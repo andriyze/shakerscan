@@ -437,6 +437,96 @@ def test_device_ssh_proposal_delta_rejects_unbound_result():
         )
 
 
+def test_confirmed_shell_input_hashes_the_phrase_and_binds_both_consents():
+    request = api_module.DeviceAgentShellConfirmRequest(
+        plan_digest="a" * 64,
+        confirmation_phrase="RUN aaaaaaaaaaaa",
+        confirm_exact_commands=True,
+        confirm_remote_device_effects=True,
+    )
+
+    payload = api_module._hunt_confirmed_shell_capability_input(
+        {"plan_id": "plan-1", "plan_digest": "a" * 64},
+        request,
+    )
+
+    assert payload == {
+        "plan_id": "plan-1",
+        "plan_digest": "a" * 64,
+        "confirmation_phrase_sha256": hashlib.sha256(
+            b"RUN aaaaaaaaaaaa"
+        ).hexdigest(),
+        "confirm_exact_commands": True,
+        "confirm_remote_device_effects": True,
+    }
+    assert "RUN aaaaaaaaaaaa" not in json.dumps(payload)
+
+
+class _ConfirmedShellDispatchConn:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    async def fetch(self, query, *args):
+        self.calls.append((query, args))
+        return self.rows
+
+
+def test_confirmed_shell_dispatch_accepts_one_correlated_scan():
+    scan_id, job_id = uuid.uuid4(), uuid.uuid4()
+    conn = _ConfirmedShellDispatchConn([{
+        "id": scan_id,
+        "job_id": job_id,
+        "status": "pending",
+        "run_kind": "device_posture",
+        "target_url": "device.test",
+        "error_message": None,
+    }])
+
+    dispatch = asyncio.run(api_module._hunt_confirmed_shell_dispatch(
+        conn,
+        device_target_id=uuid.uuid4(),
+        action_id=uuid.uuid4(),
+        reservation_id=str(uuid.uuid4()),
+        action_digest="b" * 64,
+    ))
+
+    assert dispatch["scan_id"] == str(scan_id)
+    assert dispatch["job_id"] == str(job_id)
+    assert dispatch["status"] == "queued"
+    query, args = conn.calls[0]
+    assert "budget_reservation_id" in query
+    assert "action_digest" in query
+    assert args[-1] == "b" * 64
+
+
+def test_confirmed_shell_dispatch_rejects_enqueue_failure_and_duplicates():
+    failed = {
+        "id": uuid.uuid4(),
+        "job_id": uuid.uuid4(),
+        "status": "failed",
+        "run_kind": "device_posture",
+        "target_url": "device.test",
+        "error_message": "connected-device enqueue failed: redis unavailable",
+    }
+    kwargs = {
+        "device_target_id": uuid.uuid4(),
+        "action_id": uuid.uuid4(),
+        "reservation_id": str(uuid.uuid4()),
+        "action_digest": "c" * 64,
+    }
+
+    assert asyncio.run(api_module._hunt_confirmed_shell_dispatch(
+        _ConfirmedShellDispatchConn([failed]),
+        **kwargs,
+    )) is None
+    with pytest.raises(RuntimeError, match="more than one downstream scan"):
+        asyncio.run(api_module._hunt_confirmed_shell_dispatch(
+            _ConfirmedShellDispatchConn([failed, failed]),
+            **kwargs,
+        ))
+
+
 def test_device_credential_reference_accepts_legacy_and_v2_roles():
     generic = {
         "profile_id": "profile-v2",

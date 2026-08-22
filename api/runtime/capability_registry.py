@@ -42,6 +42,7 @@ class CapabilitySpec:
     common_paths: tuple[str, ...] = ()
     arsenal_status: str = "wired"
     retest_contract: str | None = None
+    planner_visible: bool = True
     redaction_contract: tuple[str, ...] = (
         "authorization headers", "cookies", "tokens", "private keys"
     )
@@ -337,6 +338,22 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "risk_summary": {"type": "string", "minLength": 1, "maxLength": 1000},
             }, required=("port", "commands", "purpose", "risk_summary")),
             "device-ssh-plan/v1", ("immutable_shell_plan", "user_confirmation_required"),
+        ),
+        CapabilitySpec(
+            "device.ssh.execute_confirmed", "Queue one immutable SSH command plan only after the user confirms its exact digest and remote-device effects.",
+            "internal", "credential", frozenset({"device"}), "device.confirm_ssh_shell", "1",
+            "active_testing", {"active_actions": 1, "tool_wall_seconds": 30, "device_fragility_points": 12},
+            {"device_worker": True, "credential_binding": "ssh", "user_confirmation": True},
+            _schema({
+                "plan_id": {"type": "string"},
+                "plan_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "confirmation_phrase_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "confirm_exact_commands": {"type": "boolean"},
+                "confirm_remote_device_effects": {"type": "boolean"},
+            }, required=("plan_id", "plan_digest", "confirmation_phrase_sha256", "confirm_exact_commands", "confirm_remote_device_effects")),
+            "device-ssh-execution-queue/v1",
+            ("immutable_shell_plan", "user_confirmation_receipt", "scan_receipt"),
+            planner_visible=False,
         ),
     )
 )

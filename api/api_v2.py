@@ -68,6 +68,8 @@ def _capability_is_allowed(
     *,
     credential_access: bool,
 ) -> bool:
+    if not spec.planner_visible:
+        return False
     if contract.target_kind not in spec.target_kinds:
         return False
     if spec.name in _NETWORK_CAPABILITIES and not contract.policy.network_discovery:

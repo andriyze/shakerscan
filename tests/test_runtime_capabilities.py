@@ -56,7 +56,7 @@ def test_registry_filters_target_kind_and_active_permission():
     assert all_device == {
         "device.inspect", "device.capabilities.inspect", "device.http.probe",
         "device.scan", "device.service.verify", "collections.inspect", "collections.select",
-        "device.ssh.propose",
+        "device.ssh.propose", "device.ssh.execute_confirmed",
     }
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
@@ -74,6 +74,22 @@ def test_ssh_proposal_registry_budget_is_control_plane_only():
         "control_plane": True,
         "credential_binding": "ssh",
     }
+
+
+def test_confirmed_ssh_registry_contract_is_worker_placed_and_planner_hidden():
+    confirmed = CAPABILITY_REGISTRY.require("device.ssh.execute_confirmed")
+
+    assert confirmed.budget_cost == {
+        "active_actions": 1,
+        "tool_wall_seconds": 30,
+        "device_fragility_points": 12,
+    }
+    assert confirmed.placement_requirements == {
+        "device_worker": True,
+        "credential_binding": "ssh",
+        "user_confirmation": True,
+    }
+    assert confirmed.planner_visible is False
 
 
 def test_every_capability_declares_runtime_contract():

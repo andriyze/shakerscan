@@ -35,6 +35,7 @@ def test_hunt_with_valid_receipt_gets_active_capabilities_but_never_mutation():
     assert policy.mutation_allowed is False
     names = {item["name"] for item in capabilities}
     assert names >= {"device.inspect", "device.http.probe", "device.scan", "device.ssh.propose"}
+    assert "device.ssh.execute_confirmed" not in names
     assert not names & {
         "web.probe", "templates.scan", "web.crawl", "web.content_discover",
         "xss.verify", "sqli.verify", "service.fingerprint", "ports.discover", "tls.inspect",

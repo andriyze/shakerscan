@@ -36185,6 +36185,74 @@ def _hunt_device_ssh_proposal_delta(
     return plan
 
 
+def _hunt_confirmed_shell_capability_input(
+    plan: Mapping[str, Any],
+    request: DeviceAgentShellConfirmRequest,
+) -> dict[str, Any]:
+    """Bind a confirmation without retaining its user-entered phrase."""
+    return {
+        "plan_id": str(plan.get("plan_id") or ""),
+        "plan_digest": str(plan.get("plan_digest") or ""),
+        "confirmation_phrase_sha256": hashlib.sha256(
+            str(request.confirmation_phrase).encode("utf-8")
+        ).hexdigest(),
+        "confirm_exact_commands": bool(request.confirm_exact_commands),
+        "confirm_remote_device_effects": bool(
+            request.confirm_remote_device_effects
+        ),
+    }
+
+
+async def _hunt_confirmed_shell_dispatch(
+    conn: Any,
+    *,
+    device_target_id: Any,
+    action_id: Any,
+    reservation_id: str,
+    action_digest: str,
+) -> dict[str, Any] | None:
+    """Resolve the one downstream job accepted for a confirmed SSH plan."""
+    rows = await conn.fetch(
+        """SELECT id, job_id, status, run_kind, target_url, error_message
+           FROM scans
+           WHERE device_target_id=$1
+             AND options->'hunt_dispatch'->>'hunt_action_id'=$2
+             AND options->'hunt_dispatch'->>'budget_reservation_id'=$3
+             AND options->'hunt_dispatch'->>'action_digest'=$4
+             AND options->'hunt_dispatch'->>'capability_name'=
+                 'device.ssh.execute_confirmed'
+           ORDER BY created_at DESC LIMIT 2""",
+        device_target_id,
+        str(action_id),
+        str(reservation_id),
+        str(action_digest),
+    )
+    if len(rows) > 1:
+        raise RuntimeError(
+            "Confirmed SSH action created more than one downstream scan"
+        )
+    if not rows:
+        return None
+    row = rows[0]
+    enqueue_failed = bool(
+        str(row["status"]) == "failed"
+        and "enqueue failed" in str(row["error_message"] or "").lower()
+    )
+    if enqueue_failed:
+        return None
+    return {
+        "scan_id": str(row["id"]),
+        "job_id": str(row["job_id"]),
+        "status": "queued",
+        "run_kind": str(row["run_kind"]),
+        "device_target_id": str(device_target_id),
+        "target": str(row["target_url"] or ""),
+        "profile": "inventory",
+        "safety_profile": "authenticated_active",
+        "ui_url": f"/scans/{row['id']}",
+    }
+
+
 def _redact_hunt_path_query(value: Any) -> str:
     """Preserve a capability path and parameter names without persisting values."""
     text = str(value or "").strip()
@@ -37942,13 +38010,27 @@ async def confirm_hunt_shell_plan(
             status_code=409,
             detail="Confirm both the exact commands and their possible effects on the remote device",
         )
+    capability_name = "device.ssh.execute_confirmed"
+    spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
     plan_uuid = _device_uuid(plan_id, "SSH shell plan")
     queue_token = str(uuid.uuid4())
     action_id = uuid.uuid4()
-    charges = {
-        "active_actions": 1,
-        "device_fragility_points": device_agent.CONFIRMED_SHELL_FRAGILITY_COST,
-    }
+    charges = {key: int(value) for key, value in spec.budget_cost.items()}
+    if charges.get("device_fragility_points") != int(
+        device_agent.CONFIRMED_SHELL_FRAGILITY_COST
+    ):
+        raise RuntimeError("Confirmed SSH fragility contract drifted from the registry")
+    durable_store = PostgresBudgetReservationStore()
+    durable_worker_id = (
+        f"api:{str(os.environ.get('HOSTNAME') or 'local')[:64]}:{os.getpid()}"
+    )
+    durable_reservation = None
+    durable_action_digest: str | None = None
+    validated_scope_receipt_id: str | None = None
+    dispatch_required = True
+    queued: dict[str, Any] | None = None
+    admission_error: HTTPException | None = None
+    capability_input: dict[str, Any] = {}
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
@@ -37973,8 +38055,6 @@ async def confirm_hunt_shell_plan(
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             if str(plan.get("run_id")) != str(run["id"]) or str(plan.get("device_target_id")) != str(run["device_target_id"]):
                 raise HTTPException(status_code=409, detail="SSH shell plan scope does not match this Hunt")
-            if plan.get("status") != "proposed":
-                raise HTTPException(status_code=409, detail=f"SSH shell plan is already {plan.get('status') or 'unavailable'}")
             if request.plan_digest != str(plan["plan_digest"]):
                 raise HTTPException(status_code=409, detail="SSH shell plan digest changed; review the exact commands again")
             if request.confirmation_phrase != str(plan["confirmation_phrase"]):
@@ -37985,7 +38065,10 @@ async def confirm_hunt_shell_plan(
                     expires_at = expires_at.replace(tzinfo=timezone.utc)
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=409, detail="SSH shell plan has an invalid expiry") from exc
-            if expires_at <= datetime.now(timezone.utc):
+            if (
+                plan.get("status") == "proposed"
+                and expires_at <= datetime.now(timezone.utc)
+            ):
                 plans[index] = {**plan, "status": "expired"}
                 state["shell_plans"], context["device_state"] = plans, state
                 await conn.execute(
@@ -38010,121 +38093,548 @@ async def confirm_hunt_shell_plan(
                 or int(device["locator_generation"]) != int(plan["locator_generation"])
             ):
                 raise HTTPException(status_code=409, detail="Device address or identity changed; request a new shell plan")
-            legacy_daily = int(await conn.fetchval(
-                """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
-                   WHERE device_target_id=$1 AND outcome <> 'blocked'
-                     AND created_at >= date_trunc('day', NOW())""",
-                run["device_target_id"],
-            ) or 0)
-            hunt_daily = int(await conn.fetchval(
-                """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
-                   FROM hunt_runs WHERE device_target_id=$1
-                     AND created_at >= date_trunc('day', NOW())""",
-                run["device_target_id"],
-            ) or 0)
-            if legacy_daily + hunt_daily + charges["device_fragility_points"] > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
-                raise HTTPException(status_code=409, detail="Daily fragility budget for this device is exhausted")
-            await _validate_approval_receipt_for_action(
-                conn, policy.get("approval_receipt_id"), target_url=str(device["primary_locator"]),
-                target_id=run["device_target_id"], action_name="hunt.device.ssh.confirm",
-                command="device.ssh.execute_confirmed", risk_tier="credential",
-                always_require_receipt=True, require_target_binding=True, require_expiry=True,
-                created_by=f"hunt_v2_shell:{hunt_id}",
-            )
+            capability_input = _hunt_confirmed_shell_capability_input(plan, request)
+
+            if plan.get("status") == "queued":
+                queued = {
+                    "scan_id": str(plan.get("scan_id") or ""),
+                    "job_id": str(plan.get("job_id") or ""),
+                    "status": "queued",
+                    "run_kind": "device_posture",
+                    "device_target_id": str(run["device_target_id"]),
+                    "target": str(device["primary_locator"]),
+                    "profile": "inventory",
+                    "safety_profile": "authenticated_active",
+                    "ui_url": f"/scans/{plan.get('scan_id')}",
+                }
+                response = _hunt_public(run)
+                response["queued_scan"] = queued
+                response["idempotent_replay"] = True
+                return response
+
+            if plan.get("status") == "queueing":
+                try:
+                    action_id = uuid.UUID(str(plan["confirmation_action_id"]))
+                    queue_token = str(plan["queue_token"])
+                    reservation_id = str(plan["budget_reservation_id"])
+                    durable_action_digest = str(plan["action_digest"])
+                    validated_scope_receipt_id = str(
+                        plan.get("scope_receipt_id") or ""
+                    ) or None
+                except (KeyError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="SSH shell confirmation has incomplete durable correlation",
+                    ) from exc
+                durable_reservation = await durable_store.load(
+                    conn, reservation_id, for_update=True,
+                )
+                if (
+                    durable_reservation is None
+                    or durable_reservation.action_id != str(action_id)
+                    or durable_reservation.action_digest != durable_action_digest
+                    or durable_action_digest != hunt_capability_action_digest(
+                        hunt_id=run["id"],
+                        action_id=action_id,
+                        capability_name=capability_name,
+                        target_kind=str(run["target_kind"]),
+                        target_id=run["device_target_id"],
+                        capability_input=capability_input,
+                        requested_budget=charges,
+                        scope_receipt_id=validated_scope_receipt_id,
+                        approval_receipt_id=policy.get("approval_receipt_id"),
+                    )
+                    or durable_reservation.record.owner_id != str(run["id"])
+                    or durable_reservation.record.capability_name != capability_name
+                    or dict(durable_reservation.record.requested) != charges
+                    or durable_reservation.record.status != "running"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="SSH shell confirmation reservation is no longer dispatchable",
+                    )
+                queued = await _hunt_confirmed_shell_dispatch(
+                    conn,
+                    device_target_id=run["device_target_id"],
+                    action_id=action_id,
+                    reservation_id=reservation_id,
+                    action_digest=durable_action_digest,
+                )
+                if queued is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="SSH shell confirmation is already queueing",
+                    )
+                dispatch_required = False
+            elif plan.get("status") != "proposed":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"SSH shell plan is already {plan.get('status') or 'unavailable'}",
+                )
+
+            if dispatch_required:
+                approval_context = await _validate_approval_receipt_for_action(
+                    conn,
+                    policy.get("approval_receipt_id"),
+                    target_url=str(device["primary_locator"]),
+                    target_id=run["device_target_id"],
+                    action_name="hunt.device.ssh.confirm",
+                    command=capability_name,
+                    risk_tier="credential",
+                    always_require_receipt=True,
+                    require_target_binding=True,
+                    require_expiry=True,
+                    created_by=f"hunt_v2_shell:{hunt_id}",
+                )
+                validated_scope_receipt_id = str(
+                    (approval_context or {}).get("scope_receipt_id")
+                    or policy.get("scope_receipt_id")
+                    or ""
+                ) or None
+                legacy_daily = int(await conn.fetchval(
+                    """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
+                       WHERE device_target_id=$1 AND outcome <> 'blocked'
+                         AND created_at >= date_trunc('day', NOW())""",
+                    run["device_target_id"],
+                ) or 0)
+                hunt_daily = int(await conn.fetchval(
+                    """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
+                       FROM hunt_runs WHERE device_target_id=$1
+                         AND created_at >= date_trunc('day', NOW())""",
+                    run["device_target_id"],
+                ) or 0)
+                if (
+                    legacy_daily + hunt_daily
+                    + charges["device_fragility_points"]
+                    > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Daily fragility budget for this device is exhausted",
+                    )
+                durable_action_digest = hunt_capability_action_digest(
+                    hunt_id=run["id"],
+                    action_id=action_id,
+                    capability_name=capability_name,
+                    target_kind=str(run["target_kind"]),
+                    target_id=run["device_target_id"],
+                    capability_input=capability_input,
+                    requested_budget=charges,
+                    scope_receipt_id=validated_scope_receipt_id,
+                    approval_receipt_id=policy.get("approval_receipt_id"),
+                )
+                requested = DurableBudgetReservation.request(
+                    owner_kind="hunt",
+                    owner_id=str(run["id"]),
+                    capability_name=capability_name,
+                    amounts=charges,
+                )
+                stored = await durable_store.create_requested(
+                    conn,
+                    action_id=str(action_id),
+                    action_digest=durable_action_digest,
+                    record=requested,
+                )
+                budget = _hunt_json(run["budget_json"], {})
+                limits = _hunt_ledger_limits(budget)
+                used = _hunt_json(run["budget_used_json"], {})
+                try:
+                    reserved_record, reserved_used = stored.record.reserve_against(
+                        limits=limits,
+                        consumed={key: int(used.get(key) or 0) for key in limits},
+                        lease_seconds=hunt_capability_lease_seconds(charges),
+                    )
+                except BudgetExceeded as exc:
+                    released = stored.record.release(
+                        proof_not_started=True,
+                        reason="budget_exhausted_before_confirmed_ssh_queue",
+                    )
+                    await durable_store.persist_terminal(
+                        conn,
+                        previous=stored,
+                        terminal=released,
+                        ledger_after_settlement={
+                            key: int(used.get(key) or 0) for key in limits
+                        },
+                        receipt=None,
+                    )
+                    dimension = next(iter(exc.shortages), "unknown")
+                    await conn.execute(
+                        """INSERT INTO hunt_actions
+                               (id,hunt_run_id,capability_name,status,input_summary,
+                                result_summary,completed_at)
+                           VALUES ($1,$2,$3,'failed',$4,$5,NOW())""",
+                        action_id,
+                        run["id"],
+                        capability_name,
+                        json.dumps(capability_input),
+                        json.dumps({
+                            "error": f"budget_exhausted:{dimension}",
+                            "budget_reservation_id": released.reservation_id,
+                            "budget_reservation_state": released.status,
+                        }),
+                    )
+                    await conn.execute(
+                        "UPDATE hunt_runs SET status='budget_exhausted', "
+                        "stop_reason=$2, updated_at=NOW() WHERE id=$1",
+                        run["id"],
+                        f"budget_exhausted:{dimension}",
+                    )
+                    admission_error = HTTPException(
+                        status_code=409,
+                        detail=f"Hunt budget exhausted: {dimension}",
+                    )
+                else:
+                    reserved = await durable_store.persist_transition(
+                        conn,
+                        previous=stored,
+                        current=reserved_record,
+                        ledger_after_hold=reserved_used,
+                    )
+                    running_record = reserved.record.start(
+                        worker_id=durable_worker_id,
+                        lease_seconds=hunt_capability_lease_seconds(charges),
+                    )
+                    durable_reservation = await durable_store.persist_transition(
+                        conn,
+                        previous=reserved,
+                        current=running_record,
+                    )
+                    used.update(reserved_used)
+                    plan = {
+                        **plan,
+                        "status": "queueing",
+                        "queue_token": queue_token,
+                        "confirmation_action_id": str(action_id),
+                        "budget_reservation_id": (
+                            durable_reservation.record.reservation_id
+                        ),
+                        "action_digest": durable_action_digest,
+                        "scope_receipt_id": validated_scope_receipt_id,
+                        "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                        "confirmed_plan_digest": request.plan_digest,
+                        "confirmation_basis": (
+                            "explicit_user_exact_command_confirmation"
+                        ),
+                    }
+                    plans[index] = plan
+                    state["shell_plans"], context["device_state"] = plans, state
+                    await conn.execute(
+                        """UPDATE hunt_runs
+                           SET context_pack=$2,budget_used_json=$3,
+                               status='active',updated_at=NOW()
+                           WHERE id=$1""",
+                        run["id"],
+                        json.dumps(context, default=str),
+                        json.dumps(used),
+                    )
+                    await conn.execute(
+                        """INSERT INTO hunt_actions
+                               (id,hunt_run_id,capability_name,status,input_summary)
+                           VALUES ($1,$2,$3,'running',$4)""",
+                        action_id,
+                        run["id"],
+                        capability_name,
+                        json.dumps(capability_input),
+                    )
             budget = _hunt_json(run["budget_json"], {})
             limits = _hunt_ledger_limits(budget)
-            used = _hunt_json(run["budget_used_json"], {})
-            try:
-                reserved_used = reserve_budget_snapshot(
-                    limits, {key: int(used.get(key) or 0) for key in limits}, charges,
-                )
-            except BudgetExceeded as exc:
-                dimension = next(iter(exc.shortages), "unknown")
-                raise HTTPException(status_code=409, detail=f"Hunt budget exhausted: {dimension}") from exc
-            used.update(reserved_used)
-            plan = {
-                **plan, "status": "queueing", "queue_token": queue_token,
-                "confirmed_at": datetime.now(timezone.utc).isoformat(),
-                "confirmed_plan_digest": request.plan_digest,
-                "confirmation_basis": "explicit_user_exact_command_confirmation",
-            }
-            plans[index] = plan
-            state["shell_plans"], context["device_state"] = plans, state
-            await conn.execute(
-                "UPDATE hunt_runs SET context_pack=$2,budget_used_json=$3,updated_at=NOW() WHERE id=$1",
-                run["id"], json.dumps(context, default=str), json.dumps(used),
-            )
-            await conn.execute(
-                """INSERT INTO hunt_actions (id,hunt_run_id,capability_name,status,input_summary)
-                   VALUES ($1,$2,'device.ssh.execute_confirmed','running',$3)""",
-                action_id, run["id"], json.dumps({"plan_id": str(plan_uuid), "plan_digest": request.plan_digest}),
-            )
             device_target_id = run["device_target_id"]
             approval_receipt_id = policy.get("approval_receipt_id")
 
-    parent_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
-    shell_token = _DEVICE_AGENT_APPROVED_SHELL_PLAN.set(plan)
-    try:
-        queued = await scan_device(str(device_target_id), DeviceScanRequest(
-            profile="inventory", safety_profile="authenticated_active", confirm_authorized=True,
-            include_web_dast=False, max_web_origins=0,
-            ssh_credential_profile_id=str(plan["credential_profile_id"]),
-            capability_ids=["agent-confirmed-ssh-shell"],
-            approval_receipt_id=approval_receipt_id,
-        ))
-    except Exception as exc:
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                failed = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-                failed_context = _hunt_json(failed["context_pack"], {})
-                failed_state = failed_context.get("device_state") if isinstance(failed_context.get("device_state"), dict) else {}
-                failed_state["shell_plans"] = [
-                    {**item, "status": "proposed", "last_queue_error": type(exc).__name__}
-                    if str(item.get("plan_id")) == str(plan_uuid) and item.get("queue_token") == queue_token else item
-                    for item in failed_state.get("shell_plans", []) if isinstance(item, dict)
-                ]
-                failed_context["device_state"] = failed_state
-                current_used = _hunt_json(failed["budget_used_json"], {})
-                reconciled = reconcile_budget_snapshot(
-                    {key: int(current_used.get(key) or 0) for key in limits}, charges,
-                    {key: 0 for key in charges},
-                )
-                current_used.update(reconciled)
-                await conn.execute(
-                    "UPDATE hunt_runs SET context_pack=$2,budget_used_json=$3,updated_at=NOW() WHERE id=$1",
-                    failed["id"], json.dumps(failed_context, default=str), json.dumps(current_used),
-                )
-                await conn.execute(
-                    "UPDATE hunt_actions SET status='failed',result_summary=$2,completed_at=NOW() WHERE id=$1",
-                    action_id, json.dumps({"error": f"queue_fault:{type(exc).__name__}"}),
-                )
-        raise
-    finally:
-        _DEVICE_AGENT_APPROVED_SHELL_PLAN.reset(shell_token)
-        _DEVICE_AGENT_PARENT_AUTHORITY.reset(parent_token)
+    if admission_error is not None:
+        raise admission_error
+    if durable_reservation is None or durable_action_digest is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Confirmed SSH reservation was not initialized",
+        )
 
+    execution_started = time.perf_counter()
+    dispatch_error: Exception | None = None
+    if dispatch_required:
+        parent_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
+        shell_token = _DEVICE_AGENT_APPROVED_SHELL_PLAN.set(plan)
+        correlation_token = _HUNT_DEVICE_QUEUE_CORRELATION.set({
+            "schema_version": "hunt-device-dispatch/v1",
+            "hunt_id": str(run["id"]),
+            "hunt_action_id": str(action_id),
+            "budget_reservation_id": durable_reservation.record.reservation_id,
+            "action_digest": durable_action_digest,
+            "capability_name": capability_name,
+        })
+        try:
+            queued = await scan_device(str(device_target_id), DeviceScanRequest(
+                profile="inventory", safety_profile="authenticated_active",
+                confirm_authorized=True, include_web_dast=False, max_web_origins=0,
+                ssh_credential_profile_id=str(plan["credential_profile_id"]),
+                capability_ids=["agent-confirmed-ssh-shell"],
+                approval_receipt_id=approval_receipt_id,
+            ))
+        except Exception as exc:
+            dispatch_error = exc
+        finally:
+            _HUNT_DEVICE_QUEUE_CORRELATION.reset(correlation_token)
+            _DEVICE_AGENT_APPROVED_SHELL_PLAN.reset(shell_token)
+            _DEVICE_AGENT_PARENT_AUTHORITY.reset(parent_token)
+
+    accepted_scan: dict[str, Any] | None = None
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             updated = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            latest_reservation = await durable_store.load(
+                conn,
+                durable_reservation.record.reservation_id,
+                for_update=True,
+            )
+            if (
+                latest_reservation is None
+                or latest_reservation.action_id != str(action_id)
+                or latest_reservation.action_digest != durable_action_digest
+                or latest_reservation.record.status != "running"
+                or latest_reservation.record.worker_id
+                != durable_reservation.record.worker_id
+            ):
+                raise RuntimeError(
+                    "Confirmed SSH reservation changed before settlement"
+                )
+            accepted_scan = await _hunt_confirmed_shell_dispatch(
+                conn,
+                device_target_id=device_target_id,
+                action_id=action_id,
+                reservation_id=latest_reservation.record.reservation_id,
+                action_digest=durable_action_digest,
+            )
+            if (
+                accepted_scan is not None
+                and queued is not None
+                and str(queued.get("scan_id") or "")
+                and str(queued.get("scan_id")) != accepted_scan["scan_id"]
+            ):
+                raise RuntimeError(
+                    "Confirmed SSH response does not match its downstream scan"
+                )
+            elapsed_wall = max(1, math.ceil(time.perf_counter() - execution_started))
+            if accepted_scan is not None:
+                actual_charges = {
+                    key: (
+                        min(value, elapsed_wall)
+                        if key == "tool_wall_seconds"
+                        else value
+                    )
+                    for key, value in charges.items()
+                }
+                action_status = "completed"
+                result_summary = {
+                    "ok": True,
+                    "status": "queued",
+                    "scan_id": accepted_scan["scan_id"],
+                    "job_id": accepted_scan["job_id"],
+                    "plan_id": str(plan_uuid),
+                    "plan_digest": request.plan_digest,
+                    "recovered_after_response_failure": bool(dispatch_error),
+                    "receipt_observations": [{
+                        "kind": "confirmed_ssh_execution_queue",
+                        "status": "queued",
+                        "plan_id": str(plan_uuid),
+                        "plan_digest": request.plan_digest,
+                        "scan_id": accepted_scan["scan_id"],
+                        "job_id": accepted_scan["job_id"],
+                        "exact_commands_confirmed": True,
+                        "remote_device_effects_confirmed": True,
+                    }],
+                }
+            else:
+                actual_charges = _hunt_nonexecuting_actual(charges)
+                action_status = "failed"
+                result_summary = {
+                    "ok": False,
+                    "error": (
+                        f"queue_fault:{type(dispatch_error).__name__}"
+                        if dispatch_error is not None
+                        else "queue_receipt_missing"
+                    ),
+                    "plan_id": str(plan_uuid),
+                    "plan_digest": request.plan_digest,
+                    "receipt_observations": [{
+                        "kind": "confirmed_ssh_execution_queue",
+                        "status": "not_enqueued",
+                        "plan_id": str(plan_uuid),
+                        "plan_digest": request.plan_digest,
+                    }],
+                }
+            current_used = _hunt_json(updated["budget_used_json"], {})
+            current_ledger = {
+                key: int(current_used.get(key) or 0) for key in limits
+            }
+            prospective_ledger = reconcile_budget_snapshot(
+                current_ledger,
+                latest_reservation.record.requested,
+                actual_charges,
+            )
+            prospective_used = dict(current_used)
+            prospective_used.update(prospective_ledger)
+            receipt_result = await _record_tool_receipt(
+                conn,
+                ToolReceiptRequest(
+                    tool_name=str(spec.adapter),
+                    capability_name=capability_name,
+                    adapter_name=str(spec.adapter),
+                    adapter_version=str(spec.adapter_version),
+                    redacted_argv=[capability_input],
+                    target_scope={
+                        "target_kind": "device",
+                        "target_id": str(device_target_id),
+                    },
+                    scope_receipt_id=validated_scope_receipt_id,
+                    approval_receipt_id=approval_receipt_id,
+                    status="success" if accepted_scan is not None else "failed",
+                    parser_status="parsed" if accepted_scan is not None else "failed",
+                    budget_json={
+                        "reserved": charges,
+                        "actual": actual_charges,
+                        "used_after_reconciliation": prospective_used,
+                    },
+                    partial=False,
+                    hunt_id=str(run["id"]),
+                    metadata_json={
+                        "hunt_action_id": str(action_id),
+                        "durable_budget_reservation_id": (
+                            latest_reservation.record.reservation_id
+                        ),
+                        "plan_id": str(plan_uuid),
+                        "plan_digest": request.plan_digest,
+                        "downstream": accepted_scan,
+                    },
+                    created_by=f"hunt_v2_shell:{hunt_id}",
+                ),
+            )
+            receipt_id = receipt_result.get("tool_receipt", {}).get("id")
+            if not receipt_id:
+                raise RuntimeError("Confirmed SSH receipt was not persisted")
+            terminal_record, capability_receipt = terminalize_hunt_capability(
+                latest_reservation.record,
+                action_digest=durable_action_digest,
+                capability_name=capability_name,
+                adapter_name=str(spec.adapter),
+                adapter_version=str(spec.adapter_version),
+                target_id=device_target_id,
+                target_kind="device",
+                capability_input=capability_input,
+                action_status=action_status,
+                actual_budget=actual_charges,
+                worker_id=str(latest_reservation.record.worker_id),
+                started_at=(
+                    latest_reservation.record.started_at.isoformat()
+                    if latest_reservation.record.started_at
+                    else datetime.now(timezone.utc).isoformat()
+                ),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                receipt_id=str(receipt_id),
+                scope_receipt_id=validated_scope_receipt_id,
+                approval_receipt_id=approval_receipt_id,
+                result=result_summary,
+            )
+            reconciled_ledger = terminal_record.reconcile_consumed(current_ledger)
+            if reconciled_ledger != prospective_ledger:
+                raise RuntimeError(
+                    "Confirmed SSH reconciliation changed during settlement"
+                )
+            await durable_store.persist_terminal(
+                conn,
+                previous=latest_reservation,
+                terminal=terminal_record,
+                ledger_after_settlement=reconciled_ledger,
+                receipt=capability_receipt,
+            )
             updated_context = _hunt_json(updated["context_pack"], {})
             updated_state = updated_context.get("device_state") if isinstance(updated_context.get("device_state"), dict) else {}
-            updated_state["shell_plans"] = [
-                {**item, "status": "queued", "scan_id": queued["scan_id"],
-                 "queued_at": datetime.now(timezone.utc).isoformat()}
-                if str(item.get("plan_id")) == str(plan_uuid) and item.get("queue_token") == queue_token else item
-                for item in updated_state.get("shell_plans", []) if isinstance(item, dict)
-            ]
+            settled_plans = []
+            plan_settled = False
+            for item in updated_state.get("shell_plans", []):
+                if not isinstance(item, dict):
+                    continue
+                if (
+                    str(item.get("plan_id")) != str(plan_uuid)
+                    or item.get("queue_token") != queue_token
+                    or str(item.get("confirmation_action_id") or "")
+                    != str(action_id)
+                ):
+                    settled_plans.append(item)
+                    continue
+                if accepted_scan is not None:
+                    settled = {
+                        **{
+                            key: value
+                            for key, value in item.items()
+                            if key not in {
+                                "last_queue_error", "last_queue_receipt_id",
+                            }
+                        },
+                        "status": "queued",
+                        "scan_id": accepted_scan["scan_id"],
+                        "job_id": accepted_scan["job_id"],
+                        "queued_at": datetime.now(timezone.utc).isoformat(),
+                        "receipt_id": str(receipt_id),
+                        "budget_reservation_state": terminal_record.status,
+                    }
+                else:
+                    settled = {
+                        key: value
+                        for key, value in item.items()
+                        if key not in {
+                            "queue_token", "confirmation_action_id",
+                            "budget_reservation_id", "action_digest",
+                            "scope_receipt_id",
+                            "confirmed_at", "confirmed_plan_digest",
+                            "confirmation_basis",
+                        }
+                    }
+                    settled.update({
+                        "status": "proposed",
+                        "last_queue_error": result_summary["error"],
+                        "last_queue_receipt_id": str(receipt_id),
+                    })
+                settled_plans.append(settled)
+                plan_settled = True
+            if not plan_settled:
+                raise RuntimeError(
+                    "Confirmed SSH plan changed before settlement"
+                )
+            updated_state["shell_plans"] = settled_plans
             updated_context["device_state"] = updated_state
             updated = await conn.fetchrow(
-                "UPDATE hunt_runs SET context_pack=$2,updated_at=NOW() WHERE id=$1 RETURNING *",
-                updated["id"], json.dumps(updated_context, default=str),
+                """UPDATE hunt_runs
+                   SET context_pack=$2,budget_used_json=$3,updated_at=NOW()
+                   WHERE id=$1 RETURNING *""",
+                updated["id"],
+                json.dumps(updated_context, default=str),
+                json.dumps(prospective_used),
             )
-            await conn.execute(
-                "UPDATE hunt_actions SET status='completed',result_summary=$2,completed_at=NOW() WHERE id=$1",
-                action_id, json.dumps({"scan_id": queued["scan_id"], "plan_id": str(plan_uuid)}),
+            action_updated = await conn.execute(
+                """UPDATE hunt_actions
+                   SET status=$2,result_summary=$3,receipt_id=$4,completed_at=NOW()
+                   WHERE id=$1 AND hunt_run_id=$5 AND status='running'""",
+                action_id,
+                action_status,
+                json.dumps(_redact_agent_payload(result_summary), default=str),
+                _optional_uuid(str(receipt_id)),
+                updated["id"],
             )
+            if not str(action_updated).endswith(" 1"):
+                raise RuntimeError(
+                    "Confirmed SSH action changed before settlement"
+                )
+    if accepted_scan is None:
+        if dispatch_error is not None:
+            raise dispatch_error
+        raise HTTPException(
+            status_code=503,
+            detail="Confirmed SSH job was not accepted by the device queue",
+        )
     response = _hunt_public(updated)
-    response["queued_scan"] = queued
+    response["queued_scan"] = accepted_scan
+    response["recovered_after_response_failure"] = bool(dispatch_error)
     return response
 
 
