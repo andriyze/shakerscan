@@ -48,10 +48,21 @@ def test_device_queue_recovers_a_job_accepted_before_response_failure():
     handler = _handler_source()
 
     assert "options->'hunt_dispatch'->>'hunt_action_id'=$2" in handler
+    assert "_scan_queue_handoff_confirmed(correlated_scan)" in handler
     assert "Device queue action created more than one downstream scan" in handler
     assert "device_queue_state_advanced and not device_queue_enqueued" in handler
     assert "device_queue_enqueued and not device_queue_state_advanced" in handler
     assert 'status = "partial"' in handler
+
+
+def test_device_queue_row_without_handoff_proof_is_never_charged_as_accepted():
+    handler = _handler_source()
+
+    queue_recovery = handler[handler.index("correlated_scans = await conn.fetch("):]
+    queue_recovery = queue_recovery[:queue_recovery.index("proposed_ssh_plan:")]
+    assert "run_kind, options" in queue_recovery
+    assert "_scan_queue_handoff_confirmed(correlated_scan)" in queue_recovery
+    assert "enqueue failed" not in queue_recovery
 
 
 def test_blocked_device_queue_refunds_everything_except_planner_action():

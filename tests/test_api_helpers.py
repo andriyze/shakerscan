@@ -480,7 +480,7 @@ def test_confirmed_shell_dispatch_accepts_one_correlated_scan():
         "status": "pending",
         "run_kind": "device_posture",
         "target_url": "device.test",
-        "error_message": None,
+        "options": {"queue_handoff_confirmed": True},
     }])
 
     dispatch = asyncio.run(api_module._hunt_confirmed_shell_dispatch(
@@ -500,14 +500,14 @@ def test_confirmed_shell_dispatch_accepts_one_correlated_scan():
     assert args[-1] == "b" * 64
 
 
-def test_confirmed_shell_dispatch_rejects_enqueue_failure_and_duplicates():
-    failed = {
+def test_confirmed_shell_dispatch_rejects_unconfirmed_row_and_duplicates():
+    unconfirmed = {
         "id": uuid.uuid4(),
         "job_id": uuid.uuid4(),
-        "status": "failed",
+        "status": "pending",
         "run_kind": "device_posture",
         "target_url": "device.test",
-        "error_message": "connected-device enqueue failed: redis unavailable",
+        "options": {"queue_handoff_confirmed": False},
     }
     kwargs = {
         "device_target_id": uuid.uuid4(),
@@ -517,12 +517,12 @@ def test_confirmed_shell_dispatch_rejects_enqueue_failure_and_duplicates():
     }
 
     assert asyncio.run(api_module._hunt_confirmed_shell_dispatch(
-        _ConfirmedShellDispatchConn([failed]),
+        _ConfirmedShellDispatchConn([unconfirmed]),
         **kwargs,
     )) is None
     with pytest.raises(RuntimeError, match="more than one downstream scan"):
         asyncio.run(api_module._hunt_confirmed_shell_dispatch(
-            _ConfirmedShellDispatchConn([failed, failed]),
+            _ConfirmedShellDispatchConn([unconfirmed, unconfirmed]),
             **kwargs,
         ))
 
@@ -2328,6 +2328,133 @@ class _FakePool:
         return _FakeAcquire(self.conn)
 
 
+class _DeviceHandoffConn:
+    def __init__(self, *, execute_result="UPDATE 1", execute_error=None, readback=None):
+        self.execute_result = execute_result
+        self.execute_error = execute_error
+        self.readback = readback
+        self.executes = []
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+        if self.execute_error:
+            raise self.execute_error
+        return self.execute_result
+
+    async def fetchrow(self, query, *args):
+        assert "SELECT status, job_id, device_target_id, options" in query
+        return self.readback
+
+
+def test_device_queue_handoff_confirmation_is_exact_and_durable(monkeypatch):
+    scan_id = "11111111-1111-4111-8111-111111111111"
+    job_id = "device-job"
+    device_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    conn = _DeviceHandoffConn()
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+
+    asyncio.run(api_module._confirm_device_queue_handoff(
+        scan_id=scan_id,
+        job_id=job_id,
+        device_target_id=device_id,
+    ))
+
+    query, args = conn.executes[0]
+    assert "SET status='queued'" in query
+    assert "options->>'queue_handoff_confirmed'='false'" in query
+    assert "id=$1 AND job_id=$2 AND device_target_id=$3" in query
+    assert args == (uuid.UUID(scan_id), job_id, device_id)
+
+
+def test_device_queue_handoff_ack_loss_uses_exact_readback(monkeypatch):
+    scan_id = "11111111-1111-4111-8111-111111111111"
+    job_id = "device-job"
+    device_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    conn = _DeviceHandoffConn(
+        execute_error=RuntimeError("confirmation acknowledgement lost"),
+        readback={
+            "status": "running",
+            "job_id": job_id,
+            "device_target_id": device_id,
+            "options": {"queue_handoff_confirmed": True},
+        },
+    )
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+
+    asyncio.run(api_module._confirm_device_queue_handoff(
+        scan_id=scan_id,
+        job_id=job_id,
+        device_target_id=device_id,
+    ))
+
+
+def test_device_queue_handoff_ack_loss_rejects_inexact_readback(monkeypatch):
+    scan_id = "11111111-1111-4111-8111-111111111111"
+    device_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    conn = _DeviceHandoffConn(
+        execute_error=RuntimeError("confirmation acknowledgement lost"),
+        readback={
+            "status": "queued",
+            "job_id": "different-job",
+            "device_target_id": device_id,
+            "options": {"queue_handoff_confirmed": True},
+        },
+    )
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+
+    with pytest.raises(RuntimeError, match="acknowledgement lost"):
+        asyncio.run(api_module._confirm_device_queue_handoff(
+            scan_id=scan_id,
+            job_id="device-job",
+            device_target_id=device_id,
+        ))
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_confirmed_ssh_dispatch_requires_durable_queue_handoff(confirmed):
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+
+    class Conn:
+        async def fetch(self, query, *args):
+            assert "target_url, options" in query
+            return [{
+                "id": scan_id,
+                "job_id": "device-job",
+                "status": "queued",
+                "run_kind": "device_posture",
+                "target_url": "device.test",
+                "options": {"queue_handoff_confirmed": confirmed},
+            }]
+
+    result = asyncio.run(api_module._hunt_confirmed_shell_dispatch(
+        Conn(),
+        device_target_id=uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        action_id=uuid.UUID("33333333-3333-4333-8333-333333333333"),
+        reservation_id="reservation",
+        action_digest="digest",
+    ))
+
+    if confirmed:
+        assert result["scan_id"] == str(scan_id)
+        assert result["status"] == "queued"
+    else:
+        assert result is None
+
+
+def test_device_routes_confirm_handoff_before_reporting_queued():
+    source = Path(api_module.__file__).read_text()
+    scan_route = source[source.index("async def scan_device("):]
+    scan_route = scan_route[:scan_route.index('\n\n@app.post("/devices/{device_id}/verify-service")')]
+    probe_route = source[source.index("async def verify_device_service("):]
+    probe_route = probe_route[:probe_route.index('\n\n@app.get("/device-scans")')]
+
+    for route in (scan_route, probe_route):
+        assert "_QUEUE_HANDOFF_CONFIRMATION_KEY: False" in route
+        assert route.index("enqueue_job(") < route.index(
+            "await _confirm_device_queue_handoff("
+        ) < route.index('status": "queued"')
+
+
 class _FakeConn:
     def __init__(self, schedules):
         self.schedules = schedules
@@ -2624,7 +2751,7 @@ def test_enqueue_asm_confirmation_write_failure_fails_scan_and_campaign(monkeypa
     assert failed_campaign[1][0] == uuid.UUID("22222222-2222-4222-8222-222222222222")
 
 
-def test_reconcile_stale_unconfirmed_asm_handoff_fails_scan_and_owned_campaign():
+def test_reconcile_stale_unconfirmed_handoff_fails_scan_and_owned_campaign():
     scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
     campaign_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
 
@@ -2646,7 +2773,7 @@ def test_reconcile_stale_unconfirmed_asm_handoff_fails_scan_and_owned_campaign()
             return "UPDATE 1"
 
     conn = Conn()
-    repaired = asyncio.run(api_module._reconcile_unconfirmed_asm_queue_handoffs(conn))
+    repaired = asyncio.run(api_module._reconcile_unconfirmed_queue_handoffs(conn))
 
     assert repaired == 1
     assert any(

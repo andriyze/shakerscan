@@ -86,7 +86,9 @@ def test_confirmation_recovers_an_accepted_job_before_settlement():
     assert "options->'hunt_dispatch'->>'budget_reservation_id'" in dispatch
     assert "options->'hunt_dispatch'->>'action_digest'" in dispatch
     assert "Confirmed SSH action created more than one downstream scan" in dispatch
-    assert "enqueue failed" in dispatch
+    assert "target_url, options" in dispatch
+    assert "_scan_queue_handoff_confirmed(row)" in dispatch
+    assert "enqueue failed" not in dispatch
     assert "recovered_after_response_failure" in handler
     assert "dispatch_required = False" in handler
     expiry_check = handler[handler.index("if (") :]

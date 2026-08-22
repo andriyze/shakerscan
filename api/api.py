@@ -746,6 +746,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@loca
 RESULTS_DIR = Path(os.environ.get('RESULTS_DIR', '/results'))
 QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
+_QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
 DEVICE_WORKER_BUILD_REGISTRY_KEY = "shakerscan:device_worker_build"
 AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY = "shakerscan:agent_tool_worker_build"
 DEVICE_SCAN_MAX_DURATION_MINUTES = {
@@ -20089,6 +20090,7 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         ))
         options = {
             "run_kind": "device_posture",
+            _QUEUE_HANDOFF_CONFIRMATION_KEY: False,
             "device_class": str(device["device_class"]),
             "device_name": str(device["name"] or ""),
             "device_manufacturer": str(device["manufacturer"] or ""),
@@ -20175,8 +20177,29 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
     except Exception as exc:
         await _mark_scan_enqueue_failed(scan_id, f"connected-device enqueue failed: {exc}")
         raise HTTPException(status_code=503, detail="Failed to queue connected-device scan") from exc
+    try:
+        await _confirm_device_queue_handoff(
+            scan_id=scan_id,
+            job_id=job_id,
+            device_target_id=device_uuid,
+        )
+    except Exception as exc:
+        await _mark_scan_enqueue_failed(
+            scan_id, f"connected-device queue handoff failed: {exc}",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to confirm connected-device queue handoff",
+        ) from exc
     r = get_redis()
-    r.hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
+    try:
+        r.hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
+    except Exception:
+        logger.warning(
+            "Failed to cache queued connected-device job metadata for %s",
+            job_id,
+            exc_info=True,
+        )
     return {
         "scan_id": scan_id,
         "job_id": job_id,
@@ -20268,6 +20291,7 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device")
         options = {
             "run_kind": "device_probe",
+            _QUEUE_HANDOFF_CONFIRMATION_KEY: False,
             "probe_kind": "service_state",
             "probe_transport": request.transport,
             "probe_port": request.port,
@@ -20344,7 +20368,38 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
                     candidate_uuid,
                 )
         raise HTTPException(status_code=503, detail="Failed to queue connected-device service verification") from exc
-    get_redis().hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
+    try:
+        await _confirm_device_queue_handoff(
+            scan_id=scan_id,
+            job_id=job_id,
+            device_target_id=device_uuid,
+        )
+    except Exception as exc:
+        await _mark_scan_enqueue_failed(
+            scan_id, f"connected-device probe queue handoff failed: {exc}",
+        )
+        if candidate_uuid:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE investigation_candidates
+                       SET status='inconclusive',
+                           verification_context=verification_context || jsonb_build_object('enqueue_error','handoff_unconfirmed'),
+                           updated_at=NOW()
+                       WHERE id=$1 AND status='verification_queued'""",
+                    candidate_uuid,
+                )
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to confirm connected-device probe queue handoff",
+        ) from exc
+    try:
+        get_redis().hset(f"job:{job_id}", mapping={"status": "queued", "target": device["primary_locator"], "scan_id": scan_id})
+    except Exception:
+        logger.warning(
+            "Failed to cache queued connected-device probe metadata for %s",
+            job_id,
+            exc_info=True,
+        )
     return {
         "scan_id": scan_id,
         "job_id": job_id,
@@ -26371,6 +26426,73 @@ async def _mark_scan_enqueue_failed(scan_id: str, message: str, command_result_i
                 )
     except Exception:
         logger.exception("Failed to persist enqueue failure for scan %s", scan_id)
+
+
+def _scan_queue_handoff_confirmed(row: Any) -> bool:
+    options = _decode_json_value(row.get("options")) if row else None
+    return bool(
+        isinstance(options, dict)
+        and options.get(_QUEUE_HANDOFF_CONFIRMATION_KEY) is True
+    )
+
+
+async def _device_queue_handoff_readback_confirmed(
+    scan_id: str,
+    job_id: str,
+    device_target_id: Any,
+) -> bool:
+    """Resolve an ambiguous device handoff acknowledgement exactly."""
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT status, job_id, device_target_id, options
+                FROM scans
+                WHERE id=$1
+                """,
+                uuid.UUID(str(scan_id)),
+            )
+    except Exception:
+        return False
+    return bool(
+        row
+        and str(row.get("job_id") or "") == str(job_id)
+        and str(row.get("device_target_id") or "") == str(device_target_id)
+        and _scan_queue_handoff_confirmed(row)
+    )
+
+
+async def _confirm_device_queue_handoff(
+    *,
+    scan_id: str,
+    job_id: str,
+    device_target_id: Any,
+) -> None:
+    """Make Redis acceptance durable before a device route reports success."""
+    try:
+        async with db_pool.acquire() as conn:
+            confirmation = await conn.execute(
+                """
+                UPDATE scans
+                SET status='queued',
+                    options=jsonb_set(COALESCE(options, '{}'::jsonb),
+                                      '{queue_handoff_confirmed}', 'true'::jsonb, true)
+                WHERE id=$1 AND job_id=$2 AND device_target_id=$3
+                  AND status='pending'
+                  AND options->>'queue_handoff_confirmed'='false'
+                """,
+                uuid.UUID(str(scan_id)),
+                str(job_id),
+                device_target_id,
+            )
+        if str(confirmation).endswith("0"):
+            raise RuntimeError("device queue handoff confirmation changed no row")
+    except Exception:
+        if await _device_queue_handoff_readback_confirmed(
+            scan_id, job_id, device_target_id,
+        ):
+            return
+        raise
 
 
 def _route_capacity_http_exception(exc: RouteCapacityExceeded) -> HTTPException:
@@ -36213,7 +36335,7 @@ async def _hunt_confirmed_shell_dispatch(
 ) -> dict[str, Any] | None:
     """Resolve the one downstream job accepted for a confirmed SSH plan."""
     rows = await conn.fetch(
-        """SELECT id, job_id, status, run_kind, target_url, error_message
+        """SELECT id, job_id, status, run_kind, target_url, options
            FROM scans
            WHERE device_target_id=$1
              AND options->'hunt_dispatch'->>'hunt_action_id'=$2
@@ -36234,11 +36356,7 @@ async def _hunt_confirmed_shell_dispatch(
     if not rows:
         return None
     row = rows[0]
-    enqueue_failed = bool(
-        str(row["status"]) == "failed"
-        and "enqueue failed" in str(row["error_message"] or "").lower()
-    )
-    if enqueue_failed:
+    if not _scan_queue_handoff_confirmed(row):
         return None
     return {
         "scan_id": str(row["id"]),
@@ -37437,7 +37555,7 @@ async def execute_hunt_capability(
             device_queue_enqueued = device_queue_state_advanced
             if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES:
                 correlated_scans = await conn.fetch(
-                    """SELECT id, job_id, status, run_kind, error_message
+                    """SELECT id, job_id, status, run_kind, options
                        FROM scans
                        WHERE device_target_id=$1
                          AND options->'hunt_dispatch'->>'hunt_action_id'=$2
@@ -37452,14 +37570,10 @@ async def execute_hunt_capability(
                         "Device queue action created more than one downstream scan"
                     )
                 correlated_scan = correlated_scans[0] if correlated_scans else None
-                enqueue_failed = bool(
+                device_queue_enqueued = bool(
                     correlated_scan
-                    and str(correlated_scan["status"]) == "failed"
-                    and "enqueue failed" in str(
-                        correlated_scan["error_message"] or ""
-                    ).lower()
+                    and _scan_queue_handoff_confirmed(correlated_scan)
                 )
-                device_queue_enqueued = bool(correlated_scan and not enqueue_failed)
                 if device_queue_state_advanced and not device_queue_enqueued:
                     raise RuntimeError(
                         "Device queue reported success without a downstream scan"
@@ -59499,8 +59613,8 @@ def _research_queue_presence(
     return _research_fresh_processing_lease(metadata, now=now)
 
 
-async def _reconcile_unconfirmed_asm_queue_handoffs(conn) -> int:
-    """Fail stale two-phase ASM handoffs that died before queue confirmation."""
+async def _reconcile_unconfirmed_queue_handoffs(conn) -> int:
+    """Fail stale two-phase handoffs that died before queue confirmation."""
     rows = await conn.fetch(
         """
         SELECT id, campaign_id
@@ -59697,7 +59811,7 @@ async def research_autopilot_runner(pool) -> None:
                     await _reconcile_stale_research_dispatches(conn)
                     now_monotonic = time.monotonic()
                     if now_monotonic - last_queue_reconcile_monotonic >= 30.0:
-                        await _reconcile_unconfirmed_asm_queue_handoffs(conn)
+                        await _reconcile_unconfirmed_queue_handoffs(conn)
                         await _reconcile_research_orphaned_queue_work(conn)
                         last_queue_reconcile_monotonic = now_monotonic
                     if now_monotonic - last_episode_reap_monotonic >= 300.0:
@@ -60794,7 +60908,6 @@ def _build_asm_campaign_timeline(
     return events[: max(1, int(limit or 12))]
 
 
-_QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
 _RESEARCH_DISPATCH_CORRELATION_KEY = "research_dispatch_correlation"
 
 

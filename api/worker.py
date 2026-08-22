@@ -8908,7 +8908,7 @@ def _queue_handoff_confirmation_marker(row: Any) -> bool | None:
 async def _confirmed_scan_handoff_status(scan_id: str) -> str:
     """Wait briefly for a two-phase queue handoff, then fail it closed.
 
-    Legacy scans have no marker and remain claimable. New ASM enqueue paths persist
+    Legacy scans have no marker and remain claimable. Two-phase enqueue paths persist
     ``false`` before enqueue and flip it to ``true`` only after Redis acknowledges.
     """
     scan_uuid = uuid.UUID(str(scan_id))
