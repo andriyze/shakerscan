@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.reservation_store import PostgresBudgetReservationStore
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
@@ -945,6 +946,11 @@ async def run_schema_migrations(pool) -> None:
             # control-plane schema so rolling API and worker starts cannot observe a half-created
             # ledger.
             await PostgresBudgetReservationStore().ensure_schema(conn)
+
+            # Scan and Hunt share one encrypted, target-bound credential system.  Install it
+            # under the same startup lock so neither API nor workers can observe profiles
+            # without their immutable version and binding tables.
+            await PostgresCredentialProfileStore().ensure_schema(conn)
 
             # Durable key/value store for settings that must survive a Redis
             # flush/restart. Redis remains a cache for non-security automation
