@@ -9614,9 +9614,10 @@ async def build_report(target: str,
                     # Run selected tools concurrently for each URL
                     tasks: dict[str, asyncio.Task] = {}
                     if run_xss:
-                        tasks["dalfox"] = asyncio.create_task(
-                            dalfox_one(u, quick_mode, auth_session=auth_session, deep_domxss=dalfox_deep_domxss)
-                        )
+                        if canonical_scan_execution is None:
+                            tasks["dalfox"] = asyncio.create_task(
+                                dalfox_one(u, quick_mode, auth_session=auth_session, deep_domxss=dalfox_deep_domxss)
+                            )
                         tasks["custom_xss"] = asyncio.create_task(custom_xss_test(u, auth_session=auth_session))
                     if run_sqli:
                         tasks["sqlmap"] = asyncio.create_task(sqlmap_test(u, quick_mode, auth_session=auth_session))
@@ -12207,6 +12208,19 @@ async def build_report(target: str,
                 "scanner_execution_plan": scanner_execution_plan,
             }
             smart_succeeded = bool(smart_mode)
+        if canonical_scan_execution is not None:
+            placed_xss = (
+                canonical_scan_placements.get("xss.verify")
+                if isinstance(canonical_scan_placements, dict) else None
+            )
+            active_block["dalfox"] = _canonical_xss_observations(placed_xss)
+            report["findings"].extend(_canonical_xss_findings(placed_xss))
+            active_block["canonical_xss_verification"] = (
+                dict(placed_xss) if isinstance(placed_xss, Mapping) else {
+                    "status": "blocked",
+                    "reason": "canonical_xss_placement_missing",
+                }
+            )
         async def run_asm_endpoint_batch_auth() -> RegistryPhaseOutcome:
             if not smart_mode or not smart_succeeded or public_only:
                 return RegistryPhaseOutcome(
@@ -14263,6 +14277,7 @@ def _load_canonical_scan_placements(
         raise SystemExit("canonical Scan placement capabilities are invalid")
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
+        "xss.verify",
     }
     if unknown:
         raise SystemExit(
@@ -14395,6 +14410,49 @@ def _load_canonical_scan_placements(
                     "canonical web.content_discover receipt is missing"
                 )
         result["web.content_discover"] = content
+    xss_verification = capabilities.get("xss.verify")
+    if xss_verification is not None:
+        if not isinstance(xss_verification, dict) or set(xss_verification) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical xss.verify placement is malformed")
+        if (
+            xss_verification.get("schema_version")
+            != "canonical-scan-xss-verification-execution/v1"
+            or xss_verification.get("capability_name") != "xss.verify"
+            or not isinstance(xss_verification.get("enabled"), bool)
+            or xss_verification.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit("canonical xss.verify placement contract is invalid")
+        observations = xss_verification.get("observations")
+        if not isinstance(observations, list) or len(observations) > 100:
+            raise SystemExit("canonical xss.verify observations are invalid")
+        if any(
+            not isinstance(item, dict)
+            or item.get("kind") != "xss_alert"
+            or item.get("proof_state") not in {"candidate", "verified"}
+            for item in observations
+        ):
+            raise SystemExit("canonical xss.verify observation contract is invalid")
+        if xss_verification.get("observation_count") != len(observations):
+            raise SystemExit("canonical xss.verify observation count is invalid")
+        if not isinstance(xss_verification.get("receipt"), dict):
+            raise SystemExit("canonical xss.verify receipt reference is invalid")
+        if (
+            xss_verification.get("enabled")
+            and xss_verification.get("status") != "skipped"
+        ):
+            receipt_hash = str(
+                xss_verification["receipt"].get("receipt_hash") or ""
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical xss.verify receipt is missing")
+        result["xss.verify"] = xss_verification
     template = capabilities.get("templates.scan")
     if template is None:
         return result
@@ -14490,6 +14548,62 @@ def _canonical_ffuf_observations(summary: Any) -> list[dict[str, Any]]:
         and item.get("kind") == "content_discovery"
         and item.get("url")
     ][:200]
+
+
+def _canonical_xss_observations(summary: Any) -> list[dict[str, Any]]:
+    """Adapt deterministic Dalfox output into active-report observations."""
+    if not isinstance(summary, Mapping):
+        return []
+    return [
+        {
+            "url": item.get("url"),
+            "type": item.get("alert_type") or "XSS alert",
+            "param": item.get("param"),
+            "message": item.get("message"),
+            "payload_sha256": item.get("payload_sha256"),
+            "proof_state": item.get("proof_state"),
+            "canonical_capability": "xss.verify",
+        }
+        for item in summary.get("observations") or []
+        if isinstance(item, Mapping) and item.get("kind") == "xss_alert"
+    ][:100]
+
+
+def _canonical_xss_findings(summary: Any) -> list[dict[str, Any]]:
+    """Promote only explicit deterministic Dalfox proof into DAST findings."""
+    if not isinstance(summary, Mapping):
+        return []
+    receipt = dict(summary.get("receipt") or {})
+    findings: list[dict[str, Any]] = []
+    for item in summary.get("observations") or []:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("kind") != "xss_alert"
+            or item.get("proof_state") != "verified"
+            or not item.get("url")
+        ):
+            continue
+        evidence = {
+            "url": item.get("url"),
+            "param": item.get("param"),
+            "payload_sha256": item.get("payload_sha256"),
+            "message": item.get("message"),
+            "detail": {
+                "type": "verified",
+                "verified": True,
+                "source_alert_type": item.get("alert_type"),
+            },
+            "canonical_capability": "xss.verify",
+            "capability_receipt": receipt,
+        }
+        findings.append(normalize_finding(
+            "dalfox",
+            "Verified cross-site scripting",
+            "high",
+            evidence,
+            "CWE-79",
+        ))
+    return findings[:100]
 
 
 def _canonical_nuclei_result(summary: Mapping[str, Any]) -> dict[str, Any]:

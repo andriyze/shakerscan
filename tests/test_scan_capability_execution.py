@@ -22,10 +22,12 @@ from scan.capability_execution import (
     scan_capability_action_digest,
     scan_external_execution_target,
     scan_network_capability_allocation,
+    scan_parameterized_execution_candidates,
     scan_template_capability_allocation,
     scan_content_discovery_capability_allocation,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
+    scan_xss_verification_capability_allocation,
     prepare_scan_external_capability,
     prepare_scan_process_capability,
 )
@@ -217,6 +219,44 @@ def test_content_discovery_allocation_preserves_the_scan_backbone():
     assert scan_content_discovery_capability_allocation(
         _budget(max_tool_wall_seconds=3)
     ) is None
+
+
+def test_xss_verification_allocation_preserves_the_scan_backbone():
+    assert scan_xss_verification_capability_allocation(_budget()) == {
+        "http_requests": 10,
+        "tool_wall_seconds": 6,
+    }
+    assert scan_xss_verification_capability_allocation(
+        _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
+    ) == {
+        "http_requests": 400,
+        "tool_wall_seconds": 120,
+    }
+
+
+def test_parameterized_candidates_are_bound_deduplicated_and_get_only():
+    candidates = scan_parameterized_execution_candidates(
+        "https://app.example.test/?landing=1",
+        target=_target(),
+        options={
+            "custom_endpoints": [
+                "GET /search?q=test",
+                "POST /login?user=test",
+                "GET https://evil.example/search?q=test",
+                "GET /reset/AbCdEf0123456789AbCdEf0123456789?q=test",
+            ],
+        },
+        crawl_observations=[
+            {"url": "https://app.example.test/search?q=%3Credacted%3E"},
+            {"url": "https://app.example.test/search?q=%3Credacted%3E"},
+        ],
+    )
+
+    assert candidates == (
+        "https://app.example.test/?landing=1",
+        "https://app.example.test/search?q=%3Credacted%3E",
+        "https://app.example.test/search?q=test",
+    )
 
 
 def test_external_target_must_match_the_exact_frozen_origin():

@@ -21,6 +21,11 @@ _spec = importlib.util.spec_from_file_location(
 )
 scanner_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scanner_mod)
+from findings import apply_dast_precision_policy
+from scanner_tools.finding_validator import (
+    apply_validation_to_finding,
+    validate_finding,
+)
 if _added_scanner_dir:
     sys.path.remove(_SCANNER_DIR)
 
@@ -125,6 +130,84 @@ def _content_discovery_placement_summary():
         "durable_budget_settled": True,
         "idempotent_redelivery": False,
     }
+
+
+def _xss_verification_placement_summary():
+    return {
+        "schema_version": "canonical-scan-xss-verification-execution/v1",
+        "capability_name": "xss.verify",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "xss_alert",
+            "alert_type": "V",
+            "url": "https://app.example.test/search?q=%3Credacted%3E",
+            "param": "q",
+            "payload_sha256": "a" * 64,
+            "message": "verified alert",
+            "proof_state": "verified",
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 2},
+        "receipt": {"receipt_hash": "9" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_xss_verification_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {"xss.verify": _xss_verification_placement_summary()},
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    observations = scanner_mod._canonical_xss_observations(
+        placements["xss.verify"]
+    )
+
+    assert observations == [{
+        "url": "https://app.example.test/search?q=%3Credacted%3E",
+        "type": "V",
+        "param": "q",
+        "message": "verified alert",
+        "payload_sha256": "a" * 64,
+        "proof_state": "verified",
+        "canonical_capability": "xss.verify",
+    }]
+    findings = scanner_mod._canonical_xss_findings(placements["xss.verify"])
+    assert len(findings) == 1
+    assert findings[0]["tool"] == "dalfox"
+    assert findings[0]["cwe"] == "CWE-79"
+    assert findings[0]["evidence"]["capability_receipt"]["receipt_hash"] == (
+        "9" * 64
+    )
+    validated = apply_validation_to_finding(
+        findings[0], validate_finding(findings[0], ""),
+    )
+    [promoted] = apply_dast_precision_policy([validated])
+    assert promoted["verified"] is True
+    assert promoted["proof_state"] == "exploited"
+    assert promoted["proof_contract_v2"]["promotable"] is True
+
+
+def test_canonical_xss_candidate_never_becomes_a_finding():
+    summary = _xss_verification_placement_summary()
+    summary["observations"][0]["proof_state"] = "candidate"
+
+    assert scanner_mod._canonical_xss_findings(summary) == []
 
 
 def test_canonical_content_discovery_is_bound_and_adapted(monkeypatch):

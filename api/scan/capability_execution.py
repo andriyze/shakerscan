@@ -15,6 +15,11 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 
+try:
+    from scanner_tools.url_redaction import redact_path
+except ModuleNotFoundError:  # package imports in host-side tests
+    from scanner.scanner_tools.url_redaction import redact_path
+
 
 class ScanCapabilityContractError(ValueError):
     """A capability cannot execute within its immutable Scan authority."""
@@ -160,6 +165,20 @@ def scan_content_discovery_capability_allocation(
     }
 
 
+def scan_xss_verification_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve one deterministic XSS verifier slice inside Scan ceilings."""
+    http = _budget_integer(budget, "max_http_requests")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if http < 4 or wall < 4:
+        return None
+    return {
+        "http_requests": min(400, max(1, http // 10)),
+        "tool_wall_seconds": min(120, max(1, wall // 10)),
+    }
+
+
 def scan_external_execution_target(
     target_url: str,
     *,
@@ -197,6 +216,63 @@ def scan_external_execution_target(
         parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/",
         parsed.query, "",
     ))
+
+
+def scan_parameterized_execution_candidates(
+    target_url: str,
+    *,
+    target: TargetBinding,
+    options: Mapping[str, Any],
+    crawl_observations: Any = None,
+    limit: int = 8,
+) -> tuple[str, ...]:
+    """Select evidence-derived GET URLs that expose named query parameters."""
+    try:
+        base = scan_external_execution_target(target_url, target=target)
+    except ScanCapabilityContractError:
+        return ()
+    parsed_base = urllib.parse.urlsplit(base)
+    origin = urllib.parse.urlunsplit((
+        parsed_base.scheme, parsed_base.netloc, "", "", "",
+    ))
+    raw_candidates: list[str] = [base]
+    for item in crawl_observations or []:
+        if isinstance(item, Mapping) and item.get("url"):
+            raw_candidates.append(str(item["url"]))
+    for item in options.get("custom_endpoints") or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        pieces = text.split(None, 1)
+        if len(pieces) == 2 and pieces[0].upper() in {
+            "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
+        }:
+            if pieces[0].upper() != "GET":
+                continue
+            text = pieces[1].strip()
+        if text.startswith("/") and not text.startswith("//"):
+            text = urllib.parse.urljoin(origin + "/", text.lstrip("/"))
+        raw_candidates.append(text)
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in raw_candidates:
+        try:
+            candidate = scan_external_execution_target(item, target=target)
+            parsed = urllib.parse.urlsplit(candidate)
+        except (ScanCapabilityContractError, ValueError):
+            continue
+        if redact_path(parsed.path or "/") != (parsed.path or "/"):
+            continue
+        if not urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        selected.append(candidate)
+        if len(selected) >= max(1, min(32, int(limit))):
+            break
+    return tuple(selected)
 
 
 def scan_budget_ledger_limits(
