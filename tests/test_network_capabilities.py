@@ -245,6 +245,56 @@ def test_network_execution_uses_shared_executor_and_measures_bound_commands(
     assert result.redacted_execution == prepared.redacted_execution
 
 
+def test_network_execution_heartbeats_while_a_command_is_still_running(
+    target, active_policy,
+):
+    parser = SubdomainsDiscoverAdapter()
+    prepared = parser.prepare(
+        target=target,
+        args={"root_domain": "example.test"},
+        policy=active_policy,
+    )
+    heartbeats = 0
+
+    async def run_command(_argv, **_kwargs):
+        await asyncio.sleep(0.035)
+        return SimpleNamespace(
+            stdout='{"host":"api.example.test"}\n',
+            returncode=0,
+            timed_out=False,
+            partial=False,
+            stdout_truncated=False,
+            cancelled=False,
+        )
+
+    async def heartbeat():
+        nonlocal heartbeats
+        heartbeats += 1
+
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=CAPABILITY_REGISTRY.require("subdomains.discover"),
+            target=target,
+            requested_budget=prepared.estimated_budget,
+        ),
+        NetworkExecutionAdapter(
+            prepared=prepared,
+            parser=parser,
+            command_runner=run_command,
+            max_stdout_bytes=10_000,
+            max_stderr_bytes=1_000,
+            heartbeat_interval_seconds=0.01,
+        ),
+        heartbeat=heartbeat,
+        cancelled=lambda: False,
+    ))
+
+    assert result.status == "success"
+    # At least three renewals happen while the command is pending, followed by the
+    # existing post-command renewal used between multi-command adapters.
+    assert heartbeats >= 4
+
+
 def test_shared_executor_full_charges_uncertain_network_adapter_fault(
     target, active_policy,
 ):

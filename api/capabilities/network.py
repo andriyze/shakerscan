@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import ipaddress
 import json
 import math
@@ -60,6 +62,7 @@ class NetworkExecutionAdapter:
         command_runner: CommandRunner,
         max_stdout_bytes: int,
         max_stderr_bytes: int,
+        heartbeat_interval_seconds: float = 30.0,
     ) -> None:
         self.capability_name = prepared.capability_name
         self.adapter_name = prepared.adapter_name
@@ -69,6 +72,42 @@ class NetworkExecutionAdapter:
         self._command_runner = command_runner
         self._max_stdout_bytes = int(max_stdout_bytes)
         self._max_stderr_bytes = int(max_stderr_bytes)
+        self._heartbeat_interval_seconds = float(heartbeat_interval_seconds)
+        if self._heartbeat_interval_seconds <= 0:
+            raise ValueError("network capability heartbeat interval must be positive")
+
+    async def _run_command_with_heartbeats(
+        self,
+        command: PreparedCommand,
+        *,
+        per_command_wall: int,
+        heartbeat: Heartbeat,
+        cancelled: Cancelled,
+    ) -> Any:
+        """Keep the durable lease alive while one bounded subprocess is running."""
+        task = asyncio.create_task(self._command_runner(
+            [command.binary, *command.argv],
+            soft_timeout=float(per_command_wall),
+            flush_grace=0.0,
+            hard_timeout=float(per_command_wall),
+            cancel_check=cancelled,
+            max_stdout_bytes=self._max_stdout_bytes,
+            max_stderr_bytes=self._max_stderr_bytes,
+        ))
+        try:
+            while True:
+                done, _pending = await asyncio.wait(
+                    {task}, timeout=self._heartbeat_interval_seconds,
+                )
+                if task in done:
+                    return await task
+                await heartbeat()
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            with suppress(BaseException):
+                await task
+            raise
 
     async def execute(
         self,
@@ -99,14 +138,11 @@ class NetworkExecutionAdapter:
             command_started = time.monotonic()
             try:
                 attempted_commands += 1
-                streamed = await self._command_runner(
-                    [command.binary, *command.argv],
-                    soft_timeout=float(per_command_wall),
-                    flush_grace=0.0,
-                    hard_timeout=float(per_command_wall),
-                    cancel_check=cancelled,
-                    max_stdout_bytes=self._max_stdout_bytes,
-                    max_stderr_bytes=self._max_stderr_bytes,
+                streamed = await self._run_command_with_heartbeats(
+                    command,
+                    per_command_wall=per_command_wall,
+                    heartbeat=heartbeat,
+                    cancelled=cancelled,
                 )
             except FileNotFoundError:
                 attempted_commands -= 1
