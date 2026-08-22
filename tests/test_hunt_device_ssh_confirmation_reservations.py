@@ -58,6 +58,9 @@ def test_confirmation_reserves_and_starts_before_downstream_submission():
     handler = _handler_source()
 
     assert 'require(capability_name)' in handler
+    assert "DeviceExecutionAdapter(" in handler
+    assert "CapabilityExecutor().execute(" in handler
+    assert 'target_kind="device"' in handler
     assert handler.index("create_requested(") < handler.index("scan_device(")
     assert handler.index(".reserve_against(") < handler.index("scan_device(")
     assert handler.index(".start(") < handler.index("scan_device(")
@@ -138,4 +141,5 @@ def test_confirmation_receipt_binds_user_consent_plan_and_downstream_scan():
     assert settlement.index("terminalize_hunt_capability(") < settlement.index(
         "durable_store.persist_terminal("
     )
+    assert "parser_version=(" in settlement
     assert "receipt_id=$4" in handler

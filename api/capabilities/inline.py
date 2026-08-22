@@ -182,7 +182,13 @@ class DeviceExecutionAdapter(_InlineAdapter):
             int(self._state.get("scans_queued") or 0)
             - self._queues_before,
         )
-        execution_started = bool(http_attempts or queues or result.get("ok"))
+        result_status = str(result.get("status") or "").strip().lower()
+        if result_status == "queued" or isinstance(result.get("queued"), Mapping):
+            queues = max(queues, 1)
+        succeeded = bool(
+            result.get("ok") or result_status in {"success", "queued"}
+        )
+        execution_started = bool(http_attempts or queues or succeeded)
         actual = self._wall_budget(
             started,
             execution_started=execution_started,
@@ -214,7 +220,7 @@ class DeviceExecutionAdapter(_InlineAdapter):
             "blocked"
             if self.blocked_exception is not None
             else "success"
-            if result.get("ok")
+            if succeeded
             else "blocked"
             if result.get("blocked")
             else "failed"

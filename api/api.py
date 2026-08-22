@@ -38789,6 +38789,7 @@ async def confirm_hunt_shell_plan(
 
     execution_started = time.perf_counter()
     dispatch_error: Exception | None = None
+    capability_execution = None
     if dispatch_required:
         parent_token = _DEVICE_AGENT_PARENT_AUTHORITY.set(True)
         shell_token = _DEVICE_AGENT_APPROVED_SHELL_PLAN.set(plan)
@@ -38801,15 +38802,48 @@ async def confirm_hunt_shell_plan(
             "capability_name": capability_name,
         })
         try:
-            queued = await scan_device(str(device_target_id), DeviceScanRequest(
-                profile="inventory", safety_profile="authenticated_active",
-                confirm_authorized=True, include_web_dast=False, max_web_origins=0,
-                ssh_credential_profile_id=str(plan["credential_profile_id"]),
-                capability_ids=["agent-confirmed-ssh-shell"],
-                approval_receipt_id=approval_receipt_id,
-            ))
-        except Exception as exc:
-            dispatch_error = exc
+            dispatch_adapter = DeviceExecutionAdapter(
+                specification=spec,
+                operation=lambda: scan_device(
+                    str(device_target_id),
+                    DeviceScanRequest(
+                        profile="inventory",
+                        safety_profile="authenticated_active",
+                        confirm_authorized=True,
+                        include_web_dast=False,
+                        max_web_origins=0,
+                        ssh_credential_profile_id=str(
+                            plan["credential_profile_id"]
+                        ),
+                        capability_ids=["agent-confirmed-ssh-shell"],
+                        approval_receipt_id=approval_receipt_id,
+                    ),
+                ),
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution=capability_input,
+                state={},
+                # Every queue failure is captured so the exact downstream row
+                # can decide whether the hold was consumed before we re-raise.
+                blocked_exceptions=(Exception,),
+            )
+            capability_execution = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=spec,
+                    target=TargetBinding(
+                        target_id=str(device_target_id),
+                        target_kind="device",
+                        canonical_host=str(plan["target_locator"]),
+                        scope_receipt_id=validated_scope_receipt_id,
+                    ),
+                    requested_budget=durable_reservation.record.requested,
+                ),
+                dispatch_adapter,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: False,
+            )
+            queued = dispatch_adapter.result or None
+            if isinstance(dispatch_adapter.blocked_exception, Exception):
+                dispatch_error = dispatch_adapter.blocked_exception
         finally:
             _HUNT_DEVICE_QUEUE_CORRELATION.reset(correlation_token)
             _DEVICE_AGENT_APPROVED_SHELL_PLAN.reset(shell_token)
@@ -38955,6 +38989,11 @@ async def confirm_hunt_shell_plan(
                 capability_name=capability_name,
                 adapter_name=str(spec.adapter),
                 adapter_version=str(spec.adapter_version),
+                parser_version=(
+                    capability_execution.parser_version
+                    if capability_execution is not None
+                    else spec.output_schema
+                ),
                 target_id=device_target_id,
                 target_kind="device",
                 capability_input=capability_input,

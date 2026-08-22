@@ -280,6 +280,40 @@ def test_device_adapter_charges_reserved_queue_envelope_after_acceptance():
     assert result.observations[0]["queued"]["scan_id"] == "scan-1"
 
 
+def test_device_adapter_accepts_a_raw_downstream_queue_receipt():
+    specification = CAPABILITY_REGISTRY.require(
+        "device.ssh.execute_confirmed"
+    )
+    requested = {
+        "active_actions": 1,
+        "device_fragility_points": 12,
+        "tool_wall_seconds": 30,
+    }
+
+    async def operation():
+        return {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"}
+
+    result = _execute_device(
+        specification,
+        DeviceExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"plan_id": "plan-1"},
+            state={},
+            blocked_exceptions=(ExpectedDeviceBlock,),
+        ),
+        requested,
+    )
+
+    assert result.status == "success"
+    assert result.actual_budget == {
+        "active_actions": 1,
+        "device_fragility_points": 12,
+        "tool_wall_seconds": 1,
+    }
+
+
 def test_device_adapter_preserves_failed_http_attempt_consumption():
     specification = CAPABILITY_REGISTRY.require("device.http.probe")
     requested = {
