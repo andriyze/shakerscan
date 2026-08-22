@@ -200,5 +200,9 @@ def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     assert "status='reserved'" in handler
     assert "1 + MAX_REDIRECT_HOPS" in handler
     assert "record_receipt=False" in handler
+    assert "HttpRequestExecutionAdapter(" in handler
+    assert "TlsInspectionExecutionAdapter(" in handler
+    assert handler.count("CapabilityExecutor().execute(") >= 2
+    assert "receipt_observations" in handler
     assert "scope_receipt_id=validated_scope_receipt_id" in handler
     assert "'reserved','running','completed','blocked','cancelled','failed','partial'" in migrations

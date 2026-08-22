@@ -462,6 +462,14 @@ try:
         hunt_capability_lease_seconds,
         terminalize_hunt_capability,
     )
+    from hunt.capability_executor import (
+        CapabilityExecutionContext,
+        CapabilityExecutor,
+    )
+    from capabilities.inline import (
+        HttpRequestExecutionAdapter,
+        TlsInspectionExecutionAdapter,
+    )
     from hunt.contracts import capability_manifest, resolve_hunt_policy
     from hunt.legacy import LegacyHuntIsolationMiddleware
 except ModuleNotFoundError:
@@ -477,6 +485,14 @@ except ModuleNotFoundError:
         hunt_capability_action_digest,
         hunt_capability_lease_seconds,
         terminalize_hunt_capability,
+    )
+    from api.hunt.capability_executor import (
+        CapabilityExecutionContext,
+        CapabilityExecutor,
+    )
+    from api.capabilities.inline import (
+        HttpRequestExecutionAdapter,
+        TlsInspectionExecutionAdapter,
     )
     from api.hunt.contracts import capability_manifest, resolve_hunt_policy
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
@@ -37532,6 +37548,35 @@ async def execute_hunt_capability(
                     )
 
     context = _hunt_json(run["context_pack"], {})
+
+    def inline_web_target_binding() -> TargetBinding:
+        target_context = (
+            dict(context.get("target") or {})
+            if isinstance(context.get("target"), Mapping)
+            else {}
+        )
+        target_url = str(target_context.get("url") or "")
+        parsed_target = urllib.parse.urlsplit(target_url)
+        root_domain = str(
+            target_context.get("root_domain")
+            or parsed_target.hostname
+            or ""
+        ).lower().rstrip(".")
+        return TargetBinding(
+            target_id=str(run["target_id"]),
+            target_kind=str(run["target_kind"]),
+            canonical_host=parsed_target.hostname,
+            allowed_origins=tuple(target_context.get("origins") or ()),
+            allowed_addresses=tuple(
+                str(item)
+                for item in context.get("authorized_target_addresses") or ()
+                if str(item)
+            ),
+            allowed_root_domains=(root_domain,) if root_domain else (),
+            environment=str(target_context.get("environment") or "unknown"),
+            scope_receipt_id=validated_scope_receipt_id,
+        )
+
     device_context_before = (
         copy.deepcopy(context)
         if name in (
@@ -37544,6 +37589,7 @@ async def execute_hunt_capability(
     )
     execution_started = time.perf_counter()
     status, result = "failed", {}
+    capability_execution = None
     try:
         if name == "collections.inspect":
             refs = [item for item in context.get("request_collections") or [] if isinstance(item, dict)]
@@ -37592,13 +37638,44 @@ async def execute_hunt_capability(
             http_input = dict(request.input)
             http_input.setdefault("method", "GET")
             http_input.setdefault("path", "/")
-            result = await _agent_tool_http_request(
-                run["target_id"], str(context["target"]["url"]), http_input,
-                created_by=f"hunt_v2:{hunt_id}", allow_write=False,
-                approval_receipt_id=policy.get("approval_receipt_id"),
-                authorized_addresses=context.get("authorized_target_addresses") or [],
-                record_receipt=False,
+            http_adapter = HttpRequestExecutionAdapter(
+                specification=spec,
+                operation=lambda: _agent_tool_http_request(
+                    run["target_id"],
+                    str(context["target"]["url"]),
+                    http_input,
+                    created_by=f"hunt_v2:{hunt_id}",
+                    allow_write=False,
+                    approval_receipt_id=policy.get("approval_receipt_id"),
+                    authorized_addresses=(
+                        context.get("authorized_target_addresses") or []
+                    ),
+                    record_receipt=False,
+                ),
+                requested_budget=(
+                    durable_reservation.record.requested
+                    if durable_reservation is not None
+                    else charges
+                ),
+                redacted_execution=_hunt_redacted_capability_input(
+                    name, http_input,
+                ),
             )
+            capability_execution = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=spec,
+                    target=inline_web_target_binding(),
+                    requested_budget=(
+                        durable_reservation.record.requested
+                        if durable_reservation is not None
+                        else charges
+                    ),
+                ),
+                http_adapter,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: False,
+            )
+            result = http_adapter.result
         elif name in browser_capability_names:
             if (
                 durable_reservation is None
@@ -37667,13 +37744,45 @@ async def execute_hunt_capability(
                 authorized_addresses=context.get("authorized_target_addresses") or [],
             )
         elif name == "tls.inspect":
-            result = await _hunt_tls_inspect(
-                str(context["target"]["url"]),
-                context.get("authorized_target_addresses") or [],
+            tls_adapter = TlsInspectionExecutionAdapter(
+                specification=spec,
+                operation=lambda: _hunt_tls_inspect(
+                    str(context["target"]["url"]),
+                    context.get("authorized_target_addresses") or [],
+                ),
+                requested_budget=(
+                    durable_reservation.record.requested
+                    if durable_reservation is not None
+                    else charges
+                ),
+                redacted_execution=_hunt_redacted_capability_input(
+                    name, request.input,
+                ),
             )
+            capability_execution = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=spec,
+                    target=inline_web_target_binding(),
+                    requested_budget=(
+                        durable_reservation.record.requested
+                        if durable_reservation is not None
+                        else charges
+                    ),
+                ),
+                tls_adapter,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: False,
+            )
+            result = tls_adapter.result
         else:
             raise HTTPException(status_code=422, detail="Capability adapter is not executable")
-        if result.get("status") == "cancelled":
+        if capability_execution is not None:
+            status = (
+                "completed"
+                if capability_execution.status == "success"
+                else capability_execution.status
+            )
+        elif result.get("status") == "cancelled":
             status = "cancelled"
         elif result.get("partial") or result.get("status") == "partial":
             status = "partial"
@@ -37799,9 +37908,12 @@ async def execute_hunt_capability(
             for dimension, amount in measured.items():
                 if dimension in charges:
                     actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
+            if capability_execution is not None:
+                actual_charges = dict(capability_execution.actual_budget)
             elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
             if (
                 api_managed_budget
+                and capability_execution is None
                 and (status != "blocked" or device_http_attempted)
                 and "tool_wall_seconds" in charges
             ):
@@ -37859,7 +37971,7 @@ async def execute_hunt_capability(
                     1 if device_http_attempted else 0,
                     int(charges.get("device_fragility_points") or 0),
                 )
-            elif name == "http.request":
+            elif name == "http.request" and capability_execution is None:
                 followed = max(
                     0,
                     min(
@@ -37898,6 +38010,10 @@ async def execute_hunt_capability(
                 if isinstance(receipt_payload, Mapping)
                 else {}
             )
+            if capability_execution is not None:
+                receipt_contract_payload["receipt_observations"] = [
+                    dict(item) for item in capability_execution.observations
+                ]
             downstream_receipt: dict[str, Any] = {}
             if name in DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES:
                 queued_result = (
@@ -38057,6 +38173,11 @@ async def execute_hunt_capability(
                             capability_name=name,
                             adapter_name=str(spec.adapter),
                             adapter_version=str(spec.adapter_version),
+                            parser_version=(
+                                capability_execution.parser_version
+                                if capability_execution is not None
+                                else None
+                            ),
                             target_id=(
                                 run["device_target_id"] or run["target_id"]
                             ),
