@@ -529,11 +529,67 @@ CREATE TABLE request_collection_requests (
     normalized_path TEXT,
     body_mode TEXT,
     auth_type TEXT,
+    tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     safe_method BOOLEAN NOT NULL DEFAULT false,
     supported BOOLEAN NOT NULL DEFAULT true,
     PRIMARY KEY (collection_id, request_id)
 );
 CREATE INDEX idx_request_collection_requests_page ON request_collection_requests(collection_id, ordinal);
+
+CREATE TABLE request_collection_environments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    encrypted_payload TEXT NOT NULL CHECK (encrypted_payload LIKE 'enc:fernet:%'),
+    payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+    variable_count INTEGER NOT NULL DEFAULT 0 CHECK (variable_count >= 0),
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata_json) = 'object'),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT request_collection_environments_name_unique UNIQUE (collection_id, name),
+    CONSTRAINT request_collection_environments_identity_unique UNIQUE (id, collection_id)
+);
+CREATE INDEX idx_request_collection_environments_active
+ON request_collection_environments(collection_id, is_active, lower(name));
+
+CREATE TABLE request_collection_bindings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api','device')),
+    target_id UUID NOT NULL,
+    allowed_origins JSONB NOT NULL CHECK (jsonb_typeof(allowed_origins) = 'array' AND jsonb_array_length(allowed_origins) > 0),
+    environment_id UUID,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT request_collection_bindings_target_unique UNIQUE (collection_id, target_kind, target_id),
+    CONSTRAINT request_collection_bindings_identity_unique UNIQUE (id, collection_id),
+    CONSTRAINT request_collection_bindings_environment_fk FOREIGN KEY (environment_id, collection_id)
+        REFERENCES request_collection_environments(id, collection_id)
+);
+CREATE INDEX idx_request_collection_bindings_target
+ON request_collection_bindings(target_kind, target_id, is_active);
+
+CREATE TABLE request_collection_selections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
+    binding_id UUID NOT NULL,
+    name TEXT NOT NULL,
+    replay_policy TEXT NOT NULL CHECK (replay_policy IN ('discovery_only','safe_reads','confirmed_active')),
+    selector_json JSONB NOT NULL CHECK (jsonb_typeof(selector_json) = 'object'),
+    selection_digest TEXT NOT NULL CHECK (selection_digest ~ '^[0-9a-f]{64}$'),
+    selected_request_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_request_count >= 0),
+    selected_mutating_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_mutating_count >= 0),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT request_collection_selections_name_unique UNIQUE (binding_id, name),
+    CONSTRAINT request_collection_selections_binding_fk FOREIGN KEY (binding_id, collection_id)
+        REFERENCES request_collection_bindings(id, collection_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_request_collection_selections_active
+ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
 
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

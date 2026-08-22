@@ -23,6 +23,7 @@ from runtime.credential_migration import (
     migrate_legacy_web_credentials,
 )
 from runtime.reservation_store import PostgresBudgetReservationStore
+from runtime.request_collection_store import PostgresRequestCollectionStore
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
@@ -2846,6 +2847,7 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_request_collection_requests_page
                 ON request_collection_requests(collection_id, ordinal)
             """)
+            await PostgresRequestCollectionStore().ensure_schema(conn)
             await conn.execute("""
                 INSERT INTO request_collections (
                     id, device_target_id, name, format, encrypted_payload, payload_sha256,
