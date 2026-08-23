@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import heapq
 import hashlib
 import json
 import re
@@ -239,7 +240,9 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
 def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = {
         "candidate_id", "route_id", "method", "canonical_path", "parameter_name",
-        "source_tool", "auth_lane", "selected_shard", "request_ref_id",
+        "query_parameter_names", "body_field_names", "content_type",
+        "family_hints", "source_tool", "source_observation_ref", "auth_lane",
+        "selected_shard", "request_ref_id", "score", "ranking_rationale",
     }
     if set(value) != expected:
         raise ScanWorkManifestError("candidate manifest entry fields are invalid")
@@ -248,6 +251,26 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ScanWorkManifestError("candidate method is invalid")
     route = _hex(value["route_id"], name="route_id")
     parameter = str(_token(value["parameter_name"], name="parameter_name"))
+    query_names = _string_list(
+        value["query_parameter_names"],
+        name="query_parameter_names",
+        maximum=64,
+    )
+    if parameter not in query_names:
+        raise ScanWorkManifestError(
+            "candidate parameter is absent from query_parameter_names"
+        )
+    body_names = _string_list(
+        value["body_field_names"], name="body_field_names", maximum=128,
+    )
+    content_type = _token(
+        value["content_type"], name="content_type", optional=True,
+    )
+    family_hints = _string_list(
+        value["family_hints"], name="family_hints", maximum=8,
+    )
+    if not family_hints or not set(family_hints) <= {"xss", "sqli"}:
+        raise ScanWorkManifestError("candidate family_hints are invalid")
     expected_id = _digest({"route_id": route, "method": method, "parameter_name": parameter})
     if _hex(value["candidate_id"], name="candidate_id") != expected_id:
         raise ScanWorkManifestError("candidate_id does not match candidate identity")
@@ -260,7 +283,16 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "method": method,
         "canonical_path": _path(value["canonical_path"]),
         "parameter_name": parameter,
+        "query_parameter_names": list(query_names),
+        "body_field_names": list(body_names),
+        "content_type": content_type,
+        "family_hints": list(family_hints),
         "source_tool": _token(value["source_tool"], name="source_tool"),
+        "source_observation_ref": _token(
+            value["source_observation_ref"],
+            name="source_observation_ref",
+            optional=True,
+        ),
         "auth_lane": lane,
         "selected_shard": _optional_integer(
             value["selected_shard"], name="selected_shard", minimum=0, maximum=16_383,
@@ -268,6 +300,10 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "request_ref_id": _token(
             value["request_ref_id"], name="request_ref_id", optional=True,
         ),
+        "score": _integer(value["score"], name="score", minimum=0, maximum=100),
+        "ranking_rationale": list(_string_list(
+            value["ranking_rationale"], name="ranking_rationale", maximum=16,
+        )),
     }
 
 
@@ -661,39 +697,105 @@ def build_candidate_manifest(
     source_action_ids: Sequence[str],
     maximum: int,
 ) -> ScanWorkManifest:
-    """Expand every named query parameter into a deterministic bounded candidate."""
+    """Rank every query candidate and freeze the deterministic bounded top set."""
     if endpoint_manifest.kind is not ScanWorkManifestKind.ENDPOINT:
         raise ScanWorkManifestError("candidate source must be an endpoint manifest")
     limit = _integer(maximum, name="candidate maximum", minimum=1, maximum=20_000)
-    entries: list[dict[str, Any]] = []
-    truncated = False
+
+    xss_names = frozenset({
+        "callback", "comment", "description", "html", "keyword", "message",
+        "name", "next", "q", "query", "redirect", "return", "search",
+        "text", "title", "url",
+    })
+    sqli_names = frozenset({
+        "account", "category", "customer", "filter", "id", "item", "order",
+        "page", "product", "record", "search", "sort", "user", "username",
+    })
+    source_points = {
+        "collections.replay": (18, "exact_request_source"),
+        "known_endpoints": (14, "admission_declared_source"),
+        "web.crawl": (12, "crawler_observed_source"),
+        "web.content_discover": (8, "content_discovery_source"),
+        "web.probe": (6, "probe_observed_source"),
+        "seed": (4, "seed_source"),
+    }
+
+    def ranked_candidate(
+        endpoint: Mapping[str, Any], parameter: str,
+    ) -> dict[str, Any]:
+        normalized_name = parameter.lower().replace("-", "_")
+        score = 30
+        rationale = ["parameterized_query"]
+        source_score, source_reason = source_points.get(
+            str(endpoint["source_tool"]), (2, "other_admitted_source"),
+        )
+        score += source_score
+        rationale.append(source_reason)
+        if endpoint["method"] == "GET":
+            score += 8
+            rationale.append("synthetic_get_supported")
+        if endpoint["request_ref_ids"]:
+            score += 18
+            rationale.append("exact_request_reference")
+        if endpoint["auth_lane"] not in {None, "anonymous"}:
+            score += 8
+            rationale.append("authenticated_lane")
+        if normalized_name in xss_names:
+            score += 10
+            rationale.append("xss_semantic_parameter")
+        if normalized_name in sqli_names or normalized_name.endswith("_id"):
+            score += 10
+            rationale.append("sqli_semantic_parameter")
+        candidate_id = _digest({
+            "route_id": endpoint["route_id"],
+            "method": endpoint["method"],
+            "parameter_name": parameter,
+        })
+        return {
+            "candidate_id": candidate_id,
+            "route_id": endpoint["route_id"],
+            "method": endpoint["method"],
+            "canonical_path": endpoint["canonical_path"],
+            "parameter_name": parameter,
+            "query_parameter_names": list(endpoint["query_parameter_names"]),
+            "body_field_names": [],
+            "content_type": None,
+            "family_hints": ["xss", "sqli"],
+            "source_tool": endpoint["source_tool"],
+            "source_observation_ref": None,
+            "auth_lane": endpoint["auth_lane"],
+            "selected_shard": endpoint["selected_shard"],
+            "request_ref_id": (
+                endpoint["request_ref_ids"][0]
+                if endpoint["request_ref_ids"] else None
+            ),
+            "score": min(100, score),
+            "ranking_rationale": rationale,
+        }
+
+    # Keep only the best bounded set while visiting potentially large endpoint
+    # manifests.  The heap key makes a higher score and, on ties, a lower
+    # content-addressed candidate ID better.  Observation order is irrelevant.
+    selected: list[tuple[tuple[int, int], dict[str, Any]]] = []
+    candidate_count = 0
     for endpoint in endpoint_manifest.entries:
         if endpoint["method"] != "GET":
             continue
         for parameter in endpoint["query_parameter_names"]:
-            if len(entries) >= limit:
-                truncated = True
-                break
-            entries.append({
-                "candidate_id": _digest({
-                    "route_id": endpoint["route_id"],
-                    "method": endpoint["method"],
-                    "parameter_name": parameter,
-                }),
-                "route_id": endpoint["route_id"],
-                "method": endpoint["method"],
-                "canonical_path": endpoint["canonical_path"],
-                "parameter_name": parameter,
-                "source_tool": endpoint["source_tool"],
-                "auth_lane": endpoint["auth_lane"],
-                "selected_shard": endpoint["selected_shard"],
-                "request_ref_id": (
-                    endpoint["request_ref_ids"][0]
-                    if endpoint["request_ref_ids"] else None
-                ),
-            })
-        if truncated:
-            break
+            candidate = ranked_candidate(endpoint, str(parameter))
+            candidate_count += 1
+            heap_key = (
+                int(candidate["score"]),
+                -int(str(candidate["candidate_id"]), 16),
+            )
+            row = (heap_key, candidate)
+            if len(selected) < limit:
+                heapq.heappush(selected, row)
+            elif heap_key > selected[0][0]:
+                heapq.heapreplace(selected, row)
+    entries = [row[1] for row in selected]
+    entries.sort(key=lambda item: (-int(item["score"]), item["candidate_id"]))
+    truncated = candidate_count > limit
     return ScanWorkManifest(
         scan_id=endpoint_manifest.scan_id,
         kind=ScanWorkManifestKind.CANDIDATE,

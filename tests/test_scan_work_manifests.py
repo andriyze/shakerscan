@@ -172,11 +172,61 @@ def test_candidate_manifest_covers_every_parameter_and_marks_bounded_truncation(
         maximum=2,
     )
 
-    assert [item["parameter_name"] for item in complete.entries] == ["a", "b", "c"]
+    assert {item["parameter_name"] for item in complete.entries} == {"a", "b", "c"}
+    assert list(complete.entries) == sorted(
+        complete.entries,
+        key=lambda item: (-item["score"], item["candidate_id"]),
+    )
     assert len({item["candidate_id"] for item in complete.entries}) == 3
+    assert all(item["family_hints"] == ("xss", "sqli") for item in complete.entries)
+    assert all(item["ranking_rationale"] for item in complete.entries)
     assert partial.status == "partial"
     assert partial.reason_code == "candidate_limit_reached"
     assert len(partial.entries) == 2
+    assert partial.entries == complete.entries[:2]
+
+
+def test_candidate_ranking_is_semantic_recorded_and_observation_order_independent():
+    surface = _surface(query_keys=("zzz", "search"))
+    second = dict(surface["endpoints"][0])
+    second.update({
+        "normalized_path": "/api/users/{int}",
+        "concrete_path": "/api/users/1",
+        "query_keys": ["user_id"],
+    })
+    surface["endpoints"].append(second)
+    first = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface,
+        source_action_ids=("discover.web_crawl",),
+    )
+    surface["endpoints"].reverse()
+    reversed_endpoint = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface,
+        source_action_ids=("discover.web_crawl",),
+    )
+
+    ranked = build_candidate_manifest(
+        first,
+        source_action_ids=("discover.candidates",),
+        maximum=3,
+    )
+    reranked = build_candidate_manifest(
+        reversed_endpoint,
+        source_action_ids=("discover.candidates",),
+        maximum=3,
+    )
+
+    assert ranked.manifest_digest == reranked.manifest_digest
+    assert ranked.entries[0]["parameter_name"] == "search"
+    assert ranked.entries[0]["score"] > ranked.entries[-1]["score"]
+    assert ranked.entries[0]["ranking_rationale"][-2:] == (
+        "xss_semantic_parameter",
+        "sqli_semantic_parameter",
+    )
 
 
 def test_manifest_execution_selects_exact_endpoint_and_candidate_index():
@@ -190,8 +240,9 @@ def test_manifest_execution_selects_exact_endpoint_and_candidate_index():
     assert execution_url_for_manifest_endpoint(endpoint, 0) == (
         "https://app.example.test/api/orders/1?a=1&b=1"
     )
+    selected_parameter = candidates.entries[1]["parameter_name"]
     assert execution_url_for_manifest_candidate(endpoint, candidates, 1) == (
-        "https://app.example.test/api/orders/1?b=1"
+        f"https://app.example.test/api/orders/1?{selected_parameter}=1"
     )
     with pytest.raises(ScanWorkManifestError, match="outside immutable content"):
         execution_url_for_manifest_candidate(endpoint, candidates, 2)
