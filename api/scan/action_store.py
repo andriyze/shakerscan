@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS scan_capability_actions (
     observation_manifest_id UUID,
     result_digest CHAR(64),
     result_json JSONB,
+    receipt_json JSONB,
     backend_name TEXT,
     worker_id TEXT,
     lease_id UUID,
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS scan_capability_actions (
 CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_scan_status
     ON scan_capability_actions(scan_id, status, ordinal);
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS result_json JSONB;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS receipt_json JSONB;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS backend_name TEXT;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS worker_id TEXT;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_id UUID;

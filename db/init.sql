@@ -215,6 +215,7 @@ CREATE TABLE scan_capability_actions (
     observation_manifest_id UUID,
     result_digest CHAR(64),
     result_json JSONB,
+    receipt_json JSONB,
     backend_name TEXT,
     worker_id TEXT,
     lease_id UUID,

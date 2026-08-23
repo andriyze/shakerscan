@@ -152,6 +152,9 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     lease_repair_sql = Path(
         "db/repairs/2026-08-23_v2_scan_action_leases.sql"
     ).read_text(encoding="utf-8")
+    receipt_repair_sql = Path(
+        "db/repairs/2026-08-23_v2_scan_action_receipts.sql"
+    ).read_text(encoding="utf-8")
     for source in (init_sql, repair_sql):
         assert "scan_action_plan_json" in source
         assert "CREATE TABLE" in source and "scan_capability_actions" in source
@@ -162,6 +165,8 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "lease_token_hash" in source
         assert "lease_expires_at" in source
         assert "result_json" in source
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, receipt_repair_sql):
+        assert "receipt_json" in source
 
 
 def test_action_store_persists_precomputed_optional_skip_reasons():

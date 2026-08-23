@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -21,6 +23,7 @@ from api.scan.execution_backend import (
     PostgresScanExecutionBackend,
 )
 from api.scan.orchestrator import ScanOrchestrator
+from api.runtime.receipts import CapabilityReceipt
 
 
 SCAN_ID = "30000000-0000-4000-8000-000000000001"
@@ -323,6 +326,7 @@ class FakePool:
 class FakePostgresConn:
     def __init__(self, plan):
         self.scan_status = "running"
+        self.observations = {}
         self.rows = {
             action.action_id: {
                 "status": "planned",
@@ -333,7 +337,17 @@ class FakePostgresConn:
             for action in plan.actions
         }
 
+    def transaction(self):
+        return _PoolLease(self)
+
     async def fetchrow(self, query, *args):
+        if query.lstrip().startswith("INSERT INTO scan_observation_manifests"):
+            incoming = {"manifest_json": args[10], "observations_json": args[11]}
+            existing = self.observations.get(args[0])
+            if existing is not None and existing != incoming:
+                return None
+            self.observations[args[0]] = incoming
+            return {"manifest_json": incoming["manifest_json"]}
         action_id = str(args[1])
         row = self.rows[action_id]
         if "SET status='leased'" in query:
@@ -376,6 +390,7 @@ class FakePostgresConn:
                 "observation_manifest_id": args[10],
                 "result_digest": args[11],
                 "result_json": args[12],
+                "receipt_json": args[13],
                 "lease_token_hash": None,
                 "lease_expires_at": None,
             })
@@ -460,3 +475,42 @@ def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
     assert payload["action"]["requested_budget"] == dict(plan.actions[0].requested_budget)
     assert payload["action"]["dependencies"] == list(plan.actions[0].dependencies)
     assert not any(name in flattened for name in ("database_url", "postgres", "redis_url"))
+
+
+def test_postgres_backend_converts_full_receipt_and_observations_in_one_settlement():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    action = plan.actions[0]
+    lease = asyncio.run(backend.acquire_action(action))
+    now = datetime.now(timezone.utc).isoformat()
+    receipt = CapabilityReceipt(
+        receipt_id="50000000-0000-4000-8000-000000000009",
+        capability_name=action.capability_name,
+        adapter_name=str(action.placement["adapter_name"]),
+        adapter_version=str(action.placement["adapter_version"]),
+        target_id="50000000-0000-4000-8000-000000000010",
+        scan_id=plan.scan_id,
+        worker_id="local-worker-1",
+        status="success",
+        input_digest=action.action_digest,
+        parser_version="1",
+        started_at=now,
+        finished_at=now,
+        budget_reserved=action.requested_budget,
+        budget_consumed={"http_requests": 1, "tool_wall_seconds": 1},
+        observations=({"kind": "http_response", "status_code": 200},),
+    )
+
+    result = asyncio.run(backend.settle(lease, receipt))
+
+    assert result.status is CapabilityResultStatus.SUCCESS
+    assert result.observation_manifest_ref is not None
+    assert result.observation_manifest_ref.count == 1
+    assert conn.observations
+    assert json.loads(conn.rows[action.action_id]["receipt_json"])["receipt_hash"] == receipt.receipt_hash

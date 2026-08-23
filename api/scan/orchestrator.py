@@ -143,8 +143,9 @@ class ScanOrchestrator:
             reason_code=reason.value,
             charge_full_reservation=charge_full,
         )
-        self._validate_result(action, result)
-        return await self._backend.settle(lease, result)
+        settled = await self._backend.settle(lease, result)
+        self._validate_result(action, settled)
+        return settled
 
     async def _execute_action(
         self,
@@ -188,8 +189,9 @@ class ScanOrchestrator:
                 reason_code=CapabilityResultReason.ADAPTER_FAILED.value,
                 charge_full_reservation=True,
             )
-        self._validate_result(action, result)
-        return await self._backend.settle(lease, result)
+        settled = await self._backend.settle(lease, result)
+        self._validate_result(action, settled)
+        return settled
 
     async def run(self, plan: ScanActionPlan) -> ScanOrchestrationResult:
         if not isinstance(plan, ScanActionPlan):

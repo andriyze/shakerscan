@@ -18,10 +18,19 @@ import uuid
 
 from .action_plan import SCAN_ACTION_PLAN_SCHEMA, ScanAction, ScanActionPlan
 from .capability_result import (
+    CapabilityReceiptReference,
+    CapabilityResultReason,
     CapabilityResultError,
     CapabilityResultReference,
+    CapabilityResultStatus,
     placement_from_stored_result,
 )
+try:  # Preserve one class identity under api.scan.* host imports.
+    from ..runtime.observation_store import PostgresObservationManifestStore
+    from ..runtime.receipts import CapabilityReceipt
+except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
+    from runtime.observation_store import PostgresObservationManifestStore
+    from runtime.receipts import CapabilityReceipt
 
 
 ACTION_LEASE_SCHEMA = "scan-action-lease/v1"
@@ -147,7 +156,7 @@ class ScanExecutionBackend(Protocol):
     async def settle(
         self,
         lease: ActionLease,
-        result: CapabilityResultReference,
+        result: CapabilityResultReference | CapabilityReceipt,
     ) -> CapabilityResultReference: ...
 
     async def load_result(self, action_id: str) -> CapabilityResultReference | None: ...
@@ -166,7 +175,7 @@ class ScanActionExecutor(Protocol):
         action: ScanAction,
         lease: ActionLease,
         heartbeat: ActionHeartbeat,
-    ) -> CapabilityResultReference: ...
+    ) -> CapabilityResultReference | CapabilityReceipt: ...
 
     async def terminal_without_execution(
         self,
@@ -176,7 +185,7 @@ class ScanActionExecutor(Protocol):
         status: str,
         reason_code: str,
         charge_full_reservation: bool,
-    ) -> CapabilityResultReference: ...
+    ) -> CapabilityResultReference | CapabilityReceipt: ...
 
 
 def validate_action_lease(
@@ -359,33 +368,44 @@ class PostgresScanExecutionBackend:
     async def settle(
         self,
         lease: ActionLease,
-        result: CapabilityResultReference,
+        result: CapabilityResultReference | CapabilityReceipt,
     ) -> CapabilityResultReference:
         action = self._require_action(lease.action.action_id)
         validate_action_lease(lease, plan=self._plan, action=action)
-        try:
-            placement_from_stored_result(action=action, stored=result)
-        except CapabilityResultError as exc:
-            raise ScanExecutionBackendError("action result is detached from its lease") from exc
-        if (
-            result.adapter_name != str(action.placement.get("adapter_name") or "")
-            or result.adapter_version != str(action.placement.get("adapter_version") or "")
-            or dict(result.budget_reserved) != dict(action.requested_budget)
-        ):
-            raise ScanExecutionBackendError("action result conflicts with lease authority")
-        result_json = json.dumps(
-            result.canonical_dict(), sort_keys=True, separators=(",", ":"),
-        )
-        manifest_id = (
-            uuid.UUID(result.observation_manifest_ref.manifest_id)
-            if result.observation_manifest_ref is not None else None
-        )
-        async with self._pool.acquire() as conn:
+        receipt_json: str | None = None
+        async with self._pool.acquire() as conn, conn.transaction():
+            if isinstance(result, CapabilityReceipt):
+                receipt_json = json.dumps(
+                    result.public_dict(), sort_keys=True, separators=(",", ":"),
+                )
+                result = await self._result_from_receipt(
+                    conn, action=action, receipt=result,
+                )
+            if not isinstance(result, CapabilityResultReference):
+                raise ScanExecutionBackendError("action settlement result type is invalid")
+            try:
+                placement_from_stored_result(action=action, stored=result)
+            except CapabilityResultError as exc:
+                raise ScanExecutionBackendError("action result is detached from its lease") from exc
+            if (
+                result.adapter_name != str(action.placement.get("adapter_name") or "")
+                or result.adapter_version != str(action.placement.get("adapter_version") or "")
+                or dict(result.budget_reserved) != dict(action.requested_budget)
+            ):
+                raise ScanExecutionBackendError("action result conflicts with lease authority")
+            result_json = json.dumps(
+                result.canonical_dict(), sort_keys=True, separators=(",", ":"),
+            )
+            manifest_id = (
+                uuid.UUID(result.observation_manifest_ref.manifest_id)
+                if result.observation_manifest_ref is not None else None
+            )
             row = await conn.fetchrow(
                 """UPDATE scan_capability_actions
                       SET status=$7, reason_code=$8, receipt_id=$9,
                           receipt_hash=$10, observation_manifest_id=$11,
                           result_digest=$12, result_json=$13::jsonb,
+                          receipt_json=COALESCE($14::jsonb, receipt_json),
                           finished_at=now(), updated_at=now(),
                           lease_token_hash=NULL, lease_expires_at=NULL
                     WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
@@ -405,17 +425,105 @@ class PostgresScanExecutionBackend:
                 manifest_id,
                 result.result_digest,
                 result_json,
+                receipt_json,
             )
             if row is None:
                 existing = await self._load_result_with_conn(conn, action)
                 if existing is not None and existing.result_digest == result.result_digest:
                     return existing
                 raise ActionLeaseLost("action settlement lost durable lease authority")
-        stored = CapabilityResultReference.from_dict(_json_object(
-            row["result_json"], name="stored action result",
-        ))
-        placement_from_stored_result(action=action, stored=stored)
-        return stored
+            stored = CapabilityResultReference.from_dict(_json_object(
+                row["result_json"], name="stored action result",
+            ))
+            placement_from_stored_result(action=action, stored=stored)
+            return stored
+
+    async def _result_from_receipt(
+        self,
+        conn: Any,
+        *,
+        action: ScanAction,
+        receipt: CapabilityReceipt,
+    ) -> CapabilityResultReference:
+        if (
+            receipt.scan_id != self._plan.scan_id
+            or receipt.input_digest != action.action_digest
+            or receipt.capability_name != action.capability_name
+            or receipt.adapter_name != str(action.placement.get("adapter_name") or "")
+            or receipt.adapter_version != str(action.placement.get("adapter_version") or "")
+            or dict(receipt.budget_reserved) != dict(action.requested_budget)
+        ):
+            raise ScanExecutionBackendError("capability receipt conflicts with action authority")
+        raw_status = receipt.status.strip().lower()
+        if raw_status in {"success", "succeeded", "completed"}:
+            status = CapabilityResultStatus.SUCCESS
+            reason = None
+        elif receipt.timed_out or raw_status == "timed_out":
+            status = CapabilityResultStatus.TIMED_OUT
+            reason = CapabilityResultReason.TIMED_OUT
+        elif raw_status == "partial" or receipt.partial:
+            status = CapabilityResultStatus.PARTIAL
+            reason = CapabilityResultReason.OUTPUT_TRUNCATED
+        elif raw_status == "skipped":
+            status = CapabilityResultStatus.SKIPPED
+            reason = self._receipt_reason(receipt, CapabilityResultReason.NOT_APPLICABLE)
+        elif raw_status == "blocked":
+            status = CapabilityResultStatus.BLOCKED
+            reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
+        elif raw_status == "cancelled":
+            status = CapabilityResultStatus.CANCELLED
+            reason = CapabilityResultReason.CANCELLED
+        else:
+            status = CapabilityResultStatus.FAILED
+            reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
+        manifest_ref = None
+        if status in {
+            CapabilityResultStatus.SUCCESS,
+            CapabilityResultStatus.PARTIAL,
+            CapabilityResultStatus.TIMED_OUT,
+        }:
+            manifest_ref = await PostgresObservationManifestStore().persist(
+                conn,
+                scan_id=self._plan.scan_id,
+                action_id=action.action_id,
+                capability_name=action.capability_name,
+                output_schema=action.output_schema,
+                observations=tuple(dict(item) for item in receipt.observations),
+            )
+        return CapabilityResultReference(
+            action_id=action.action_id,
+            action_digest=str(action.action_digest),
+            capability_name=action.capability_name,
+            adapter_name=receipt.adapter_name,
+            adapter_version=receipt.adapter_version,
+            output_schema=action.output_schema,
+            status=status,
+            partial=status in {
+                CapabilityResultStatus.PARTIAL,
+                CapabilityResultStatus.TIMED_OUT,
+            },
+            timed_out=status is CapabilityResultStatus.TIMED_OUT,
+            reason_code=reason,
+            receipt_ref=CapabilityReceiptReference(
+                receipt_id=receipt.receipt_id,
+                receipt_hash=receipt.receipt_hash,
+            ),
+            observation_manifest_ref=manifest_ref,
+            budget_reserved=receipt.budget_reserved,
+            budget_consumed=receipt.budget_consumed,
+        )
+
+    @staticmethod
+    def _receipt_reason(
+        receipt: CapabilityReceipt,
+        default: CapabilityResultReason,
+    ) -> CapabilityResultReason:
+        known = {item.value: item for item in CapabilityResultReason}
+        for error in receipt.errors:
+            candidate = str(error or "").strip().lower().split(":", 1)[0]
+            if candidate in known:
+                return known[candidate]
+        return default
 
     async def _load_result_with_conn(
         self, conn: Any, action: ScanAction,
