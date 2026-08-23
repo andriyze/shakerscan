@@ -11,6 +11,7 @@ from api.scan.budget_allocator import (
     allocate_scan_action_plan,
 )
 from api.scan.execution import ScanExecutionPlan
+from api.scan.work_manifests import build_canonical_nuclei_template_manifest
 
 
 SCAN_ID = "30000000-0000-4000-8000-000000000001"
@@ -42,8 +43,20 @@ def _compile(budget: ScanBudget, *, include=(), active=True):
         budget_profile="fast",
         budget=budget,
     )
+    template = (
+        build_canonical_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=_target().digest,
+        )
+        if active and (not include or "nuclei" in include) else None
+    )
     return ScanActionPlanCompiler().compile(
-        scan_id=SCAN_ID, execution_plan=execution, target_binding=_target(),
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        template_manifest_ref=(
+            template.reference().canonical_dict() if template is not None else None
+        ),
     )
 
 

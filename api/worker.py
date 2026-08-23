@@ -177,7 +177,9 @@ from scan.work_manifests import (
     ScanWorkManifestKind,
     ScanWorkManifestReference,
     build_candidate_manifest,
+    build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
+    canonical_nuclei_options_for_manifest,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
     unique_work_manifest_reference_dicts,
@@ -12410,6 +12412,7 @@ async def _execute_scan_template_capability(
     scan_id: str,
     job_id: str,
     canonical_action: Any | None = None,
+    canonical_template_options: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run canonical Nuclei once, outside the compatibility scanner process."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -12456,13 +12459,20 @@ async def _execute_scan_template_capability(
         authorized_addresses[0], authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
+    template_options = dict(canonical_template_options or {})
+    if canonical_action is not None and not template_options:
+        raise ScanCapabilityContractError(
+            "canonical Nuclei action requires immutable template options"
+        )
+    capability_args = dict(principal.capability_args())
+    capability_args.update(template_options)
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
         scan_id=scan_id,
         job_id=job_id,
         capability_name="templates.scan",
-        capability_args=principal.capability_args(),
+        capability_args=capability_args,
         action_id=(canonical_action.action_id if canonical_action is not None
                    else "deterministic_baseline.templates.scan"),
         target_binding=target,
@@ -12472,7 +12482,7 @@ async def _execute_scan_template_capability(
             "tool_name": "nuclei",
             "execution_target": execution_target,
             "registered_target": registered_target,
-            "scanner_options": {},
+            "scanner_options": template_options,
             "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
@@ -13541,11 +13551,25 @@ class _CanonicalLocalScanDispatcher:
             return await self._network_action(action, lease)
         elif action.capability_name == "templates.scan":
             execution_target = await self._manifest_endpoint(action)
+            template_manifest = await self._work_manifest(
+                action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,
+            )
+            if template_manifest is None:
+                raise ScanCapabilityContractError(
+                    "Nuclei action has no immutable template manifest"
+                )
+            try:
+                template_options = canonical_nuclei_options_for_manifest(
+                    template_manifest, action_id=action.action_id,
+                )
+            except ScanWorkManifestError as exc:
+                raise ScanCapabilityContractError(str(exc)) from exc
             summary = await _execute_scan_template_capability(
                 execution_target or self.target_url,
                 self.options,
                 scan_id=self.scan_id,
                 job_id=self.job_id, canonical_action=action,
+                canonical_template_options=template_options,
             )
         elif action.capability_name in {"xss.verify", "sqli.verify"}:
             candidate = await self._candidate(action)
@@ -16541,7 +16565,7 @@ def _compile_parallel_child_work_manifests(
     child_options: Mapping[str, Any],
     selected_shard: int,
     endpoints: Sequence[Any],
-) -> tuple[dict[str, Any], tuple[ScanWorkManifest, ScanWorkManifest]]:
+) -> tuple[dict[str, Any], tuple[ScanWorkManifest, ...]]:
     """Freeze the exact value-free endpoint/candidate work assigned to a shard."""
     manifest_options = dict(child_options)
     manifest_options["custom_endpoints"] = [str(item) for item in endpoints]
@@ -16590,7 +16614,24 @@ def _compile_parallel_child_work_manifests(
     options["endpoint_manifest_id"] = str(endpoint_manifest.manifest_id)
     options["endpoint_manifest_ref"] = endpoint_manifest.reference().canonical_dict()
     options["candidate_manifest_ref"] = candidate_manifest.reference().canonical_dict()
-    return options, (endpoint_manifest, candidate_manifest)
+    manifests: list[ScanWorkManifest] = [endpoint_manifest, candidate_manifest]
+    policy = parent_job.execution_plan.policy
+    include = set(policy.include_families)
+    exclude = set(policy.exclude_families)
+    if (
+        policy.active_testing
+        and "nuclei" not in exclude
+        and (not include or "nuclei" in include)
+    ):
+        template_manifest = build_canonical_nuclei_template_manifest(
+            scan_id=child_scan_id,
+            target_binding_digest=parent_job.target.digest,
+        )
+        options["template_manifest_ref"] = (
+            template_manifest.reference().canonical_dict()
+        )
+        manifests.append(template_manifest)
+    return options, tuple(manifests)
 
 
 def _enqueue_parallel_discovery_continuation(

@@ -88,6 +88,7 @@ from .work_manifests import (
     ScanWorkManifestError,
     ScanWorkManifestKind,
     ScanWorkManifestReference,
+    canonical_nuclei_options_for_manifest,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
     unique_work_manifest_reference_dicts,
@@ -521,6 +522,22 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(self.options, lane="primary")
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
+        if tool == "nuclei":
+            template_manifest = await self._work_manifest(
+                action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,
+            )
+            if template_manifest is None:
+                raise ScanActionAdapterError(
+                    "Nuclei action has no immutable template manifest"
+                )
+            try:
+                template_options = canonical_nuclei_options_for_manifest(
+                    template_manifest, action_id=action.action_id,
+                )
+            except ScanWorkManifestError as exc:
+                raise ScanActionAdapterError(str(exc)) from exc
+            args.update(template_options)
+            scanner_options.update(template_options)
         if tool == "ffuf":
             args["wordlist"] = "common"
             scanner_options["wordlist"] = "common"

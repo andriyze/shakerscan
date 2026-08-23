@@ -203,7 +203,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "active_testing", {"http_requests": 4_000, "tool_wall_seconds": 300},
             {"network_reachability": True, "binary": "nuclei"},
             _http_principal_schema({
-                "severity": {"type": "string"}, "tags": {"type": "string"},
+                "severity": {"type": "string"},
+                "tags": {"type": "string"},
+                "template_pack_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
             }),
             "nuclei-jsonl/v1", ("template_match", "request_response"),
             "nuclei", "nuclei", 300_000, ("-version",), ("/opt/tools/nuclei",),

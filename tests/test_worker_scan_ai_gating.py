@@ -2212,6 +2212,47 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
     ])
 
 
+def test_active_parallel_child_freezes_the_same_nuclei_template_pack():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"active_testing": True, "include_families": ["nuclei"]},
+        approval_receipt_id="approval-1",
+    )
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    parent = CanonicalScanJob.create(
+        job_id="parent-job",
+        scan_id="parent-scan",
+        target=target,
+        execution_plan=contract.execution_plan,
+    )
+
+    options, manifests = worker._compile_parallel_child_work_manifests(
+        child_scan_id="22222222-2222-4222-8222-222222222224",
+        target_url="https://example.test",
+        parent_job=parent,
+        child_options={"custom_budget": {"request_max": 50, "max_urls": 20}},
+        selected_shard=0,
+        endpoints=("GET /v1/items",),
+    )
+
+    template = manifests[-1]
+    assert template.kind.value == "template"
+    assert options["template_manifest_ref"] == (
+        template.reference().canonical_dict()
+    )
+
+
 def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch):
     from runtime.models import TargetBinding
     from scan.contracts import resolve_scan_contract

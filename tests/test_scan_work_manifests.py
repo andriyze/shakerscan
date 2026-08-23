@@ -13,14 +13,18 @@ from api.scan.manifest_store import (
     ScanManifestStoreError,
 )
 from api.scan.work_manifests import (
+    CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
+    CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
     ScanWorkManifest,
     ScanWorkManifestError,
     ScanWorkManifestKind,
     ScanWorkManifestReference,
     build_candidate_manifest,
+    build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
     build_request_manifest,
     build_template_manifest,
+    canonical_nuclei_options_for_manifest,
     execution_url_for_endpoint,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
@@ -185,6 +189,41 @@ def test_request_and_template_manifests_are_complete_bounded_and_deterministic()
     assert request.entries[0]["request_ref_id"] == "request-1"
     assert [item["batch_index"] for item in templates.entries] == [0, 0, 1, 1, 2]
     assert len(templates.entries) == 5
+
+
+def test_canonical_nuclei_pack_freezes_pinned_bundle_filters_and_action_authority():
+    manifest = build_canonical_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+    )
+
+    assert manifest.kind.value == "template"
+    assert manifest.status == "complete"
+    assert len(manifest.entries) == 1
+    assert canonical_nuclei_options_for_manifest(
+        manifest, action_id="active.templates.00042",
+    ) == {
+        "severity": "high,critical",
+        "tags": "exposure,misconfig,auth-bypass,default-login",
+        "template_pack_digest": manifest.entries[0]["template_digest"],
+    }
+    with pytest.raises(ScanWorkManifestError, match="does not authorize"):
+        canonical_nuclei_options_for_manifest(
+            manifest, action_id="verify.xss",
+        )
+
+
+def test_canonical_nuclei_pack_matches_the_image_pinned_template_bundle():
+    dockerfile = (Path(__file__).parents[1] / "scanner" / "Dockerfile").read_text()
+
+    assert (
+        f"ARG NUCLEI_TEMPLATES_COMMIT={CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT}"
+        in dockerfile
+    )
+    assert (
+        f"ARG NUCLEI_TEMPLATES_SHA256={CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256}"
+        in dockerfile
+    )
 
 
 def test_manifests_reject_secret_fields_and_sensitive_concrete_paths():

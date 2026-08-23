@@ -627,6 +627,14 @@ class ScanActionPlanCompiler:
         sqli = active and self._family_enabled(execution_plan, "sqli")
         nuclei = active and self._family_enabled(execution_plan, "nuclei")
         bola = active and self._family_enabled(execution_plan, "bola")
+        if scope != "discovery" and nuclei and (
+            not template_ref
+            or int(template_ref.get("entry_count") or 0) != 1
+            or template_ref.get("status") != "complete"
+        ):
+            raise ScanActionPlanError(
+                "Nuclei actions require one complete immutable template manifest"
+            )
         explicitly_requested = set(policy.include_families)
         needs_candidates = xss or sqli or nuclei
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}

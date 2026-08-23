@@ -26,6 +26,17 @@ WORK_MANIFEST_CONTENT_SCHEMAS = MappingProxyType({
     "request": "request-manifest/v1",
     "template": "template-manifest/v1",
 })
+CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT = (
+    "2935d63aebd1f5f4a3c8e87c6e7f5c47f689b115"
+)
+CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256 = (
+    "20aff7085b5c1771a8f7a28624009359a1cedab924c9ad7836078ca07e28de39"
+)
+CANONICAL_NUCLEI_TEMPLATE_PACK_ID = "nuclei-safe-active-focused-v1"
+CANONICAL_NUCLEI_TEMPLATE_SEVERITIES = ("high", "critical")
+CANONICAL_NUCLEI_TEMPLATE_TAGS = (
+    "exposure", "misconfig", "auth-bypass", "default-login",
+)
 _MAX_ENTRIES = MappingProxyType({
     "endpoint": 100_000,
     "candidate": 20_000,
@@ -743,6 +754,84 @@ def build_template_manifest(
         status="partial" if truncated else "complete",
         reason_code="template_limit_reached" if truncated else None,
     )
+
+
+def canonical_nuclei_template_pack_digest() -> str:
+    """Identify the exact immutable bundle filter used by canonical Scan."""
+    return _digest({
+        "schema_version": "canonical-nuclei-template-pack/v1",
+        "template_bundle_commit": CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
+        "template_bundle_sha256": CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
+        "template_pack_id": CANONICAL_NUCLEI_TEMPLATE_PACK_ID,
+        "severities": list(CANONICAL_NUCLEI_TEMPLATE_SEVERITIES),
+        "tags": list(CANONICAL_NUCLEI_TEMPLATE_TAGS),
+        "protocol_types": ["http"],
+        "risk": "safe_active",
+        "interactsh": False,
+    })
+
+
+def build_canonical_nuclei_template_manifest(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+) -> ScanWorkManifest:
+    """Freeze the one reviewed Nuclei pack selected from the pinned image bundle."""
+    return build_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target_binding_digest,
+        source_action_ids=("active.templates",),
+        templates=({
+            "template_id": CANONICAL_NUCLEI_TEMPLATE_PACK_ID,
+            "template_digest": canonical_nuclei_template_pack_digest(),
+            "risk": "safe_active",
+            "tags": list(CANONICAL_NUCLEI_TEMPLATE_TAGS),
+        },),
+        batch_size=1,
+        maximum=1,
+    )
+
+
+def canonical_nuclei_options_for_manifest(
+    manifest: ScanWorkManifest,
+    *,
+    action_id: str,
+) -> dict[str, str]:
+    """Resolve fixed Nuclei options only from the reviewed immutable pack."""
+    if (
+        manifest.kind is not ScanWorkManifestKind.TEMPLATE
+        or manifest.status != "complete"
+        or len(manifest.entries) != 1
+    ):
+        raise ScanWorkManifestError(
+            "canonical Nuclei execution requires one complete template pack"
+        )
+    normalized_action_id = str(action_id or "").strip()
+    if not any(
+        normalized_action_id == source
+        or normalized_action_id.startswith(f"{source}.")
+        for source in manifest.source_action_ids
+    ):
+        raise ScanWorkManifestError(
+            "template manifest does not authorize this Nuclei action"
+        )
+    entry = manifest.entries[0]
+    if (
+        entry.get("template_id") != CANONICAL_NUCLEI_TEMPLATE_PACK_ID
+        or entry.get("template_digest")
+        != canonical_nuclei_template_pack_digest()
+        or entry.get("batch_index") != 0
+        or entry.get("risk") != "safe_active"
+        or tuple(entry.get("tags") or ()) != CANONICAL_NUCLEI_TEMPLATE_TAGS
+    ):
+        raise ScanWorkManifestError(
+            "template manifest is not the reviewed canonical Nuclei pack"
+        )
+    return {
+        "severity": ",".join(CANONICAL_NUCLEI_TEMPLATE_SEVERITIES),
+        "tags": ",".join(CANONICAL_NUCLEI_TEMPLATE_TAGS),
+        "template_pack_digest": canonical_nuclei_template_pack_digest(),
+    }
 
 
 def execution_url_for_endpoint(

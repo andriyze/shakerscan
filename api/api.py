@@ -478,6 +478,7 @@ try:
         ScanWorkManifest,
         ScanWorkManifestError,
         ScanWorkManifestReference,
+        build_canonical_nuclei_template_manifest,
         build_request_manifest,
         route_id as scan_manifest_route_id,
         work_manifest_references_in,
@@ -550,6 +551,7 @@ except ModuleNotFoundError:
         ScanWorkManifest,
         ScanWorkManifestError,
         ScanWorkManifestReference,
+        build_canonical_nuclei_template_manifest,
         build_request_manifest,
         route_id as scan_manifest_route_id,
         work_manifest_references_in,
@@ -3808,6 +3810,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
             canonical_job = None
             scan_action_plan = None
             request_work_manifests: tuple[ScanWorkManifest, ...] = ()
+            template_work_manifest: ScanWorkManifest | None = None
             if canonical_schedule:
                 scheduled_bindings = [
                     dict(item)
@@ -3875,6 +3878,15 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     scan_options["request_manifest_refs"] = (
                         scheduled_request_manifest_refs
                     )
+                template_work_manifest = _compile_scan_template_work_manifest(
+                    scan_id=scan_id,
+                    scan_contract=scan_contract,
+                    target_binding=target_binding,
+                )
+                if template_work_manifest is not None:
+                    scan_options["template_manifest_ref"] = (
+                        template_work_manifest.reference().canonical_dict()
+                    )
                 canonical_job = CanonicalScanJob.create(
                     job_id=job_id,
                     scan_id=scan_id,
@@ -3902,6 +3914,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         ],
                         request_collection_refs=scheduled_executable_refs,
                         request_manifest_refs=scheduled_request_manifest_refs,
+                        template_manifest_ref=(
+                            template_work_manifest.reference().canonical_dict()
+                            if template_work_manifest is not None else None
+                        ),
                     )
                 except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
                     print(
@@ -3934,6 +3950,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     for manifest in request_work_manifests:
                         await PostgresScanManifestStore().persist(
                             conn, manifest=manifest,
+                        )
+                    if template_work_manifest is not None:
+                        await PostgresScanManifestStore().persist(
+                            conn, manifest=template_work_manifest,
                         )
 
         job_data = (
@@ -28910,6 +28930,7 @@ def _compile_allocated_scan_action_plan(
     credential_refs: Sequence[Mapping[str, Any]] = (),
     request_collection_refs: Sequence[Mapping[str, Any]] = (),
     request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
+    template_manifest_ref: Mapping[str, Any] | None = None,
 ):
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=scan_id,
@@ -28920,10 +28941,33 @@ def _compile_allocated_scan_action_plan(
             request_collection_refs
         ),
         request_manifest_refs=request_manifest_refs,
+        template_manifest_ref=template_manifest_ref,
     )
     return allocate_scan_action_plan(
         raw_plan, scan_contract.budget,
     ).plan
+
+
+def _compile_scan_template_work_manifest(
+    *,
+    scan_id: str,
+    scan_contract: ResolvedScanContract,
+    target_binding: TargetBinding,
+) -> ScanWorkManifest | None:
+    """Freeze the reviewed Nuclei pack exactly when policy enables that family."""
+    policy = scan_contract.execution_plan.policy
+    include = set(policy.include_families)
+    exclude = set(policy.exclude_families)
+    if not (
+        policy.active_testing
+        and "nuclei" not in exclude
+        and (not include or "nuclei" in include)
+    ):
+        return None
+    return build_canonical_nuclei_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target_binding.digest,
+    )
 
 
 def normalize_dast_scan_options(options: ScanOptions) -> str:
@@ -29287,6 +29331,15 @@ async def submit_scan(request: ScanRequest):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if request_work_manifest_refs:
             options_payload["request_manifest_refs"] = request_work_manifest_refs
+        template_work_manifest = _compile_scan_template_work_manifest(
+            scan_id=scan_id,
+            scan_contract=scan_contract,
+            target_binding=target_binding,
+        )
+        if template_work_manifest is not None:
+            options_payload["template_manifest_ref"] = (
+                template_work_manifest.reference().canonical_dict()
+            )
         canonical_job = CanonicalScanJob.create(
             job_id=job_id,
             scan_id=scan_id,
@@ -29303,6 +29356,10 @@ async def submit_scan(request: ScanRequest):
                 credential_refs=credential_refs,
                 request_collection_refs=executable_collection_refs,
                 request_manifest_refs=request_work_manifest_refs,
+                template_manifest_ref=(
+                    template_work_manifest.reference().canonical_dict()
+                    if template_work_manifest is not None else None
+                ),
             )
         except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -29335,6 +29392,10 @@ async def submit_scan(request: ScanRequest):
             for manifest in request_work_manifests:
                 await PostgresScanManifestStore().persist(
                     conn, manifest=manifest,
+                )
+            if template_work_manifest is not None:
+                await PostgresScanManifestStore().persist(
+                    conn, manifest=template_work_manifest,
                 )
             command_result = await _record_command_result(
                 conn,

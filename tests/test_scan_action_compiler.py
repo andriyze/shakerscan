@@ -14,7 +14,10 @@ from api.scan.action_plan import (
     request_collection_action_refs,
 )
 from api.scan.budget_allocator import allocate_scan_action_plan
-from api.scan.work_manifests import ScanWorkManifestReference
+from api.scan.work_manifests import (
+    ScanWorkManifestReference,
+    build_canonical_nuclei_template_manifest,
+)
 from api.scan.execution import ScanExecutionPlan
 
 
@@ -93,6 +96,32 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
     assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 2
     assert plan.actions[-1].action_id == "finalize.report"
     assert set(plan.actions[-1].dependencies) == set(by_id) - {"finalize.report"}
+
+
+def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
+    with pytest.raises(ScanActionPlanError, match="immutable template manifest"):
+        ScanActionPlanCompiler().compile(
+            scan_id=SCAN_ID,
+            execution_plan=_execution(include=("nuclei",)),
+            target_binding=_target(),
+        )
+
+    manifest = build_canonical_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=_target().digest,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("nuclei",)),
+        target_binding=_target(),
+        template_manifest_ref=manifest.reference().canonical_dict(),
+    )
+    action = next(
+        item for item in plan.actions if item.capability_name == "templates.scan"
+    )
+    assert action.capability_args["template_manifest_ref"] == (
+        manifest.reference().canonical_dict()
+    )
 
 
 def test_compiler_binds_opaque_inputs_and_is_independent_of_reference_order():
