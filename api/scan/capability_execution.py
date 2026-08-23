@@ -21,8 +21,6 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools.url_redaction import redact_path
 
-from .external_process import FIXED_PROFILE_CAPABILITIES
-
 
 class ScanCapabilityContractError(ValueError):
     """A capability cannot execute within its immutable Scan authority."""
@@ -657,7 +655,7 @@ def fit_prepared_scan_capability(
     *,
     ledger_limits: Mapping[str, int],
 ) -> PreparedExecution:
-    """Fit a scalable adapter, or reject an incomplete fixed process profile."""
+    """Bind a prepared adapter to the action's immutable reservation ceiling."""
     requested: dict[str, int] = {}
     for raw_name, raw_amount in dict(prepared.estimated_budget).items():
         name = str(raw_name or "").strip()
@@ -670,13 +668,6 @@ def fit_prepared_scan_capability(
         if amount <= 0 or ceiling <= 0:
             raise ScanCapabilityContractError(
                 f"Scan budget leaves no capacity for capability dimension: {name}"
-            )
-        if (
-            prepared.capability_name in FIXED_PROFILE_CAPABILITIES
-            and ceiling < amount
-        ):
-            raise ScanCapabilityContractError(
-                "fixed external capability budget is incomplete: " + name
             )
         requested[name] = min(amount, ceiling)
     if not requested:

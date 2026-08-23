@@ -109,18 +109,28 @@ def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
 
 def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
     budget = ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25)
-    allocation = allocate_scan_action_plan(_compile(budget), budget)
+    compiled = _compile(budget)
+    maximum_digest = next(
+        action.action_digest for action in compiled.actions
+        if action.action_id == "active.templates"
+    )
+    allocation = allocate_scan_action_plan(compiled, budget)
     rows = {action.action_id: action for action in allocation.plan.actions}
 
     assert rows["discover.web_crawl"].admission_status == "planned"
-    assert rows["active.templates"].reason_code == "insufficient_plan_budget"
-    assert rows["verify.xss"].reason_code == "insufficient_plan_budget"
+    assert rows["active.templates"].requested_budget == {
+        "http_requests": 61, "tool_wall_seconds": 30,
+    }
+    assert rows["active.templates"].action_digest != maximum_digest
+    assert rows["verify.xss"].requested_budget == {
+        "http_requests": 11, "tool_wall_seconds": 10,
+    }
     assert rows["verify.sqli"].reason_code == "insufficient_plan_budget"
     assert rows["finalize.report"].admission_status == "planned"
 
 
 def test_allocator_fails_admission_when_focused_required_graph_cannot_fit():
-    budget = ScanBudget(300, 200, 100, 10, 10, 180, 1, 0, 10)
+    budget = ScanBudget(300, 200, 100, 10, 10, 129, 1, 0, 10)
     plan = _compile(budget, include=("xss",))
     with pytest.raises(ScanBudgetAllocationError, match="required Scan action"):
         allocate_scan_action_plan(plan, budget)

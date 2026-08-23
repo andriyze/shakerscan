@@ -25,6 +25,7 @@ from .work_manifests import (
     ScanWorkManifestKind,
     ScanWorkManifestReference,
 )
+from .external_process import minimum_reservation_scaled_profile
 
 
 SCAN_ACTION_PLAN_SCHEMA = "scan-action-plan/v1"
@@ -920,6 +921,10 @@ class ScanActionPlanCompiler:
                     )
                 return
             specification = self._registry.require(capability_name)
+            per_item_budget = (
+                minimum_reservation_scaled_profile(capability_name)
+                or dict(specification.budget_cost)
+            )
             limits = execution_plan.budget.ledger_limits()
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
@@ -939,7 +944,7 @@ class ScanActionPlanCompiler:
                 for name, amount in blueprint_budget(blueprint).items():
                     reserved[name] = reserved.get(name, 0) + amount
             affordable = entry_count
-            for name, amount in specification.budget_cost.items():
+            for name, amount in per_item_budget.items():
                 if amount > 0:
                     available = max(0, limits.get(name, 0) - reserved.get(name, 0))
                     affordable = min(affordable, available // amount)
@@ -966,7 +971,9 @@ class ScanActionPlanCompiler:
                     capability_name,
                     {**dict(capability_args), index_name: index},
                     dependencies=dependencies,
-                    required=required,
+                    # An explicit family requires at least one bounded attempt;
+                    # remaining ranked manifest entries are optional breadth.
+                    required=required and index == 0,
                 )
 
         def has_manifest_work(

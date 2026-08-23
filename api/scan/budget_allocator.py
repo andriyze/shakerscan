@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import ScanBudget
 
 from .action_plan import ScanAction, ScanActionPlan
+from .external_process import fit_reservation_scaled_profile
 
 
 MANDATORY_ACTION_IDS = frozenset({
@@ -65,10 +66,11 @@ def allocate_scan_action_plan(
 ) -> ScanBudgetAllocation:
     """Admit the complete worst-case graph before any action may execute.
 
-    Fixed registry holds are never silently reduced. Required work fails admission
-    when it cannot fit; optional work remains in the immutable plan with a stable
-    skip reason. The residual authority is assigned once to ``scan.execute`` so
-    legacy internal checks cannot expand independently after admission.
+    Registry maximums are retained unless a capability declares reviewed process
+    tiers. A selected smaller tier is frozen into the returned action digest before
+    traffic. Required work fails admission when no tier fits; optional work remains
+    in the immutable plan with a stable skip reason. The residual authority is
+    assigned once to ``scan.execute`` so legacy internal checks cannot expand.
     """
     limits = budget.ledger_limits()
     allocated = {name: 0 for name in limits}
@@ -110,6 +112,20 @@ def allocate_scan_action_plan(
             continue
 
         missing = shortages(action)
+        if missing:
+            scaled = fit_reservation_scaled_profile(
+                action.capability_name,
+                requested=action.requested_budget,
+                available={
+                    name: max(0, limits[name] - allocated[name])
+                    for name in limits
+                },
+            )
+            if scaled is not None:
+                action = replace(
+                    action, requested_budget=scaled, action_digest=None,
+                )
+                missing = shortages(action)
         if missing:
             if action.required or action.action_id in MANDATORY_ACTION_IDS:
                 raise ScanBudgetAllocationError(action.action_id, missing)

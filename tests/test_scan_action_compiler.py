@@ -336,7 +336,7 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     assert "verify.xss" not in discovery_ids
 
 
-def test_manifest_breadth_is_capped_by_fixed_profile_resource_ceiling():
+def test_manifest_breadth_compiles_ranked_reduced_profile_capacity():
     endpoint_ref = ScanWorkManifestReference(
         manifest_id="10000000-0000-4000-8000-000000000092",
         kind="endpoint",
@@ -366,12 +366,23 @@ def test_manifest_breadth_is_capped_by_fixed_profile_resource_ceiling():
         action for action in plan.actions if action.capability_name == "xss.verify"
     ]
 
-    # Required baseline/probe/crawl holds leave room for six 120-second actions.
-    assert len(actions) == 6
+    # The compiler exposes every ranked candidate that could fit at the minimum
+    # reviewed tier; whole-plan allocation then chooses exact larger/smaller tiers.
+    assert len(actions) == 82
     assert [action.capability_args["candidate_index"] for action in actions] == list(
-        range(6)
+        range(82)
     )
     allocation = allocate_scan_action_plan(plan, _budget())
+    allocated_actions = [
+        action for action in allocation.plan.actions
+        if action.capability_name == "xss.verify"
+        and action.admission_status == "planned"
+    ]
+    assert len(allocated_actions) > 6
+    assert any(
+        action.requested_budget != {"http_requests": 400, "tool_wall_seconds": 120}
+        for action in allocated_actions
+    )
     assert all(
         action.admission_status == "planned"
         for action in allocation.plan.actions

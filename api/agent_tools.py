@@ -702,38 +702,100 @@ def build_enforced_scanner_plan(
             "redirects": 0, "recursion": False, "threads": 1,
         }
     elif scanner == "nuclei":
-        hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
-        timeout_seconds, timeout_ms = 300, 300_000
-        mode, method = "conservative", "fixed_conservative_profile"
-        proof_inputs = {
-            "rate_per_second": 10, "duration_seconds": 300,
-            "startup_and_engine_overhead": 1_000,
-            "retries": 0, "redirects": 0,
-            "public_oob": False,
-        }
+        http = int(reservation.get("http_requests") or 0)
+        if http >= 4_000 and wall >= 300:
+            hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
+            timeout_seconds, timeout_ms = 300, 300_000
+            mode, method = "conservative", "fixed_conservative_profile"
+            proof_inputs = {
+                "profile": "full", "rate_per_second": 10,
+                "duration_seconds": 300, "startup_and_engine_overhead": 1_000,
+                "retries": 0, "redirects": 0, "public_oob": False,
+            }
+        else:
+            duration = min(wall, max(0, http - 1))
+            rate = (http - 1) // duration if duration else 0
+            if duration < 1 or rate < 1:
+                raise AgentToolError("nuclei reduced profile requires rate/time capacity")
+            _replace_argv_value(argv, "-rate-limit", rate)
+            _replace_argv_value(argv, "-bulk-size", 1)
+            _replace_argv_value(argv, "-concurrency", 1)
+            timeout_seconds, timeout_ms = duration, duration * 1_000
+            hard = {
+                "http_requests": rate * duration + 1,
+                "tool_wall_seconds": duration,
+            }
+            mode, method = "conservative", "rate_time_upper_bound"
+            proof_inputs = {
+                "profile": "reduced", "rate_per_second": rate,
+                "duration_seconds": duration, "startup_burst": 1,
+                "bulk_size": 1, "concurrency": 1, "retries": 0,
+                "redirects": 0, "public_oob": False,
+            }
     elif scanner == "dalfox":
-        hard = {"http_requests": 400, "tool_wall_seconds": 120}
-        timeout_seconds, timeout_ms = 120, 120_000
-        mode, method = "conservative", "fixed_conservative_profile"
-        proof_inputs = {
-            "targets": 1, "workers": 3, "delay_ms": 1_000,
-            "headless": False, "parameter_mining": False, "blind_oob": False,
-        }
+        http = int(reservation.get("http_requests") or 0)
+        if http >= 400 and wall >= 120:
+            hard = {"http_requests": 400, "tool_wall_seconds": 120}
+            timeout_seconds, timeout_ms = 120, 120_000
+            mode, method = "conservative", "fixed_conservative_profile"
+            proof_inputs = {
+                "profile": "full", "targets": 1, "workers": 3,
+                "delay_ms": 1_000, "headless": False,
+                "parameter_mining": False, "blind_oob": False,
+            }
+        else:
+            duration = min(wall, max(0, http - 1))
+            if duration < 1:
+                raise AgentToolError("dalfox reduced profile requires rate/time capacity")
+            _replace_argv_value(argv, "--worker", 1)
+            _replace_argv_value(argv, "--delay", 1_000)
+            timeout_seconds, timeout_ms = duration, duration * 1_000
+            hard = {
+                "http_requests": duration + 1,
+                "tool_wall_seconds": duration,
+            }
+            mode, method = "conservative", "rate_time_upper_bound"
+            proof_inputs = {
+                "profile": "reduced", "targets": 1, "workers": 1,
+                "delay_ms": 1_000, "startup_burst": 1,
+                "headless": False, "parameter_mining": False,
+                "blind_oob": False,
+            }
     elif scanner == "sqlmap":
         sqlmap_output_dir = str(runtime.get("sqlmap_output_dir") or "")
         argv = bind_scanner_runtime_paths(
             "sqlmap", argv, scratch_dir=sqlmap_output_dir,
         )
-        hard = {"http_requests": 900, "tool_wall_seconds": 300}
-        timeout_seconds, timeout_ms = 300, 300_000
-        mode, method = "conservative", "fixed_conservative_profile"
-        proof_inputs = {
-            "targets": 1, "candidate_requests": 1, "crawl_depth": 0,
-            "retries": 0, "threads": 1, "techniques": "BEUT",
-            "shell": False, "file_read": False, "dump": False,
-        }
         _replace_argv_value(argv, "--threads", 1)
         _replace_argv_value(argv, "--retries", 0)
+        http = int(reservation.get("http_requests") or 0)
+        if http >= 900 and wall >= 300:
+            hard = {"http_requests": 900, "tool_wall_seconds": 300}
+            timeout_seconds, timeout_ms = 300, 300_000
+            mode, method = "conservative", "fixed_conservative_profile"
+            techniques, profile = "BEUT", "full"
+        else:
+            duration = min(wall, max(0, http - 1))
+            if duration < 1:
+                raise AgentToolError("sqlmap reduced profile requires rate/time capacity")
+            techniques = "BEU" if duration >= 60 else "BE"
+            _replace_argv_value(argv, "--technique", techniques)
+            _replace_argv_value(argv, "--level", 1)
+            _replace_argv_value(argv, "--risk", 1)
+            timeout_seconds, timeout_ms = duration, duration * 1_000
+            hard = {
+                "http_requests": duration + 1,
+                "tool_wall_seconds": duration,
+            }
+            mode, method = "conservative", "rate_time_upper_bound"
+            profile = "reduced"
+        proof_inputs = {
+            "profile": profile, "targets": 1, "candidate_requests": 1,
+            "crawl_depth": 0, "retries": 0, "threads": 1,
+            "delay_ms": 1_000, "startup_burst": 1,
+            "techniques": techniques, "shell": False, "file_read": False,
+            "dump": False,
+        }
     elif scanner == "nmap":
         if reservation.get("tcp_ports_attempted", 0) < 1:
             raise AgentToolError("nmap requires one reserved TCP port")

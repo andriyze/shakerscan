@@ -219,10 +219,57 @@ def validate_enforcement_receipt(
     return value
 
 
-# Tools whose fixed command cannot honestly be scaled below the registry profile.
-# Dynamic builders for the other tools prove their reduced command ceiling.
-FIXED_PROFILE_CAPABILITIES = frozenset({
-    "templates.scan",
-    "xss.verify",
-    "sqli.verify",
-})
+# Reviewed reservation tiers for external verifiers whose registry budget is the
+# maximum useful profile. Each tier is selected before traffic, becomes part of
+# the immutable action digest, and has a matching command-derived proof builder.
+RESERVATION_SCALED_PROFILES: Mapping[
+    str, tuple[Mapping[str, int], ...]
+] = {
+    "templates.scan": (
+        {"http_requests": 4_000, "tool_wall_seconds": 300},
+        {"http_requests": 1_001, "tool_wall_seconds": 100},
+        {"http_requests": 301, "tool_wall_seconds": 60},
+        {"http_requests": 61, "tool_wall_seconds": 30},
+        {"http_requests": 21, "tool_wall_seconds": 20},
+        {"http_requests": 11, "tool_wall_seconds": 10},
+    ),
+    "xss.verify": (
+        {"http_requests": 400, "tool_wall_seconds": 120},
+        {"http_requests": 121, "tool_wall_seconds": 120},
+        {"http_requests": 61, "tool_wall_seconds": 60},
+        {"http_requests": 31, "tool_wall_seconds": 30},
+        {"http_requests": 16, "tool_wall_seconds": 15},
+        {"http_requests": 11, "tool_wall_seconds": 10},
+    ),
+    "sqli.verify": (
+        {"http_requests": 900, "tool_wall_seconds": 300},
+        {"http_requests": 121, "tool_wall_seconds": 120},
+        {"http_requests": 61, "tool_wall_seconds": 60},
+        {"http_requests": 31, "tool_wall_seconds": 30},
+        {"http_requests": 21, "tool_wall_seconds": 20},
+    ),
+}
+
+
+def fit_reservation_scaled_profile(
+    capability_name: str,
+    *,
+    requested: Mapping[str, int],
+    available: Mapping[str, int],
+) -> dict[str, int] | None:
+    """Return the largest reviewed tier bounded by request and residual hold."""
+    for profile in RESERVATION_SCALED_PROFILES.get(str(capability_name), ()):
+        if all(
+            int(amount) <= int(requested.get(name, 0))
+            and int(amount) <= int(available.get(name, 0))
+            for name, amount in profile.items()
+        ):
+            return dict(profile)
+    return None
+
+
+def minimum_reservation_scaled_profile(
+    capability_name: str,
+) -> dict[str, int] | None:
+    profiles = RESERVATION_SCALED_PROFILES.get(str(capability_name), ())
+    return dict(profiles[-1]) if profiles else None

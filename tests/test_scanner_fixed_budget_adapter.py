@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from capabilities.scanner import ScannerExecutionAdapter
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import PreparedExecution
-from scan.capability_execution import (
-    ScanCapabilityContractError,
-    fit_prepared_scan_capability,
-)
+from scan.capability_execution import fit_prepared_scan_capability
 
 
 def _prepared() -> PreparedExecution:
@@ -74,15 +69,16 @@ def _adapter(*, requested, include_receipt=True):
     return instance, calls
 
 
-def test_fixed_external_scan_tool_is_rejected_during_native_budget_fit():
-    with pytest.raises(
-        ScanCapabilityContractError,
-        match="fixed external capability budget is incomplete: http_requests",
-    ):
-        fit_prepared_scan_capability(
-            _prepared(),
-            ledger_limits={"http_requests": 400, "tool_wall_seconds": 30},
-        )
+def test_external_scan_tool_is_bound_to_smaller_immutable_action_hold():
+    prepared = fit_prepared_scan_capability(
+        _prepared(),
+        ledger_limits={"http_requests": 301, "tool_wall_seconds": 60},
+    )
+
+    assert dict(prepared.estimated_budget) == {
+        "http_requests": 301,
+        "tool_wall_seconds": 60,
+    }
 
 
 def test_fixed_external_scan_tool_runs_with_complete_profile_and_proof():
