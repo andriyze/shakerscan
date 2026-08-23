@@ -97,6 +97,20 @@ def test_auth_session_registry_contract_is_target_bound_and_worker_private():
     assert specification.planner_visible is False
 
 
+def test_active_collection_replay_has_an_approval_bound_hidden_contract():
+    specification = CAPABILITY_REGISTRY.require("collections.replay_active")
+
+    assert specification.risk_tier == "active"
+    assert specification.required_approval == "state_changing_http"
+    assert specification.adapter == "collections.replay"
+    assert specification.budget_cost == {
+        "http_requests": 2_000,
+        "state_changing_requests": 2_000,
+        "tool_wall_seconds": 300,
+    }
+    assert specification.planner_visible is False
+
+
 def test_authz_verification_is_read_only_proof_gated_and_planner_hidden():
     specification = CAPABILITY_REGISTRY.require("authz.verify")
 

@@ -13999,8 +13999,13 @@ async def _execute_scan_request_collections(
                         scan_uuid, json.dumps(current_used),
                     )
 
+        replay_capability_name = (
+            "collections.replay_active"
+            if replay_policy == "confirmed_active"
+            else "collections.replay_safe"
+        )
         replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
-            "collections.replay_safe"
+            replay_capability_name
         )
         replay_adapter = ReplayExecutionAdapter(
             specification=replay_spec,

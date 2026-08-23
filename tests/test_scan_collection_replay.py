@@ -300,6 +300,8 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert "persist_terminal" in handler
     assert "ReplayExecutionAdapter(" in handler
     assert "CapabilityExecutor().execute(" in handler
+    assert '"collections.replay_active"' in handler
+    assert 'replay_policy == "confirmed_active"' in handler
     assert "adapter_managed_cancellation=True" in handler
     assert "cancelled=lambda: _scan_cancel_requested(scan_id)" in handler
     assert 'summary["cancelled"] = True' in handler

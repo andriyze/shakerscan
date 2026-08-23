@@ -483,7 +483,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.replay_safe", "Replay up to 25 safe-method requests from a bound collection.",
-            "http", "passive", frozenset({"web", "api"}), "collections.replay_safe", "1", None,
+            "http", "passive", frozenset({"web", "api"}), "collections.replay", "1", None,
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},
@@ -492,6 +492,31 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                          "anonymous", "primary", "secondary", "service",
                      ]}}),
             "request-collection-replay/v2", ("http_observation", "tool_receipt"),
+        ),
+        CapabilitySpec(
+            "collections.replay_active",
+            "Replay an exact approved state-changing request selection from a bound collection.",
+            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "state_changing_http",
+            {
+                "http_requests": 2_000,
+                "state_changing_requests": 2_000,
+                "tool_wall_seconds": 300,
+            },
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "durable_reservation": True,
+            },
+            _schema({
+                "collection_id": {"type": "string"},
+                "selection_id": {"type": "string"},
+                "as_principal": {
+                    "type": "string", "enum": ["primary", "secondary", "service"],
+                },
+            }, required=("collection_id", "selection_id")),
+            "request-collection-replay/v2", ("http_observation", "tool_receipt"),
+            planner_visible=False,
         ),
         CapabilitySpec(
             "device.http.probe", "Send one target-pinned read-only request to a confirmed device web origin.",
