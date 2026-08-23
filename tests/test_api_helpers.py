@@ -279,6 +279,81 @@ def test_scan_detail_exposes_verified_content_free_stage_prefix(monkeypatch):
     assert "observations" not in json.dumps(checkpoint)
 
 
+def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch):
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    plan = {
+        "scan_id": str(scan_id),
+        "plan_digest": "a" * 64,
+        "execution_plan_digest": "b" * 64,
+        "target_binding_digest": "c" * 64,
+        "actions": [{
+            "action_id": "baseline.http",
+            "action_digest": "d" * 64,
+            "stage": "deterministic_baseline",
+            "ordinal": 0,
+            "capability_name": "http.request",
+            "capability_args": {"authorization": "never-public"},
+            "requested_budget": {"http_requests": 1},
+            "placement": {"eligible_backends": ["local", "broker"]},
+            "dependencies": [],
+            "required": True,
+            "supporting": False,
+            "admission_status": "planned",
+        }],
+    }
+    action = {
+        "action_id": "baseline.http",
+        "ordinal": 0,
+        "status": "success",
+        "backend_name": "local",
+        "requested_budget": {"http_requests": 1},
+        "result_json": {
+            "budget_reserved": {"http_requests": 1},
+            "budget_consumed": {"http_requests": 1},
+        },
+    }
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            assert "FROM scans" in query
+            return {
+                "id": scan_id,
+                "status": "completed",
+                "result": {},
+                "scan_action_plan_json": plan,
+                "scan_action_plan_digest": "a" * 64,
+                "scan_action_plan_schema": "scan-action-plan/v1",
+            }
+
+        async def fetch(self, query, *args):
+            assert "FROM scan_capability_actions" in query
+            return [action]
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+    actions = asyncio.run(api_module.get_scan_actions(str(scan_id)))
+    capabilities = asyncio.run(api_module.get_scan_capabilities(str(scan_id)))
+    coverage = asyncio.run(api_module.get_scan_coverage(str(scan_id)))
+
+    assert actions["actions"][0]["status"] == "success"
+    assert actions["transport_parity"]["consistent"] is True
+    assert capabilities["capability_coverage"]["completed"] == 1
+    assert coverage["grade_reliability"]["reliable"] is True
+    assert "never-public" not in json.dumps({
+        "actions": actions, "capabilities": capabilities, "coverage": coverage,
+    })
+
+
 def test_stale_scan_stage_checkpoint_preserves_failure_truth(monkeypatch, tmp_path):
     scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
     checkpoint = {
@@ -514,7 +589,7 @@ def test_native_hunt_start_persists_exact_contract_and_capability_allowlist(monk
         return ["https://example.test"]
 
     async def collections(*_args, **_kwargs):
-        return [], []
+        return [], [], []
 
     async def addresses(*_args, **_kwargs):
         return ["192.0.2.10"]
@@ -1340,9 +1415,10 @@ def test_broker_canonical_queue_retries_never_serialize_materialized_options():
     assert result_source.index("_broker_execution_projection(materialized)") < result_source.index(
         'job_payload["_broker_result_id"]'
     )
-    assert lease_source.index("await reserve_broker_scan_execution(") < lease_source.index(
+    assert lease_source.index("PostgresScanActionStore().load_plan(") < lease_source.index(
         "return JSONResponse("
     )
+    assert '"scan_action_plan": scan_action_plan_payload' in lease_source
     assert "await heartbeat_broker_scan_execution(" in heartbeat_source
     assert result_source.index("await settle_broker_scan_execution(") < result_source.index(
         "INSERT INTO broker_job_results"

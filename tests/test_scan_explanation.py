@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import json
+
+from api.scan.explanation import (
+    action_list_response,
+    build_scan_execution_explanation,
+    capability_list_response,
+    coverage_response,
+)
+
+
+SCAN_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _plan():
+    common = {
+        "placement": {
+            "eligible_backends": ["local", "broker"],
+            "private_environment_ref": "/private/never-public.json",
+        },
+        "supporting": False,
+        "dependencies": [],
+        "requested_budget": {"http_requests": 4, "tool_wall_seconds": 10},
+    }
+    return {
+        "schema_version": "scan-action-plan/v1",
+        "scan_id": SCAN_ID,
+        "plan_digest": "a" * 64,
+        "execution_plan_digest": "b" * 64,
+        "target_binding_digest": "c" * 64,
+        "actions": [
+            {
+                **common,
+                "action_id": "baseline.http",
+                "action_digest": "d" * 64,
+                "stage": "deterministic_baseline",
+                "ordinal": 0,
+                "capability_name": "http.request",
+                "required": True,
+                "admission_status": "planned",
+                "capability_args": {
+                    "authorization": "must-never-be-public",
+                    "path": "/private",
+                },
+            },
+            {
+                **common,
+                "action_id": "verify.xss.0",
+                "action_digest": "e" * 64,
+                "stage": "active_verification",
+                "ordinal": 1,
+                "capability_name": "xss.verify",
+                "required": False,
+                "admission_status": "skipped",
+                "reason_code": "insufficient_plan_budget",
+                "capability_args": {"candidate_index": 0},
+            },
+            {
+                **common,
+                "action_id": "finalize.report",
+                "action_digest": "f" * 64,
+                "stage": "finalize_evidence",
+                "ordinal": 2,
+                "capability_name": "scan.execute",
+                "required": True,
+                "admission_status": "planned",
+                "capability_args": {"report_only": True},
+            },
+        ],
+    }
+
+
+def _rows():
+    return [
+        {
+            "action_id": "baseline.http",
+            "ordinal": 0,
+            "status": "partial",
+            "reason_code": "output_truncated",
+            "backend_name": "broker",
+            "worker_id": "broker:worker-1",
+            "attempt": 1,
+            "requested_budget": {"http_requests": 4, "tool_wall_seconds": 10},
+            "result_json": {
+                "budget_reserved": {"http_requests": 4, "tool_wall_seconds": 10},
+                "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 4},
+                "observation_manifest_ref": {
+                    "manifest_id": "22222222-2222-4222-8222-222222222222",
+                    "count": 1,
+                    "size_bytes": 120,
+                    "sha256": "1" * 64,
+                    "manifest_digest": "2" * 64,
+                },
+            },
+            "receipt_json": {
+                "receipt_id": "33333333-3333-4333-8333-333333333333",
+                "receipt_hash": "3" * 64,
+                "parser_version": "http-observation/v1",
+                "redacted_execution": {
+                    "authorization": "still-never-public",
+                    "provenance": {
+                        "source_revision": "revision-1",
+                        "binary_path": "/opt/tools/httpx",
+                    },
+                },
+            },
+        },
+        {
+            "action_id": "verify.xss.0",
+            "ordinal": 1,
+            "status": "skipped",
+            "reason_code": "insufficient_plan_budget",
+        },
+        {
+            "action_id": "finalize.report",
+            "ordinal": 2,
+            "status": "planned",
+        },
+    ]
+
+
+def test_execution_explanation_is_content_safe_and_explicit():
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="running",
+        plan_payload=_plan(),
+        action_rows=_rows(),
+    )
+
+    assert explanation["schema_version"] == "scan-execution-explanation/v1"
+    assert [stage["status"] for stage in explanation["stage_timeline"]] == [
+        "partial", "complete_with_gaps", "pending",
+    ]
+    action = explanation["actions"][0]
+    assert action["placement"] == {
+        "eligible_backends": ["local", "broker"],
+        "backend": "broker",
+        "worker_id": "broker:worker-1",
+        "attempt": 1,
+    }
+    assert action["budget"]["consumed"]["http_requests"] == 2
+    assert action["observation"]["count"] == 1
+    assert action["receipt"]["provenance"]["source_revision"] == "revision-1"
+    serialized = json.dumps(explanation)
+    assert "must-never-be-public" not in serialized
+    assert "still-never-public" not in serialized
+    assert "/private/never-public.json" not in serialized
+    assert '"capability_args"' not in serialized
+
+
+def test_execution_explanation_marks_required_partial_grade_unreliable():
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="completed",
+        plan_payload=_plan(),
+        action_rows=_rows(),
+    )
+
+    coverage = explanation["coverage"]
+    assert coverage["status"] == "partial"
+    assert coverage["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["output_truncated"],
+        "reason_labels": ["The bounded output limit was reached"],
+        "warning": "The grade is provisional because required coverage did not complete cleanly.",
+    }
+    assert coverage["capability_coverage"]["required"] == 1
+    assert coverage["capability_coverage"]["partial"] == 1
+    assert coverage["optional_gaps"][0]["action_id"] == "verify.xss.0"
+    assert explanation["transport_parity"]["broker_eligible"] is True
+
+
+def test_public_endpoint_projections_have_stable_schemas():
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="completed",
+        plan_payload=_plan(),
+        action_rows=_rows(),
+    )
+
+    assert action_list_response(explanation)["schema_version"] == "scan-action-list/v1"
+    assert capability_list_response(explanation)["schema_version"] == "scan-capability-coverage/v1"
+    assert coverage_response(explanation)["schema_version"] == "scan-coverage-explanation/v1"
+    assert capability_list_response(explanation)["capabilities"][0]["capability_name"] == "http.request"

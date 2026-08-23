@@ -132,6 +132,35 @@ def test_finalizer_explains_required_action_degradation():
 
     assert report["coverage"]["status"] == "failed"
     assert report["coverage"]["reasons"] == ["adapter_failed"]
+    assert report["coverage"]["capability_coverage"] == {
+        "total": 2,
+        "required": 2,
+        "completed": 1,
+        "partial": 0,
+        "blocked": 0,
+        "failed": 1,
+        "skipped": 0,
+        "cancelled": 0,
+        "actions": [
+            {
+                "action_id": "baseline.http",
+                "capability_name": "http.request",
+                "required": True,
+                "status": "failed",
+                "reason_code": "adapter_failed",
+            },
+            {
+                "action_id": "baseline.security_txt",
+                "capability_name": "http.request",
+                "required": True,
+                "status": "success",
+                "reason_code": None,
+            },
+        ],
+    }
+    assert report["result"]["grade"] == "A*"
+    assert report["result"]["grade_reliable"] is False
+    assert report["scan_metadata"]["grade_reliability_reasons"] == ["adapter_failed"]
     row = report["canonical_action_execution"]["actions"][0]
     assert row["status"] == "failed"
     assert row["reason_code"] == "adapter_failed"
@@ -177,3 +206,33 @@ def test_finalizer_promotes_only_typed_pinned_tls_posture_issues():
     }
     assert all(item["verified"] is True for item in report["findings"])
     assert report["verification_summary"]["verified"] == 3
+
+
+def test_finalizer_degrades_when_candidates_receive_zero_active_attempts():
+    xss = _action("verify.xss.0", 0, capability_name="xss.verify")
+    final = _action("finalize.report", 1, dependencies=(xss.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(xss, final),
+    )
+    results = _results(plan)
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations={xss.action_id: ()},
+        work_manifest_references=({
+            "kind": "candidate",
+            "entry_count": 1,
+            "status": "complete",
+            "manifest_id": str(uuid.uuid4()),
+            "manifest_digest": "f" * 64,
+        },),
+    )
+
+    assert report["coverage"]["status"] == "partial"
+    assert report["coverage"]["active_zero_attempt_actions"] == ["verify.xss.0"]
+    assert report["coverage"]["grade_reliability"]["reliable"] is False
+    assert report["result"]["grade"] == "A*"

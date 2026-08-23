@@ -1139,6 +1139,138 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
   )
 }
 
+function formatExecutionBudget(value: any): string {
+  if (!value || typeof value !== 'object') return 'None'
+  const labels: Record<string, string> = {
+    http_requests: 'HTTP requests',
+    state_changing_requests: 'state changes',
+    browser_actions: 'browser actions',
+    tcp_ports_attempted: 'TCP attempts',
+    hosts_attempted: 'hosts',
+    tool_wall_seconds: 'seconds',
+  }
+  const entries = Object.entries(value)
+    .map(([name, amount]) => [name, Number(amount)] as const)
+    .filter(([, amount]) => Number.isFinite(amount) && amount > 0)
+  if (!entries.length) return 'None'
+  return entries
+    .map(([name, amount]) => `${amount.toLocaleString()} ${labels[name] || name.replace(/_/g, ' ')}`)
+    .join(' · ')
+}
+
+function executionStatusClass(status: string): string {
+  if (status === 'success' || status === 'complete') return 'bg-green-500/10 text-green-300'
+  if (status === 'failed' || status === 'blocked') return 'bg-red-500/10 text-red-300'
+  if (status === 'partial' || status === 'timed_out' || status === 'complete_with_gaps') return 'bg-amber-500/10 text-amber-300'
+  if (status === 'cancelled') return 'bg-gray-700 text-gray-300'
+  if (status === 'running' || status === 'leased') return 'bg-blue-500/10 text-blue-300'
+  return 'bg-gray-800 text-gray-400'
+}
+
+function ExecutionPlanCard({ scan }: { scan: any }) {
+  const explanation = scan?.execution_explanation
+  const actions = Array.isArray(explanation?.actions) ? explanation.actions : []
+  const stages = Array.isArray(explanation?.stage_timeline) ? explanation.stage_timeline : []
+  if (!actions.length) return null
+
+  const coverage = explanation?.coverage || {}
+  const matrix = coverage?.capability_coverage || {}
+  const reliability = coverage?.grade_reliability || {}
+  const parity = explanation?.transport_parity || {}
+  const completed = Number(matrix.completed || 0)
+  const total = Number(matrix.total || Math.max(0, actions.length - 1))
+  const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) > 0
+  const apiRecordUrl = `${API_URL}/scans/${scan.id}/actions`
+
+  return (
+    <Card className="mb-6 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-200">What this scan ran</h2>
+          <p className="mt-1 text-xs text-gray-500">
+            {completed} of {total} security capabilities completed
+            {hasGap ? ' · coverage gaps are explained below' : ''}.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`rounded px-2 py-1 text-xs ${parity.consistent === false ? 'bg-red-500/10 text-red-300' : 'bg-green-500/10 text-green-300'}`}>
+            {parity.consistent === false ? 'Execution record mismatch' : 'Same local / fleet contract'}
+          </span>
+          <a
+            href={apiRecordUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+          >
+            Open execution record
+          </a>
+        </div>
+      </div>
+
+      {reliability.reliable === false && (
+        <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/10 p-3">
+          <div className="text-sm font-medium text-amber-200">Grade is provisional</div>
+          <p className="mt-1 text-xs text-amber-100/80">
+            {String(reliability.warning || 'Required coverage did not complete cleanly.')}
+          </p>
+          {Array.isArray(reliability.reason_labels) && reliability.reason_labels.length > 0 && (
+            <p className="mt-1 text-xs text-amber-200/70">{reliability.reason_labels.join(' · ')}</p>
+          )}
+        </div>
+      )}
+
+      <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+        {stages.map((stage: any) => (
+          <div key={String(stage.stage)} className="min-w-36 rounded border border-gray-800 bg-gray-950/50 p-2">
+            <div className="text-xs font-medium text-gray-300">{String(stage.label || stage.stage)}</div>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <span className={`rounded px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(stage.status || 'pending'))}`}>
+                {String(stage.status || 'pending').replace(/_/g, ' ')}
+              </span>
+              <span className="text-[11px] text-gray-600">{Number(stage.action_count || 0)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <details className="mt-4 rounded border border-gray-800 bg-gray-950/40">
+        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white">
+          Capability details ({actions.length})
+        </summary>
+        <div className="divide-y divide-gray-800 border-t border-gray-800">
+          {actions.map((action: any) => {
+            const placement = action?.placement || {}
+            const reserved = action?.budget?.reserved || {}
+            const consumed = action?.budget?.consumed || {}
+            const observationCount = Number(action?.observation?.count || 0)
+            return (
+              <div id={String(action.action_id)} key={String(action.action_id)} className="p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-gray-200">{String(action.label || action.action_id)}</span>
+                  <span className={`rounded px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(action.status || 'planned'))}`}>
+                    {String(action.status || 'planned').replace(/_/g, ' ')}
+                  </span>
+                  {action.required && <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-400">required</span>}
+                </div>
+                {action.reason && <p className="mt-1 text-xs text-amber-300/80">{String(action.reason)}</p>}
+                <div className="mt-2 grid gap-1 text-[11px] text-gray-500 md:grid-cols-2">
+                  <div>
+                    Ran on: {placement.backend ? String(placement.backend) : 'not assigned'}
+                    {placement.worker_id ? ` · ${String(placement.worker_id)}` : ''}
+                  </div>
+                  <div>Evidence observations: {observationCount.toLocaleString()}</div>
+                  <div className="break-words">Reserved: {formatExecutionBudget(reserved)}</div>
+                  <div className="break-words">Used: {formatExecutionBudget(consumed)}</div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </details>
+    </Card>
+  )
+}
+
 function ScanDetailContent() {
   const params = useParams()
   const searchParams = useSearchParams()
@@ -1324,6 +1456,7 @@ function ScanDetailContent() {
         </div>
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
+        <ExecutionPlanCard scan={scan} />
 
         {renderScanActivityLogs(true)}
       </div>
@@ -1347,6 +1480,7 @@ function ScanDetailContent() {
           {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
+          <ExecutionPlanCard scan={scan} />
           <AiGateCampaignReviewCard scan={scan} />
           <DeploymentDecisionCard
             decision={deploymentDecision}
@@ -1370,6 +1504,7 @@ function ScanDetailContent() {
         {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
+        <ExecutionPlanCard scan={scan} />
       </div>
     )
   }
@@ -1415,6 +1550,7 @@ function ScanDetailContent() {
       {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
+      <ExecutionPlanCard scan={scan} />
       <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}

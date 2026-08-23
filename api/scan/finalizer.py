@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from typing import Any, Mapping, Sequence
 
 from .action_plan import ScanActionPlan
@@ -18,6 +19,14 @@ _SEVERITY_WEIGHT = {
     "low": 2,
     "info": 0,
 }
+_ACTIVE_VERIFIER_CAPABILITIES = frozenset({
+    "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
+    "browser.proof",
+})
+_TRAFFIC_BUDGETS = frozenset({
+    "http_requests", "state_changing_requests", "browser_actions",
+    "tcp_ports_attempted", "hosts_attempted",
+})
 
 
 class ScanFinalizationError(ValueError):
@@ -346,19 +355,118 @@ def finalize_scan_report(
         result.reason_code.value
         for _action, result in required_rows if result.reason_code is not None
     })
+    work_manifests = [dict(item) for item in work_manifest_references]
+    candidate_count = sum(
+        max(0, int(item.get("entry_count") or 0))
+        for item in work_manifests
+        if item.get("kind") == "candidate" and item.get("status") != "cancelled"
+    )
+    zero_attempt_actions = [
+        action.action_id
+        for action in expected_actions
+        if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES
+        and candidate_count > 0
+        and action_results[action.action_id].status in {
+            CapabilityResultStatus.SUCCESS, CapabilityResultStatus.PARTIAL,
+        }
+        and not any(
+            int(amount) > 0
+            for name, amount in action_results[action.action_id].budget_consumed.items()
+            if name in _TRAFFIC_BUDGETS
+        )
+    ]
+    placement_gaps = [
+        action.action_id
+        for action in expected_actions
+        if (
+            action_results[action.action_id].reason_code is not None
+            and action_results[action.action_id].reason_code.value
+            == "placement_unavailable"
+        )
+    ]
+    required_incomplete = [
+        (action, result)
+        for action, result in required_rows
+        if result.status is not CapabilityResultStatus.SUCCESS
+    ]
+    reliability_reasons = sorted({
+        (
+            result.reason_code.value
+            if result.reason_code is not None
+            else "required_capability_incomplete"
+        )
+        for _action, result in required_incomplete
+    } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+      | ({"placement_unavailable"} if placement_gaps else set()))
+    grade_reliable = not reliability_reasons
+    rendered_grade = grade if grade_reliable else f"{grade}*"
+    coverage_reasons = sorted(
+        set(reasons)
+        | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+        | ({"placement_unavailable"} if placement_gaps else set())
+    )
+    action_status_counts = Counter(row["status"] for row in action_rows)
+    optional_gaps = [
+        {
+            "action_id": action.action_id,
+            "capability_name": action.capability_name,
+            "status": action_results[action.action_id].status.value,
+            "reason_code": (
+                action_results[action.action_id].reason_code.value
+                if action_results[action.action_id].reason_code is not None
+                else None
+            ),
+        }
+        for action in expected_actions
+        if not action.required
+        and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+    ]
+    capability_coverage = {
+        "total": len(expected_actions),
+        "required": len(required_rows),
+        "completed": action_status_counts.get("success", 0),
+        "partial": (
+            action_status_counts.get("partial", 0)
+            + action_status_counts.get("timed_out", 0)
+        ),
+        "blocked": action_status_counts.get("blocked", 0),
+        "failed": action_status_counts.get("failed", 0),
+        "skipped": action_status_counts.get("skipped", 0),
+        "cancelled": action_status_counts.get("cancelled", 0),
+        "actions": [{
+            "action_id": row["action_id"],
+            "capability_name": row["capability_name"],
+            "required": row["required"],
+            "status": row["status"],
+            "reason_code": row["reason_code"],
+        } for row in action_rows],
+    }
+    if zero_attempt_actions and coverage_status == "complete":
+        coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
     return {
         "schema_version": SCAN_REPORT_SCHEMA,
         "target": str(target_url),
         "findings": findings,
-        "result": {"score": score, "grade": grade},
+        "result": {
+            "score": score,
+            "grade": rendered_grade,
+            "grade_reliable": grade_reliable,
+        },
         "coverage": {
             "status": coverage_status,
-            "reasons": reasons,
+            "reasons": coverage_reasons,
             "planned_action_count": len(plan.actions),
             "terminal_action_count": len(action_rows),
             "finalization_action_id": finalization_action.action_id,
+            "capability_coverage": capability_coverage,
+            "grade_reliability": {
+                "reliable": grade_reliable,
+                "reasons": reliability_reasons,
+            },
+            "optional_gaps": optional_gaps,
+            "active_zero_attempt_actions": zero_attempt_actions,
         },
         "verification_summary": {
             "verified": verified,
@@ -380,7 +488,7 @@ def finalize_scan_report(
                 "action_digest": finalization_action.action_digest,
                 "status": "success",
             },
-            "work_manifests": [dict(item) for item in work_manifest_references],
+            "work_manifests": work_manifests,
         },
         "scan_metadata": {
             "status": coverage_status,
@@ -388,5 +496,7 @@ def finalize_scan_report(
             "cancelled": coverage_status == "cancelled",
             "finding_promotion_authority": "deterministic_proof_contracts_only",
             "finalizer": "pure_receipt_projection/v1",
+            "grade_reliable": grade_reliable,
+            "grade_reliability_reasons": reliability_reasons,
         },
     }

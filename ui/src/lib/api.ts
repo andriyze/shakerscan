@@ -1226,6 +1226,7 @@ export interface Scan {
   error_message?: string
   result?: Record<string, unknown> | null
   options?: Record<string, unknown> | null
+  execution_explanation?: Record<string, unknown> | null
   scan_role?: 'standalone' | 'parent' | 'shard' | string | null
   parent_scan_id?: string | null
   shard_index?: number | null

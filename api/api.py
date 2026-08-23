@@ -491,6 +491,12 @@ try:
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
     )
+    from scan.explanation import (
+        action_list_response as scan_action_list_response,
+        build_scan_execution_explanation,
+        capability_list_response as scan_capability_list_response,
+        coverage_response as scan_coverage_response,
+    )
     from scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -563,6 +569,12 @@ except ModuleNotFoundError:
     from api.scan.stage_store import (
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
+    )
+    from api.scan.explanation import (
+        action_list_response as scan_action_list_response,
+        build_scan_execution_explanation,
+        capability_list_response as scan_capability_list_response,
+        coverage_response as scan_coverage_response,
     )
     from api.scan.broker_execution import (
         BrokerScanExecutionError,
@@ -29665,6 +29677,77 @@ async def list_scans(
     }
 
 
+_PUBLIC_SCAN_ACTIONS_SQL = """
+    SELECT action_id, stage, ordinal, capability_name, adapter_name,
+           adapter_version, output_schema, action_digest, requested_budget,
+           placement_json, dependencies_json, required, supporting, status,
+           reason_code, reservation_id, receipt_id, receipt_hash,
+           observation_manifest_id, result_digest, result_json, receipt_json,
+           backend_name, worker_id, attempt, started_at, finished_at
+      FROM scan_capability_actions
+     WHERE scan_id=$1
+     ORDER BY ordinal
+"""
+
+
+def _public_scan_execution_explanation(
+    scan: Mapping[str, Any],
+    action_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    report = _decode_json_value(scan.get("result"))
+    return build_scan_execution_explanation(
+        scan_id=str(scan.get("id") or ""),
+        scan_status=str(scan.get("status") or "unknown"),
+        plan_payload=_json_object(scan.get("scan_action_plan_json")),
+        action_rows=tuple(dict(row) for row in action_rows),
+        report=report if isinstance(report, Mapping) else {},
+    )
+
+
+async def _load_public_scan_execution_explanation(
+    conn: Any,
+    scan_id: str,
+) -> dict[str, Any]:
+    try:
+        parsed_scan_id = uuid.UUID(str(scan_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=404, detail="Scan not found") from exc
+    scan = await conn.fetchrow(
+        """SELECT id, status, result, scan_action_plan_json,
+                  scan_action_plan_digest, scan_action_plan_schema
+             FROM scans WHERE id=$1""",
+        parsed_scan_id,
+    )
+    if scan is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    action_rows = await conn.fetch(_PUBLIC_SCAN_ACTIONS_SQL, parsed_scan_id)
+    return _public_scan_execution_explanation(scan, action_rows)
+
+
+@app.get("/scans/{scan_id}/actions")
+async def get_scan_actions(scan_id: str):
+    """Explain the immutable stage/action timeline without private inputs."""
+    async with db_pool.acquire() as conn:
+        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
+    return scan_action_list_response(explanation)
+
+
+@app.get("/scans/{scan_id}/capabilities")
+async def get_scan_capabilities(scan_id: str):
+    """Summarize planned and executed capability coverage for one Scan."""
+    async with db_pool.acquire() as conn:
+        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
+    return scan_capability_list_response(explanation)
+
+
+@app.get("/scans/{scan_id}/coverage")
+async def get_scan_coverage(scan_id: str):
+    """Explain coverage gaps, grade reliability, and transport parity."""
+    async with db_pool.acquire() as conn:
+        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
+    return scan_coverage_response(explanation)
+
+
 @app.get("/scans/{scan_id}")
 async def get_scan(scan_id: str, verified_only: bool = False):
     """Get scan details."""
@@ -29699,6 +29782,10 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                 END
         """, uuid.UUID(scan_id))
 
+        action_rows = await conn.fetch(
+            _PUBLIC_SCAN_ACTIONS_SQL, uuid.UUID(scan_id),
+        )
+
         canonical_stage_checkpoint = None
         if scan.get("job_id"):
             try:
@@ -29716,6 +29803,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                 )
 
     result = dict(scan)
+    execution_explanation = _public_scan_execution_explanation(result, action_rows)
     result['execution_context'] = _json_object(result.get('execution_context'))
     if result.get('result') is not None:
         result['result'] = _normalize_scan_result_for_api(_decode_json_value(result['result']))
@@ -29736,6 +29824,10 @@ async def get_scan(scan_id: str, verified_only: bool = False):
         )
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
+    result['execution_explanation'] = execution_explanation
+    # Raw action authority contains internal capability arguments. Public callers
+    # receive the allowlisted explanation above plus content-addressed digests.
+    result.pop('scan_action_plan_json', None)
 
     # Surface a top-level `parallel` boolean (mirrors options.parallel and the
     # submit response, which already returns parallel:true for a parent). Without
