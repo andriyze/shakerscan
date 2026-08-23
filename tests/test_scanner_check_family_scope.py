@@ -253,6 +253,51 @@ def _http_redirect_placement_summary():
     }
 
 
+def _security_txt_placement_summary():
+    return {
+        "schema_version": "canonical-scan-security-txt-execution/v1",
+        "capability_name": "http.request",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "http_observation",
+            "request": {
+                "method": "GET",
+                "origin": "https://app.example.test",
+                "path": "/.well-known/security.txt",
+                "pinned_address": "192.0.2.10",
+                "follow_redirects": True,
+            },
+            "response": {
+                "status": 200,
+                "http_version": "HTTP/2",
+                "final_url": (
+                    "https://app.example.test/.well-known/security.txt"
+                ),
+                "selected_headers": {},
+                "set_cookie_metadata": [],
+                "security_txt": {
+                    "present": True,
+                    "url": (
+                        "https://app.example.test/.well-known/security.txt"
+                    ),
+                    "sample": "Contact: mailto:security@example.test",
+                },
+            },
+            "redirect_chain": [],
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
+        "receipt": {"receipt_hash": "3" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
 def _xss_verification_placement_summary():
     return {
         "schema_version": "canonical-scan-xss-verification-execution/v1",
@@ -606,6 +651,69 @@ def test_canonical_http_redirect_rejects_unbound_http_origin(monkeypatch):
         scanner_mod._load_canonical_scan_placements(execution)
 
 
+def test_canonical_security_txt_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {
+                "http.request.security_txt": _security_txt_placement_summary(),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    result = scanner_mod._canonical_security_txt_result(
+        placements["http.request.security_txt"],
+        base_url="https://app.example.test",
+    )
+
+    assert result == {
+        "present": True,
+        "url": "https://app.example.test/.well-known/security.txt",
+        "sample": "Contact: mailto:security@example.test",
+        "canonical_capability": "http.request",
+        "capability_receipt": {"receipt_hash": "3" * 64},
+    }
+
+
+def test_canonical_security_txt_rejects_non_fixed_path(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    tampered = _security_txt_placement_summary()
+    tampered["observations"][0]["request"]["path"] = "/private"
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {"http.request.security_txt": tampered},
+        }),
+    )
+
+    with pytest.raises(SystemExit, match="observation contract"):
+        scanner_mod._load_canonical_scan_placements(execution)
+
+
 def test_canonical_report_assembly_never_repeats_base_header_request():
     source = inspect.getsource(scanner_mod.build_report)
     start = source.index("if canonical_scan_execution is not None:", source.index(
@@ -654,10 +762,13 @@ def test_canonical_report_assembly_reuses_protocol_evidence():
     canonical_block = posture_block[canonical_start:legacy_start]
 
     assert "_canonical_http_protocol_posture(" in canonical_block
+    assert "_canonical_security_txt_result(" in canonical_block
     assert "supports_http2(" not in canonical_block
     assert "supports_http3(" not in canonical_block
+    assert "fetch_security_txt(" not in canonical_block
     assert "supports_http2(base_url)" in posture_block[legacy_start:]
     assert "supports_http3(base_url)" in posture_block[legacy_start:]
+    assert "fetch_security_txt(base_url)" in posture_block[legacy_start:]
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):

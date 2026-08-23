@@ -5085,7 +5085,15 @@ async def build_report(target: str,
         h3_task = asyncio.create_task(
             _focused_async_value(canonical_http3)
         )
-        sec_txt_task = asyncio.create_task(fetch_security_txt(base_url))
+        sec_txt_task = asyncio.create_task(_focused_async_value(
+            _canonical_security_txt_result(
+                (
+                    canonical_scan_placements.get("http.request.security_txt")
+                    if isinstance(canonical_scan_placements, dict) else None
+                ),
+                base_url=base_url,
+            )
+        ))
     else:
         h2_task     = asyncio.create_task(supports_http2(base_url))
         h3_task     = asyncio.create_task(supports_http3(base_url))
@@ -14331,6 +14339,8 @@ def _validate_canonical_http_placement(
     placement_name: str,
     schema_version: str,
     required_request_scheme: str | None = None,
+    required_method: str = "HEAD",
+    required_path: str | None = None,
 ) -> dict[str, Any]:
     """Validate public HTTP evidence against the frozen Scan authority."""
     if not isinstance(summary, dict) or set(summary) != {
@@ -14411,7 +14421,7 @@ def _validate_canonical_http_placement(
                 "method", "origin", "path", "query_keys", "as_principal",
                 "body_kind", "pinned_address", "follow_redirects",
             }
-            or request.get("method") != "HEAD"
+            or request.get("method") != required_method
             or request_origin not in allowed_origins
             or request_origin_key is None
             or request_origin_key[1] != canonical_host
@@ -14421,6 +14431,10 @@ def _validate_canonical_http_placement(
             )
             or request.get("pinned_address") not in allowed_addresses
             or not str(request.get("path") or "").startswith("/")
+            or (
+                required_path is not None
+                and request.get("path") != required_path
+            )
             or not isinstance(response, dict)
             or not isinstance(selected_headers, dict)
             or set(selected_headers) - _CANONICAL_HTTP_HEADER_NAMES
@@ -14499,8 +14513,8 @@ def _load_canonical_scan_placements(
         raise SystemExit("canonical Scan placement capabilities are invalid")
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
-        "http.request", "http.request.scheme_redirect", "tls.inspect",
-        "xss.verify", "sqli.verify",
+        "http.request", "http.request.scheme_redirect",
+        "http.request.security_txt", "tls.inspect", "xss.verify", "sqli.verify",
     }
     if unknown:
         raise SystemExit(
@@ -14652,6 +14666,45 @@ def _load_canonical_scan_placements(
                 required_request_scheme="http",
             )
         )
+    security_txt = capabilities.get("http.request.security_txt")
+    if security_txt is not None:
+        validated_security_txt = _validate_canonical_http_placement(
+            security_txt,
+            execution,
+            placement_name="http.request.security_txt",
+            schema_version="canonical-scan-security-txt-execution/v1",
+            required_method="GET",
+            required_path="/.well-known/security.txt",
+        )
+        for item in validated_security_txt.get("observations") or []:
+            response = item.get("response") or {}
+            policy = response.get("security_txt")
+            if (
+                not isinstance(policy, dict)
+                or set(policy) != {"present", "url", "sample"}
+                or not isinstance(policy.get("present"), bool)
+                or _canonical_origin_key(policy.get("url")) not in {
+                    key for key in map(
+                        _canonical_origin_key,
+                        (execution.get("target_binding") or {}).get(
+                            "allowed_origins"
+                        ) or [],
+                    )
+                    if key is not None
+                }
+                or not str(policy.get("url") or "").endswith(
+                    "/.well-known/security.txt"
+                )
+                or not isinstance(policy.get("sample"), (str, type(None)))
+                or len(policy.get("sample") or "") > 500
+                or (policy.get("present") and not policy.get("sample"))
+                or (not policy.get("present") and policy.get("sample") is not None)
+            ):
+                raise SystemExit(
+                    "canonical http.request.security_txt observation "
+                    "contract is invalid"
+                )
+        result["http.request.security_txt"] = validated_security_txt
     tls_inspection = capabilities.get("tls.inspect")
     if tls_inspection is not None:
         if not isinstance(tls_inspection, dict) or set(tls_inspection) != {
@@ -14966,6 +15019,42 @@ def _canonical_http_protocol_posture(
         version.startswith("HTTP/3") for version in versions
     ) or any(protocol.startswith("h3") for protocol in negotiated_protocols)
     return bool(http2), True if http3_observed else None
+
+
+def _canonical_security_txt_result(
+    summary: Any,
+    *,
+    base_url: str,
+) -> dict[str, Any]:
+    """Adapt the fixed RFC 9116 receipt into the legacy report shape."""
+    default = {
+        "present": False,
+        "url": base_url.rstrip("/") + "/.well-known/security.txt",
+        "sample": None,
+    }
+    if not isinstance(summary, Mapping):
+        return default
+    for item in summary.get("observations") or []:
+        if not isinstance(item, Mapping):
+            continue
+        response = item.get("response") or {}
+        policy = (
+            response.get("security_txt")
+            if isinstance(response, Mapping) else None
+        )
+        if isinstance(policy, Mapping):
+            return {
+                "present": bool(policy.get("present")),
+                "url": str(policy.get("url") or default["url"]),
+                "sample": (
+                    str(policy.get("sample"))
+                    if policy.get("sample") is not None else None
+                ),
+                "canonical_capability": "http.request",
+                "capability_receipt": dict(summary.get("receipt") or {}),
+            }
+    default["canonical_status"] = str(summary.get("status") or "missing")
+    return default
 
 
 def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:

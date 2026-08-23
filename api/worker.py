@@ -10563,6 +10563,25 @@ def _scan_http_redirect_summary_from_stored(
     return summary
 
 
+def _skipped_scan_security_txt_summary(reason: str) -> dict[str, Any]:
+    summary = _skipped_scan_http_baseline_summary(reason)
+    summary["schema_version"] = "canonical-scan-security-txt-execution/v1"
+    return summary
+
+
+def _scan_security_txt_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    summary = _scan_http_baseline_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+    summary["schema_version"] = "canonical-scan-security-txt-execution/v1"
+    return summary
+
+
 async def _run_scan_http_baseline_operation(
     *,
     origin: str,
@@ -10603,6 +10622,69 @@ async def _run_scan_http_baseline_operation(
     }
     response["body_sample"] = ""
     response["selected_json"] = {}
+    if response.get("final_url"):
+        response["final_url"] = redact_url(str(response["final_url"]))
+    if response.get("location"):
+        response["location"] = redact_url(str(response["location"]))
+    result["response"] = response
+    chain = []
+    for item in result.get("redirect_chain") or []:
+        if not isinstance(item, Mapping):
+            continue
+        row = dict(item)
+        if row.get("location"):
+            row["location"] = redact_url(str(row["location"]))
+        chain.append(row)
+    if "redirect_chain" in result:
+        result["redirect_chain"] = chain
+    return result
+
+
+async def _run_scan_security_txt_operation(
+    *,
+    origin: str,
+    capability_args: Mapping[str, Any],
+    target: TargetBinding,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Fetch RFC 9116 policy and retain only bounded public evidence."""
+    result = dict(await execute_bound_http_request(
+        origin,
+        capability_args,
+        target=target,
+        allow_write=False,
+        timeout_seconds=timeout_seconds,
+    ))
+    request = (
+        dict(result.get("request") or {})
+        if isinstance(result.get("request"), Mapping) else {}
+    )
+    result["request"] = request
+    response = (
+        dict(result.get("response") or {})
+        if isinstance(result.get("response"), Mapping) else {}
+    )
+    body = str(response.get("body_sample") or "").strip()
+    directive_markers = (
+        "contact:", "expires:", "acknowledgments:", "encryption:",
+        "preferred-languages:", "policy:", "hiring:", "canonical:",
+    )
+    present = (
+        response.get("status") == 200
+        and bool(body)
+        and any(marker in body.lower() for marker in directive_markers)
+    )
+    policy_url = urllib.parse.urljoin(
+        origin.rstrip("/") + "/", "/.well-known/security.txt",
+    )
+    response["security_txt"] = {
+        "present": bool(present),
+        "url": redact_url(policy_url),
+        "sample": redact_text(body)[:500] if present else None,
+    }
+    response["body_sample"] = ""
+    response["selected_json"] = {}
+    response["selected_headers"] = {}
     if response.get("final_url"):
         response["final_url"] = redact_url(str(response["final_url"]))
     if response.get("location"):
@@ -10739,6 +10821,59 @@ async def _execute_scan_http_redirect_capability(
         ),
     )
     return _scan_http_redirect_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+
+
+async def _execute_scan_security_txt_capability(
+    target_url: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run the fixed RFC 9116 request outside the report monolith."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_security_txt_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    if execution.discovery_manifest_only:
+        return _skipped_scan_security_txt_summary("discovery_manifest_only")
+    allocation = scan_http_baseline_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_security_txt_summary("insufficient_stage_budget")
+    target = execution.target_binding
+    execution_target = scan_external_execution_target(target_url, target=target)
+    parsed = urllib.parse.urlsplit(execution_target)
+    origin = urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, "", "", "",
+    ))
+    capability_args = {
+        "method": "GET",
+        "path": "/.well-known/security.txt",
+        "follow_redirects": True,
+    }
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="http.request",
+        capability_args=capability_args,
+        action_id="deterministic_baseline.security_txt",
+        target_binding=target,
+        reservation_limits=allocation,
+        inline_operation=lambda: _run_scan_security_txt_operation(
+            origin=origin,
+            capability_args=capability_args,
+            target=target,
+            timeout_seconds=int(allocation["tool_wall_seconds"]),
+        ),
+    )
+    return _scan_security_txt_summary_from_stored(
         stored,
         idempotent_redelivery=idempotent_redelivery,
     )
@@ -11857,6 +11992,9 @@ async def _execute_reserved_deterministic_scan(
         http_redirect = await _execute_scan_http_redirect_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
+        security_txt = await _execute_scan_security_txt_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
         tls = await _execute_scan_tls_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
@@ -11867,6 +12005,7 @@ async def _execute_reserved_deterministic_scan(
             {
                 "http.request": http_baseline,
                 "http.request.scheme_redirect": http_redirect,
+                "http.request.security_txt": security_txt,
                 "tls.inspect": tls,
                 "templates.scan": template,
             },
@@ -11959,6 +12098,9 @@ async def _execute_reserved_deterministic_scan(
             "http.request.scheme_redirect": baseline.get(
                 "http.request.scheme_redirect"
             ) or _skipped_scan_http_redirect_summary("stage_disabled"),
+            "http.request.security_txt": baseline.get(
+                "http.request.security_txt"
+            ) or _skipped_scan_security_txt_summary("stage_disabled"),
             "tls.inspect": baseline.get("tls.inspect")
             or _skipped_scan_tls_summary("stage_disabled"),
             "templates.scan": baseline.get("templates.scan")

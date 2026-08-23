@@ -331,6 +331,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     async def skip_http_baseline(*_args, **_kwargs):
         return worker._skipped_scan_http_baseline_summary("test_isolation")
 
+    async def skip_security_txt(*_args, **_kwargs):
+        return worker._skipped_scan_security_txt_summary("test_isolation")
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
@@ -344,6 +347,11 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         worker,
         "_execute_scan_http_baseline_capability",
         skip_http_baseline,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_security_txt_capability",
+        skip_security_txt,
     )
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
@@ -1765,6 +1773,122 @@ def test_http_redirect_probe_uses_bound_http_origin(monkeypatch):
         "canonical-scan-http-redirect-execution/v1"
     )
     assert summary["status"] == "success"
+
+
+def test_security_txt_stage_uses_fixed_registered_request(monkeypatch):
+    _plan, target, options = _authority(enabled=True, network=False)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "http.request",
+            observations=[{
+                "kind": "http_observation",
+                "request": {
+                    "method": "GET",
+                    "origin": "https://app.example.test",
+                    "path": "/.well-known/security.txt",
+                    "pinned_address": "192.0.2.10",
+                },
+                "response": {
+                    "status": 200,
+                    "selected_headers": {},
+                    "security_txt": {
+                        "present": True,
+                        "url": (
+                            "https://app.example.test/"
+                            ".well-known/security.txt"
+                        ),
+                        "sample": "Contact: mailto:security@example.test",
+                    },
+                },
+                "redirect_chain": [],
+            }],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_security_txt_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "http.request"
+    assert call["capability_args"] == {
+        "method": "GET",
+        "path": "/.well-known/security.txt",
+        "follow_redirects": True,
+    }
+    assert call["action_id"] == "deterministic_baseline.security_txt"
+    assert call["target_binding"] == target
+    assert call["reservation_limits"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 15,
+    }
+    assert callable(call["inline_operation"])
+    assert summary["schema_version"] == (
+        "canonical-scan-security-txt-execution/v1"
+    )
+    assert summary["status"] == "success"
+
+
+def test_security_txt_receipt_keeps_only_bounded_public_policy(monkeypatch):
+    _plan, target, _options = _authority(enabled=True, network=False)
+
+    async def raw_operation(*_args, **_kwargs):
+        return {
+            "ok": True,
+            "request": {
+                "method": "GET",
+                "origin": "https://app.example.test",
+                "path": "/.well-known/security.txt",
+                "pinned_address": "192.0.2.10",
+            },
+            "response": {
+                "status": 200,
+                "body_sample": (
+                    "Contact: mailto:security@example.test\n"
+                    "Expires: 2030-01-01T00:00:00Z\n"
+                ),
+                "selected_json": {"private": "value"},
+                "selected_headers": {"authorization": "private"},
+                "final_url": (
+                    "https://app.example.test/.well-known/security.txt"
+                ),
+            },
+            "redirect_chain": [],
+            "hops_followed": 0,
+        }
+
+    monkeypatch.setattr(worker, "execute_bound_http_request", raw_operation)
+    result = asyncio.run(worker._run_scan_security_txt_operation(
+        origin="https://app.example.test",
+        capability_args={
+            "method": "GET",
+            "path": "/.well-known/security.txt",
+            "follow_redirects": True,
+        },
+        target=target,
+        timeout_seconds=15,
+    ))
+
+    policy = result["response"]["security_txt"]
+    assert policy["present"] is True
+    assert policy["url"] == (
+        "https://app.example.test/.well-known/security.txt"
+    )
+    assert policy["sample"].startswith("Contact:")
+    assert len(policy["sample"]) <= 500
+    assert result["response"]["body_sample"] == ""
+    assert result["response"]["selected_json"] == {}
+    assert result["response"]["selected_headers"] == {}
 
 
 def test_http_baseline_receipt_redacts_paths_queries_and_bodies(monkeypatch):
