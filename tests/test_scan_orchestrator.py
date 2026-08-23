@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import uuid
 
+import pytest
+
 from api.runtime.observation_manifests import ObservationManifest
 from api.scan.action_plan import ScanAction, ScanActionPlan
 from api.scan.capability_result import (
@@ -16,6 +18,7 @@ from api.scan.execution_backend import (
     ActionAlreadyTerminal,
     ActionLease,
     ActionLeaseLost,
+    PostgresScanExecutionBackend,
 )
 from api.scan.orchestrator import ScanOrchestrator
 
@@ -296,3 +299,164 @@ def test_duplicate_lease_reuses_the_already_terminal_result():
     assert report.status_matrix[second.action_id] == "success"
     assert second.action_id not in executor.executed
     assert executor.executed == ["finalize.report"]
+
+
+class _PoolLease:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _PoolLease(self.conn)
+
+
+class FakePostgresConn:
+    def __init__(self, plan):
+        self.scan_status = "running"
+        self.rows = {
+            action.action_id: {
+                "status": "planned",
+                "action_digest": action.action_digest,
+                "attempt": 0,
+                "result_json": None,
+            }
+            for action in plan.actions
+        }
+
+    async def fetchrow(self, query, *args):
+        action_id = str(args[1])
+        row = self.rows[action_id]
+        if "SET status='leased'" in query:
+            if row["status"] != "planned" or row["action_digest"] != args[2]:
+                return None
+            row.update({
+                "status": "leased",
+                "backend_name": args[5],
+                "worker_id": args[6],
+                "lease_id": args[7],
+                "lease_token_hash": args[8],
+                "lease_expires_at": args[9],
+                "attempt": row["attempt"] + 1,
+            })
+            return {"attempt": row["attempt"]}
+        if "SET status='running'" in query:
+            if (
+                row["status"] not in {"leased", "running"}
+                or row["lease_id"] != args[3]
+                or row["lease_token_hash"] != args[4]
+                or row["worker_id"] != args[5]
+            ):
+                return None
+            row["status"] = "running"
+            row["lease_expires_at"] = args[6]
+            return {"lease_expires_at": row["lease_expires_at"]}
+        if "SET status=$7" in query:
+            if (
+                row["status"] not in {"leased", "running"}
+                or row["lease_id"] != args[3]
+                or row["lease_token_hash"] != args[4]
+                or row["worker_id"] != args[5]
+            ):
+                return None
+            row.update({
+                "status": args[6],
+                "reason_code": args[7],
+                "receipt_id": args[8],
+                "receipt_hash": args[9],
+                "observation_manifest_id": args[10],
+                "result_digest": args[11],
+                "result_json": args[12],
+                "lease_token_hash": None,
+                "lease_expires_at": None,
+            })
+            return {"result_json": row["result_json"]}
+        if "SELECT status, result_json, action_digest" in query:
+            return dict(row)
+        if "SELECT status, action_digest, result_json" in query:
+            return dict(row)
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *args):
+        assert "SELECT status FROM scans" in query
+        return self.scan_status
+
+
+def test_postgres_backend_hashes_lease_token_and_settles_generic_result_atomically():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    action = plan.actions[0]
+
+    lease = asyncio.run(backend.acquire_action(action))
+    stored_row = conn.rows[action.action_id]
+    assert stored_row["lease_token_hash"] != lease.lease_token
+    assert stored_row["lease_token_hash"] == hashlib.sha256(
+        lease.lease_token.encode()
+    ).hexdigest()
+    asyncio.run(backend.heartbeat(lease))
+    result = _result(action, status=CapabilityResultStatus.SUCCESS)
+    settled = asyncio.run(backend.settle(lease, result))
+
+    assert settled == result
+    assert asyncio.run(backend.load_result(action.action_id)) == result
+    assert stored_row["status"] == "success"
+    assert stored_row["lease_token_hash"] is None
+    assert stored_row["result_digest"] == result.result_digest
+
+
+def test_postgres_backend_fails_closed_after_lease_authority_is_lost():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    action = plan.actions[0]
+    lease = asyncio.run(backend.acquire_action(action))
+    conn.rows[action.action_id]["lease_token_hash"] = "f" * 64
+
+    with pytest.raises(ActionLeaseLost, match="heartbeat"):
+        asyncio.run(backend.heartbeat(lease))
+    with pytest.raises(ActionLeaseLost, match="settlement"):
+        asyncio.run(backend.settle(
+            lease, _result(action, status=CapabilityResultStatus.SUCCESS),
+        ))
+
+
+def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="broker-worker-1",
+        backend_name="broker",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    conn.scan_status = "cancelling"
+    assert asyncio.run(backend.cancellation_requested()) is True
+
+    lease = asyncio.run(backend.acquire_action(plan.actions[0]))
+    payload = lease.remote_payload()
+    flattened = str(payload).lower()
+    assert payload["action"]["action_id"] == plan.actions[0].action_id
+    assert payload["action"]["requested_budget"] == dict(plan.actions[0].requested_budget)
+    assert payload["action"]["dependencies"] == list(plan.actions[0].dependencies)
+    assert not any(name in flattened for name in ("database_url", "postgres", "redis_url"))

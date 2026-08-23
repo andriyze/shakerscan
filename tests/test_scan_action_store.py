@@ -10,6 +10,7 @@ import pytest
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.action_store import (
+    ACTION_LEASE_MIGRATION_NAME,
     MIGRATION_NAME,
     PostgresScanActionStore,
     SCAN_ACTION_SCHEMA_SQL,
@@ -141,11 +142,15 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     asyncio.run(PostgresScanActionStore().ensure_schema(conn))
     assert conn.executed == [(SCAN_ACTION_SCHEMA_SQL, ())]
     assert MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_LEASE_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
 
     init_sql = Path("db/init.sql").read_text(encoding="utf-8")
     repair_sql = Path(
         "db/repairs/2026-08-23_v2_scan_capability_actions.sql"
+    ).read_text(encoding="utf-8")
+    lease_repair_sql = Path(
+        "db/repairs/2026-08-23_v2_scan_action_leases.sql"
     ).read_text(encoding="utf-8")
     for source in (init_sql, repair_sql):
         assert "scan_action_plan_json" in source
@@ -153,6 +158,10 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "UNIQUE (scan_id, action_id)" in source
         assert "input_binding_digest" in source
         assert "observation_manifest_id" in source
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, lease_repair_sql):
+        assert "lease_token_hash" in source
+        assert "lease_expires_at" in source
+        assert "result_json" in source
 
 
 def test_action_store_persists_precomputed_optional_skip_reasons():

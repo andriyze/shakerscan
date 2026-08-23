@@ -15,6 +15,7 @@ from .action_plan import ScanActionPlan, ScanActionPlanError
 
 
 MIGRATION_NAME = "v2_scan_capability_actions_v1"
+ACTION_LEASE_MIGRATION_NAME = "v2_scan_action_leases_v1"
 SCAN_ACTION_SCHEMA_SQL = r"""
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_json JSONB;
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_digest TEXT;
@@ -50,6 +51,12 @@ CREATE TABLE IF NOT EXISTS scan_capability_actions (
     receipt_hash CHAR(64),
     observation_manifest_id UUID,
     result_digest CHAR(64),
+    result_json JSONB,
+    backend_name TEXT,
+    worker_id TEXT,
+    lease_id UUID,
+    lease_token_hash CHAR(64),
+    lease_expires_at TIMESTAMPTZ,
     attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
@@ -64,12 +71,24 @@ CREATE TABLE IF NOT EXISTS scan_capability_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_scan_status
     ON scan_capability_actions(scan_id, status, ordinal);
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS result_json JSONB;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS backend_name TEXT;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS worker_id TEXT;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_id UUID;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_token_hash CHAR(64);
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_lease_expiry
+    ON scan_capability_actions(lease_expires_at)
+    WHERE status IN ('leased','running');
 CREATE TABLE IF NOT EXISTS app_schema_migrations (
     name TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_capability_actions_v1')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_scan_action_leases_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 

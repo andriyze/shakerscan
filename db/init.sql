@@ -214,6 +214,12 @@ CREATE TABLE scan_capability_actions (
     receipt_hash CHAR(64),
     observation_manifest_id UUID,
     result_digest CHAR(64),
+    result_json JSONB,
+    backend_name TEXT,
+    worker_id TEXT,
+    lease_id UUID,
+    lease_token_hash CHAR(64),
+    lease_expires_at TIMESTAMPTZ,
     attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
@@ -228,6 +234,9 @@ CREATE TABLE scan_capability_actions (
 );
 CREATE INDEX idx_scan_capability_actions_scan_status
     ON scan_capability_actions(scan_id, status, ordinal);
+CREATE INDEX idx_scan_capability_actions_lease_expiry
+    ON scan_capability_actions(lease_expires_at)
+    WHERE status IN ('leased','running');
 
 -- ============================================================
 -- AI TARGETS - Chat/RAG/agent/MCP surfaces for AI Gate scans

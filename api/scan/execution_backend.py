@@ -8,13 +8,20 @@ allowed to vary only the placement and short-lived lease metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import re
+import secrets
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 import uuid
 
 from .action_plan import SCAN_ACTION_PLAN_SCHEMA, ScanAction, ScanActionPlan
-from .capability_result import CapabilityResultReference
+from .capability_result import (
+    CapabilityResultError,
+    CapabilityResultReference,
+    placement_from_stored_result,
+)
 
 
 ACTION_LEASE_SCHEMA = "scan-action-lease/v1"
@@ -201,3 +208,257 @@ def validate_lease_freshness(
         raise ScanExecutionBackendError("lease expiry must be timezone-aware")
     if expires_at <= current:
         raise ActionLeaseLost("action lease expired")
+
+
+def _json_object(value: Any, *, name: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ScanExecutionBackendError(f"{name} is invalid JSON") from exc
+    if not isinstance(value, Mapping):
+        raise ScanExecutionBackendError(f"{name} must be an object")
+    return dict(value)
+
+
+class PostgresScanExecutionBackend:
+    """Transactional action leases for the local control-plane scheduler.
+
+    Only the SHA-256 hash of the lease token is persisted.  A raw token exists
+    solely in the short-lived :class:`ActionLease` delivered to its selected
+    worker.
+    """
+
+    backend_name = "local"
+
+    def __init__(
+        self,
+        *,
+        pool: Any,
+        plan: ScanActionPlan,
+        worker_id: str,
+        backend_name: str = "local",
+        lease_seconds: int = 120,
+        token_factory: Callable[[], str] | None = None,
+    ) -> None:
+        if not isinstance(plan, ScanActionPlan):
+            raise ScanExecutionBackendError("Postgres backend requires a canonical action plan")
+        normalized_backend = str(backend_name or "").strip().lower()
+        if normalized_backend not in {"local", "broker"}:
+            raise ScanExecutionBackendError("Postgres backend placement is invalid")
+        normalized_worker = str(worker_id or "").strip()
+        if not normalized_worker or len(normalized_worker) > 200:
+            raise ScanExecutionBackendError("Postgres backend worker_id is invalid")
+        self._pool = pool
+        self._plan = plan
+        self._worker_id = normalized_worker
+        self.backend_name = normalized_backend
+        self._lease_seconds = _positive_seconds(lease_seconds)
+        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
+        self._actions = {action.action_id: action for action in plan.actions}
+
+    def _require_action(self, action_id: str) -> ScanAction:
+        action = self._actions.get(str(action_id or ""))
+        if action is None:
+            raise ScanExecutionBackendError("action is absent from the persisted Scan plan")
+        return action
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    async def acquire_action(self, action: ScanAction) -> ActionLease:
+        expected = self._require_action(action.action_id)
+        if expected.action_digest != action.action_digest:
+            raise ScanExecutionBackendError("action differs from the persisted Scan plan")
+        if self.backend_name not in tuple(action.placement.get("eligible_backends") or ()):
+            raise ScanExecutionBackendError("action cannot run on this backend")
+        lease_id = str(uuid.uuid4())
+        token = str(self._token_factory() or "").strip()
+        if not _LEASE_TOKEN_RE.fullmatch(token):
+            raise ScanExecutionBackendError("generated lease token is invalid")
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._lease_seconds)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE scan_capability_actions
+                      SET status='leased', backend_name=$6, worker_id=$7,
+                          lease_id=$8, lease_token_hash=$9,
+                          lease_expires_at=$10, attempt=attempt+1,
+                          started_at=COALESCE(started_at, now()), updated_at=now()
+                    WHERE scan_id=$1 AND action_id=$2
+                      AND action_digest=$3
+                      AND execution_plan_digest=$4
+                      AND target_binding_digest=$5
+                      AND status='planned'
+                RETURNING attempt""",
+                uuid.UUID(self._plan.scan_id),
+                action.action_id,
+                action.action_digest,
+                self._plan.execution_plan_digest,
+                self._plan.target_binding_digest,
+                self.backend_name,
+                self._worker_id,
+                uuid.UUID(lease_id),
+                self._token_hash(token),
+                expires_at,
+            )
+            if row is None:
+                state = await conn.fetchrow(
+                    """SELECT status, result_json, action_digest
+                         FROM scan_capability_actions
+                        WHERE scan_id=$1 AND action_id=$2""",
+                    uuid.UUID(self._plan.scan_id),
+                    action.action_id,
+                )
+                if state and str(state.get("status") or "") in {
+                    "success", "partial", "skipped", "blocked", "failed",
+                    "cancelled", "timed_out",
+                }:
+                    raise ActionAlreadyTerminal(action.action_id)
+                raise ScanExecutionBackendError(
+                    "action is already leased or its immutable authority changed"
+                )
+        return ActionLease(
+            lease_id=lease_id,
+            lease_token=token,
+            scan_id=self._plan.scan_id,
+            plan_digest=str(self._plan.plan_digest),
+            execution_plan_digest=self._plan.execution_plan_digest,
+            target_binding_digest=self._plan.target_binding_digest,
+            action=action,
+            backend=self.backend_name,
+            worker_id=self._worker_id,
+            lease_seconds=self._lease_seconds,
+            attempt=int(row["attempt"]),
+        )
+
+    async def heartbeat(self, lease: ActionLease) -> None:
+        action = self._require_action(lease.action.action_id)
+        validate_action_lease(lease, plan=self._plan, action=action)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._lease_seconds)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE scan_capability_actions
+                      SET status='running', lease_expires_at=$7, updated_at=now()
+                    WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
+                      AND lease_id=$4 AND lease_token_hash=$5
+                      AND worker_id=$6 AND status IN ('leased','running')
+                      AND lease_expires_at > now()
+                RETURNING lease_expires_at""",
+                uuid.UUID(self._plan.scan_id),
+                action.action_id,
+                action.action_digest,
+                uuid.UUID(lease.lease_id),
+                self._token_hash(lease.lease_token),
+                self._worker_id,
+                expires_at,
+            )
+        if row is None:
+            raise ActionLeaseLost("action heartbeat lost durable lease authority")
+
+    async def settle(
+        self,
+        lease: ActionLease,
+        result: CapabilityResultReference,
+    ) -> CapabilityResultReference:
+        action = self._require_action(lease.action.action_id)
+        validate_action_lease(lease, plan=self._plan, action=action)
+        try:
+            placement_from_stored_result(action=action, stored=result)
+        except CapabilityResultError as exc:
+            raise ScanExecutionBackendError("action result is detached from its lease") from exc
+        if (
+            result.adapter_name != str(action.placement.get("adapter_name") or "")
+            or result.adapter_version != str(action.placement.get("adapter_version") or "")
+            or dict(result.budget_reserved) != dict(action.requested_budget)
+        ):
+            raise ScanExecutionBackendError("action result conflicts with lease authority")
+        result_json = json.dumps(
+            result.canonical_dict(), sort_keys=True, separators=(",", ":"),
+        )
+        manifest_id = (
+            uuid.UUID(result.observation_manifest_ref.manifest_id)
+            if result.observation_manifest_ref is not None else None
+        )
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE scan_capability_actions
+                      SET status=$7, reason_code=$8, receipt_id=$9,
+                          receipt_hash=$10, observation_manifest_id=$11,
+                          result_digest=$12, result_json=$13::jsonb,
+                          finished_at=now(), updated_at=now(),
+                          lease_token_hash=NULL, lease_expires_at=NULL
+                    WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
+                      AND lease_id=$4 AND lease_token_hash=$5
+                      AND worker_id=$6 AND status IN ('leased','running')
+                RETURNING result_json""",
+                uuid.UUID(self._plan.scan_id),
+                action.action_id,
+                action.action_digest,
+                uuid.UUID(lease.lease_id),
+                self._token_hash(lease.lease_token),
+                self._worker_id,
+                result.status.value,
+                result.reason_code.value if result.reason_code is not None else None,
+                result.receipt_ref.receipt_id,
+                result.receipt_ref.receipt_hash,
+                manifest_id,
+                result.result_digest,
+                result_json,
+            )
+            if row is None:
+                existing = await self._load_result_with_conn(conn, action)
+                if existing is not None and existing.result_digest == result.result_digest:
+                    return existing
+                raise ActionLeaseLost("action settlement lost durable lease authority")
+        stored = CapabilityResultReference.from_dict(_json_object(
+            row["result_json"], name="stored action result",
+        ))
+        placement_from_stored_result(action=action, stored=stored)
+        return stored
+
+    async def _load_result_with_conn(
+        self, conn: Any, action: ScanAction,
+    ) -> CapabilityResultReference | None:
+        row = await conn.fetchrow(
+            """SELECT status, action_digest, result_json
+                 FROM scan_capability_actions
+                WHERE scan_id=$1 AND action_id=$2""",
+            uuid.UUID(self._plan.scan_id),
+            action.action_id,
+        )
+        if row is None:
+            raise ScanExecutionBackendError("persisted Scan action index is incomplete")
+        if str(row.get("action_digest") or "") != action.action_digest:
+            raise ScanExecutionBackendError("persisted Scan action authority changed")
+        raw = row.get("result_json")
+        if raw is None:
+            if str(row.get("status") or "") in {
+                "success", "partial", "skipped", "blocked", "failed",
+                "cancelled", "timed_out",
+            }:
+                raise ScanExecutionBackendError("terminal Scan action has no generic result")
+            return None
+        try:
+            result = CapabilityResultReference.from_dict(_json_object(
+                raw, name="stored action result",
+            ))
+            placement_from_stored_result(action=action, stored=result)
+        except (CapabilityResultError, ValueError) as exc:
+            raise ScanExecutionBackendError("stored Scan action result is invalid") from exc
+        return result
+
+    async def load_result(self, action_id: str) -> CapabilityResultReference | None:
+        action = self._require_action(action_id)
+        async with self._pool.acquire() as conn:
+            return await self._load_result_with_conn(conn, action)
+
+    async def cancellation_requested(self) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.fetchval(
+                "SELECT status FROM scans WHERE id=$1",
+                uuid.UUID(self._plan.scan_id),
+            )
+        if status is None:
+            raise ScanExecutionBackendError("Scan owner disappeared during execution")
+        return str(status).strip().lower() in {"cancelled", "cancelling"}
