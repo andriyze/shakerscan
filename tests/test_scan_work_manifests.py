@@ -97,6 +97,46 @@ def test_endpoint_manifest_freezes_complete_value_free_route_contract():
     ) == manifest.reference()
 
 
+def test_endpoint_manifest_preserves_route_specific_auth_lane():
+    anonymous = _endpoint_manifest()
+    route = anonymous.entries[0]["route_id"]
+
+    manifest = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest=_surface(),
+        source_action_ids=("admission.surface",),
+        auth_lane="anonymous",
+        auth_lane_by_route={route: "secondary"},
+        request_ref_ids_by_route={route: ("request-secondary-1",)},
+    )
+
+    assert manifest.entries[0]["auth_lane"] == "secondary"
+    assert manifest.entries[0]["request_ref_ids"] == (
+        "request-secondary-1",
+    )
+
+
+def test_endpoint_manifest_never_executes_a_public_redacted_path():
+    surface = _surface()
+    surface["endpoints"][0].update({
+        "normalized_path": "/reset/<redacted>",
+        "concrete_path": "/reset/<redacted>",
+        "sensitive_path_redacted": True,
+    })
+
+    manifest = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface,
+        source_action_ids=("admission.surface",),
+    )
+
+    assert manifest.entries == ()
+    assert manifest.status == "partial"
+    assert manifest.reason_code == "sensitive_paths_excluded:1"
+
+
 def test_manifest_reference_extraction_accepts_only_canonical_nested_references():
     reference = _endpoint_manifest().reference()
 

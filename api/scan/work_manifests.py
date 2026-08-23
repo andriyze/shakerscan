@@ -590,6 +590,7 @@ def build_endpoint_manifest(
     auth_lane: str | None = "anonymous",
     selected_shard: int | None = None,
     request_ref_ids_by_route: Mapping[str, Sequence[str]] | None = None,
+    auth_lane_by_route: Mapping[str, str] | None = None,
 ) -> ScanWorkManifest:
     """Upgrade normalized discovery output into the canonical durable endpoint form."""
     if str(surface_manifest.get("schema_version") or "") not in {
@@ -603,6 +604,7 @@ def build_endpoint_manifest(
     if status != "complete" and reason is None:
         reason = "surface_manifest_incomplete"
     request_refs = dict(request_ref_ids_by_route or {})
+    auth_lanes = dict(auth_lane_by_route or {})
     depth_by_source = {
         "seed": 0,
         "known_endpoints": 0,
@@ -613,9 +615,15 @@ def build_endpoint_manifest(
         "subdomains.discover": 1,
     }
     entries: list[dict[str, Any]] = []
+    excluded_sensitive_paths = 0
     for raw in surface_manifest.get("endpoints") or ():
         if not isinstance(raw, Mapping):
             raise ScanWorkManifestError("surface manifest endpoint must be an object")
+        # Public discovery surfaces intentionally redact secret-like path
+        # segments.  A redacted display path is never executable authority.
+        if raw.get("sensitive_path_redacted") is True:
+            excluded_sensitive_paths += 1
+            continue
         source = str(raw.get("source") or "unknown")
         base = endpoint_entry_from_public_record(
             raw,
@@ -625,8 +633,17 @@ def build_endpoint_manifest(
             auth_lane=auth_lane,
             selected_shard=selected_shard,
         )
+        base["auth_lane"] = auth_lanes.get(base["route_id"], auth_lane)
         base["request_ref_ids"] = list(request_refs.get(base["route_id"], ()))
         entries.append(base)
+    if excluded_sensitive_paths:
+        status = "partial" if status != "cancelled" else status
+        exclusion_reason = (
+            f"sensitive_paths_excluded:{excluded_sensitive_paths}"
+        )
+        reason = ";".join(
+            item for item in (reason, exclusion_reason) if item
+        )[:200]
     return ScanWorkManifest(
         scan_id=scan_id,
         kind=ScanWorkManifestKind.ENDPOINT,

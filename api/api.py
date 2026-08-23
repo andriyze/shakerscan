@@ -478,7 +478,9 @@ try:
         ScanWorkManifest,
         ScanWorkManifestError,
         ScanWorkManifestReference,
+        build_candidate_manifest,
         build_canonical_nuclei_template_manifest,
+        build_endpoint_manifest,
         build_request_manifest,
         route_id as scan_manifest_route_id,
         work_manifest_references_in,
@@ -497,6 +499,7 @@ try:
         capability_list_response as scan_capability_list_response,
         coverage_response as scan_coverage_response,
     )
+    from scan.surface_manifest import build_scan_surface_manifest
     from scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -557,7 +560,9 @@ except ModuleNotFoundError:
         ScanWorkManifest,
         ScanWorkManifestError,
         ScanWorkManifestReference,
+        build_candidate_manifest,
         build_canonical_nuclei_template_manifest,
+        build_endpoint_manifest,
         build_request_manifest,
         route_id as scan_manifest_route_id,
         work_manifest_references_in,
@@ -576,6 +581,7 @@ except ModuleNotFoundError:
         capability_list_response as scan_capability_list_response,
         coverage_response as scan_coverage_response,
     )
+    from api.scan.surface_manifest import build_scan_surface_manifest
     from api.scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -3822,6 +3828,8 @@ async def run_due_schedules(pool: asyncpg.Pool):
             canonical_job = None
             scan_action_plan = None
             request_work_manifests: tuple[ScanWorkManifest, ...] = ()
+            endpoint_work_manifest: ScanWorkManifest | None = None
+            candidate_work_manifest: ScanWorkManifest | None = None
             template_work_manifest: ScanWorkManifest | None = None
             if canonical_schedule:
                 scheduled_bindings = [
@@ -3890,6 +3898,32 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     scan_options["request_manifest_refs"] = (
                         scheduled_request_manifest_refs
                     )
+                (
+                    endpoint_work_manifest,
+                    candidate_work_manifest,
+                ) = _compile_scan_admission_surface_work_manifests(
+                    scan_id=scan_id,
+                    target_url=target_url,
+                    scan_contract=scan_contract,
+                    target_binding=target_binding,
+                    options=scan_options,
+                    request_manifests=request_work_manifests,
+                )
+                endpoint_work_manifest_ref = (
+                    endpoint_work_manifest.reference().canonical_dict()
+                )
+                candidate_work_manifest_ref = (
+                    candidate_work_manifest.reference().canonical_dict()
+                )
+                scan_options["endpoint_manifest_id"] = str(
+                    endpoint_work_manifest.manifest_id
+                )
+                scan_options["endpoint_manifest_ref"] = (
+                    endpoint_work_manifest_ref
+                )
+                scan_options["candidate_manifest_ref"] = (
+                    candidate_work_manifest_ref
+                )
                 template_work_manifest = _compile_scan_template_work_manifest(
                     scan_id=scan_id,
                     scan_contract=scan_contract,
@@ -3913,6 +3947,9 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             if isinstance(item, Mapping)
                         ]
                     ),
+                    endpoint_manifest_id=str(
+                        endpoint_work_manifest.manifest_id
+                    ),
                 )
                 try:
                     scan_action_plan = _compile_allocated_scan_action_plan(
@@ -3926,6 +3963,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         ],
                         request_collection_refs=scheduled_executable_refs,
                         request_manifest_refs=scheduled_request_manifest_refs,
+                        endpoint_manifest_ref=endpoint_work_manifest_ref,
+                        candidate_manifest_ref=(
+                            candidate_work_manifest_ref
+                            if candidate_work_manifest.entries else None
+                        ),
                         template_manifest_ref=(
                             template_work_manifest.reference().canonical_dict()
                             if template_work_manifest is not None else None
@@ -3963,6 +4005,13 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         await PostgresScanManifestStore().persist(
                             conn, manifest=manifest,
                         )
+                    for manifest in (
+                        endpoint_work_manifest, candidate_work_manifest,
+                    ):
+                        if manifest is not None:
+                            await PostgresScanManifestStore().persist(
+                                conn, manifest=manifest,
+                            )
                     if template_work_manifest is not None:
                         await PostgresScanManifestStore().persist(
                             conn, manifest=template_work_manifest,
@@ -28942,6 +28991,8 @@ def _compile_allocated_scan_action_plan(
     credential_refs: Sequence[Mapping[str, Any]] = (),
     request_collection_refs: Sequence[Mapping[str, Any]] = (),
     request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
+    endpoint_manifest_ref: Mapping[str, Any] | None = None,
+    candidate_manifest_ref: Mapping[str, Any] | None = None,
     template_manifest_ref: Mapping[str, Any] | None = None,
 ):
     raw_plan = ScanActionPlanCompiler().compile(
@@ -28953,11 +29004,79 @@ def _compile_allocated_scan_action_plan(
             request_collection_refs
         ),
         request_manifest_refs=request_manifest_refs,
+        endpoint_manifest_ref=endpoint_manifest_ref,
+        candidate_manifest_ref=candidate_manifest_ref,
         template_manifest_ref=template_manifest_ref,
     )
     return allocate_scan_action_plan(
         raw_plan, scan_contract.budget,
     ).plan
+
+
+def _compile_scan_admission_surface_work_manifests(
+    *,
+    scan_id: str,
+    target_url: str,
+    scan_contract: ResolvedScanContract,
+    target_binding: TargetBinding,
+    options: Mapping[str, Any],
+    request_manifests: Sequence[ScanWorkManifest] = (),
+) -> tuple[ScanWorkManifest, ScanWorkManifest]:
+    """Freeze every route known before traffic into exact, private work.
+
+    This is deliberately not the crawl continuation manifest.  It covers the
+    canonical origin plus admitted manual/OpenAPI/HAR/request-collection seeds,
+    so actions can never execute their display-redacted representations.
+    """
+    empty_success = {"status": "success", "observations": []}
+    surface = build_scan_surface_manifest(
+        target_url=target_url,
+        target=target_binding,
+        options=options,
+        collection_replay=empty_success,
+        subdomains=empty_success,
+        probe=empty_success,
+        crawl=empty_success,
+        content=empty_success,
+        max_endpoints=scan_contract.budget.max_endpoints,
+    )
+    request_refs_by_route: dict[str, list[str]] = {}
+    auth_lane_by_route: dict[str, str] = {}
+    for manifest in request_manifests:
+        for entry in manifest.entries:
+            route = str(entry.get("route_id") or "")
+            request_ref = str(entry.get("request_ref_id") or "")
+            if not route or not request_ref:
+                continue
+            request_refs_by_route.setdefault(route, []).append(request_ref)
+            lane = str(entry.get("auth_lane") or "anonymous")
+            if lane != "anonymous":
+                auth_lane_by_route[route] = lane
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target_binding.digest,
+        surface_manifest=surface,
+        source_action_ids=("admission.surface",),
+        auth_lane="anonymous",
+        request_ref_ids_by_route={
+            route: tuple(dict.fromkeys(values))
+            for route, values in request_refs_by_route.items()
+        },
+        auth_lane_by_route=auth_lane_by_route,
+    )
+    candidate_manifest = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("admission.surface",),
+        maximum=max(
+            1,
+            min(
+                20_000,
+                scan_contract.budget.max_http_requests,
+                scan_contract.budget.max_endpoints * 64,
+            ),
+        ),
+    )
+    return endpoint_manifest, candidate_manifest
 
 
 def _compile_scan_template_work_manifest(
@@ -29343,6 +29462,28 @@ async def submit_scan(request: ScanRequest):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if request_work_manifest_refs:
             options_payload["request_manifest_refs"] = request_work_manifest_refs
+        (
+            endpoint_work_manifest,
+            candidate_work_manifest,
+        ) = _compile_scan_admission_surface_work_manifests(
+            scan_id=scan_id,
+            target_url=normalized_target,
+            scan_contract=scan_contract,
+            target_binding=target_binding,
+            options=options_payload,
+            request_manifests=request_work_manifests,
+        )
+        endpoint_work_manifest_ref = (
+            endpoint_work_manifest.reference().canonical_dict()
+        )
+        candidate_work_manifest_ref = (
+            candidate_work_manifest.reference().canonical_dict()
+        )
+        options_payload["endpoint_manifest_id"] = str(
+            endpoint_work_manifest.manifest_id
+        )
+        options_payload["endpoint_manifest_ref"] = endpoint_work_manifest_ref
+        options_payload["candidate_manifest_ref"] = candidate_work_manifest_ref
         template_work_manifest = _compile_scan_template_work_manifest(
             scan_id=scan_id,
             scan_contract=scan_contract,
@@ -29359,6 +29500,7 @@ async def submit_scan(request: ScanRequest):
             execution_plan=scan_contract.execution_plan,
             request_collections=admitted_request_collection_job_refs(collection_refs),
             credential_profile_ids=admitted_credential_profile_ids(credential_refs),
+            endpoint_manifest_id=str(endpoint_work_manifest.manifest_id),
         )
         try:
             scan_action_plan = _compile_allocated_scan_action_plan(
@@ -29368,6 +29510,11 @@ async def submit_scan(request: ScanRequest):
                 credential_refs=credential_refs,
                 request_collection_refs=executable_collection_refs,
                 request_manifest_refs=request_work_manifest_refs,
+                endpoint_manifest_ref=endpoint_work_manifest_ref,
+                candidate_manifest_ref=(
+                    candidate_work_manifest_ref
+                    if candidate_work_manifest.entries else None
+                ),
                 template_manifest_ref=(
                     template_work_manifest.reference().canonical_dict()
                     if template_work_manifest is not None else None
@@ -29402,6 +29549,12 @@ async def submit_scan(request: ScanRequest):
                 conn, plan=scan_action_plan,
             )
             for manifest in request_work_manifests:
+                await PostgresScanManifestStore().persist(
+                    conn, manifest=manifest,
+                )
+            for manifest in (
+                endpoint_work_manifest, candidate_work_manifest,
+            ):
                 await PostgresScanManifestStore().persist(
                     conn, manifest=manifest,
                 )

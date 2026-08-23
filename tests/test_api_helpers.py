@@ -2908,6 +2908,8 @@ class _FakeConn:
     async def fetchrow(self, query, *args):
         if "SELECT asm_config FROM targets" in query:
             return {"asm_config": {}}
+        if "INSERT INTO scan_work_manifests" in query:
+            return {"content_json": args[-1]}
         return {}
 
     async def execute(self, query, *args):
@@ -20044,6 +20046,70 @@ def test_parallel_recovery_requeues_terminal_discovery_continuation(monkeypatch)
         "attempt": 1,
         "plan_version": api_module.parallel_scan.PLAN_VERSION,
     }
+
+
+def test_admission_surface_work_manifests_freeze_known_routes_and_auth_lanes():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+
+    scan_id = "34333333-3333-4333-8333-333333333333"
+    target = TargetBinding(
+        target_id="target-admission",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    route = api_module.scan_manifest_route_id(
+        target_binding_digest=target.digest,
+        method="GET",
+        scheme="https",
+        host="example.test",
+        port=443,
+        canonical_path="/orders",
+        query_parameter_names=("owner",),
+    )
+    request_manifest = api_module.build_request_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target.digest,
+        source_action_ids=("inputs.collection_00",),
+        requests=({
+            "request_ref_id": "request-owner-secondary",
+            "route_id": route,
+            "method": "GET",
+            "auth_lane": "secondary",
+            "selected_shard": None,
+            "safe_method": True,
+            "body_schema_digest": None,
+        },),
+    )
+
+    endpoint_manifest, candidate_manifest = (
+        api_module._compile_scan_admission_surface_work_manifests(
+            scan_id=scan_id,
+            target_url="https://example.test",
+            scan_contract=resolve_scan_contract(budget_profile="balanced"),
+            target_binding=target,
+            options={
+                "custom_endpoints": ["GET /orders?owner=customer-7"],
+            },
+            request_manifests=(request_manifest,),
+        )
+    )
+
+    orders = next(
+        item for item in endpoint_manifest.entries
+        if item["route_id"] == route
+    )
+    assert endpoint_manifest.status == "complete"
+    assert orders["auth_lane"] == "secondary"
+    assert orders["request_ref_ids"] == ("request-owner-secondary",)
+    assert candidate_manifest.entries[0]["route_id"] == route
+    assert candidate_manifest.entries[0]["parameter_name"] == "owner"
+    assert candidate_manifest.entries[0]["request_ref_id"] == (
+        "request-owner-secondary"
+    )
 
 
 def test_parallel_recovery_requeues_canonical_continuation_without_private_options(monkeypatch):
