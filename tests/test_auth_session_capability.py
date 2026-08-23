@@ -199,6 +199,49 @@ def test_form_action_outside_frozen_target_fails_before_credential_submission():
     assert calls[0][1]["method"] == "GET"
 
 
+def test_prelogin_cookie_alone_is_not_treated_as_authenticated_identity():
+    async def request_executor(_origin, args, **kwargs):
+        if args["method"] == "GET":
+            kwargs["private_response_sink"](_private_response(
+                200,
+                body=(
+                    '<form action="/session" method="post">'
+                    '<input type="text" name="username">'
+                    '<input type="password" name="password">'
+                    "</form>"
+                ),
+                cookies={"prelogin": "anonymous-session"},
+            ))
+        else:
+            kwargs["private_response_sink"](_private_response(
+                302,
+                headers={"location": "/login?error=invalid"},
+                final_url="https://app.example.test/session",
+            ))
+        return {
+            "ok": True,
+            "request": {"method": args["method"], "path": args["path"]},
+            "response": {"status": 200},
+        }
+
+    session = asyncio.run(establish_target_bound_http_session(
+        TargetBoundSessionCredential(
+            lane="primary",
+            auth_kind="form_login",
+            endpoint_url="/login",
+            binding_digest="d" * 64,
+            username="operator",
+            secret="invalid-password",
+        ),
+        target=TARGET,
+        request_executor=request_executor,
+    ))
+
+    assert session.established is False
+    assert session.headers() == {}
+    assert session.error == "session exchange produced no usable identity"
+
+
 def test_worker_private_http_response_repr_hides_body_headers_and_cookies():
     response = _private_response(
         200,

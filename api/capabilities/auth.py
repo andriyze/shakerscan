@@ -416,6 +416,7 @@ async def establish_target_bound_http_session(
             request_count += 1 if isinstance(post_result.get("request"), Mapping) else 0
         if not post_result.get("ok") or latest is None:
             raise SessionCredentialContractError("session exchange request failed")
+        response_identity, _response_cookie_names = _session_headers(latest)
         headers, cookie_names = _session_headers(
             latest, inherited_cookies=inherited_cookies,
         )
@@ -423,7 +424,7 @@ async def establish_target_bound_http_session(
             200 <= latest.status_code < 300
             or latest.status_code in _SUCCESS_REDIRECTS
         )
-        if not acceptable_status or not headers:
+        if not acceptable_status or not headers or not response_identity:
             raise SessionCredentialContractError(
                 "session exchange produced no usable identity"
             )
