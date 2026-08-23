@@ -91,6 +91,7 @@ from .work_manifests import (
     canonical_nuclei_options_for_manifest,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
+    execution_routes_for_endpoint_manifest,
     unique_work_manifest_reference_dicts,
 )
 
@@ -603,15 +604,12 @@ class DatabaseNeutralScanActionDispatcher:
         secondary = resolve_scan_http_principal(self.options, lane="secondary")
         if not primary.authenticated or not secondary.authenticated:
             return self._skip(action, "not_applicable")
-        rows = (
-            *(await self._observations("discover.web_crawl")),
-            *(await self._observations("discover.web_content")),
+        endpoint_manifest = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
         )
-        routes = [
-            str(item["url"])
-            for item in rows
-            if item.get("url") and str(item.get("method") or "GET").upper() == "GET"
-        ][:50]
+        if endpoint_manifest is None:
+            return self._skip(action, "manifest_unavailable")
+        routes = list(execution_routes_for_endpoint_manifest(endpoint_manifest))
         if not routes:
             return self._skip(action, "not_applicable")
         args = {

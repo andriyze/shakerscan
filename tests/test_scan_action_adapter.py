@@ -105,6 +105,16 @@ def _dispatcher(plan, backend, *, target=TARGET, policy=None):
     )
 
 
+def _principal(lane):
+    return type("Principal", (), {
+        "authenticated": True,
+        "binding_digest": ("1" if lane == "primary" else "2") * 64,
+        "headers": lambda self: {
+            "Authorization": "Bearer " + lane,
+        },
+    })()
+
+
 def _lease(plan, action):
     return ActionLease(
         lease_id=str(uuid.uuid4()),
@@ -560,6 +570,87 @@ def test_database_neutral_required_verifier_skips_an_empty_bound_manifest():
 
     assert receipt.status == "skipped"
     assert receipt.errors == ("not_applicable",)
+
+
+def test_database_neutral_authz_uses_only_bound_endpoint_manifest(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoints = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/api/items/{int}",
+                    "concrete_path": "/api/items/{int}",
+                    "query_keys": ["expand"], "source": "web.crawl",
+                },
+                {
+                    "method": "POST", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/api/items",
+                    "concrete_path": "/api/items",
+                    "query_keys": [], "source": "collections.replay",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    action = _action(
+        "verify.authz", "authz.verify", 0,
+        capability_args={
+            "principal_lanes": ["primary", "secondary"],
+            "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        action_adapter_module,
+        "resolve_scan_http_principal",
+        lambda _options, *, lane: _principal(lane),
+    )
+
+    async def verify(_target_url, routes, **_kwargs):
+        captured["routes"] = list(routes)
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "authz_differential",
+                "proof_state": "inconclusive",
+                "principal_contexts_distinct": True,
+            },
+            "budget_consumed": {"http_requests": 0, "tool_wall_seconds": 0},
+        }
+
+    monkeypatch.setattr(
+        action_adapter_module,
+        "verify_target_bound_object_authorization",
+        verify,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={endpoints.manifest_id: endpoints}),
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["routes"] == [
+        "https://app.example.test/api/items/1?expand=1"
+    ]
 
 
 def test_database_neutral_nuclei_uses_only_digest_checked_template_pack(monkeypatch):

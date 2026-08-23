@@ -190,6 +190,7 @@ from scan.work_manifests import (
     canonical_nuclei_options_for_manifest,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
+    execution_routes_for_endpoint_manifest,
     unique_work_manifest_reference_dicts,
 )
 from scan.capability_result import CapabilityResultReference
@@ -13611,13 +13612,14 @@ class _CanonicalLocalScanDispatcher:
                 job_id=self.job_id, canonical_action=action,
             )
         elif action.action_id == "verify.authz":
-            crawl = await self._observations("discover.web_crawl")
-            content = await self._observations("discover.web_content")
-            routes = _scan_authz_route_inventory(
-                self.options,
-                crawl_observations=crawl,
-                content_observations=content,
+            endpoint_manifest = await self._work_manifest(
+                action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
             )
+            if endpoint_manifest is None:
+                return self._synthetic_receipt(
+                    action, lease, status="skipped", reason="manifest_unavailable",
+                )
+            routes = list(execution_routes_for_endpoint_manifest(endpoint_manifest))
             summary = await _execute_scan_authz_verification_capability(
                 self.target_url, routes, self.options,
                 scan_id=self.scan_id, job_id=self.job_id,

@@ -992,6 +992,31 @@ def execution_url_for_manifest_endpoint(
     return execution_url_for_endpoint(endpoint)
 
 
+def execution_routes_for_endpoint_manifest(
+    manifest: ScanWorkManifest,
+    *,
+    method: str = "GET",
+    maximum: int = 50,
+) -> tuple[str, ...]:
+    """Materialize a bounded route inventory only from immutable endpoints."""
+    if manifest.kind is not ScanWorkManifestKind.ENDPOINT:
+        raise ScanWorkManifestError("route inventory requires an endpoint manifest")
+    normalized_method = str(method or "").strip().upper()
+    if not _METHOD_RE.fullmatch(normalized_method):
+        raise ScanWorkManifestError("route inventory method is invalid")
+    limit = _integer(maximum, name="route inventory maximum", minimum=1, maximum=50)
+    routes: list[str] = []
+    for entry in manifest.entries:
+        if entry["method"] != normalized_method:
+            continue
+        route = execution_url_for_endpoint(entry)
+        if route not in routes:
+            routes.append(route)
+        if len(routes) >= limit:
+            break
+    return tuple(routes)
+
+
 def execution_url_for_manifest_candidate(
     endpoint_manifest: ScanWorkManifest,
     candidate_manifest: ScanWorkManifest,
