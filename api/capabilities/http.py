@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 import urllib.parse
 
 import agent_tools
@@ -16,6 +17,34 @@ from http_experiment import (
     validate_next_hop,
 )
 from runtime.models import TargetBinding
+
+
+@dataclass(frozen=True, repr=False)
+class WorkerPrivateHTTPResponse:
+    """Raw bounded response material available only inside the executing worker."""
+
+    status_code: int
+    final_url: str
+    _body: bytes = field(repr=False)
+    _headers: Mapping[str, str] = field(repr=False)
+    _cookies: Mapping[str, str] = field(repr=False)
+
+    def __repr__(self) -> str:
+        return (
+            "WorkerPrivateHTTPResponse("
+            f"status_code={self.status_code}, body_bytes={len(self._body)}, "
+            f"header_names={sorted(self._headers)}, "
+            f"cookie_names={sorted(self._cookies)}, values_visible=False)"
+        )
+
+    def body(self) -> bytes:
+        return bytes(self._body)
+
+    def headers(self) -> dict[str, str]:
+        return dict(self._headers)
+
+    def cookies(self) -> dict[str, str]:
+        return dict(self._cookies)
 
 
 def _origin(value: Any) -> str | None:
@@ -116,6 +145,7 @@ async def execute_bound_http_request(
     selected_headers: list[str] | None = None,
     timeout_seconds: int = 15,
     allow_bound_origin_redirects: bool = False,
+    private_response_sink: Callable[[WorkerPrivateHTTPResponse], None] | None = None,
 ) -> dict[str, Any]:
     """Execute one bounded request while revalidating every destination hop."""
     import httpx
@@ -305,6 +335,23 @@ async def execute_bound_http_request(
             "error": "request_error:MissingResponse",
             "request": request_view,
         }
+    if private_response_sink is not None:
+        private_response_sink(WorkerPrivateHTTPResponse(
+            status_code=int(response.status_code),
+            final_url=final_url,
+            _body=body[:MAX_BODY_BYTES],
+            _headers={
+                str(name).lower(): str(value)
+                for name, value in response.headers.items()
+                if str(name).lower() in {
+                    "authorization", "content-type", "location",
+                }
+            },
+            _cookies={
+                str(name): str(value)
+                for name, value in response.cookies.items()
+            },
+        ))
     summary = response_summary(
         response,
         body,

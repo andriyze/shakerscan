@@ -79,6 +79,24 @@ def test_scan_execute_is_a_placed_evidence_report_assembler():
     }
 
 
+def test_auth_session_registry_contract_is_target_bound_and_worker_private():
+    specification = CAPABILITY_REGISTRY.require("auth.session.establish")
+
+    assert specification.risk_tier == "credential"
+    assert specification.required_approval == "credential_use"
+    assert specification.budget_cost == {
+        "http_requests": 4,
+        "tool_wall_seconds": 45,
+    }
+    assert specification.placement_requirements == {
+        "network_reachability": True,
+        "runtime_target_binding": True,
+        "credentials_resolved_server_side": True,
+        "worker_private_result": True,
+    }
+    assert specification.planner_visible is False
+
+
 def test_ssh_proposal_registry_budget_is_control_plane_only():
     proposal = CAPABILITY_REGISTRY.require("device.ssh.propose")
 

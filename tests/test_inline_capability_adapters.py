@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from capabilities.inline import (
+    AuthSessionExecutionAdapter,
     ControlPlaneExecutionAdapter,
     DeviceExecutionAdapter,
     HttpRequestExecutionAdapter,
@@ -204,6 +205,50 @@ def test_tls_not_applicable_has_zero_network_consumption():
         "agent_actions": 1,
     }
     assert result.observations == ()
+
+
+def test_auth_session_adapter_persists_content_free_measured_observation():
+    specification = CAPABILITY_REGISTRY.require("auth.session.establish")
+    requested = {"http_requests": 4, "tool_wall_seconds": 45}
+
+    async def operation():
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "credential_session",
+                "lane": "primary",
+                "header_names": ["Authorization"],
+                "secret_values_visible": False,
+            },
+            "budget_consumed": {
+                "http_requests": 1,
+                "tool_wall_seconds": 1,
+            },
+        }
+
+    result = _execute(
+        specification,
+        AuthSessionExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"lane": "primary"},
+        ),
+        requested,
+    )
+
+    assert result.status == "success"
+    assert result.actual_budget == {
+        "http_requests": 1,
+        "tool_wall_seconds": 1,
+    }
+    assert result.observations == ({
+        "kind": "credential_session",
+        "lane": "primary",
+        "header_names": ["Authorization"],
+        "secret_values_visible": False,
+    },)
 
 
 class ExpectedControlBlock(Exception):

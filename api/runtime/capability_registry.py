@@ -302,6 +302,40 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "http-observation/v1", ("http_observation", "tool_receipt"),
         ),
         CapabilitySpec(
+            "auth.session.establish",
+            "Establish one target-bound worker-private form or OAuth HTTP session.",
+            "http", "credential", _HTTP_TARGETS, "auth.session", "1",
+            "credential_use", {"http_requests": 4, "tool_wall_seconds": 45},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "credentials_resolved_server_side": True,
+                "worker_private_result": True,
+            },
+            _schema({
+                "lane": {"type": "string", "enum": ["primary", "secondary"]},
+                "auth_kind": {
+                    "type": "string",
+                    "enum": [
+                        "form_login", "oauth_client_credentials", "oauth_password",
+                    ],
+                },
+                "credential_binding_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "endpoint_binding_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "endpoint_path": {"type": "string"},
+            }, required=(
+                "lane", "auth_kind", "credential_binding_digest",
+                "endpoint_binding_digest", "endpoint_path",
+            )),
+            "credential-session/v1",
+            ("credential_session_observation", "tool_receipt"),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "tls.inspect", "Inspect TLS configuration for a target-bound origin.",
             "internal", "passive", _HTTP_TARGETS, "scanner.tls", "1", None,
             {"tcp_ports_attempted": 1, "tool_wall_seconds": 15},
