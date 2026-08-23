@@ -15,14 +15,19 @@ import os
 import re
 from typing import Any, Mapping
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey,
-    X25519PublicKey,
-)
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.exceptions import InvalidTag
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import (
+        X25519PrivateKey,
+        X25519PublicKey,
+    )
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.exceptions import InvalidTag
+except ModuleNotFoundError:  # lightweight host tests may omit image dependencies
+    hashes = serialization = X25519PrivateKey = X25519PublicKey = None
+    ChaCha20Poly1305 = HKDF = None
+    InvalidTag = ValueError
 
 
 SEALED_INPUT_SCHEMA = "broker-private-input-envelope/v1"
@@ -33,6 +38,13 @@ _HKDF_INFO = b"shakerscan/broker-private-input/v1"
 
 class SealedInputError(ValueError):
     """A private-input key, authority, envelope, or plaintext is invalid."""
+
+
+def _require_crypto() -> None:
+    if X25519PrivateKey is None:
+        raise SealedInputError(
+            "sealed input encryption requires the cryptography runtime dependency"
+        )
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
@@ -69,6 +81,7 @@ def _authority_bytes(authority: Mapping[str, Any]) -> bytes:
 
 def generate_sealed_input_keypair() -> tuple[str, str]:
     """Return a one-use X25519 private/public key pair as base64 raw bytes."""
+    _require_crypto()
     private = X25519PrivateKey.generate()
     private_raw = private.private_bytes(
         encoding=serialization.Encoding.Raw,
@@ -83,6 +96,7 @@ def generate_sealed_input_keypair() -> tuple[str, str]:
 
 
 def validate_sealed_input_public_key(value: Any) -> str:
+    _require_crypto()
     raw = _b64decode(value, name="sealed input public key", expected_size=32)
     try:
         X25519PublicKey.from_public_bytes(raw)
@@ -94,6 +108,7 @@ def validate_sealed_input_public_key(value: Any) -> str:
 def _derive_key(
     shared_secret: bytes, *, salt: bytes, authority_digest: str,
 ) -> bytes:
+    _require_crypto()
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -109,6 +124,7 @@ def seal_private_input(
     authority: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Encrypt one canonical JSON object for a lease worker's one-use key."""
+    _require_crypto()
     plaintext = _canonical_json(payload)
     if not plaintext or len(plaintext) > MAX_SEALED_INPUT_PLAINTEXT_BYTES:
         raise SealedInputError("sealed input plaintext exceeds its size limit")
@@ -153,6 +169,7 @@ def open_private_input(
     authority: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Authenticate and decrypt one lease-bound private-input envelope."""
+    _require_crypto()
     if not isinstance(envelope, Mapping) or set(envelope) != {
         "schema_version", "ephemeral_public_key", "salt", "nonce",
         "ciphertext", "authority_digest", "content_sha256", "plaintext_bytes",
