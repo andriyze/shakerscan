@@ -23,6 +23,7 @@ from runtime.credential_migration import (
     migrate_legacy_web_credentials,
 )
 from runtime.reservation_store import PostgresBudgetReservationStore
+from runtime.observation_store import PostgresObservationManifestStore
 from runtime.request_collection_store import PostgresRequestCollectionStore
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.action_store import PostgresScanActionStore
@@ -969,6 +970,10 @@ async def run_schema_migrations(pool) -> None:
             # Endpoint, candidate, saved-request, and template worklists are
             # durable content-addressed inputs to the same action scheduler.
             await PostgresScanManifestStore().ensure_schema(conn)
+
+            # Generic capability results expose only these content-free
+            # references; the bounded observation objects remain private.
+            await PostgresObservationManifestStore().ensure_schema(conn)
 
             # Scan and Hunt share one encrypted, target-bound credential system.  Install it
             # under the same startup lock so neither API nor workers can observe profiles
