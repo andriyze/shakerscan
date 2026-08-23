@@ -90,8 +90,16 @@ def test_compiler_binds_opaque_inputs_and_is_independent_of_reference_order():
         {"profile_id": "primary-id", "version": 4, "digest": "e" * 64, "lane": "primary"},
     )
     collections = (
-        {"collection_id": "collection-b", "version": 1, "selection_digest": "f" * 64},
-        {"collection_id": "collection-a", "version": 3, "selection_digest": "a" * 64},
+        {
+            "collection_id": "collection-b", "selection_id": "selection-b",
+            "binding_id": "binding-b", "version": 1,
+            "selection_digest": "f" * 64,
+        },
+        {
+            "collection_id": "collection-a", "selection_id": "selection-a",
+            "binding_id": "binding-a", "version": 3,
+            "selection_digest": "a" * 64,
+        },
     )
     compiler = ScanActionPlanCompiler()
     first = compiler.compile(
@@ -301,6 +309,8 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
     },))
     collections = request_collection_action_refs(({
         "collection_id": "collection-1",
+        "selection_id": "selection-1",
+        "binding_id": "binding-1",
         "selection_digest": "a" * 64,
         "replay_policy": "confirmed_active",
         "selected_requests": 8,
@@ -316,6 +326,8 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
     assert len(credentials[0]["digest"]) == 64
     assert collections == ({
         "collection_id": "collection-1",
+        "selection_id": "selection-1",
+        "binding_id": "binding-1",
         "version": 1,
         "selection_digest": "a" * 64,
         "active": True,
@@ -333,5 +345,6 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
         action for action in plan.actions
         if action.capability_name == "collections.replay_active"
     )
+    assert replay.capability_args["request_collection_ref"] == collections[0]
     assert replay.requested_budget["http_requests"] == 8
     assert replay.requested_budget["state_changing_requests"] == 8

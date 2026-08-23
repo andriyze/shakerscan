@@ -183,6 +183,8 @@ def request_collection_action_refs(
     result: list[dict[str, Any]] = []
     for raw in refs:
         collection_id = str(raw.get("collection_id") or "").strip()
+        selection_id = str(raw.get("selection_id") or "").strip()
+        binding_id = str(raw.get("binding_id") or "").strip()
         selection_digest = str(raw.get("selection_digest") or "").strip().lower()
         replay_policy = str(raw.get("replay_policy") or "").strip().lower()
         if replay_policy not in {"safe_reads", "confirmed_active"}:
@@ -198,6 +200,8 @@ def request_collection_action_refs(
             raise ScanActionPlanError("request collection limit is invalid") from exc
         if (
             not collection_id
+            or not selection_id
+            or not binding_id
             or not _HEX_64_RE.fullmatch(selection_digest)
             or selected < 1
             or selector_limit < 1
@@ -205,6 +209,8 @@ def request_collection_action_refs(
             raise ScanActionPlanError("request collection action reference is incomplete")
         result.append({
             "collection_id": collection_id,
+            "selection_id": selection_id,
+            "binding_id": binding_id,
             "version": 1,
             "selection_digest": selection_digest,
             "active": replay_policy == "confirmed_active",
@@ -524,10 +530,13 @@ class ScanActionPlanCompiler:
             request_collection_refs,
             name="request collection",
             allowed_keys=frozenset({
-                "collection_id", "version", "selection_digest", "principal_ref", "active",
-                "max_requests",
+                "collection_id", "selection_id", "binding_id", "version",
+                "selection_digest", "principal_ref", "active", "max_requests",
             }),
-            required_keys=frozenset({"collection_id", "version", "selection_digest"}),
+            required_keys=frozenset({
+                "collection_id", "selection_id", "binding_id", "version",
+                "selection_digest",
+            }),
             maximum=32,
         )
         for reference in credentials:
