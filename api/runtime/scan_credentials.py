@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
+import re
 from typing import Any, Mapping, Sequence
 
 from .credential_resolver import CredentialResolutionError, ResolvedCredential
@@ -25,6 +28,168 @@ _SECONDARY_KINDS = frozenset({
 
 class ScanCredentialError(ValueError):
     """A Scan credential selection is ambiguous, unsupported, or no longer valid."""
+
+
+@dataclass(frozen=True, repr=False)
+class ScanHTTPPrincipal:
+    """Worker-private immediate HTTP identity with content-free public metadata."""
+
+    lane: str
+    _headers: Mapping[str, str] = field(repr=False)
+    binding_digest: str | None
+    source: str
+    reason: str | None = None
+    profile_reference_count: int = 0
+
+    def __repr__(self) -> str:
+        return (
+            f"ScanHTTPPrincipal(lane={self.lane!r}, source={self.source!r}, "
+            f"header_names={sorted(self._headers)}, authenticated={self.authenticated}, "
+            "values_visible=False)"
+        )
+
+    @property
+    def authenticated(self) -> bool:
+        return bool(self._headers and self.binding_digest)
+
+    def headers(self) -> dict[str, str]:
+        return dict(self._headers)
+
+    def capability_args(self) -> dict[str, str]:
+        if not self.authenticated or not self.binding_digest:
+            return {}
+        return {
+            "as_principal": self.lane,
+            "principal_binding_digest": self.binding_digest,
+        }
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "lane": self.lane,
+            "authenticated": self.authenticated,
+            "source": self.source,
+            "reason": self.reason,
+            "header_names": sorted(self._headers),
+            "profile_reference_count": self.profile_reference_count,
+            "secret_values_visible": False,
+        }
+
+
+_HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$")
+_RESERVED_HTTP_HEADERS = frozenset({
+    "connection", "content-length", "host", "transfer-encoding",
+})
+
+
+def _safe_scan_http_headers(values: Mapping[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw_name, raw_value in values.items():
+        name = str(raw_name or "").strip()
+        value = str(raw_value or "")
+        if (
+            not _HTTP_HEADER_NAME.fullmatch(name)
+            or name.lower() in _RESERVED_HTTP_HEADERS
+            or not value
+            or not value.isascii()
+            or len(value.encode("ascii")) > 8_192
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in value
+            )
+        ):
+            raise ScanCredentialError("Scan HTTP credential headers are invalid")
+        headers[name] = value
+    return headers
+
+
+def resolve_scan_http_principal(
+    options: Mapping[str, Any], *, lane: str = "primary",
+) -> ScanHTTPPrincipal:
+    """Resolve an already-hydrated immediate identity without exposing its values."""
+    normalized_lane = str(lane or "").strip().lower()
+    if normalized_lane not in {"primary", "secondary"}:
+        raise ScanCredentialError("Scan HTTP principal lane is invalid")
+    headers: dict[str, Any] = {}
+    if normalized_lane == "primary":
+        if options.get("auth_header"):
+            headers["Authorization"] = options["auth_header"]
+        if options.get("auth_cookies"):
+            headers["Cookie"] = options["auth_cookies"]
+        raw_custom = options.get("auth_headers_json")
+        if raw_custom:
+            try:
+                custom = json.loads(str(raw_custom))
+            except json.JSONDecodeError as exc:
+                raise ScanCredentialError(
+                    "Scan custom authentication headers are invalid"
+                ) from exc
+            if not isinstance(custom, dict):
+                raise ScanCredentialError(
+                    "Scan custom authentication headers must be an object"
+                )
+            headers.update(custom)
+        interactive = any(options.get(key) for key in (
+            "login_username", "login_password", "oauth_client_id",
+            "oauth_client_secret", "oauth_username", "oauth_password",
+        ))
+    else:
+        if options.get("user2_header"):
+            headers["Authorization"] = options["user2_header"]
+        if options.get("user2_cookies"):
+            headers["Cookie"] = options["user2_cookies"]
+        interactive = any(options.get(key) for key in (
+            "user2_login_username", "user2_login_password",
+        ))
+
+    safe_headers = _safe_scan_http_headers(headers) if headers else {}
+    refs = []
+    for item in options.get("resolved_credential_profiles") or []:
+        if not isinstance(item, Mapping):
+            continue
+        item_lane = str(item.get("scan_lane") or "").strip().lower()
+        auth_state = str(item.get("auth_state") or "").strip().lower()
+        lane_matches = (
+            item_lane == normalized_lane
+            or (normalized_lane == "primary" and auth_state == "user1")
+            or (normalized_lane == "secondary" and auth_state == "user2")
+        )
+        if not lane_matches:
+            continue
+        refs.append({
+            "profile_id": str(item.get("profile_id") or ""),
+            "profile_version": int(item.get("profile_version") or 0),
+            "auth_kind": str(item.get("auth_kind") or ""),
+            "principal_slot": str(item.get("principal_slot") or ""),
+            "lane": normalized_lane,
+        })
+    binding = {
+        "schema_version": "scan-http-principal-binding/v1",
+        "lane": normalized_lane,
+        "profile_references": sorted(
+            refs, key=lambda item: (item["profile_id"], item["profile_version"]),
+        ),
+        "header_names": sorted(name.lower() for name in safe_headers),
+        "source": "credential_profiles" if refs else "legacy_worker_private",
+    }
+    digest = (
+        hashlib.sha256(json.dumps(
+            binding, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        if safe_headers else None
+    )
+    reason = None
+    source = binding["source"] if safe_headers else "anonymous"
+    if interactive and not safe_headers:
+        source = "interactive_profile"
+        reason = "interactive_session_capability_not_available"
+    return ScanHTTPPrincipal(
+        lane=normalized_lane,
+        _headers=safe_headers,
+        binding_digest=digest,
+        source=source,
+        reason=reason,
+        profile_reference_count=len(refs),
+    )
 
 
 def admit_scan_credential_profiles(

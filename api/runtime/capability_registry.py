@@ -265,7 +265,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
-                "as_principal": {"type": "string"},
+                "as_principal": {
+                    "type": "string", "enum": ["primary", "secondary"],
+                },
+                "principal_binding_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
                 "follow_redirects": {"type": "boolean"},
             }),
             "http-observation/v1", ("http_observation", "tool_receipt"),

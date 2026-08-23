@@ -7686,12 +7686,19 @@ async def build_report(target: str,
             "cipher_suites": sslyze_.get("cipher_suites") if sslyze_.get("cipher_suites") else nmap_.get("ciphers_by_protocol", {}),
         },
         "http": {
-            "source": "browser" if use_browser else "curl",
+            "source": (
+                "canonical_capability"
+                if canonical_scan_execution is not None
+                else "browser" if use_browser else "curl"
+            ),
             "status": browser_res["status"] if use_browser and browser_res else headers_main["status"],
             "final_url": final_url,
             "request_url": headers_main.get("request_url") or base_url,
             "redirect_chain": headers_main.get("redirect_chain") or [],
             "remote_ip": headers_main.get("remote_ip"),
+            "principal_slot": headers_main.get(
+                "principal_slot", "anonymous",
+            ),
             "headers": chosen_headers,
             "security_headers": sec_headers,
             "csp_evaluation": csp_eval,
@@ -14539,6 +14546,9 @@ def _validate_canonical_http_placement(
                 "body_kind", "pinned_address", "follow_redirects",
             }
             or request.get("method") != required_method
+            or request.get("as_principal") not in {
+                "anonymous", "primary", "secondary",
+            }
             or request_origin not in allowed_origins
             or request_origin_key is None
             or request_origin_key[1] != canonical_host
@@ -15237,6 +15247,7 @@ def _canonical_http_baseline_result(
         "final_url": final_url,
         "redirect_chain": redirect_urls,
         "remote_ip": request.get("pinned_address"),
+        "principal_slot": request.get("as_principal") or "anonymous",
         "raw": "",
         "advertises_h3": "h3=" in alt_svc.lower(),
         "canonical_capability": "http.request",

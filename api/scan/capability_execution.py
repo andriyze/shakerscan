@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
+import re
 from typing import Any, Mapping
 import urllib.parse
 
@@ -466,6 +467,11 @@ def _normalize_external_capability_args(
             if len(value) > 2_000 or any(ord(ch) < 0x20 for ch in value):
                 raise ScanCapabilityContractError(
                     f"{specification.name} input {name} is invalid"
+                )
+            pattern = field.get("pattern")
+            if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+                raise ScanCapabilityContractError(
+                    f"{specification.name} input {name} does not match its pattern"
                 )
         elif expected == "integer":
             if isinstance(value, bool) or not isinstance(value, int):

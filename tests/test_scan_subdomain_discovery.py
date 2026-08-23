@@ -1690,6 +1690,67 @@ def test_http_baseline_stage_uses_registered_inline_capability(monkeypatch):
     assert summary["observations"][0]["kind"] == "http_observation"
 
 
+def test_http_baseline_binds_worker_private_primary_headers(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+    options = {
+        **options,
+        "auth_header": "Bearer primary-secret",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 2,
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    }
+    captured = {}
+
+    async def raw_operation(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "request": {
+                "method": "HEAD",
+                "origin": "https://app.example.test",
+                "path": "/",
+                "query_keys": [],
+                "as_principal": kwargs["principal_slot"],
+                "body_kind": None,
+                "pinned_address": "192.0.2.10",
+                "follow_redirects": True,
+            },
+            "response": {"status": 200, "selected_headers": {}},
+            "redirect_chain": [],
+        }
+
+    async def execute_capability(**kwargs):
+        assert kwargs["capability_args"]["as_principal"] == "primary"
+        assert len(kwargs["capability_args"]["principal_binding_digest"]) == 64
+        await kwargs["inline_operation"]()
+        return _stored_network_capability(
+            "http.request",
+            observations=[],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(worker, "execute_bound_http_request", raw_operation)
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+
+    asyncio.run(worker._execute_scan_http_baseline_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert captured["trusted_headers"] == {
+        "Authorization": "Bearer primary-secret",
+    }
+    assert captured["principal_slot"] == "primary"
+
+
 def test_http_redirect_probe_skips_when_http_origin_is_not_bound(monkeypatch):
     _plan, _target, options = _authority(enabled=True, network=False)
 

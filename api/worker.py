@@ -109,6 +109,7 @@ from runtime.scan_credentials import (
     SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
     bind_resolved_scan_credential,
+    resolve_scan_http_principal,
 )
 from scan.collection_replay import (
     EXECUTABLE_REPLAY_POLICIES,
@@ -10631,6 +10632,8 @@ async def _run_scan_http_baseline_operation(
     target: TargetBinding,
     timeout_seconds: int,
     allow_bound_origin_redirects: bool = False,
+    trusted_headers: Mapping[str, Any] | None = None,
+    principal_slot: str = "anonymous",
 ) -> dict[str, Any]:
     """Execute the shared adapter and retain only public header evidence."""
     result = dict(await execute_bound_http_request(
@@ -10641,6 +10644,8 @@ async def _run_scan_http_baseline_operation(
         selected_headers=_SCAN_BASELINE_RESPONSE_HEADERS,
         timeout_seconds=timeout_seconds,
         allow_bound_origin_redirects=allow_bound_origin_redirects,
+        trusted_headers=trusted_headers,
+        principal_slot=principal_slot,
     ))
     request = (
         dict(result.get("request") or {})
@@ -10782,6 +10787,8 @@ async def _execute_scan_http_baseline_capability(
         "path": path,
         "follow_redirects": True,
     }
+    principal = resolve_scan_http_principal(options, lane="primary")
+    capability_args.update(principal.capability_args())
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10797,6 +10804,10 @@ async def _execute_scan_http_baseline_capability(
             capability_args=capability_args,
             target=target,
             timeout_seconds=int(allocation["tool_wall_seconds"]),
+            trusted_headers=principal.headers(),
+            principal_slot=(
+                "primary" if principal.authenticated else "anonymous"
+            ),
         ),
     )
     return _scan_http_baseline_summary_from_stored(
@@ -12010,6 +12021,12 @@ async def _execute_reserved_deterministic_scan(
         scan_id=scan_id,
         job_id=job_id,
     )
+    primary_principal = resolve_scan_http_principal(
+        normalized, lane="primary",
+    )
+    secondary_principal = resolve_scan_http_principal(
+        normalized, lane="secondary",
+    )
 
     def stage_capabilities(
         output: Mapping[str, Any],
@@ -12063,6 +12080,8 @@ async def _execute_reserved_deterministic_scan(
                 collection_replay_summary, Mapping,
             ),
             "secret_values_exposed": False,
+            "primary_principal": primary_principal.public_dict(),
+            "secondary_principal": secondary_principal.public_dict(),
         })
 
     async def discover_surface_stage(
@@ -12289,6 +12308,19 @@ async def _execute_reserved_deterministic_scan(
         result["canonical_candidate_verification"] = dict(
             verification.get("proof_contracts") or {}
         )
+        authentication = primary_principal.public_dict()
+        authentication["applied_capabilities"] = [
+            "http.request"
+        ] if (
+            primary_principal.authenticated
+            and isinstance(baseline.get("http.request"), Mapping)
+            and str(baseline["http.request"].get("status") or "")
+            in {"success", "partial"}
+        ) else []
+        authentication["secondary_principal"] = (
+            secondary_principal.public_dict()
+        )
+        result["canonical_authentication"] = authentication
         status = "partial" if (
             result.get("error") or summary.get("partial") or summary.get("timed_out")
         ) else "completed"

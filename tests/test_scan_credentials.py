@@ -10,6 +10,7 @@ from api.runtime.scan_credentials import (
     ScanCredentialError,
     admit_scan_credential_profiles,
     bind_resolved_scan_credential,
+    resolve_scan_http_principal,
 )
 
 
@@ -138,3 +139,50 @@ def test_scan_worker_binding_preserves_custom_headers_and_form_login():
         "user2_login_password": "password",
         "login_url": "/login",
     }
+
+
+def test_scan_immediate_primary_principal_is_secret_free_and_digest_bound():
+    principal = resolve_scan_http_principal({
+        "auth_header": "Bearer primary-secret",
+        "auth_headers_json": '{"X-Tenant":"blue"}',
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    })
+
+    assert principal.authenticated is True
+    assert principal.headers() == {
+        "Authorization": "Bearer primary-secret",
+        "X-Tenant": "blue",
+    }
+    assert principal.capability_args()["as_principal"] == "primary"
+    assert len(principal.capability_args()["principal_binding_digest"]) == 64
+    assert principal.public_dict() == {
+        "lane": "primary",
+        "authenticated": True,
+        "source": "credential_profiles",
+        "reason": None,
+        "header_names": ["Authorization", "X-Tenant"],
+        "profile_reference_count": 1,
+        "secret_values_visible": False,
+    }
+    assert "primary-secret" not in repr(principal)
+    assert "primary-secret" not in repr(principal.public_dict())
+
+
+def test_scan_interactive_primary_is_explicitly_not_applied_without_session_capability():
+    principal = resolve_scan_http_principal({
+        "login_username": "operator",
+        "login_password": "secret-password",
+    })
+
+    assert principal.authenticated is False
+    assert principal.headers() == {}
+    assert principal.public_dict()["reason"] == (
+        "interactive_session_capability_not_available"
+    )
+    assert "secret-password" not in repr(principal)
