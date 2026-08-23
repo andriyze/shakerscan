@@ -1005,6 +1005,56 @@ def test_canonical_report_assembly_uses_placed_dns_posture():
     assert "fetch_tls_rpt(host)" in extras_block[extras_legacy:]
 
 
+def test_canonical_report_assembly_never_enters_legacy_active_loop():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index(
+        "# Canonical active traffic already executed as placed registry actions."
+    )
+    legacy_start = source.index(
+        "elif active_checks and not public_only:", start,
+    )
+    canonical_block = source[start:legacy_start]
+
+    assert '_canonical_xss_observations(placed_xss)' in canonical_block
+    assert '_canonical_sqli_observations(placed_sqli)' in canonical_block
+    assert '"legacy_active_execution": False' in canonical_block
+    assert "smart_active_scan(" not in canonical_block
+    assert "dalfox_scan(" not in canonical_block
+    assert "sqlmap_scan(" not in canonical_block
+
+
+def test_canonical_report_assembly_skips_unregistered_passive_probes():
+    source = inspect.getsource(scanner_mod.build_report)
+    recon_start = source.index("# Additional security checks")
+    recon_end = source.index("# Complete mode specific tasks", recon_start)
+    recon_block = source[recon_start:recon_end]
+    assert "canonical_capability_not_registered" in recon_block
+    assert recon_block.index("canonical_scan_execution is not None") < (
+        recon_block.index("check_cors(base_url)")
+    )
+
+    auxiliary_start = source.index("# Enhanced security checks")
+    auxiliary_end = source.index(
+        "# Phase 1/2 Critical Checks", auxiliary_start,
+    )
+    auxiliary_block = source[auxiliary_start:auxiliary_end]
+    assert "canonical_scan_execution is None" in auxiliary_block
+    assert "canonical_capability_not_registered" in auxiliary_block
+
+    vhost_start = source.index("# Virtual host enumeration")
+    vhost_end = source.index("recon_dispatch_receipts", vhost_start)
+    vhost_block = source[vhost_start:vhost_end]
+    assert "canonical_scan_execution is None" in vhost_block
+    assert "canonical_capability_not_registered" in vhost_block
+
+    posture_start = source.index("# Cloud service detection")
+    posture_end = source.index("# Server version detection", posture_start)
+    posture_block = source[posture_start:posture_end]
+    assert posture_block.count(
+        "allow_network_probe=canonical_scan_execution is None"
+    ) == 2
+
+
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,

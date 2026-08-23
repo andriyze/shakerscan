@@ -46,6 +46,46 @@ def test_detect_waf_counts_payload_specific_block_response(monkeypatch):
     assert all(detail["block_reason"] == "HTTP 403" for detail in result["blocked_details"])
 
 
+def test_detect_waf_can_derive_header_signal_without_network_probe(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("canonical report assembly must not probe the network")
+
+    monkeypatch.setattr(discovery, "run", fail_run)
+
+    result = asyncio.run(discovery.detect_waf(
+        "https://example.test/",
+        {"cf-ray": ["receipt-derived"]},
+        allow_network_probe=False,
+    ))
+
+    assert result["waf_detected"] is True
+    assert result["waf_products"] == ["cloudflare"]
+    assert result["active_probe"] == {
+        "skipped": True,
+        "reason": "canonical_capability_not_registered",
+    }
+
+
+def test_detect_cloud_services_skips_s3_network_probe_when_disabled(monkeypatch):
+    async def fail_run(*args, **kwargs):
+        raise AssertionError("canonical report assembly must not probe the network")
+
+    monkeypatch.setattr(discovery, "run", fail_run)
+
+    result = asyncio.run(discovery.detect_cloud_services(
+        "bucket.s3.amazonaws.com",
+        {},
+        allow_network_probe=False,
+    ))
+
+    assert result["provider"] == "AWS"
+    assert "S3 Bucket" in result["services"]
+    assert result["network_probe"] == {
+        "skipped": True,
+        "reason": "canonical_capability_not_registered",
+    }
+
+
 def test_append_query_param_preserves_existing_query_string():
     url = discovery._append_query_param("https://example.test/path?existing=1", "test", "' OR '1'='1")
 

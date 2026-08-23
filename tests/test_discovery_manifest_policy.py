@@ -132,12 +132,18 @@ def test_scanner_applies_native_execution_without_a_legacy_preset():
 
     _apply_canonical_scan_execution(args, execution)
 
-    assert args.active is True
-    assert args.check_family == "sqli"
+    assert args.active is False
+    assert args.active_enforced is True
+    assert args.check_family is None
     assert args.vuln_auth is False
     assert args.vuln_injection is False
     assert args.vuln_web is False
     assert args.network_discovery is False
+    assert args.exposure_client is False
+    assert args.exposure_infra is False
+    assert args.enhanced_dns is False
+    assert args.deep_discovery is False
+    assert args.websocket_testing is False
     assert args.budget_profile == "balanced"
     assert args.budget_request_max == 5000
     assert args.budget_max_urls == 2000

@@ -2456,7 +2456,12 @@ async def check_cors(url: str) -> dict[str, Any]:
     return results
 
 
-async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dict[str, Any]:
+async def detect_cloud_services(
+    host: str,
+    headers: dict[str, list[str]],
+    *,
+    allow_network_probe: bool = True,
+) -> dict[str, Any]:
     results: dict[str, Any] = {"provider": None, "services": [], "cdn": None, "misconfigurations": []}
     host = host.lower().rstrip(".")
     server_header = " ".join(headers.get("server", [])).lower()
@@ -2475,12 +2480,18 @@ async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dic
     if is_s3_host:
         results["provider"] = "AWS"
         results["services"].append("S3 Bucket")
-        s3_url = f"https://{host}"
-        out, err, rc = await run(["curl", "-sS", "-I", s3_url], timeout=10)
-        if rc == 0 and "200 OK" in out:
-            list_out, _, list_rc = await run(["curl", "-sS", s3_url], timeout=10)
-            if list_rc == 0 and "<ListBucketResult" in list_out:
-                results["misconfigurations"].append({"type": "s3_public_list", "severity": "high", "details": "S3 bucket allows public listing"})
+        if allow_network_probe:
+            s3_url = f"https://{host}"
+            out, err, rc = await run(["curl", "-sS", "-I", s3_url], timeout=10)
+            if rc == 0 and "200 OK" in out:
+                list_out, _, list_rc = await run(["curl", "-sS", s3_url], timeout=10)
+                if list_rc == 0 and "<ListBucketResult" in list_out:
+                    results["misconfigurations"].append({"type": "s3_public_list", "severity": "high", "details": "S3 bucket allows public listing"})
+        else:
+            results["network_probe"] = {
+                "skipped": True,
+                "reason": "canonical_capability_not_registered",
+            }
     azure_indicators = [("x-ms-", "Azure Service"), ("x-azure-", "Azure Service"), ("azurewebsites", "Azure Web Apps"), ("blob.core.windows", "Azure Blob Storage"), ("azureedge", "Azure CDN"), ("cloudapp.azure", "Azure Cloud App")]
     for indicator, service in azure_indicators:
         if any(indicator in k.lower() for k in headers) or indicator in host:
@@ -2569,7 +2580,12 @@ def _contains_payload_block_signature(response_body: str, baseline_body: str) ->
     return None
 
 
-async def detect_waf(url: str, headers: dict[str, list[str]]) -> dict[str, Any]:
+async def detect_waf(
+    url: str,
+    headers: dict[str, list[str]],
+    *,
+    allow_network_probe: bool = True,
+) -> dict[str, Any]:
     results: dict[str, Any] = {"waf_detected": False, "waf_products": [], "confidence": "none", "bypass_techniques": []}
     waf_signatures = {
         "cloudflare": [("cf-ray", "header"), ("cf-cache-status", "header"), ("__cfduid", "cookie"), ("cloudflare", "server")],
@@ -2595,6 +2611,12 @@ async def detect_waf(url: str, headers: dict[str, list[str]]) -> dict[str, Any]:
                     results["waf_detected"] = True
                     results["waf_products"].append(waf_name)
                     break
+    if not allow_network_probe:
+        results["active_probe"] = {
+            "skipped": True,
+            "reason": "canonical_capability_not_registered",
+        }
+        return results
     waf_test_payloads = [
         ("XSS", "<script>alert(1)</script>"),
         ("SQLi", "' OR '1'='1"),

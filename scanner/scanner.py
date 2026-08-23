@@ -1320,12 +1320,30 @@ async def nuclei_comprehensive_scan(
     )
 
 
-async def detect_cloud_services(host: str, headers: dict[str, list[str]]) -> dict[str, Any]:
-    return await _detect_cloud_services_mod(host, headers)
+async def detect_cloud_services(
+    host: str,
+    headers: dict[str, list[str]],
+    *,
+    allow_network_probe: bool = True,
+) -> dict[str, Any]:
+    return await _detect_cloud_services_mod(
+        host,
+        headers,
+        allow_network_probe=allow_network_probe,
+    )
 
 
-async def detect_waf(url: str, headers: dict[str, list[str]]) -> dict[str, Any]:
-    return await _detect_waf_mod(url, headers)
+async def detect_waf(
+    url: str,
+    headers: dict[str, list[str]],
+    *,
+    allow_network_probe: bool = True,
+) -> dict[str, Any]:
+    return await _detect_waf_mod(
+        url,
+        headers,
+        allow_network_probe=allow_network_probe,
+    )
 
 
 # ---------- API Security Testing ----------
@@ -5508,12 +5526,22 @@ async def build_report(target: str,
     ))
     # Additional security checks
     if not public_only:
-        if focused_scope.skip_posture() or skip_global_checks:
+        if (
+            canonical_scan_execution is not None
+            or focused_scope.skip_posture()
+            or skip_global_checks
+        ):
             if focused_scope.skip_posture():
                 print("[smart] Focused manual active scope: skipping unrelated passive exposure probes", file=sys.stderr)
             if skip_global_checks:
                 print("[scanner] Parallel child shard: skipping duplicate passive exposure probes", file=sys.stderr)
-            skip_reason = "focused_manual_active_scope" if focused_scope.skip_posture() else "parallel_child_skip_global_checks"
+            skip_reason = (
+                "canonical_capability_not_registered"
+                if canonical_scan_execution is not None
+                else "focused_manual_active_scope"
+                if focused_scope.skip_posture()
+                else "parallel_child_skip_global_checks"
+            )
             cors_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CORS_SHAPE, reason=skip_reason)))
             takeover_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SUBDOMAIN_TAKEOVER_SHAPE, reason=skip_reason)))
             exposed_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(EXPOSED_FILES_SHAPE, reason=skip_reason)))
@@ -5701,7 +5729,8 @@ async def build_report(target: str,
 
     # Enhanced security checks (will be run after headers are available)
     if (
-        not public_only
+        canonical_scan_execution is None
+        and not public_only
         and not focused_manual_active_scope
         and not skip_global_checks
         and not discovery_manifest_only
@@ -5716,7 +5745,13 @@ async def build_report(target: str,
         api_sec_empty = {"api_type": "unknown", "vulnerabilities": [], "endpoints_discovered": [], "authentication": {"required": False, "methods": []}}
         subdomain_empty = {"vulnerable": False, "dangling_cnames": [], "vulnerable_services": [], "evidence": []}
         xxe_empty = {"vulnerable": False, "payloads_tested": [], "evidence": []}
-        if focused_manual_active_scope:
+        if canonical_scan_execution is not None:
+            for value in (api_sec_empty, subdomain_empty, xxe_empty):
+                value.update({
+                    "skipped": True,
+                    "reason": "canonical_capability_not_registered",
+                })
+        elif focused_manual_active_scope:
             print("[smart] Focused manual active scope: skipping auxiliary API/XXE discovery probes", file=sys.stderr)
             api_sec_empty = focused_scope.skipped_result(api_sec_empty)
             subdomain_empty = focused_scope.skipped_result(subdomain_empty)
@@ -5804,13 +5839,22 @@ async def build_report(target: str,
     emit_progress("baseline", 20, "dns/tls/http complete")
 
     # Virtual host enumeration (post-DNS, safe)
-    if not public_only and dns.get("A") and not focused_manual_active_scope:
+    if (
+        canonical_scan_execution is None
+        and not public_only
+        and dns.get("A")
+        and not focused_manual_active_scope
+    ):
         vhost_task = asyncio.create_task(enumerate_virtual_hosts(base_url, host, dns.get("A")))
     else:
         # Focused scans carry the skip marker (so completion status reports the
         # gap); public-only / no-A-record cases are simply not applicable and
         # return a bare empty result.
-        if focused_scope.skip_discovery():
+        if canonical_scan_execution is not None:
+            vhost_result = focused_scope.skipped_result(
+                VHOST_SHAPE, reason="canonical_capability_not_registered",
+            )
+        elif focused_scope.skip_discovery():
             vhost_result = focused_scope.skipped_result(VHOST_SHAPE)
         else:
             vhost_result = dict(VHOST_SHAPE)
@@ -7302,10 +7346,18 @@ async def build_report(target: str,
     cookies = analyze_cookies(chosen_headers)
 
     # Cloud service detection
-    cloud_services = await detect_cloud_services(host, chosen_headers)
+    cloud_services = await detect_cloud_services(
+        host,
+        chosen_headers,
+        allow_network_probe=canonical_scan_execution is None,
+    )
 
     # WAF detection (needs headers)
-    waf_results = await detect_waf(base_url, chosen_headers)
+    waf_results = await detect_waf(
+        base_url,
+        chosen_headers,
+        allow_network_probe=canonical_scan_execution is None,
+    )
 
     # Server version detection (nginx, Apache, Node.js, PHP, etc.)
     server_versions = detect_server_versions(chosen_headers)
@@ -9506,8 +9558,44 @@ async def build_report(target: str,
                 "schemathesis", "OpenAPI test errors", "medium", {"errors": api_rep.get("errors")}
             ))
 
+    # Canonical active traffic already executed as placed registry actions.
+    if canonical_scan_execution is not None:
+        placed_xss = (
+            canonical_scan_placements.get("xss.verify")
+            if isinstance(canonical_scan_placements, dict) else None
+        )
+        placed_sqli = (
+            canonical_scan_placements.get("sqli.verify")
+            if isinstance(canonical_scan_placements, dict) else None
+        )
+        active_block = {
+            "targets": [],
+            "dalfox": _canonical_xss_observations(placed_xss),
+            "sqlmap": _canonical_sqli_observations(placed_sqli),
+            "custom_sqli": [],
+            "custom_xss": [],
+            "filters": {"xss": False, "sqli": False},
+            "check_family_scope": check_family_scope,
+            "scanner_execution_plan": scanner_execution_plan,
+            "canonical_xss_verification": (
+                dict(placed_xss) if isinstance(placed_xss, Mapping) else {
+                    "status": "blocked",
+                    "reason": "canonical_xss_placement_missing",
+                }
+            ),
+            "canonical_sqli_verification": (
+                dict(placed_sqli) if isinstance(placed_sqli, Mapping) else {
+                    "status": "blocked",
+                    "reason": "canonical_sqli_placement_missing",
+                }
+            ),
+            "legacy_active_execution": False,
+        }
+        report["findings"].extend(_canonical_xss_findings(placed_xss))
+        report["findings"].extend(_canonical_sqli_findings(placed_sqli))
+        report["active_checks"] = active_block
     # Optional: active checks (sampled outside of smart/complete mode)
-    if active_checks and not public_only:
+    elif active_checks and not public_only:
         dalfox_deep_domxss = deep_domxss
         if dalfox_deep_domxss is None and (exploit_level == "aggressive" or complete_tier == "aggressive"):
             dalfox_deep_domxss = True
@@ -12290,31 +12378,6 @@ async def build_report(target: str,
                 "scanner_execution_plan": scanner_execution_plan,
             }
             smart_succeeded = bool(smart_mode)
-        if canonical_scan_execution is not None:
-            placed_xss = (
-                canonical_scan_placements.get("xss.verify")
-                if isinstance(canonical_scan_placements, dict) else None
-            )
-            active_block["dalfox"] = _canonical_xss_observations(placed_xss)
-            report["findings"].extend(_canonical_xss_findings(placed_xss))
-            active_block["canonical_xss_verification"] = (
-                dict(placed_xss) if isinstance(placed_xss, Mapping) else {
-                    "status": "blocked",
-                    "reason": "canonical_xss_placement_missing",
-                }
-            )
-            placed_sqli = (
-                canonical_scan_placements.get("sqli.verify")
-                if isinstance(canonical_scan_placements, dict) else None
-            )
-            active_block["sqlmap"] = _canonical_sqli_observations(placed_sqli)
-            report["findings"].extend(_canonical_sqli_findings(placed_sqli))
-            active_block["canonical_sqli_verification"] = (
-                dict(placed_sqli) if isinstance(placed_sqli, Mapping) else {
-                    "status": "blocked",
-                    "reason": "canonical_sqli_placement_missing",
-                }
-            )
         async def run_asm_endpoint_batch_auth() -> RegistryPhaseOutcome:
             if not smart_mode or not smart_succeeded or public_only:
                 return RegistryPhaseOutcome(
@@ -15756,33 +15819,34 @@ def _apply_canonical_scan_execution(args: Any, execution: Mapping[str, Any]) -> 
     discovery_only = bool(scope["discovery_manifest_only"])
     active = bool(policy["active_testing"] and not discovery_only)
     skip_global = bool(scope["skip_global_checks"])
-    focused_family = execution.get("focused_family")
-
     for name in _CANONICAL_FORBIDDEN_BOOLEAN_ARGS:
         setattr(args, name, False)
-    args.active = active
+    # Active traffic is executed before report assembly by separately reserved
+    # registry capabilities. Keep the policy decision as metadata, but never
+    # re-enable the legacy active loop inside scan.execute.
+    args.active = False
     args.active_enforced = active
     args.public = False
     # Canonical network policy executes in worker-owned registry capabilities
     # with durable per-action reservations. The scanner subprocess must never
     # repeat that traffic through its legacy internal network-discovery branch.
     args.network_discovery = False
-    args.check_family = focused_family
+    args.check_family = None
     args.xss = False
     args.sqli = False
     args.nuclei = not discovery_only and not bool(scope["focused_endpoints_only"])
-    args.vuln_auth = active and not bool(focused_family)
-    args.vuln_injection = active and not bool(focused_family)
-    args.vuln_web = active and not bool(focused_family)
-    args.exposure_client = not skip_global and not discovery_only
-    args.exposure_infra = not skip_global and not discovery_only
+    args.vuln_auth = False
+    args.vuln_injection = False
+    args.vuln_web = False
+    args.exposure_client = False
+    args.exposure_infra = False
     args.threat_intel = False
-    args.websocket_testing = active and not bool(focused_family)
-    args.enhanced_dns = not skip_global and not discovery_only
-    args.deep_discovery = active and not bool(scope["zero_rediscovery"])
+    args.websocket_testing = False
+    args.enhanced_dns = False
+    args.deep_discovery = False
     args.grpc_discovery = False
-    args.json_link_following = not bool(scope["zero_rediscovery"])
-    args.options_method_discovery = not bool(scope["zero_rediscovery"])
+    args.json_link_following = False
+    args.options_method_discovery = False
     args.skip_global_checks = skip_global
     args.focused_endpoints_only = bool(scope["focused_endpoints_only"])
     args.zero_rediscovery = bool(scope["zero_rediscovery"])
@@ -16924,7 +16988,14 @@ async def cli_main():
     else:
         args.active_enforced = False
     if canonical_scan_execution is not None:
-        args.active_enforced = bool(args.active)
+        args.active_enforced = bool(
+            canonical_scan_execution["execution_plan"]["policy"][
+                "active_testing"
+            ]
+            and not canonical_scan_execution["adapter_scope"][
+                "discovery_manifest_only"
+            ]
+        )
 
     if args.network_discovery and not args.active:
         print("Error: --network-discovery requires --active (or an active scan preset).", file=sys.stderr)
