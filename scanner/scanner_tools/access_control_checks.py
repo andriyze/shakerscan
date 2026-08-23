@@ -18,7 +18,7 @@ import json
 import re
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from .common import run, detect_spa_catch_all, fetch_homepage_hash, is_same_as_homepage, _compute_content_hash
@@ -2970,6 +2970,8 @@ async def authz_resource_replay_test(
     max_replays: int = 80,
     timeout: int = 10,
     max_seconds: float | None = None,
+    fetcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    allow_write_replays: bool = True,
 ) -> dict[str, Any]:
     """Auth-aware object authorization check built from real producer responses.
 
@@ -2980,7 +2982,10 @@ async def authz_resource_replay_test(
     user2 both receive equivalent resource-like data for the same object ID, and
     that ID was absent from user2's producer response.
     """
-    from .proof_of_exploit import fetch_with_capture
+    if fetcher is None:
+        from .proof_of_exploit import fetch_with_capture
+
+        fetcher = fetch_with_capture
 
     started = time.monotonic()
 
@@ -3095,14 +3100,14 @@ async def authz_resource_replay_test(
         producer_attempt = _new_authz_producer_attempt(producer_endpoint)
         producer_attempt["attempted_params_count"] = 1
         try:
-            user1_resp = await fetch_with_capture(producer_url, headers=user1_headers, timeout=timeout, budget_key="bola")
+            user1_resp = await fetcher(producer_url, headers=user1_headers, timeout=timeout, budget_key="bola")
             if _mark_cooperative_cancel(results):
                 producer_attempt["status"] = "partial"
                 producer_attempt["skip_reason"] = "cancelled"
                 results["endpoint_attempts"].append(producer_attempt)
                 break
             producer_attempt["attempted_params_count"] = 2
-            user2_listing_resp = await fetch_with_capture(producer_url, headers=user2_headers, timeout=timeout, budget_key="bola")
+            user2_listing_resp = await fetcher(producer_url, headers=user2_headers, timeout=timeout, budget_key="bola")
         except Exception as exc:
             producer_attempt["status"] = "partial"
             producer_attempt["error_summary"] = str(exc)[:200]
@@ -3179,7 +3184,7 @@ async def authz_resource_replay_test(
                 attempt["attempted_params_count"] = 1
                 results["replays_attempted"] += 1
                 try:
-                    owner_resp = await fetch_with_capture(
+                    owner_resp = await fetcher(
                         candidate["url"], headers=user1_headers, timeout=timeout, budget_key="bola"
                     )
                     if _mark_cooperative_cancel(results):
@@ -3187,7 +3192,7 @@ async def authz_resource_replay_test(
                         attempt["skip_reason"] = "cancelled"
                         results["endpoint_attempts"].append(attempt)
                         break
-                    attacker_resp = await fetch_with_capture(
+                    attacker_resp = await fetcher(
                         candidate["url"], headers=user2_headers, timeout=timeout, budget_key="bola"
                     )
                 except Exception as exc:
@@ -3302,7 +3307,10 @@ async def authz_resource_replay_test(
                 if results["cross_principal_violations"] >= 10:
                     return results
 
-                if results["write_replays_attempted"] < max_write_replays:
+                if (
+                    allow_write_replays
+                    and results["write_replays_attempted"] < max_write_replays
+                ):
                     write_candidate = _authz_write_replay_candidate(candidate)
                     if write_candidate:
                         if _mark_cooperative_cancel(results):
@@ -3320,7 +3328,7 @@ async def authz_resource_replay_test(
                         write_headers = dict(user2_headers)
                         write_headers["Content-Type"] = "application/json"
                         try:
-                            write_resp = await fetch_with_capture(
+                            write_resp = await fetcher(
                                 write_candidate["url"],
                                 method=write_candidate["method"],
                                 data=write_candidate["body"],

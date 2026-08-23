@@ -344,6 +344,49 @@ def test_authz_resource_replay_detects_write_side_bola(monkeypatch):
     )
 
 
+def test_authz_resource_replay_injected_transport_can_forbid_write_replays():
+    from scanner_tools.access_control_checks import authz_resource_replay_test
+
+    methods = []
+
+    async def bound_fetch(url, method="GET", headers=None, **_kwargs):
+        methods.append(method)
+        assert method == "GET"
+        principal = (
+            "user2"
+            if headers and headers.get("Authorization") == "Bearer user2"
+            else "user1"
+        )
+        if url.endswith("/api/orders"):
+            body = (
+                [{"id": 101, "email": "owner@example.test", "amount": 25}]
+                if principal == "user1"
+                else [{"id": 202, "email": "attacker@example.test", "amount": 10}]
+            )
+        else:
+            body = {"id": 101, "email": "owner@example.test", "amount": 25}
+        return {
+            "status_code": 200,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps(body),
+        }
+
+    result = asyncio.run(authz_resource_replay_test(
+        "https://app.test",
+        ["/api/orders"],
+        _session("user1"),
+        _session("user2"),
+        max_producers=1,
+        max_replays=1,
+        fetcher=bound_fetch,
+        allow_write_replays=False,
+    ))
+
+    assert result["cross_principal_violations"] == 1
+    assert result["write_replays_attempted"] == 0
+    assert methods == ["GET", "GET", "GET", "GET"]
+
+
 def test_authz_resource_replay_uses_discovered_consumer_templates(monkeypatch):
     from scanner_tools.access_control_checks import authz_resource_replay_test
     import scanner_tools.proof_of_exploit as poe
