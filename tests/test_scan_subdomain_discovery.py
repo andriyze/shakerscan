@@ -1457,7 +1457,7 @@ def test_fixed_external_scan_tool_rejects_incomplete_reservation_before_process(
             action_id="deterministic_baseline.templates",
             target_binding=target,
             reservation_limits={
-                "http_requests": 20,
+                "http_requests": 10,
                 "tool_wall_seconds": 10,
             },
             scanner_process_payload={"tool_name": "nuclei"},

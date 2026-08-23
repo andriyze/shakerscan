@@ -180,6 +180,7 @@ from scan.continuation import (
     merge_scan_action_continuation,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.external_process import fit_reservation_scaled_profile
 from scan.work_manifests import (
     ScanWorkManifest,
     ScanWorkManifestError,
@@ -10069,6 +10070,29 @@ async def _execute_reserved_scan_capability(
                 )
             request_limits[name] = min(request_limits[name], amount)
     if prepared is not None:
+        if external_process:
+            scaled_profile = fit_reservation_scaled_profile(
+                capability_name,
+                requested=prepared.estimated_budget,
+                available=request_limits,
+            )
+            if capability_name in {
+                "templates.scan", "xss.verify", "sqli.verify",
+            } and scaled_profile is None:
+                raise ScanCapabilityContractError(
+                    "fixed external capability budget is incomplete"
+                )
+            if scaled_profile is not None:
+                prepared = PreparedExecution(
+                    capability_name=prepared.capability_name,
+                    adapter_name=prepared.adapter_name,
+                    adapter_version=prepared.adapter_version,
+                    commands=prepared.commands,
+                    estimated_budget=scaled_profile,
+                    input_digest=prepared.input_digest,
+                    redacted_execution=prepared.redacted_execution,
+                    parser_version=prepared.parser_version,
+                )
         prepared = fit_prepared_scan_capability(
             prepared, ledger_limits=request_limits,
         )
