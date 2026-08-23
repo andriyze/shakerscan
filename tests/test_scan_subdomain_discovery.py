@@ -672,10 +672,24 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
             "scan_metadata": {"schema_version": "scan-report/v2"},
         }
 
+    async def placed_network(*_args, **_kwargs):
+        return {
+            "status": "success",
+            "actions": [],
+            "observation_count": 0,
+            "partial": False,
+            "timed_out": False,
+            "budget_consumed": {},
+            "durable_budget_settled": True,
+        }
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "_execute_agent_scanner_process", fake_external_tool)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(
+        worker, "_execute_scan_network_discovery", placed_network,
+    )
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
@@ -684,10 +698,6 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
         job_id="job-1",
-        network_discovery_summary={
-            "status": "success",
-            "actions": [],
-        },
     ))
 
     assert ("httpx", "running") in events
@@ -749,6 +759,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert result["canonical_capabilities"]["sqli.verify"][
         "receipt"
     ]["budget_reservation_state"] == "committed"
+    assert result["network_discovery"]["status"] == "success"
     stage_execution = result["canonical_stage_execution"]
     assert [row["name"] for row in stage_execution["stages"]] == [
         "bind_target",
@@ -761,6 +772,9 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         "finalize_evidence",
     ]
     assert stage_execution["stages"][5]["adapter"] == "native_worker"
+    assert stage_execution["stages"][3]["capability_names"] == [
+        "ports.discover", "service.fingerprint",
+    ]
     assert stage_execution["stages"][5]["capability_names"] == [
         "xss.verify", "sqli.verify", "authz.verify",
     ]
@@ -807,28 +821,64 @@ def test_candidate_verification_never_promotes_sqlmap_label_without_differential
     )
 
 
-def test_enabled_network_stage_requires_placement_before_surface_traffic(
+def test_cancelled_network_stage_stops_before_baseline_traffic(
     monkeypatch,
 ):
-    _plan, _target, options = _authority(enabled=False, network=True)
+    plan, _target, options = _authority(enabled=False, network=True)
+    connection = _Connection(plan)
+    calls = []
 
-    async def unexpected_surface_traffic(*_args, **_kwargs):
-        raise AssertionError("surface traffic ran before network placement check")
+    async def skipped_probe(*_args, **_kwargs):
+        calls.append("surface")
+        return worker._skipped_scan_web_probe_summary("test_isolation")
 
+    async def skipped_crawl(*_args, **_kwargs):
+        return worker._skipped_scan_web_crawl_summary("test_isolation")
+
+    async def skipped_content(*_args, **_kwargs):
+        return worker._skipped_scan_content_discovery_summary("test_isolation")
+
+    async def cancelled_network(*_args, **_kwargs):
+        calls.append("network")
+        return {
+            "status": "cancelled",
+            "actions": [],
+            "observation_count": 0,
+            "partial": False,
+            "timed_out": False,
+            "budget_consumed": {},
+            "durable_budget_settled": True,
+        }
+
+    async def unexpected_baseline_traffic(*_args, **_kwargs):
+        raise AssertionError("baseline traffic continued after network cancellation")
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(
-        worker, "_execute_scan_web_probe_capability", unexpected_surface_traffic,
+        worker, "_execute_scan_web_probe_capability", skipped_probe,
     )
+    monkeypatch.setattr(
+        worker, "_execute_scan_web_crawl_capability", skipped_crawl,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_scan_content_discovery_capability", skipped_content,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_scan_network_discovery", cancelled_network,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_scan_http_baseline_capability", unexpected_baseline_traffic,
+    )
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
-    with pytest.raises(
-        worker.ScanCapabilityContractError,
-        match="discover_network stage requires",
-    ):
+    with pytest.raises(ValueError, match="Cancelled by user"):
         asyncio.run(worker._execute_reserved_deterministic_scan(
             "https://app.example.test",
             options,
             scan_id="00000000-0000-0000-0000-000000000001",
             job_id="job-1",
         ))
+    assert calls == ["surface", "network"]
 
 
 def test_scan_port_discovery_uses_same_reserve_before_traffic_boundary(
@@ -2630,17 +2680,19 @@ def test_worker_runs_subdomain_discovery_inside_the_fixed_surface_stage():
     assert deterministic.index("_execute_scan_subdomain_discovery(") < (
         deterministic.index("_execute_scan_web_probe_capability(")
     )
+    assert deterministic.index("_execute_scan_network_discovery(") > (
+        deterministic.index("_execute_scan_web_probe_capability(")
+    )
     assert '"subdomains.discover": subdomains' in deterministic
     assert '"subdomains.discover", "web.probe"' in deterministic
     assert "_execute_scan_subdomain_discovery(" not in standalone
     assert standalone.index("_hydrate_generic_scan_credentials(") < (
         standalone.index("_execute_reserved_deterministic_scan(")
     )
-    assert standalone.index("_execute_scan_network_discovery(") < standalone.index(
-        "_hydrate_generic_scan_credentials("
-    )
+    assert "_execute_scan_network_discovery(" not in standalone
     assert "parallel_discovery" in shard
     assert "_execute_scan_subdomain_discovery(" not in shard
+    assert "_execute_scan_network_discovery(" not in shard
     assert "canonical_subdomain_discovery" in plan
     assert "canonical_network_discovery" in plan
     assert "needs_placed_discovery" in plan

@@ -12349,7 +12349,6 @@ async def _execute_reserved_deterministic_scan(
     *,
     scan_id: str,
     job_id: str,
-    network_discovery_summary: Mapping[str, Any] | None = None,
     collection_replay_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run canonical DAST through the executable fixed-stage worker graph."""
@@ -12359,16 +12358,6 @@ async def _execute_reserved_deterministic_scan(
             target, dict(options), scan_id=scan_id, job_id=job_id,
         )
     execution = build_native_scan_execution(admission.plan, normalized)
-    network_stage = next(
-        row for row in execution.stage_rows()
-        if row["name"] == "discover_network"
-    )
-    if network_stage["enabled"] and not isinstance(
-        network_discovery_summary, Mapping,
-    ):
-        raise ScanCapabilityContractError(
-            "enabled discover_network stage requires its placed worker result"
-        )
     context = ScanStageContext(
         execution=execution,
         target_url=target,
@@ -12551,10 +12540,9 @@ async def _execute_reserved_deterministic_scan(
     async def discover_network_stage(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
-        if not isinstance(network_discovery_summary, Mapping):
-            raise ScanCapabilityContractError(
-                "enabled discover_network stage requires its placed worker result"
-            )
+        network_discovery_summary = await _execute_scan_network_discovery(
+            effective_options, scan_id, job_id=job_id,
+        )
         return stage_capabilities(
             {"network.discovery": dict(network_discovery_summary)},
             capability_names=("ports.discover", "service.fingerprint"),
@@ -12690,6 +12678,7 @@ async def _execute_reserved_deterministic_scan(
     ) -> ScanStageRunResult:
         inputs = stage_context.output("resolve_inputs")
         surface = stage_context.output("discover_surface")
+        network = stage_context.output("discover_network")
         baseline = stage_context.output("deterministic_baseline")
         active = stage_context.output("deterministic_active")
         verification = stage_context.output("verify_candidates")
@@ -12816,6 +12805,12 @@ async def _execute_reserved_deterministic_scan(
             result,
             surface.get("subdomains.discover")
             if isinstance(surface.get("subdomains.discover"), Mapping)
+            else None,
+        )
+        result = _attach_scan_network_summary(
+            result,
+            network.get("network.discovery")
+            if isinstance(network.get("network.discovery"), Mapping)
             else None,
         )
         status = "partial" if (
@@ -14304,7 +14299,6 @@ async def process_scan_job(job_data: dict):
     heartbeat_thread.start()
 
     collection_replay_summary: dict[str, Any] | None = None
-    network_discovery_summary: dict[str, Any] | None = None
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -14317,14 +14311,6 @@ async def process_scan_job(job_data: dict):
                     and not ai_target_id
                     and run_kind not in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
                 ):
-                    if isinstance(options.get("_canonical_target_binding"), Mapping):
-                        network_discovery_summary = (
-                            await _execute_scan_network_discovery(
-                                options, scan_id, job_id=job_id,
-                            )
-                        )
-                        if network_discovery_summary.get("status") == "cancelled":
-                            raise ValueError("Cancelled by user")
                     collection_replay_summary = await _execute_scan_request_collections(
                         options,
                         scan_id,
@@ -14347,7 +14333,6 @@ async def process_scan_job(job_data: dict):
                         options,
                         scan_id=scan_id,
                         job_id=job_id,
-                        network_discovery_summary=network_discovery_summary,
                         collection_replay_summary=collection_replay_summary,
                     )
                 else:
@@ -14416,9 +14401,6 @@ async def process_scan_job(job_data: dict):
 
         if collection_replay_summary is not None:
             result["request_collection_replay"] = collection_replay_summary
-        result = _attach_scan_network_summary(
-            result, network_discovery_summary,
-        )
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result = _apply_runtime_scope_guard_to_result(result, options)
@@ -16565,23 +16547,11 @@ async def process_scan_shard_job(job_data: dict):
         name=f"heartbeat-{job_id[:8]}", daemon=True,
     )
     heartbeat_thread.start()
-    network_discovery_summary: dict[str, Any] | None = None
     try:
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
-                if (
-                    parallel_discovery
-                    and isinstance(options.get("_canonical_target_binding"), Mapping)
-                ):
-                    network_discovery_summary = (
-                        await _execute_scan_network_discovery(
-                            options, scan_id, job_id=job_id,
-                        )
-                    )
-                    if network_discovery_summary.get("status") == "cancelled":
-                        raise ValueError("Cancelled by user")
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 result = await _execute_reserved_deterministic_scan(
@@ -16589,7 +16559,6 @@ async def process_scan_shard_job(job_data: dict):
                     options,
                     scan_id=scan_id,
                     job_id=job_id,
-                    network_discovery_summary=network_discovery_summary,
                 )
         except Exception as e:
             result = {'target': target, 'error': str(e),
@@ -16599,9 +16568,6 @@ async def process_scan_shard_job(job_data: dict):
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result['shard_label'] = label
-        result = _attach_scan_network_summary(
-            result, network_discovery_summary,
-        )
         score = result.get('result', {}).get('score')
         grade = result.get('result', {}).get('grade')
         findings = result.get('findings', [])
