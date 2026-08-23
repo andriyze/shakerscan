@@ -21,6 +21,8 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from scanner.scanner_tools.url_redaction import redact_path
 
+from .external_process import FIXED_PROFILE_CAPABILITIES
+
 
 class ScanCapabilityContractError(ValueError):
     """A capability cannot execute within its immutable Scan authority."""
@@ -108,14 +110,14 @@ def scan_network_capability_allocation(
 def scan_template_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:
-    """Reserve a bounded Nuclei slice without starving the baseline Scan."""
+    """Return the complete conservative Nuclei profile or skip it."""
     http = _budget_integer(budget, "max_http_requests")
     wall = _budget_integer(budget, "max_tool_wall_seconds")
-    if http < 2 or wall < 2:
+    if http < 4_000 or wall < 300:
         return None
     return {
-        "http_requests": min(4_000, max(1, http // 4)),
-        "tool_wall_seconds": min(300, max(1, wall // 4)),
+        "http_requests": 4_000,
+        "tool_wall_seconds": 300,
     }
 
 
@@ -133,7 +135,7 @@ def scan_web_probe_capability_allocation(
     if http <= preserved_http or wall <= preserved_wall:
         return None
     return {
-        "http_requests": min(4, http - preserved_http),
+        "http_requests": 1,
         "tool_wall_seconds": min(30, wall - preserved_wall),
     }
 
@@ -211,28 +213,28 @@ def scan_tls_capability_allocation(
 def scan_xss_verification_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:
-    """Reserve one deterministic XSS verifier slice inside Scan ceilings."""
+    """Return the complete conservative Dalfox profile or skip it."""
     http = _budget_integer(budget, "max_http_requests")
     wall = _budget_integer(budget, "max_tool_wall_seconds")
-    if http < 4 or wall < 4:
+    if http < 400 or wall < 120:
         return None
     return {
-        "http_requests": min(400, max(1, http // 10)),
-        "tool_wall_seconds": min(120, max(1, wall // 10)),
+        "http_requests": 400,
+        "tool_wall_seconds": 120,
     }
 
 
 def scan_sqli_verification_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:
-    """Reserve one deterministic SQLi verifier slice inside Scan ceilings."""
+    """Return the complete conservative SQLMap profile or skip it."""
     http = _budget_integer(budget, "max_http_requests")
     wall = _budget_integer(budget, "max_tool_wall_seconds")
-    if http < 4 or wall < 4:
+    if http < 900 or wall < 300:
         return None
     return {
-        "http_requests": min(900, max(1, http // 10)),
-        "tool_wall_seconds": min(300, max(1, wall // 10)),
+        "http_requests": 900,
+        "tool_wall_seconds": 300,
     }
 
 
@@ -649,7 +651,7 @@ def fit_prepared_scan_capability(
     *,
     ledger_limits: Mapping[str, int],
 ) -> PreparedExecution:
-    """Clamp an adapter estimate to exact Scan ceilings before reservation."""
+    """Fit a scalable adapter, or reject an incomplete fixed process profile."""
     requested: dict[str, int] = {}
     for raw_name, raw_amount in dict(prepared.estimated_budget).items():
         name = str(raw_name or "").strip()
@@ -662,6 +664,13 @@ def fit_prepared_scan_capability(
         if amount <= 0 or ceiling <= 0:
             raise ScanCapabilityContractError(
                 f"Scan budget leaves no capacity for capability dimension: {name}"
+            )
+        if (
+            prepared.capability_name in FIXED_PROFILE_CAPABILITIES
+            and ceiling < amount
+        ):
+            raise ScanCapabilityContractError(
+                "fixed external capability budget is incomplete: " + name
             )
         requested[name] = min(amount, ceiling)
     if not requested:

@@ -28,6 +28,7 @@ from scanner_tools.request_replay import ReplayAuthorization, build_replay_plan
 
 def _authority(
     *, enabled: bool = True, network: bool = False, approval: bool = False,
+    budget: ScanBudget | None = None,
 ):
     plan = ScanExecutionPlan(
         policy=ScanPolicy(
@@ -38,7 +39,7 @@ def _authority(
             approval_receipt_id="approval-1" if network or approval else None,
         ),
         budget_profile="balanced",
-        budget=ScanBudget(1_200, 100, 50, 20, 10, 60, 2),
+        budget=budget or ScanBudget(1_200, 100, 50, 20, 10, 60, 2),
     )
     target = TargetBinding(
         target_id="target-1",
@@ -57,6 +58,12 @@ def _authority(
         "_canonical_target_binding": target.canonical_dict(),
     })
     return plan, target, options
+
+
+def _external_full_budget() -> ScanBudget:
+    return ScanBudget(
+        3_600, 20_000, 1_000, 1_000, 20_000, 4_000, 8, 0, 500,
+    )
 
 
 class _Transaction:
@@ -687,12 +694,28 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     events = []
     store = _ReservationStore(events)
     placement_seen = {}
+    runtime_budget_seen = {}
 
     async def fake_external_tool(payload, *, heartbeat):
         tool = payload["tool_name"]
         events.append((tool, store.current.record.status))
         assert payload["_cancelled"]() is False
         await heartbeat()
+        reserved = {
+            key: value for key, value in payload["_reserved_budget"].items()
+            if key in {"http_requests", "tcp_ports_attempted", "tool_wall_seconds"}
+        }
+        enforcement = {
+            "schema_version": "external-process-enforcement/v1",
+            "tool_name": tool,
+            "process_plan_digest": "c" * 64,
+            "hard_budget": reserved,
+            "accounting_mode": "conservative",
+            "proof_method": "rate_time_upper_bound",
+            "parser_version": worker.agent_tools.CAPABILITY_REGISTRY.for_legacy_tool(
+                tool
+            ).output_schema,
+        }
         if tool == "httpx":
             return {
                 "status": "success",
@@ -710,6 +733,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
                     "errors": [],
                 },
                 "settlement": {"mode": "exact", "actual": 1},
+                "process_enforcement": enforcement,
             }
         if tool == "katana":
             return {
@@ -730,6 +754,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
                     "actual": None,
                     "observed_minimum": 2,
                 },
+                "process_enforcement": enforcement,
             }
         if tool == "ffuf":
             return {
@@ -751,6 +776,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
                     "actual": None,
                     "observed_minimum": 2,
                 },
+                "process_enforcement": enforcement,
             }
         if tool == "nuclei":
             return {
@@ -822,15 +848,8 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     ):
         events.append(("baseline", store.current.record.status))
         placement_seen.update(canonical_placed_capabilities or {})
+        runtime_budget_seen.update(canonical_runtime_budget or {})
         assert target == "https://app.example.test"
-        assert canonical_runtime_budget == {
-            "http_requests": 88,
-            "state_changing_requests": 0,
-            "browser_actions": 20,
-            "tcp_ports_attempted": 0,
-            "hosts_attempted": 50,
-            "tool_wall_seconds": 49,
-        }
         return {
             "target": target,
             "findings": [],
@@ -864,6 +883,16 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
             "durable_budget_settled": True,
         }
 
+    async def skipped_inline(*_args, **_kwargs):
+        return {
+            "status": "skipped",
+            "enabled": False,
+            "reason": "test_isolation",
+            "observations": [],
+            "budget_consumed": {},
+            "durable_budget_settled": True,
+        }
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "_execute_agent_scanner_process", fake_external_tool)
@@ -871,6 +900,14 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     monkeypatch.setattr(
         worker, "_execute_scan_network_discovery", placed_network,
     )
+    for operation in (
+        "_execute_scan_http_baseline_capability",
+        "_execute_scan_http_redirect_capability",
+        "_execute_scan_security_txt_capability",
+        "_execute_scan_dns_capability",
+        "_execute_scan_tls_capability",
+    ):
+        monkeypatch.setattr(worker, operation, skipped_inline)
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
@@ -884,10 +921,14 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert ("httpx", "running") in events
     assert ("katana", "running") in events
     assert ("ffuf", "running") in events
-    assert ("nuclei", "running") in events
-    assert ("dalfox", "running") in events
-    assert ("sqlmap", "running") in events
+    assert ("nuclei", "running") not in events
+    assert ("dalfox", "running") not in events
+    assert ("sqlmap", "running") not in events
     assert ("baseline", "running") in events
+    assert runtime_budget_seen["http_requests"] <= plan.budget.max_http_requests
+    assert runtime_budget_seen["tool_wall_seconds"] <= (
+        plan.budget.max_tool_wall_seconds
+    )
     assert events.index(("httpx", "running")) < events.index(
         ("katana", "running")
     )
@@ -895,18 +936,12 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         ("ffuf", "running")
     )
     assert events.index(("ffuf", "running")) < events.index(
-        ("nuclei", "running")
-    )
-    assert events.index(("nuclei", "running")) < events.index(
-        ("dalfox", "running")
-    )
-    assert events.index(("dalfox", "running")) < events.index(
-        ("sqlmap", "running")
-    )
-    assert events.index(("sqlmap", "running")) < events.index(
         ("baseline", "running")
     )
-    assert placement_seen["templates.scan"]["status"] == "success"
+    assert placement_seen["templates.scan"]["status"] == "skipped"
+    assert placement_seen["templates.scan"]["reason"] == (
+        "insufficient_fixed_profile_budget"
+    )
     assert placement_seen["web.probe"]["status"] == "success"
     assert placement_seen["web.probe"]["observations"][0]["status"] == 200
     assert placement_seen["web.crawl"]["status"] == "success"
@@ -917,29 +952,13 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert placement_seen["web.content_discover"]["observations"][0][
         "status"
     ] == 403
-    assert placement_seen["templates.scan"]["observations"][0][
-        "proof_state"
-    ] == "candidate"
-    assert placement_seen["xss.verify"]["status"] == "success"
-    assert placement_seen["xss.verify"]["observations"][0][
-        "proof_state"
-    ] == "verified"
-    assert placement_seen["sqli.verify"]["status"] == "success"
-    assert placement_seen["sqli.verify"]["observations"][0]["url"] == (
-        "https://app.example.test/api/orders?q=%3Credacted%3E"
-    )
-    assert placement_seen["sqli.verify"]["observations"][0][
-        "proof_state"
-    ] == "candidate"
-    assert result["canonical_capabilities"]["templates.scan"][
-        "receipt"
-    ]["budget_reservation_state"] == "committed"
-    assert result["canonical_capabilities"]["xss.verify"][
-        "receipt"
-    ]["budget_reservation_state"] == "committed"
-    assert result["canonical_capabilities"]["sqli.verify"][
-        "receipt"
-    ]["budget_reservation_state"] == "committed"
+    for capability in ("xss.verify", "sqli.verify"):
+        assert placement_seen[capability]["status"] == "skipped"
+        assert placement_seen[capability]["reason"] == (
+            "insufficient_fixed_profile_budget"
+        )
+    for capability in ("templates.scan", "xss.verify", "sqli.verify"):
+        assert result["canonical_capabilities"][capability]["receipt"] == {}
     assert result["network_discovery"]["status"] == "success"
     endpoint_manifest = result["discovery"]["endpoint_manifest"]
     assert endpoint_manifest["schema_version"] == "endpoint-manifest/v1"
@@ -980,12 +999,9 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     )
     assert stage_execution["stages"][6]["capability_names"] == []
     verification = result["canonical_candidate_verification"]
-    assert verification["xss"]["verified_count"] == 1
+    assert verification["xss"]["verified_count"] == 0
     assert verification["sqli"]["verified_count"] == 0
-    assert verification["sqli"]["suspected_count"] == 1
-    assert verification["sqli"]["promotion_blocked_reason"] == (
-        "deterministic_differential_missing"
-    )
+    assert verification["sqli"]["suspected_count"] == 0
     assert stage_execution["stages"][7]["capability_names"] == [
         "scan.execute"
     ]
@@ -1284,7 +1300,7 @@ def test_scan_http_uses_same_reserve_before_request_boundary(monkeypatch):
     assert redelivery is False
 
 
-def test_external_scan_tool_reserves_before_process_and_settles_typed_output(
+def test_fixed_external_scan_tool_rejects_incomplete_reservation_before_process(
     monkeypatch,
 ):
     plan, target, options = _authority(enabled=False, network=True)
@@ -1320,8 +1336,11 @@ def test_external_scan_tool_reserves_before_process_and_settles_typed_output(
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
-    stored, redelivery = asyncio.run(
-        worker._execute_reserved_scan_capability(
+    with pytest.raises(
+        worker.ScanCapabilityContractError,
+        match="fixed external capability budget is incomplete",
+    ):
+        asyncio.run(worker._execute_reserved_scan_capability(
             admission=admission,
             execution=execution,
             scan_id="00000000-0000-0000-0000-000000000001",
@@ -1337,24 +1356,10 @@ def test_external_scan_tool_reserves_before_process_and_settles_typed_output(
             scanner_process_payload={"tool_name": "nuclei"},
             scanner_process_runner=process_runner,
             scanner_result_holder=process_result,
-        )
-    )
+        ))
 
-    assert events[:3] == [
-        ("create", "requested"),
-        ("transition", "reserved"),
-        ("transition", "running"),
-    ]
-    assert ("traffic", "running") in events
-    assert events[-1] == ("terminal", "committed")
-    assert stored.record.capability_name == "templates.scan"
-    assert stored.record.actual == {
-        "http_requests": 3,
-        "tool_wall_seconds": 2,
-    }
-    assert stored.receipt["observations"][0]["template_id"] == "example-cve"
-    assert process_result["result"]["status"] == "success"
-    assert redelivery is False
+    assert events == []
+    assert process_result == {}
 
 
 def test_parent_standalone_reuses_verified_placed_discovery_without_traffic(
@@ -1551,7 +1556,9 @@ def _stored_network_capability(
 
 
 def test_template_stage_places_one_reserved_nuclei_result(monkeypatch):
-    _plan, _target, options = _authority(enabled=False, network=True)
+    _plan, _target, options = _authority(
+        enabled=False, network=True, budget=_external_full_budget(),
+    )
     calls = []
 
     async def execute_capability(**kwargs):
@@ -1584,8 +1591,8 @@ def test_template_stage_places_one_reserved_nuclei_result(monkeypatch):
     assert call["capability_name"] == "templates.scan"
     assert call["action_id"] == "deterministic_baseline.templates.scan"
     assert call["reservation_limits"] == {
-        "http_requests": 25,
-        "tool_wall_seconds": 15,
+        "http_requests": 4_000,
+        "tool_wall_seconds": 300,
     }
     assert call["scanner_process_payload"]["execution_target"] == (
         "https://app.example.test/account?id=1"
@@ -1598,7 +1605,9 @@ def test_template_stage_places_one_reserved_nuclei_result(monkeypatch):
 
 
 def test_verify_stage_places_one_reserved_xss_result(monkeypatch):
-    _plan, _target, options = _authority(enabled=False, network=True)
+    _plan, _target, options = _authority(
+        enabled=False, network=True, budget=_external_full_budget(),
+    )
     calls = []
 
     async def execute_capability(**kwargs):
@@ -1632,8 +1641,8 @@ def test_verify_stage_places_one_reserved_xss_result(monkeypatch):
     assert call["capability_name"] == "xss.verify"
     assert call["action_id"].startswith("deterministic_verify.xss.")
     assert call["reservation_limits"] == {
-        "http_requests": 10,
-        "tool_wall_seconds": 6,
+        "http_requests": 400,
+        "tool_wall_seconds": 120,
     }
     assert call["scanner_process_payload"]["tool_name"] == "dalfox"
     assert call["scanner_process_payload"]["execution_target"] == (
@@ -1673,7 +1682,9 @@ def test_verify_stage_never_runs_without_active_permission(monkeypatch):
 
 
 def test_verify_stage_places_one_reserved_sqli_result(monkeypatch):
-    _plan, _target, options = _authority(enabled=False, network=True)
+    _plan, _target, options = _authority(
+        enabled=False, network=True, budget=_external_full_budget(),
+    )
     calls = []
 
     async def execute_capability(**kwargs):
@@ -1705,8 +1716,8 @@ def test_verify_stage_places_one_reserved_sqli_result(monkeypatch):
     assert call["capability_name"] == "sqli.verify"
     assert call["action_id"].startswith("deterministic_verify.sqli.")
     assert call["reservation_limits"] == {
-        "http_requests": 10,
-        "tool_wall_seconds": 6,
+        "http_requests": 900,
+        "tool_wall_seconds": 300,
     }
     assert call["scanner_process_payload"]["tool_name"] == "sqlmap"
     assert call["scanner_process_payload"]["execution_target"] == (
@@ -1781,7 +1792,7 @@ def test_recon_stage_places_one_reserved_http_fingerprint(monkeypatch):
     assert call["capability_name"] == "web.probe"
     assert call["action_id"] == "deterministic_recon.web.probe"
     assert call["reservation_limits"] == {
-        "http_requests": 4,
+        "http_requests": 1,
         "tool_wall_seconds": 30,
     }
     assert call["scanner_process_payload"]["tool_name"] == "httpx"
@@ -2400,7 +2411,9 @@ def test_authz_proof_reserves_content_free_binding_before_differential(
 def test_placed_http_tools_bind_primary_credentials_without_public_secrets(
     monkeypatch,
 ):
-    _plan, _target, options = _authority(enabled=False, network=True)
+    _plan, _target, options = _authority(
+        enabled=False, network=True, budget=_external_full_budget(),
+    )
     secret = "Bearer external-tool-worker-private"
     options = {
         **options,

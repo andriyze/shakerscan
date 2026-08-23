@@ -16,7 +16,10 @@ class PinnedSocksProxy:
     resolves that name: after validating the exact host and port, it connects to the frozen IP.
     """
 
-    def __init__(self, *, hostname: str, pinned_address: str, port: int) -> None:
+    def __init__(
+        self, *, hostname: str, pinned_address: str, port: int,
+        max_connections: int | None = None,
+    ) -> None:
         self.hostname = str(hostname or "").strip().lower().rstrip(".")
         self.pinned_address = str(ipaddress.ip_address(str(pinned_address or "").strip()))
         self.port = int(port)
@@ -24,8 +27,17 @@ class PinnedSocksProxy:
             raise ValueError("pinned SOCKS proxy requires a hostname")
         if not 1 <= self.port <= 65535:
             raise ValueError("pinned SOCKS proxy requires a valid port")
+        self.max_connections = (
+            None if max_connections is None else max(1, int(max_connections))
+        )
         self._server: asyncio.AbstractServer | None = None
         self._connections: set[asyncio.Task[Any]] = set()
+        self.connection_attempts = 0
+        self.connections_opened = 0
+        self.connections_rejected = 0
+        self.bytes_to_target = 0
+        self.bytes_from_target = 0
+        self.limit_exceeded = asyncio.Event()
 
     @property
     def proxy_url(self) -> str:
@@ -57,6 +69,15 @@ class PinnedSocksProxy:
         await self.close()
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.connection_attempts += 1
+        if (
+            self.max_connections is not None
+            and self.connection_attempts > self.max_connections
+        ):
+            self.connections_rejected += 1
+            self.limit_exceeded.set()
+            writer.close()
+            return
         task = asyncio.create_task(self._handle(reader, writer))
         self._connections.add(task)
         task.add_done_callback(self._connections.discard)
@@ -110,11 +131,21 @@ class PinnedSocksProxy:
             except (OSError, asyncio.TimeoutError):
                 await self._reply(writer, 5)
                 return
+            self.connections_opened += 1
             await self._reply(writer, 0)
 
-            async def relay(source: asyncio.StreamReader, target: asyncio.StreamWriter) -> None:
+            async def relay(
+                source: asyncio.StreamReader,
+                target: asyncio.StreamWriter,
+                *,
+                toward_target: bool,
+            ) -> None:
                 try:
                     while chunk := await source.read(65536):
+                        if toward_target:
+                            self.bytes_to_target += len(chunk)
+                        else:
+                            self.bytes_from_target += len(chunk)
                         target.write(chunk)
                         await target.drain()
                 except (OSError, ConnectionError, asyncio.CancelledError):
@@ -123,8 +154,12 @@ class PinnedSocksProxy:
                     with contextlib.suppress(OSError):
                         target.close()
 
-            left = asyncio.create_task(relay(reader, upstream_writer))
-            right = asyncio.create_task(relay(upstream_reader, writer))
+            left = asyncio.create_task(
+                relay(reader, upstream_writer, toward_target=True)
+            )
+            right = asyncio.create_task(
+                relay(upstream_reader, writer, toward_target=False)
+            )
             await asyncio.gather(left, right, return_exceptions=True)
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, UnicodeError, ValueError, OSError):
             pass

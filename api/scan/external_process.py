@@ -1,0 +1,228 @@
+"""Fail-closed wire-budget contracts for registry-owned external processes.
+
+An external command is executable only when its immutable process plan carries a
+command-derived upper bound that fits the already-reserved durable budget.  The
+post-execution receipt is intentionally content-free: it proves the authority
+used to launch the process without persisting argv, headers, or environment
+values that can contain worker-only credentials.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import re
+from typing import Any, Mapping
+
+
+PROCESS_PLAN_SCHEMA = "enforced-process-plan/v1"
+PROCESS_BUDGET_PROOF_SCHEMA = "external-process-budget-proof/v1"
+PROCESS_ENFORCEMENT_SCHEMA = "external-process-enforcement/v1"
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_BUDGET_DIMENSIONS = frozenset({
+    "http_requests",
+    "state_changing_requests",
+    "browser_actions",
+    "tcp_ports_attempted",
+    "hosts_attempted",
+    "tool_wall_seconds",
+})
+_PROOF_METHODS = frozenset({
+    "exact_request_count",
+    "rate_time_upper_bound",
+    "exact_wordlist",
+    "fixed_conservative_profile",
+    "exact_port_set",
+    "port_retry_upper_bound",
+})
+
+
+class ExternalProcessContractError(ValueError):
+    """A process cannot prove that its wire behavior fits its reservation."""
+
+
+def _positive_budget(value: Mapping[str, Any], *, label: str) -> dict[str, int]:
+    normalized: dict[str, int] = {}
+    for raw_name, raw_amount in dict(value).items():
+        name = str(raw_name or "").strip()
+        if name not in _BUDGET_DIMENSIONS:
+            raise ExternalProcessContractError(
+                f"{label} uses unknown budget dimension: {name}"
+            )
+        if isinstance(raw_amount, bool):
+            raise ExternalProcessContractError(
+                f"{label} budget must contain integers"
+            )
+        try:
+            amount = int(raw_amount)
+        except (TypeError, ValueError) as exc:
+            raise ExternalProcessContractError(
+                f"{label} budget must contain integers"
+            ) from exc
+        if amount <= 0:
+            raise ExternalProcessContractError(
+                f"{label} budget must contain positive amounts"
+            )
+        normalized[name] = amount
+    if not normalized:
+        raise ExternalProcessContractError(f"{label} budget is empty")
+    return normalized
+
+
+def _wire_reservation(value: Mapping[str, Any]) -> dict[str, int]:
+    """Select process-owned dimensions from a broader Scan/Hunt ledger hold."""
+    selected = {
+        str(name): amount for name, amount in dict(value).items()
+        if str(name) in _BUDGET_DIMENSIONS
+    }
+    return _positive_budget(selected, label="process reservation")
+
+
+def _canonical_digest(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class EnforcedProcessPlan:
+    """One immutable, validated command and its pre-launch hard ceiling."""
+
+    tool_name: str
+    binary: str
+    argv: tuple[str, ...]
+    env: tuple[tuple[str, str], ...]
+    timeout_ms: int
+    hard_budget: tuple[tuple[str, int], ...]
+    budget_proof: Mapping[str, Any]
+    parser_version: str
+
+    def __post_init__(self) -> None:
+        tool = str(self.tool_name or "").strip().lower()
+        binary = str(self.binary or "").strip()
+        parser = str(self.parser_version or "").strip()
+        if not tool or not binary or not parser:
+            raise ExternalProcessContractError(
+                "process plan requires tool, binary, and parser identities"
+            )
+        if not self.argv or any("\x00" in str(item) for item in self.argv):
+            raise ExternalProcessContractError("process argv is empty or invalid")
+        if int(self.timeout_ms) < 1_000:
+            raise ExternalProcessContractError("process timeout must be at least 1000ms")
+        names = [str(name) for name, _value in self.env]
+        if len(names) != len(set(names)) or any(
+            not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name) for name in names
+        ):
+            raise ExternalProcessContractError("process environment overrides are invalid")
+        hard = _positive_budget(dict(self.hard_budget), label="process hard")
+        if int(self.timeout_ms) > hard.get("tool_wall_seconds", 0) * 1_000:
+            raise ExternalProcessContractError(
+                "process timeout exceeds its hard wall budget"
+            )
+        proof = dict(self.budget_proof)
+        if proof.get("schema_version") != PROCESS_BUDGET_PROOF_SCHEMA:
+            raise ExternalProcessContractError("process budget proof schema is invalid")
+        if str(proof.get("tool_name") or "").strip().lower() != tool:
+            raise ExternalProcessContractError("process budget proof tool mismatch")
+        mode = str(proof.get("accounting_mode") or "")
+        if mode not in {"exact", "conservative"}:
+            raise ExternalProcessContractError("process accounting mode is invalid")
+        method = str(proof.get("method") or "")
+        if method not in _PROOF_METHODS:
+            raise ExternalProcessContractError("process proof method is invalid")
+        if _positive_budget(
+            proof.get("upper_bound") if isinstance(proof.get("upper_bound"), Mapping) else {},
+            label="process proof upper bound",
+        ) != hard:
+            raise ExternalProcessContractError(
+                "process proof upper bound does not match its hard budget"
+            )
+        object.__setattr__(self, "tool_name", tool)
+        object.__setattr__(self, "binary", binary)
+        object.__setattr__(self, "parser_version", parser)
+        object.__setattr__(self, "hard_budget", tuple(sorted(hard.items())))
+        object.__setattr__(self, "budget_proof", proof)
+
+    @property
+    def hard_budget_dict(self) -> dict[str, int]:
+        return dict(self.hard_budget)
+
+    @property
+    def digest(self) -> str:
+        # Values can contain credentials. Only the one-way digest leaves the
+        # worker; neither argv nor env is placed in a durable receipt.
+        return _canonical_digest({
+            "schema_version": PROCESS_PLAN_SCHEMA,
+            "tool_name": self.tool_name,
+            "binary": self.binary,
+            "argv": list(self.argv),
+            "env": list(self.env),
+            "timeout_ms": int(self.timeout_ms),
+            "hard_budget": self.hard_budget_dict,
+            "budget_proof": dict(self.budget_proof),
+            "parser_version": self.parser_version,
+        })
+
+    def validate_reservation(self, reserved: Mapping[str, Any]) -> None:
+        reservation = _wire_reservation(reserved)
+        shortages = sorted(
+            name for name, amount in self.hard_budget
+            if reservation.get(name, 0) < amount
+        )
+        if shortages:
+            raise ExternalProcessContractError(
+                "process hard ceiling exceeds reservation: " + ",".join(shortages)
+            )
+
+    def enforcement_receipt(self) -> dict[str, Any]:
+        proof = dict(self.budget_proof)
+        return {
+            "schema_version": PROCESS_ENFORCEMENT_SCHEMA,
+            "tool_name": self.tool_name,
+            "process_plan_digest": self.digest,
+            "hard_budget": self.hard_budget_dict,
+            "accounting_mode": proof["accounting_mode"],
+            "proof_method": proof["method"],
+            "parser_version": self.parser_version,
+        }
+
+
+def validate_enforcement_receipt(
+    receipt: Mapping[str, Any], *, reserved: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the content-free proof returned by the worker process runner."""
+    value = dict(receipt)
+    if value.get("schema_version") != PROCESS_ENFORCEMENT_SCHEMA:
+        raise ExternalProcessContractError("process enforcement receipt schema is invalid")
+    if not _DIGEST_RE.fullmatch(str(value.get("process_plan_digest") or "")):
+        raise ExternalProcessContractError("process plan digest is invalid")
+    if str(value.get("accounting_mode") or "") not in {"exact", "conservative"}:
+        raise ExternalProcessContractError("process enforcement accounting mode is invalid")
+    if str(value.get("proof_method") or "") not in _PROOF_METHODS:
+        raise ExternalProcessContractError("process enforcement proof method is invalid")
+    hard = _positive_budget(
+        value.get("hard_budget") if isinstance(value.get("hard_budget"), Mapping) else {},
+        label="process enforcement hard",
+    )
+    reservation = _wire_reservation(reserved)
+    shortages = sorted(
+        name for name, amount in hard.items()
+        if reservation.get(name, 0) < amount
+    )
+    if shortages:
+        raise ExternalProcessContractError(
+            "process enforcement exceeds reservation: " + ",".join(shortages)
+        )
+    value["hard_budget"] = hard
+    return value
+
+
+# Tools whose fixed command cannot honestly be scaled below the registry profile.
+# Dynamic builders for the other tools prove their reduced command ceiling.
+FIXED_PROFILE_CAPABILITIES = frozenset({
+    "templates.scan",
+    "xss.verify",
+    "sqli.verify",
+})

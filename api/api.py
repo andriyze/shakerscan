@@ -34644,6 +34644,7 @@ async def _enqueue_agent_scanner_tool(
     timeout_ms: int,
     pinned_address: str,
     authorized_addresses: list[str],
+    reserved_budget: Mapping[str, int],
     oob_interactsh_server: str | None = None,
     oob_interactsh_token: str | None = None,
 ) -> dict[str, Any]:
@@ -34666,6 +34667,9 @@ async def _enqueue_agent_scanner_tool(
         "timeout_ms": timeout_ms,
         "pinned_address": pinned_address,
         "authorized_addresses": authorized_addresses[:16],
+        "_reserved_budget": {
+            str(key): int(value) for key, value in reserved_budget.items()
+        },
         "oob_interactsh_server": oob_interactsh_server,
         "oob_interactsh_token": oob_interactsh_token,
         "submitted_at": utc_now_iso(),
@@ -34955,6 +34959,9 @@ async def _agent_tool_run_tool(
             timeout_ms=timeout_ms,
             pinned_address=pinned_address,
             authorized_addresses=frozen_addresses,
+            reserved_budget=dict(
+                agent_tools.CAPABILITY_REGISTRY.for_legacy_tool(name).budget_cost
+            ),
             oob_interactsh_server=oob_interactsh_server,
             oob_interactsh_token=oob_interactsh_token,
         )

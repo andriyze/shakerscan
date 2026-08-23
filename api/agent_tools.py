@@ -18,12 +18,18 @@ from __future__ import annotations
 import hashlib
 import json
 import ipaddress
+import math
 import os
 import re
 import urllib.parse
 from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
+from scan.external_process import (
+    EnforcedProcessPlan,
+    ExternalProcessContractError,
+    PROCESS_BUDGET_PROOF_SCHEMA,
+)
 
 try:
     from scanner_tools.url_redaction import redact_url
@@ -177,10 +183,11 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 
 
 def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
-    # Passive fingerprint: status, title, tech, redirect chain. No tunables.
+    # Passive fingerprint: exactly one URL, with fallback and redirects disabled.
     return ["-u", url, "-status-code", "-title", "-tech-detect", "-web-server",
             "-json", "-silent", "-timeout", "10", "-no-color", "-no-stdin",
-            "-rate-limit", "2", "-threads", "1", "-no-fallback-scheme"]
+            "-retries", "0", "-rate-limit", "1", "-threads", "1",
+            "-no-fallback-scheme"]
 
 
 def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
@@ -216,13 +223,13 @@ _AGENT_FFUF_WORDLISTS: dict[str, str] = {
 
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
-    # bounded: depth 2, 45s wall cap, 50 req/s, field-scope fqdn (same HOST only — never crosses
+    # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
     # origin), 8s per-request timeout, URL-only output. Katana's JSONL records embed raw
     # request/response bodies and can exhaust the worker output cap after only a few pages.
     # The compact stream is sufficient for route discovery and keeps planner evidence bounded.
     return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
-            "-timeout", "8", "-disable-redirects", "-silent"]
+            "-timeout", "8", "-retry", "0", "-disable-redirects", "-silent"]
 
 
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
@@ -248,7 +255,7 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     # payloads), level/risk 2, no crawl, output to a scratch dir the worker owns (replaced
     # per-job by bind_scanner_runtime_paths); findings surface in stdout ("is vulnerable").
     return ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
-            "--threads", "2", "--timeout", "8", "--retries", "1", "--delay", "1",
+            "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             "--smart", "--disable-coloring", "--answers", "redirect=N",
             "--user-agent", "shakerscan-sqlmap/1.0"]
@@ -256,14 +263,15 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
 
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
-    # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Auto-calibrated
-    # soft-404 filtering (-ac), 40s wall cap, 5 req/s. FUZZ appended to the same-origin base path.
+    # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Automatic
+    # calibration stays off because it adds requests outside the exact wordlist count. The
+    # authoritative worker replaces this source with an owner-only exact-size subset.
     wordlist = _AGENT_FFUF_WORDLISTS.get(
         str(opts.get("wordlist") or "").strip().lower(), _AGENT_FFUF_WORDLISTS["common"]
     )
     base = url.split("?", 1)[0].rstrip("/")
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
-            "-mc", "200,204,301,302,307,401,403,405", "-ac",
+            "-mc", "200,204,301,302,307,401,403,405",
             "-t", "5", "-rate", "5", "-timeout", "8", "-maxtime", "40", "-s", "-json"]
 
 
@@ -277,7 +285,7 @@ def _tmpl_nmap(url: str, opts: dict[str, Any]) -> list[str]:
     host = str(parsed.hostname or "")
     port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
     return ["-p", str(port), "-sV", "-sT", "--version-light", "--host-timeout", "60s",
-            "--max-retries", "2", "-T3", "-Pn", "-oN", "-", host]
+            "--max-retries", "0", "-T3", "-Pn", "-oN", "-", host]
 
 
 def _tmpl_naabu(url: str, opts: dict[str, Any]) -> list[str]:
@@ -573,6 +581,201 @@ def build_scanner_argv(
         argv,
         int(template["default_timeout_ms"]),
     )
+
+
+def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
+    try:
+        index = argv.index(flag)
+        argv[index + 1] = str(value)
+    except (ValueError, IndexError) as exc:
+        raise AgentToolError(f"scanner command is missing required flag: {flag}") from exc
+
+
+def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
+    """Resolve one bundled FFUF source path; callers can never supply a filesystem path."""
+    selected = str(dict(options or {}).get("wordlist") or "").strip().lower()
+    return _AGENT_FFUF_WORDLISTS.get(selected, _AGENT_FFUF_WORDLISTS["common"])
+
+
+def build_enforced_scanner_plan(
+    name: str,
+    url: str,
+    options: dict[str, Any],
+    *,
+    reserved_budget: Mapping[str, Any],
+    pinned_address: str | None = None,
+    pinned_proxy_url: str | None = None,
+    oob_interactsh_server: str | None = None,
+    oob_interactsh_token: str | None = None,
+    trusted_headers: Mapping[str, Any] | None = None,
+    runtime_paths: Mapping[str, Any] | None = None,
+) -> EnforcedProcessPlan:
+    """Build and prove a command whose worst-case wire use fits ``reserved_budget``.
+
+    This is the sole authoritative builder used by worker process creation. The
+    older tuple builder remains a compatibility renderer for inspection/tests;
+    it is not sufficient authority to launch a process.
+    """
+    scanner = str(name or "").strip().lower()
+    reservation: dict[str, int] = {}
+    for raw_name, raw_amount in dict(reserved_budget or {}).items():
+        try:
+            amount = int(raw_amount)
+        except (TypeError, ValueError) as exc:
+            raise AgentToolError("scanner reservation must contain integers") from exc
+        if amount > 0:
+            reservation[str(raw_name)] = amount
+    wall = int(reservation.get("tool_wall_seconds") or 0)
+    if wall < 1:
+        raise AgentToolError("scanner reservation has no wall-clock capacity")
+    runtime = dict(runtime_paths or {})
+    internal_options = dict(options or {})
+    if scanner == "ffuf" and runtime.get("ffuf_wordlist"):
+        internal_options["wordlist"] = "common"
+
+    binary, argv, template_timeout_ms = build_scanner_argv(
+        scanner,
+        url,
+        internal_options,
+        pinned_address=pinned_address,
+        pinned_proxy_url=pinned_proxy_url,
+        # The executable contract is self-contained. OOB traffic cannot be
+        # counted by the target-bound limiter, so it is always disabled here.
+        oob_interactsh_server=None,
+        oob_interactsh_token=None,
+        trusted_headers=trusted_headers,
+    )
+    timeout_seconds = max(1, min(wall, int(math.ceil(template_timeout_ms / 1000))))
+    timeout_ms = timeout_seconds * 1_000
+    proof_inputs: dict[str, Any]
+
+    if scanner == "httpx":
+        if reservation.get("http_requests", 0) < 1:
+            raise AgentToolError("httpx requires one reserved HTTP request")
+        hard = {"http_requests": 1, "tool_wall_seconds": timeout_seconds}
+        mode, method = "exact", "exact_request_count"
+        proof_inputs = {
+            "targets": 1, "redirects": 0, "fallbacks": 0, "retries": 0,
+        }
+    elif scanner == "katana":
+        http = int(reservation.get("http_requests") or 0)
+        duration = min(30, wall, max(0, http - 1))
+        if duration < 1:
+            raise AgentToolError("katana requires two reserved HTTP requests")
+        _replace_argv_value(argv, "-rate-limit", 1)
+        _replace_argv_value(argv, "-concurrency", 1)
+        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        timeout_seconds = duration
+        timeout_ms = duration * 1_000
+        # One initial token plus one token for each elapsed second.
+        hard = {"http_requests": duration + 1, "tool_wall_seconds": duration}
+        mode, method = "conservative", "rate_time_upper_bound"
+        proof_inputs = {
+            "rate_per_second": 1, "duration_seconds": duration,
+            "startup_burst": 1, "redirects": 0, "form_fill": False,
+            "depth": 2, "concurrency": 1,
+        }
+    elif scanner == "ffuf":
+        wordlist_path = str(runtime.get("ffuf_wordlist") or "")
+        try:
+            entry_count = int(runtime.get("ffuf_word_count") or 0)
+        except (TypeError, ValueError) as exc:
+            raise AgentToolError("ffuf bounded wordlist count is invalid") from exc
+        if (
+            not wordlist_path
+            or not os.path.isabs(wordlist_path)
+            or entry_count < 1
+            or entry_count > int(reservation.get("http_requests") or 0)
+        ):
+            raise AgentToolError("ffuf requires a bounded worker-owned wordlist")
+        _replace_argv_value(argv, "-w", wordlist_path)
+        _replace_argv_value(argv, "-t", 1)
+        _replace_argv_value(argv, "-rate", 1)
+        maxtime = min(40, wall)
+        _replace_argv_value(argv, "-maxtime", maxtime)
+        timeout_seconds = maxtime
+        timeout_ms = maxtime * 1_000
+        hard = {"http_requests": entry_count, "tool_wall_seconds": maxtime}
+        mode, method = "exact", "exact_wordlist"
+        proof_inputs = {
+            "entries": entry_count, "auto_calibration_requests": 0,
+            "redirects": 0, "recursion": False, "threads": 1,
+        }
+    elif scanner == "nuclei":
+        hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
+        timeout_seconds, timeout_ms = 300, 300_000
+        mode, method = "conservative", "fixed_conservative_profile"
+        proof_inputs = {
+            "rate_per_second": 10, "duration_seconds": 300,
+            "startup_and_engine_overhead": 1_000,
+            "retries": 0, "redirects": 0,
+            "public_oob": False,
+        }
+    elif scanner == "dalfox":
+        hard = {"http_requests": 400, "tool_wall_seconds": 120}
+        timeout_seconds, timeout_ms = 120, 120_000
+        mode, method = "conservative", "fixed_conservative_profile"
+        proof_inputs = {
+            "targets": 1, "workers": 3, "delay_ms": 1_000,
+            "headless": False, "parameter_mining": False, "blind_oob": False,
+        }
+    elif scanner == "sqlmap":
+        sqlmap_output_dir = str(runtime.get("sqlmap_output_dir") or "")
+        argv = bind_scanner_runtime_paths(
+            "sqlmap", argv, scratch_dir=sqlmap_output_dir,
+        )
+        hard = {"http_requests": 900, "tool_wall_seconds": 300}
+        timeout_seconds, timeout_ms = 300, 300_000
+        mode, method = "conservative", "fixed_conservative_profile"
+        proof_inputs = {
+            "targets": 1, "candidate_requests": 1, "crawl_depth": 0,
+            "retries": 0, "threads": 1, "techniques": "BEUT",
+            "shell": False, "file_read": False, "dump": False,
+        }
+        _replace_argv_value(argv, "--threads", 1)
+        _replace_argv_value(argv, "--retries", 0)
+    elif scanner == "nmap":
+        if reservation.get("tcp_ports_attempted", 0) < 1:
+            raise AgentToolError("nmap requires one reserved TCP port")
+        hard = {"tcp_ports_attempted": 1, "tool_wall_seconds": timeout_seconds}
+        mode, method = "exact", "exact_port_set"
+        proof_inputs = {"targets": 1, "ports": 1, "scripts": 0}
+    elif scanner == "naabu":
+        if reservation.get("tcp_ports_attempted", 0) < 200:
+            raise AgentToolError("naabu top-100 profile requires 200 TCP-attempt units")
+        hard = {"tcp_ports_attempted": 200, "tool_wall_seconds": timeout_seconds}
+        mode, method = "conservative", "port_retry_upper_bound"
+        proof_inputs = {"targets": 1, "ports": 100, "attempts_per_port": 2}
+    else:
+        raise AgentToolError(f"scanner has no wire-budget proof builder: {scanner}")
+
+    proof = {
+        "schema_version": PROCESS_BUDGET_PROOF_SCHEMA,
+        "tool_name": scanner,
+        "accounting_mode": mode,
+        "method": method,
+        "inputs": proof_inputs,
+        "upper_bound": hard,
+    }
+    try:
+        parser_version = str(CAPABILITY_REGISTRY.for_legacy_tool(scanner).output_schema)
+    except KeyError:
+        parser_version = "scanner-output/v1"
+    try:
+        plan = EnforcedProcessPlan(
+            tool_name=scanner,
+            binary=binary,
+            argv=tuple(argv),
+            env=(("NO_COLOR", "1"),),
+            timeout_ms=timeout_ms,
+            hard_budget=tuple(sorted(hard.items())),
+            budget_proof=proof,
+            parser_version=parser_version,
+        )
+        plan.validate_reservation(reservation)
+    except ExternalProcessContractError as exc:
+        raise AgentToolError(str(exc)) from exc
+    return plan
 
 
 def bind_scanner_runtime_paths(

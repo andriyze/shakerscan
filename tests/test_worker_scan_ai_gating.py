@@ -2977,6 +2977,7 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
         "timeout_ms": 30_000,
         "pinned_address": "203.0.113.7",
         "authorized_addresses": ["203.0.113.7"],
+        "_reserved_budget": {"http_requests": 1, "tool_wall_seconds": 30},
     }))
 
     assert captured["cmd"][0] == "httpx"
@@ -2992,6 +2993,27 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
     assert result["settlement"]["mode"] == "exact"
     assert result["settlement"]["actual"] == 1
     assert "secret" not in json.dumps(result)
+
+
+def test_ffuf_worker_materializes_exact_owner_only_wordlist(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    source.write_text("admin\n# comment\napi\nadmin\nhealth\n", encoding="utf-8")
+    monkeypatch.setitem(
+        worker.agent_tools._AGENT_FFUF_WORDLISTS, "common", str(source),
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+
+    path, count = worker._materialize_bounded_ffuf_wordlist(
+        options={"wordlist": "common"},
+        reservation={"http_requests": 2},
+        scratch_dir=str(scratch),
+    )
+
+    materialized = Path(path)
+    assert count == 2
+    assert materialized.read_text(encoding="utf-8") == "admin\napi\n"
+    assert materialized.stat().st_mode & 0o777 == 0o600
 
 
 def test_nuclei_request_accounting_uses_stderr_stats_without_exposing_them():
@@ -3110,6 +3132,7 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
         "timeout_ms": 30_000,
         "pinned_address": "203.0.113.7",
         "authorized_addresses": ["203.0.113.7"],
+        "_reserved_budget": {"http_requests": 1, "tool_wall_seconds": 30},
     }))
 
     result = json.loads(redis.values["agent_tool_result:agent-job-output-limit"])

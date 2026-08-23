@@ -191,7 +191,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "web.probe", "Passive HTTP fingerprint of a target-bound URL.",
             "external_tool", "read_only", _HTTP_TARGETS, "httpx", "1",
-            None, {"http_requests": 4, "tool_wall_seconds": 30},
+            None, {"http_requests": 1, "tool_wall_seconds": 30},
             {"network_reachability": True, "binary": "httpx"},
             _http_principal_schema(),
             "httpx-json/v1", ("http_observation",), "httpx", "httpx", 30_000,

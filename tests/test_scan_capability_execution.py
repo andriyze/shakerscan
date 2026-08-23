@@ -163,10 +163,7 @@ def test_network_allocation_degrades_to_port_only_when_budget_cannot_fingerprint
 
 
 def test_template_allocation_preserves_budget_for_the_baseline_scan():
-    assert scan_template_capability_allocation(_budget()) == {
-        "http_requests": 25,
-        "tool_wall_seconds": 15,
-    }
+    assert scan_template_capability_allocation(_budget()) is None
     assert scan_template_capability_allocation(
         _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
     ) == {
@@ -180,7 +177,7 @@ def test_template_allocation_preserves_budget_for_the_baseline_scan():
 
 def test_web_probe_allocation_preserves_later_stage_capacity():
     assert scan_web_probe_capability_allocation(_budget()) == {
-        "http_requests": 4,
+        "http_requests": 1,
         "tool_wall_seconds": 30,
     }
     assert scan_web_probe_capability_allocation(
@@ -229,10 +226,7 @@ def test_content_discovery_allocation_preserves_the_scan_backbone():
 
 
 def test_xss_verification_allocation_preserves_the_scan_backbone():
-    assert scan_xss_verification_capability_allocation(_budget()) == {
-        "http_requests": 10,
-        "tool_wall_seconds": 6,
-    }
+    assert scan_xss_verification_capability_allocation(_budget()) is None
     assert scan_xss_verification_capability_allocation(
         _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
     ) == {
@@ -242,15 +236,12 @@ def test_xss_verification_allocation_preserves_the_scan_backbone():
 
 
 def test_sqli_verification_allocation_preserves_the_scan_backbone():
-    assert scan_sqli_verification_capability_allocation(_budget()) == {
-        "http_requests": 10,
-        "tool_wall_seconds": 6,
-    }
+    assert scan_sqli_verification_capability_allocation(_budget()) is None
     assert scan_sqli_verification_capability_allocation(
         _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
     ) == {
         "http_requests": 900,
-        "tool_wall_seconds": 270,
+        "tool_wall_seconds": 300,
     }
 
 

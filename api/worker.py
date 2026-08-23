@@ -11826,7 +11826,7 @@ async def _execute_scan_xss_verification_capability(
     )
     if allocation is None:
         return _skipped_scan_xss_verification_summary(
-            "insufficient_stage_budget"
+            "insufficient_fixed_profile_budget"
         )
 
     target = execution.target_binding
@@ -12229,7 +12229,7 @@ async def _execute_scan_sqli_verification_capability(
     )
     if allocation is None:
         return _skipped_scan_sqli_verification_summary(
-            "insufficient_stage_budget"
+            "insufficient_fixed_profile_budget"
         )
 
     target = execution.target_binding
@@ -12311,7 +12311,9 @@ async def _execute_scan_template_capability(
         execution.payload()["execution_budget"]
     )
     if allocation is None:
-        return _skipped_scan_template_summary("insufficient_stage_budget")
+        return _skipped_scan_template_summary(
+            "insufficient_fixed_profile_budget"
+        )
 
     target = execution.target_binding
     execution_target = scan_external_execution_target(
@@ -18828,6 +18830,50 @@ def _agent_scanner_request_settlement(
     return agent_tools.scanner_request_settlement(normalized, settlement_input)
 
 
+def _materialize_bounded_ffuf_wordlist(
+    *, options: Mapping[str, Any], reservation: Mapping[str, Any], scratch_dir: str,
+) -> tuple[str, int]:
+    """Create the exact owner-only wordlist whose entries equal FFUF's wire ceiling."""
+    try:
+        request_limit = max(0, int(reservation.get("http_requests") or 0))
+    except (TypeError, ValueError) as exc:
+        raise agent_tools.AgentToolError("ffuf request reservation is invalid") from exc
+    if request_limit < 1:
+        raise agent_tools.AgentToolError("ffuf has no reserved requests")
+    source = Path(agent_tools.scanner_ffuf_wordlist_source(options))
+    selected: list[str] = []
+    seen: set[str] = set()
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise agent_tools.AgentToolError("ffuf bundled wordlist is unavailable") from exc
+    for raw in lines:
+        entry = raw.strip()
+        if (
+            not entry
+            or entry.startswith("#")
+            or len(entry.encode("utf-8")) > 512
+            or any(character in entry for character in "\x00\r\n")
+            or entry in seen
+        ):
+            continue
+        seen.add(entry)
+        selected.append(entry)
+        if len(selected) >= request_limit:
+            break
+    if not selected:
+        raise agent_tools.AgentToolError("ffuf bundled wordlist has no safe entries")
+    destination = Path(scratch_dir) / "bounded-wordlist.txt"
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(selected) + "\n")
+    return str(destination), len(selected)
+
+
 async def _execute_agent_scanner_process(
     job_data: Mapping[str, Any],
     *,
@@ -18850,6 +18896,7 @@ async def _execute_agent_scanner_process(
     read_streams: asyncio.Task[tuple[bytes, bytes]] | None = None
     process_started = False
     execution_uncertain = False
+    process_enforcement: dict[str, Any] = {}
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
     registered_target = str(job_data.get("registered_target") or "")
@@ -18877,35 +18924,67 @@ async def _execute_agent_scanner_process(
         target_port = parsed_execution.port or (
             443 if parsed_execution.scheme.lower() == "https" else 80
         )
+        reserved_budget = (
+            dict(job_data.get("_reserved_budget") or {})
+            if isinstance(job_data.get("_reserved_budget"), Mapping)
+            else {}
+        )
+        if not reserved_budget:
+            raise agent_tools.AgentToolError(
+                "scanner process requires its durable reserved budget"
+            )
+        connection_ceiling = max(
+            1,
+            int(reserved_budget.get("http_requests") or 0),
+            int(reserved_budget.get("tcp_ports_attempted") or 0),
+        )
         pinned_proxy = await PinnedSocksProxy(
             hostname=str(parsed_execution.hostname or ""),
             pinned_address=pinned_address,
             port=target_port,
+            max_connections=connection_ceiling,
         ).start()
-        binary, argv, template_timeout_ms = agent_tools.build_scanner_argv(
+        runtime_paths: dict[str, Any] = {}
+        if name in {"ffuf", "sqlmap"}:
+            scratch_dir = tempfile.mkdtemp(
+                prefix=f"shakerscan-{name}-{job_id[:8]}-"
+            )
+            os.chmod(scratch_dir, 0o700)
+        if name == "ffuf":
+            wordlist_path, word_count = _materialize_bounded_ffuf_wordlist(
+                options=options,
+                reservation=reserved_budget,
+                scratch_dir=str(scratch_dir),
+            )
+            runtime_paths.update({
+                "ffuf_wordlist": wordlist_path,
+                "ffuf_word_count": word_count,
+            })
+        if name == "sqlmap":
+            runtime_paths["sqlmap_output_dir"] = str(scratch_dir)
+        process_plan = agent_tools.build_enforced_scanner_plan(
             name,
             execution_target,
             options,
+            reserved_budget=reserved_budget,
             pinned_address=pinned_address,
             pinned_proxy_url=pinned_proxy.proxy_url,
             oob_interactsh_server=job_data.get("oob_interactsh_server"),
             oob_interactsh_token=job_data.get("oob_interactsh_token"),
             trusted_headers=job_data.get("trusted_headers"),
+            runtime_paths=runtime_paths,
         )
-        if name == "sqlmap":
-            scratch_dir = tempfile.mkdtemp(
-                prefix=f"shakerscan-sqlmap-{job_id[:8]}-"
-            )
-        argv = agent_tools.bind_scanner_runtime_paths(
-            name,
-            argv,
-            scratch_dir=scratch_dir,
-        )
-        requested_timeout = int(job_data.get("timeout_ms") or template_timeout_ms)
-        timeout_ms = max(1_000, min(template_timeout_ms, requested_timeout))
+        binary = process_plan.binary
+        argv = list(process_plan.argv)
+        process_enforcement = process_plan.enforcement_receipt()
+        requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
+        timeout_ms = max(1_000, min(process_plan.timeout_ms, requested_timeout))
+        process_environment = dict(os.environ)
+        process_environment.update(dict(process_plan.env))
         proc = await asyncio.create_subprocess_exec(
             binary,
             *argv,
+            env=process_environment,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -18934,6 +19013,11 @@ async def _execute_agent_scanner_process(
                 break
             if overflow.is_set():
                 status, error = "failed", "output_limit_exceeded"
+                _terminate_agent_tool_process_group(proc)
+                break
+            proxy_limit = getattr(pinned_proxy, "limit_exceeded", None)
+            if proxy_limit is not None and proxy_limit.is_set():
+                status, error = "failed", "connection_limit_exceeded"
                 _terminate_agent_tool_process_group(proc)
                 break
             if loop.time() >= deadline:
@@ -19029,6 +19113,29 @@ async def _execute_agent_scanner_process(
     ]
     record_count = int(typed_output.get("record_count") or 0)
     finished_at = datetime.now(timezone.utc)
+    network_telemetry = {
+        "connections_attempted": (
+            int(getattr(pinned_proxy, "connection_attempts", 0))
+            if pinned_proxy is not None else 0
+        ),
+        "connections_opened": (
+            int(getattr(pinned_proxy, "connections_opened", 0))
+            if pinned_proxy is not None else 0
+        ),
+        "connections_rejected": (
+            int(getattr(pinned_proxy, "connections_rejected", 0))
+            if pinned_proxy is not None else 0
+        ),
+        "bytes_to_target": (
+            int(getattr(pinned_proxy, "bytes_to_target", 0))
+            if pinned_proxy is not None else 0
+        ),
+        "bytes_from_target": (
+            int(getattr(pinned_proxy, "bytes_from_target", 0))
+            if pinned_proxy is not None else 0
+        ),
+        "targets": 1 if process_started else 0,
+    }
     return {
         "job_id": job_id,
         "status": status,
@@ -19043,6 +19150,8 @@ async def _execute_agent_scanner_process(
         "line_count": record_count,
         "typed_output": typed_output,
         "settlement": settlement,
+        "process_enforcement": process_enforcement,
+        "network_telemetry": network_telemetry,
         "execution_uncertain": execution_uncertain,
         "network_binding": "hostname_preserving_pinned_socks5",
     }

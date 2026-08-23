@@ -23,6 +23,21 @@ TARGET = TargetBinding(
 )
 
 
+def _enforcement(*, hard=None, mode="conservative", method="fixed_conservative_profile"):
+    return {
+        "schema_version": "external-process-enforcement/v1",
+        "tool_name": "nuclei",
+        "process_plan_digest": "a" * 64,
+        "hard_budget": hard or {
+            "http_requests": 4_000,
+            "tool_wall_seconds": 300,
+        },
+        "accounting_mode": mode,
+        "proof_method": method,
+        "parser_version": "nuclei-jsonl/v1",
+    }
+
+
 def _run(adapter: ScannerExecutionAdapter, requested: dict[str, int]):
     return asyncio.run(CapabilityExecutor().execute(
         CapabilityExecutionContext(
@@ -56,6 +71,7 @@ def test_scanner_adapter_uses_exact_settlement_and_redacted_execution():
                 "errors": [],
             },
             "settlement": {"mode": "exact", "actual": 7},
+            "process_enforcement": _enforcement(),
         }
 
     adapter = ScannerExecutionAdapter(
@@ -77,8 +93,21 @@ def test_scanner_adapter_uses_exact_settlement_and_redacted_execution():
     assert result.observations == ({
         "kind": "template_match", "id": "x",
     },)
-    assert result.redacted_execution == {
-        "path": "/account", "severity": "high",
+    assert result.redacted_execution["path"] == "/account"
+    assert result.redacted_execution["severity"] == "high"
+    assert result.redacted_execution["process_enforcement"] == _enforcement()
+    assert result.redacted_execution["wire_telemetry"] == {
+        "schema_version": "external-wire-telemetry/v1",
+        "accounting_mode": "exact",
+        "actual_http_requests": 7,
+        "observed_http_requests_minimum": 0,
+        "http_request_upper_bound": 4_000,
+        "tcp_attempt_upper_bound": 0,
+        "connections_attempted": 0,
+        "connections_opened": 0,
+        "targets": 0,
+        "wall_seconds": 2,
+        "limiter_status": "within_ceiling",
     }
     assert "worker-only-secret" not in str(result)
 
@@ -105,6 +134,7 @@ def test_scanner_timeout_is_a_partial_executor_outcome():
                 "errors": [],
             },
             "settlement": {"mode": "conservative"},
+            "process_enforcement": _enforcement(),
         }
 
     result = _run(ScannerExecutionAdapter(
@@ -158,3 +188,35 @@ def test_scanner_adapter_passes_live_cancellation_to_process_runner():
     assert saw_cancelled is True
     assert result.status == "cancelled"
     assert result.actual_budget == {"tool_wall_seconds": 0}
+
+
+def test_scanner_adapter_never_reports_success_after_wire_limiter_overrun():
+    requested = {
+        "http_requests": 4_000,
+        "tool_wall_seconds": 300,
+    }
+
+    async def process_runner(_payload, *, heartbeat):
+        await heartbeat()
+        return {
+            "status": "success",
+            "elapsed_seconds": 3,
+            "typed_output": {"records": [], "errors": []},
+            "settlement": {"mode": "exact", "actual": 4_001},
+            "process_enforcement": _enforcement(),
+        }
+
+    result = asyncio.run(ScannerExecutionAdapter(
+        specification=CAPABILITY_REGISTRY.require("templates.scan"),
+        process_payload={},
+        process_runner=process_runner,
+        requested_budget=requested,
+        redacted_execution={"input": {}},
+    ).execute(
+        heartbeat=lambda: asyncio.sleep(0),
+        cancelled=lambda: False,
+    ))
+
+    assert result.status == "failed"
+    assert result.actual_budget == requested
+    assert result.errors[0].startswith("external_process_contract:")

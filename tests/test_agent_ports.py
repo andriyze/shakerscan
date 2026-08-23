@@ -513,7 +513,7 @@ def test_external_scanner_output_is_typed_and_query_values_are_redacted():
 
 
 def test_scanner_request_reservations_are_conservative_and_explicit():
-    assert at.scanner_request_reservation("httpx") == 4
+    assert at.scanner_request_reservation("httpx") == 1
     assert at.scanner_request_reservation("nuclei") == 4000
     assert at.scanner_request_reservation("ffuf") == 220
 
@@ -731,7 +731,7 @@ def test_ffuf_wordlist_tunable_is_injection_proof():
     _, argv, _ = at.build_scanner_argv("ffuf", "http://t/base", {"wordlist": "api"})
     assert argv[argv.index("-u") + 1] == "http://t/base/FUZZ"
     assert argv[argv.index("-w") + 1] == at._AGENT_FFUF_WORDLISTS["api"]
-    assert "-maxtime" in argv and "-ac" in argv                  # hard wall cap + soft-404 filtering
+    assert "-maxtime" in argv and "-ac" not in argv              # hard wall, no hidden calibration requests
     # unknown / path-injection selectors fall back to the bundled common list — never an arbitrary path
     for bad in ("/etc/passwd", "; rm -rf /", "nope"):
         _, argv2, _ = at.build_scanner_argv("ffuf", "http://t/x", {"wordlist": bad})
@@ -871,7 +871,8 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert argv[argv.index("--batch") + 1] == "--technique"  # non-interactive
     assert argv[argv.index("--technique") + 1] == "BEUT"     # boolean/error/union/time-based
     assert argv[argv.index("--level") + 1] == "2" and argv[argv.index("--risk") + 1] == "2"
-    assert argv[argv.index("--threads") + 1] == "2" and argv[argv.index("--delay") + 1] == "1"
+    assert argv[argv.index("--threads") + 1] == "1" and argv[argv.index("--delay") + 1] == "1"
+    assert argv[argv.index("--retries") + 1] == "0"
     assert timeout == 300_000                                # wider window for time-based payloads
     assert at.scanner_request_reservation("sqlmap") == 900
     assert "--crawl" not in " ".join(argv) and "--os-shell" not in " ".join(argv)
@@ -901,7 +902,7 @@ def test_posture_scanners_nmap_naabu_present_and_bounded():
     assert "-sS" not in argv                                    # never raw SYN
     assert not any(str(flag).startswith("--script") for flag in argv)  # no NSE scripts
     assert argv[argv.index("--host-timeout") + 1] == "60s"      # hard host wall
-    assert argv[argv.index("--max-retries") + 1] == "2"
+    assert argv[argv.index("--max-retries") + 1] == "0"
     assert argv[argv.index("-oN") + 1] == "-"                   # output on stdout only, no files
     assert argv[-1] == "example.test"                           # positional host
     assert timeout == 90_000
