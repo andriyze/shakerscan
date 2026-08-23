@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import hashlib
+import uuid
+
+from api.runtime.observation_manifests import ObservationManifest
+from api.scan.action_plan import ScanActionPlan
+from api.scan.capability_result import (
+    CapabilityResultReason,
+    CapabilityResultReference,
+    CapabilityResultStatus,
+)
+from api.scan.finalizer import finalize_scan_report
+from tests.test_scan_orchestrator import SCAN_ID, _action, _plan, _result
+
+
+def _results(plan):
+    return {
+        action.action_id: _result(action, status=CapabilityResultStatus.SUCCESS)
+        for action in plan.actions if action.action_id != "finalize.report"
+    }
+
+
+def _result_with_observation_count(action, count: int) -> CapabilityResultReference:
+    content = b"{}\n" * count
+    manifest = ObservationManifest(
+        manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"finalizer:{action.action_id}:{count}")),
+        owner_id=SCAN_ID,
+        action_id=action.action_id,
+        capability_name=action.capability_name,
+        output_schema=action.output_schema,
+        observation_count=count,
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        object_key=f"scans/{SCAN_ID}/{action.action_id}.jsonl",
+    ).reference()
+    base = _result(action, status=CapabilityResultStatus.SUCCESS)
+    return CapabilityResultReference(
+        **{
+            **base.digest_material(),
+            "receipt_ref": base.receipt_ref,
+            "observation_manifest_ref": manifest,
+        }
+    )
+
+
+def test_finalizer_is_a_pure_deterministic_projection_of_receipts():
+    plan = _plan()
+    results = _results(plan)
+    observations = {action.action_id: () for action in plan.actions}
+
+    first = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+    second = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert first == second
+    assert first["schema_version"] == "canonical-scan-report/v2"
+    assert first["coverage"]["status"] == "complete"
+    assert first["scan_metadata"]["finalizer"] == "pure_receipt_projection/v1"
+
+
+def test_finalizer_promotes_only_deterministic_proof_contracts():
+    xss = _action("verify.xss", 0, capability_name="xss.verify")
+    sqli = _action(
+        "verify.sqli", 1, dependencies=(xss.action_id,), capability_name="sqli.verify",
+    )
+    final = _action(
+        "finalize.report", 2, dependencies=(xss.action_id, sqli.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(xss, sqli, final),
+    )
+    results = _results(plan)
+    results[xss.action_id] = _result_with_observation_count(xss, 2)
+    results[sqli.action_id] = _result_with_observation_count(sqli, 1)
+    observations = {action.action_id: () for action in plan.actions[:-1]}
+    observations[xss.action_id] = (
+        {"kind": "xss_alert", "proof_state": "verified", "url": "https://app.example.test/x", "param": "q"},
+        {"kind": "xss_alert", "proof_state": "candidate", "url": "https://app.example.test/no"},
+    )
+    observations[sqli.action_id] = (
+        {"kind": "sqli_finding", "url": "https://app.example.test/s", "param": "id"},
+    )
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 2
+    xss = next(item for item in report["findings"] if item["tool"] == "dalfox")
+    sqli = next(item for item in report["findings"] if item["tool"] == "sqlmap")
+    assert xss["verified"] is True
+    assert sqli["verified"] is False and sqli["suspected"] is True
+    assert report["verification_summary"] == {
+        "verified": 1, "suspected": 1, "unproven_critical_high": 1,
+    }
+
+
+def test_finalizer_explains_required_action_degradation():
+    plan = _plan()
+    results = _results(plan)
+    failed_action = plan.actions[0]
+    results[failed_action.action_id] = _result(
+        failed_action,
+        status=CapabilityResultStatus.FAILED,
+        reason=CapabilityResultReason.ADAPTER_FAILED,
+        charge_full=True,
+    )
+    observations = {action.action_id: () for action in plan.actions}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["coverage"]["status"] == "failed"
+    assert report["coverage"]["reasons"] == ["adapter_failed"]
+    row = report["canonical_action_execution"]["actions"][0]
+    assert row["status"] == "failed"
+    assert row["reason_code"] == "adapter_failed"
