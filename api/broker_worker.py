@@ -35,6 +35,7 @@ from scan.broker_backend import (
     BrokerScanExecutionBackend,
 )
 from scan.orchestrator import ScanOrchestrator
+from scan.migration import require_legacy_scan_execution_window
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from worker import (
     RESULTS_DIR,
@@ -732,6 +733,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
                     worker_id=action_worker_id,
                 )
             else:
+                require_legacy_scan_execution_window()
                 result = await run_scan(
                     target,
                     dict(job.get("options") or {}),
