@@ -529,7 +529,12 @@ def prepare_scan_external_capability(
         raise ScanCapabilityContractError(
             f"{specification.name} requires a frozen web target binding"
         )
-    if specification.requires_active_approval and not (
+    if specification.risk_tier == "credential":
+        if not policy.approval_receipt_id:
+            raise ScanCapabilityContractError(
+                f"{specification.name} requires credential-use approval"
+            )
+    elif specification.requires_active_approval and not (
         policy.active_testing and policy.approval_receipt_id
     ):
         raise ScanCapabilityContractError(
@@ -585,7 +590,12 @@ def prepare_scan_inline_capability(
         raise ScanCapabilityContractError(
             f"{specification.name} does not support {target.target_kind} targets"
         )
-    if specification.requires_active_approval and not (
+    if specification.risk_tier == "credential":
+        if not policy.approval_receipt_id:
+            raise ScanCapabilityContractError(
+                f"{specification.name} requires credential-use approval"
+            )
+    elif specification.requires_active_approval and not (
         policy.active_testing and policy.approval_receipt_id
     ):
         raise ScanCapabilityContractError(

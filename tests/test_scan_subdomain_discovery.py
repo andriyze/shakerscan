@@ -24,14 +24,16 @@ from runtime.reservation_store import StoredBudgetReservation
 from scan.execution import ScanExecutionPlan
 
 
-def _authority(*, enabled: bool = True, network: bool = False):
+def _authority(
+    *, enabled: bool = True, network: bool = False, approval: bool = False,
+):
     plan = ScanExecutionPlan(
         policy=ScanPolicy(
             active_testing=network,
             network_discovery=network,
             subdomain_discovery=enabled,
             scope_receipt_id="scope-1",
-            approval_receipt_id="approval-1" if network else None,
+            approval_receipt_id="approval-1" if network or approval else None,
         ),
         budget_profile="balanced",
         budget=ScanBudget(1_200, 100, 50, 20, 10, 60, 2),
@@ -265,7 +267,22 @@ def test_scan_subdomain_discovery_reserves_before_target_traffic_and_settles(
 def test_deterministic_scan_reserves_remaining_budget_before_process_and_redelivery(
     monkeypatch,
 ):
-    plan, _target, options = _authority(enabled=True)
+    plan, _target, options = _authority(enabled=True, approval=True)
+    login_secret = "worker-private-login-secret"
+    session_cookie = "session=worker-private-established-cookie"
+    options = {
+        **options,
+        "login_username": "operator",
+        "login_password": login_secret,
+        "login_url": "/login",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    }
     connection = _Connection(plan)
     connection.row["budget_used_json"] = {
         "http_requests": 7,
@@ -278,6 +295,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     events = []
     store = _ReservationStore(events)
     calls = 0
+    session_calls = 0
 
     async def fake_run_scan(
         target,
@@ -292,6 +310,8 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         events.append(("traffic", store.current.record.status))
         assert target == "https://app.example.test"
         assert runtime_options["scan_execution_plan_digest"] == plan.digest
+        assert runtime_options["login_password"] == login_secret
+        assert session_cookie not in json.dumps(runtime_options)
         assert canonical_runtime_budget == {
             "http_requests": 0,
             "state_changing_requests": 0,
@@ -322,7 +342,30 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
             "scan_metadata": {"schema_version": "scan-report/v2"},
         }
 
-    async def skip_web_probe(*_args, **_kwargs):
+    async def establish_session(
+        runtime_options, *, private_session_holder, **_kwargs,
+    ):
+        nonlocal session_calls
+        session_calls += 1
+        assert runtime_options["login_password"] == login_secret
+        private_session_holder["session"] = SimpleNamespace(
+            established=True,
+            headers=lambda: {"Cookie": session_cookie},
+        )
+        summary = worker._skipped_scan_auth_session_summary("test")
+        summary.update({
+            "enabled": True,
+            "status": "success",
+            "reason": None,
+            "worker_private_session_available": True,
+        })
+        return summary
+
+    async def skip_web_probe(_target_url, runtime_options, **_kwargs):
+        assert runtime_options["auth_cookies"] == session_cookie
+        assert worker.resolve_scan_http_principal(
+            runtime_options,
+        ).authenticated is True
         return worker._skipped_scan_web_probe_summary("test_isolation")
 
     async def skip_tls(*_args, **_kwargs):
@@ -340,6 +383,11 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_auth_session_capability",
+        establish_session,
+    )
     monkeypatch.setattr(
         worker,
         "_execute_scan_web_probe_capability",
@@ -375,6 +423,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     assert ("traffic", "running") in events
     assert events[-1] == ("terminal", "committed")
     assert calls == 1
+    assert session_calls == 1
     assert set(store.current.record.actual) == {"tool_wall_seconds"}
     assert result["deterministic_scan_execution"]["receipt"][
         "budget_reservation_state"
@@ -388,9 +437,13 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         job_id="job-1",
     ))
     assert calls == 1
+    assert session_calls == 2
     assert redelivered["deterministic_scan_execution"][
         "idempotent_redelivery"
     ] is True
+    assert redelivered["canonical_authentication"]["authenticated"] is True
+    assert redelivered["canonical_authentication"]["header_names"] == ["Cookie"]
+    assert session_cookie not in json.dumps(redelivered)
 
 
 def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch):
@@ -1159,6 +1212,7 @@ def _stored_network_capability(
         "web.probe": ("httpx", "httpx-typed-v1"),
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
+        "auth.session.establish": ("auth.session", "credential-session/v1"),
         "http.request": ("agent.http_request", "http-observation/v1"),
         "dns.inspect": ("scanner.dns", "dns-posture-observation/v1"),
         "tls.inspect": ("scanner.tls", "tls-observation/v1"),
@@ -1749,6 +1803,127 @@ def test_http_baseline_binds_worker_private_primary_headers(monkeypatch):
         "Authorization": "Bearer primary-secret",
     }
     assert captured["principal_slot"] == "primary"
+
+
+def test_passive_scan_establishes_approved_primary_session_as_a_capability(
+    monkeypatch,
+):
+    _plan, _target, options = _authority(
+        enabled=True, network=False, approval=True,
+    )
+    secret = "form-worker-private-password"
+    options = {
+        **options,
+        "login_username": "operator",
+        "login_password": secret,
+        "login_url": "/login?tenant=blue",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    }
+    calls = []
+
+    session = SimpleNamespace(
+        established=True,
+        headers=lambda: {"Cookie": "session=worker-private-cookie"},
+        execution_result=lambda: {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "credential_session",
+                "lane": "primary",
+                "auth_kind": "form_login",
+                "status": "established",
+                "endpoint_path": "/login?<redacted-query>",
+                "header_names": ["Cookie"],
+                "cookie_names": ["session"],
+                "secret_values_visible": False,
+            },
+            "budget_consumed": {
+                "http_requests": 2,
+                "tool_wall_seconds": 1,
+            },
+        },
+    )
+
+    async def establish(credential, *, target):
+        assert target.canonical_host == "app.example.test"
+        assert credential.auth_kind == "form_login"
+        assert secret not in repr(credential)
+        return session
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        operation_result = await kwargs["inline_operation"]()
+        assert secret not in json.dumps(operation_result)
+        return _stored_network_capability(
+            "auth.session.establish",
+            observations=[operation_result["observation"]],
+            amounts={"http_requests": 2, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "establish_target_bound_http_session", establish,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    holder = {}
+    summary = asyncio.run(worker._execute_scan_auth_session_capability(
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+        private_session_holder=holder,
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "auth.session.establish"
+    assert call["action_id"] == "resolve_inputs.auth.session.establish.primary"
+    assert call["reservation_limits"] == {
+        "http_requests": 2,
+        "tool_wall_seconds": 30,
+    }
+    assert call["capability_args"]["endpoint_path"] == (
+        "/login?<redacted-query>"
+    )
+    assert secret not in json.dumps(call["capability_args"])
+    assert holder["session"] is session
+    assert summary["status"] == "success"
+    assert summary["worker_private_session_available"] is True
+    assert secret not in json.dumps(summary)
+
+
+def test_interactive_session_never_executes_without_credential_approval(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+    options = {
+        **options,
+        "login_username": "operator",
+        "login_password": "worker-private-password",
+        "login_url": "/login",
+    }
+
+    async def unexpected_execution(**_kwargs):
+        raise AssertionError("unapproved credential session reached execution")
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", unexpected_execution,
+    )
+    summary = asyncio.run(worker._execute_scan_auth_session_capability(
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+        private_session_holder={},
+    ))
+
+    assert summary["enabled"] is True
+    assert summary["status"] == "blocked"
+    assert summary["reason"] == "credential_approval_missing"
+    assert summary["durable_budget_settled"] is False
 
 
 def test_placed_http_tools_bind_primary_credentials_without_public_secrets(

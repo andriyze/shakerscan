@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,10 @@ from api.runtime.scan_credentials import (
     SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
     admit_scan_credential_profiles,
+    bind_scan_session_headers,
     bind_resolved_scan_credential,
     resolve_scan_http_principal,
+    resolve_scan_interactive_credential,
 )
 
 
@@ -183,6 +186,70 @@ def test_scan_interactive_primary_is_explicitly_not_applied_without_session_capa
     assert principal.authenticated is False
     assert principal.headers() == {}
     assert principal.public_dict()["reason"] == (
-        "interactive_session_capability_not_available"
+        "interactive_session_not_established"
     )
     assert "secret-password" not in repr(principal)
+
+
+def test_scan_interactive_profile_builds_content_free_session_binding():
+    credential = resolve_scan_interactive_credential({
+        "oauth_client_id": "scanner-client",
+        "oauth_client_secret": "oauth-worker-private-secret",
+        "oauth_token_url": "/oauth/token?tenant=blue",
+        "oauth_scope": "read profile",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "oauth_client_credentials",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    })
+
+    assert credential is not None
+    assert credential.capability_args() == {
+        "lane": "primary",
+        "auth_kind": "oauth_client_credentials",
+        "credential_binding_digest": credential.binding_digest,
+        "endpoint_binding_digest": credential.endpoint_binding_digest,
+        "endpoint_path": "/oauth/token?<redacted-query>",
+    }
+    assert len(credential.binding_digest) == 64
+    assert len(credential.endpoint_binding_digest) == 64
+    assert credential.public_dict()["secret_values_visible"] is False
+    assert "oauth-worker-private-secret" not in repr(credential)
+    assert "oauth-worker-private-secret" not in repr(credential.session_credential())
+
+
+def test_established_session_headers_become_an_immediate_primary_principal():
+    options = bind_scan_session_headers(
+        {
+            "login_username": "operator",
+            "login_password": "form-worker-private-secret",
+            "resolved_credential_profiles": [{
+                "profile_id": "profile-1",
+                "profile_version": 3,
+                "auth_kind": "form_login",
+                "principal_slot": "primary",
+                "scan_lane": "primary",
+            }],
+        },
+        {"Cookie": "session=worker-private-cookie"},
+        lane="primary",
+    )
+    principal = resolve_scan_http_principal(options)
+
+    assert principal.authenticated is True
+    assert principal.headers() == {"Cookie": "session=worker-private-cookie"}
+    assert principal.public_dict()["source"] == "credential_profiles"
+    assert principal.public_dict()["reason"] is None
+
+
+def test_scan_http_principal_rejects_case_insensitive_duplicate_headers():
+    with pytest.raises(ScanCredentialError, match="headers are invalid"):
+        resolve_scan_http_principal({
+            "auth_header": "Bearer first",
+            "auth_headers_json": json.dumps({
+                "authorization": "Bearer second",
+            }),
+        })

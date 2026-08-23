@@ -67,8 +67,10 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.http import execute_bound_http_request
+from capabilities.auth import establish_target_bound_http_session
 from capabilities.dns import inspect_dns_posture
 from capabilities.inline import (
+    AuthSessionExecutionAdapter,
     DnsInspectionExecutionAdapter,
     HttpRequestExecutionAdapter,
     TlsInspectionExecutionAdapter,
@@ -109,7 +111,9 @@ from runtime.scan_credentials import (
     SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
     bind_resolved_scan_credential,
+    bind_scan_session_headers,
     resolve_scan_http_principal,
+    resolve_scan_interactive_credential,
 )
 from scan.collection_replay import (
     EXECUTABLE_REPLAY_POLICIES,
@@ -9935,7 +9939,7 @@ async def _execute_reserved_scan_capability(
             "deterministic Scan runner requires scan.execute"
         )
     if internal_inline and capability_name not in {
-        "dns.inspect", "http.request", "tls.inspect",
+        "auth.session.establish", "dns.inspect", "http.request", "tls.inspect",
     }:
         raise ScanCapabilityContractError(
             "unsupported inline Scan capability adapter"
@@ -10262,7 +10266,9 @@ async def _execute_reserved_scan_capability(
                 "inline Scan capability operation is unavailable"
             )
         inline_adapter = (
-            HttpRequestExecutionAdapter
+            AuthSessionExecutionAdapter
+            if capability_name == "auth.session.establish"
+            else HttpRequestExecutionAdapter
             if capability_name == "http.request"
             else DnsInspectionExecutionAdapter
             if capability_name == "dns.inspect"
@@ -10444,6 +10450,139 @@ def _deterministic_scan_terminal_failure_result(
         },
         "deterministic_scan_execution": dict(summary),
     }
+
+
+def _skipped_scan_auth_session_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-auth-session-execution/v1",
+        "capability_name": "auth.session.establish",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+        "worker_private_session_available": False,
+    }
+
+
+def _blocked_scan_auth_session_summary(reason: str) -> dict[str, Any]:
+    summary = _skipped_scan_auth_session_summary(reason)
+    summary.update({
+        "enabled": True,
+        "status": "blocked",
+        "durable_budget_settled": False,
+        "errors": [str(reason)[:200]],
+    })
+    return summary
+
+
+def _scan_auth_session_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+    private_session_available: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and str(item.get("kind") or "") == "credential_session"
+    ][:1]
+    reason = None
+    if status == "success" and not private_session_available:
+        status = "failed"
+        reason = "worker_private_session_unavailable_after_redelivery"
+    return {
+        "schema_version": "canonical-scan-auth-session-execution/v1",
+        "capability_name": "auth.session.establish",
+        "enabled": True,
+        "status": status,
+        "reason": reason,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+        "worker_private_session_available": bool(private_session_available),
+    }
+
+
+async def _execute_scan_auth_session_capability(
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+    private_session_holder: dict[str, Any],
+) -> dict[str, Any]:
+    """Establish the primary interactive identity under Scan authority."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_auth_session_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    if execution.discovery_manifest_only:
+        return _skipped_scan_auth_session_summary("discovery_manifest_only")
+    credential = resolve_scan_interactive_credential(options, lane="primary")
+    if credential is None:
+        return _skipped_scan_auth_session_summary("no_interactive_primary")
+    if not admission.plan.policy.approval_receipt_id:
+        return _blocked_scan_auth_session_summary("credential_approval_missing")
+
+    target = execution.target_binding
+    request_limit = 2 if credential.auth_kind == "form_login" else 1
+
+    async def establish_session() -> Mapping[str, Any]:
+        session = await establish_target_bound_http_session(
+            credential.session_credential(), target=target,
+        )
+        private_session_holder["session"] = session
+        return session.execution_result()
+
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="auth.session.establish",
+        capability_args=credential.capability_args(),
+        action_id="resolve_inputs.auth.session.establish.primary",
+        target_binding=target,
+        reservation_limits={
+            "http_requests": request_limit,
+            "tool_wall_seconds": 30,
+        },
+        inline_operation=establish_session,
+    )
+    session = private_session_holder.get("session")
+    private_available = bool(
+        session is not None
+        and session.established
+        and session.headers()
+    )
+    return _scan_auth_session_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+        private_session_available=private_available,
+    )
 
 
 def _skipped_scan_template_summary(reason: str) -> dict[str, Any]:
@@ -12037,11 +12176,12 @@ async def _execute_reserved_deterministic_scan(
         scan_id=scan_id,
         job_id=job_id,
     )
+    effective_options = dict(normalized)
     primary_principal = resolve_scan_http_principal(
-        normalized, lane="primary",
+        effective_options, lane="primary",
     )
     secondary_principal = resolve_scan_http_principal(
-        normalized, lane="secondary",
+        effective_options, lane="secondary",
     )
 
     def stage_capabilities(
@@ -12080,11 +12220,28 @@ async def _execute_reserved_deterministic_scan(
         })
 
     async def resolve_inputs_stage(_context: ScanStageContext) -> ScanStageRunResult:
+        nonlocal effective_options, primary_principal
+
         def count_rows(name: str) -> int:
-            value = normalized.get(name)
+            value = effective_options.get(name)
             return len(value) if isinstance(value, (list, tuple)) else 0
 
-        return ScanStageRunResult(output={
+        private_session_holder: dict[str, Any] = {}
+        session_summary = await _execute_scan_auth_session_capability(
+            effective_options,
+            scan_id=scan_id,
+            job_id=job_id,
+            private_session_holder=private_session_holder,
+        )
+        session = private_session_holder.get("session")
+        if session is not None and session.established and session.headers():
+            effective_options = bind_scan_session_headers(
+                effective_options, session.headers(), lane="primary",
+            )
+            primary_principal = resolve_scan_http_principal(
+                effective_options, lane="primary",
+            )
+        output = {
             "credential_profile_reference_count": count_rows(
                 "credential_profile_refs"
             ),
@@ -12098,19 +12255,33 @@ async def _execute_reserved_deterministic_scan(
             "secret_values_exposed": False,
             "primary_principal": primary_principal.public_dict(),
             "secondary_principal": secondary_principal.public_dict(),
-        })
+            "auth.session.establish": session_summary,
+        }
+        if session_summary.get("enabled") and session_summary.get("status") != "success":
+            return ScanStageRunResult(
+                output=output,
+                status="failed",
+                reason="credential_session_establishment_failed",
+                adapter="native_worker.auth_session",
+                capability_names=("auth.session.establish",),
+            )
+        return ScanStageRunResult(
+            output=output,
+            adapter="native_worker.auth_session",
+            capability_names=("auth.session.establish",),
+        )
 
     async def discover_surface_stage(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
         probe = await _execute_scan_web_probe_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         crawl = await _execute_scan_web_crawl_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         content = await _execute_scan_content_discovery_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         output: dict[str, Any] = {
             "web.probe": probe,
@@ -12146,22 +12317,22 @@ async def _execute_reserved_deterministic_scan(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
         http_baseline = await _execute_scan_http_baseline_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         http_redirect = await _execute_scan_http_redirect_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         security_txt = await _execute_scan_security_txt_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         dns = await _execute_scan_dns_capability(
-            normalized, scan_id=scan_id, job_id=job_id,
+            effective_options, scan_id=scan_id, job_id=job_id,
         )
         tls = await _execute_scan_tls_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         template = await _execute_scan_template_capability(
-            target, normalized, scan_id=scan_id, job_id=job_id,
+            target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         return stage_capabilities(
             {
@@ -12185,17 +12356,17 @@ async def _execute_reserved_deterministic_scan(
         candidates = scan_parameterized_execution_candidates(
             target,
             target=execution.target_binding,
-            options=normalized,
+            options=effective_options,
             crawl_observations=(
                 crawl.get("observations") if isinstance(crawl, Mapping) else None
             ),
         )
         candidate = candidates[0] if candidates else None
         xss = await _execute_scan_xss_verification_capability(
-            candidate, normalized, scan_id=scan_id, job_id=job_id,
+            candidate, effective_options, scan_id=scan_id, job_id=job_id,
         )
         sqli = await _execute_scan_sqli_verification_capability(
-            candidate, normalized, scan_id=scan_id, job_id=job_id,
+            candidate, effective_options, scan_id=scan_id, job_id=job_id,
         )
         return stage_capabilities(
             {
@@ -12245,11 +12416,14 @@ async def _execute_reserved_deterministic_scan(
     async def finalize_evidence_stage(
         stage_context: ScanStageContext,
     ) -> ScanStageRunResult:
+        inputs = stage_context.output("resolve_inputs")
         surface = stage_context.output("discover_surface")
         baseline = stage_context.output("deterministic_baseline")
         active = stage_context.output("deterministic_active")
         verification = stage_context.output("verify_candidates")
         placed_capabilities = {
+            "auth.session.establish": inputs.get("auth.session.establish")
+            or _skipped_scan_auth_session_summary("stage_disabled"),
             "web.probe": surface.get("web.probe")
             or _skipped_scan_web_probe_summary("stage_disabled"),
             "web.crawl": surface.get("web.crawl")
@@ -12325,6 +12499,9 @@ async def _execute_reserved_deterministic_scan(
             verification.get("proof_contracts") or {}
         )
         authentication = primary_principal.public_dict()
+        authentication["session_establishment"] = dict(
+            inputs.get("auth.session.establish") or {}
+        )
         authenticated_candidates = {
             "web.probe": surface.get("web.probe"),
             "web.crawl": surface.get("web.crawl"),

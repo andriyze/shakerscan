@@ -464,7 +464,6 @@ def test_scan_external_capability_requires_frozen_binding_and_active_approval():
             args={"as_principal": "primary"},
             policy=policy,
         )
-
     with pytest.raises(ScanCapabilityContractError, match="active testing approval"):
         prepare_scan_external_capability(
             specification=specification,
@@ -478,6 +477,43 @@ def test_scan_external_capability_requires_frozen_binding_and_active_approval():
             target=_target(),
             args={"argv": ["-target", "attacker.test"]},
             policy=policy,
+        )
+
+
+def test_scan_session_capability_requires_approval_but_not_active_testing():
+    specification = CAPABILITY_REGISTRY.require("auth.session.establish")
+    args = {
+        "lane": "primary",
+        "auth_kind": "form_login",
+        "credential_binding_digest": "a" * 64,
+        "endpoint_binding_digest": "b" * 64,
+        "endpoint_path": "/login",
+    }
+    prepared = prepare_scan_inline_capability(
+        specification=specification,
+        target=_target(),
+        args=args,
+        policy=ScanPolicy(
+            active_testing=False,
+            approval_receipt_id="credential-approval-1",
+            scope_receipt_id="scope-1",
+        ),
+    )
+
+    assert prepared.capability_name == "auth.session.establish"
+    assert prepared.estimated_budget == {
+        "http_requests": 4,
+        "tool_wall_seconds": 45,
+    }
+    assert prepared.redacted_execution["input"] == args
+    with pytest.raises(
+        ScanCapabilityContractError, match="credential-use approval",
+    ):
+        prepare_scan_inline_capability(
+            specification=specification,
+            target=_target(),
+            args=args,
+            policy=ScanPolicy(active_testing=False),
         )
 
 
