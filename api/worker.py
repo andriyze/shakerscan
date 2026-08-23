@@ -12890,7 +12890,7 @@ async def _execute_reserved_deterministic_scan(
                 dict(result.get("scan_metadata") or {})
                 if isinstance(result.get("scan_metadata"), Mapping) else {}
             )
-            metadata["endpoint_manifest_digest"] = hashlib.sha256(
+            manifest_digest = hashlib.sha256(
                 json.dumps(
                     endpoint_manifest,
                     sort_keys=True,
@@ -12898,7 +12898,32 @@ async def _execute_reserved_deterministic_scan(
                     ensure_ascii=True,
                 ).encode("utf-8")
             ).hexdigest()
+            metadata["endpoint_manifest"] = {
+                "schema_version": str(
+                    endpoint_manifest.get("schema_version") or ""
+                ),
+                "status": str(endpoint_manifest.get("status") or "partial"),
+                "endpoint_count": int(
+                    endpoint_manifest.get("endpoint_count") or 0
+                ),
+                "digest": manifest_digest,
+            }
+            metadata["endpoint_manifest_digest"] = manifest_digest
             result["scan_metadata"] = metadata
+            if str(endpoint_manifest.get("status") or "") == "partial":
+                coverage = (
+                    dict(result.get("coverage") or {})
+                    if isinstance(result.get("coverage"), Mapping) else {}
+                )
+                if str(coverage.get("status") or "") not in {
+                    "failed", "cancelled",
+                }:
+                    coverage["status"] = "partial"
+                reasons = [str(item) for item in coverage.get("reasons") or []]
+                if "canonical_surface_manifest_partial" not in reasons:
+                    reasons.append("canonical_surface_manifest_partial")
+                coverage["reasons"] = reasons
+                result["coverage"] = coverage
         status = "partial" if (
             result.get("error") or summary.get("partial") or summary.get("timed_out")
         ) else "completed"

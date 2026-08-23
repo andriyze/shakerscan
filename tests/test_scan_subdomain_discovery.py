@@ -950,6 +950,12 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert re.fullmatch(
         r"[0-9a-f]{64}", result["scan_metadata"]["endpoint_manifest_digest"],
     )
+    assert result["scan_metadata"]["endpoint_manifest"] == {
+        "schema_version": "endpoint-manifest/v1",
+        "status": "complete",
+        "endpoint_count": 3,
+        "digest": result["scan_metadata"]["endpoint_manifest_digest"],
+    }
     stage_execution = result["canonical_stage_execution"]
     assert [row["name"] for row in stage_execution["stages"]] == [
         "bind_target",
