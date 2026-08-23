@@ -27,7 +27,9 @@ const BUDGETS: Array<{ value: BudgetProfile; label: string; description: string;
 const ADVANCED_LIMITS = [
   ['max_duration_seconds', 'Maximum duration (seconds)'],
   ['max_http_requests', 'Maximum HTTP requests'],
+  ['max_state_changing_requests', 'Maximum state-changing requests'],
   ['max_endpoints', 'Maximum endpoints'],
+  ['max_hosts', 'Maximum hosts'],
   ['max_browser_actions', 'Maximum browser actions'],
   ['max_tcp_ports', 'Maximum TCP ports'],
   ['max_tool_wall_seconds', 'Maximum tool runtime (seconds)'],

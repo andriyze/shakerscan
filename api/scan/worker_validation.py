@@ -43,6 +43,8 @@ BUDGET_CEILINGS: Mapping[str, int] = {
     "max_tcp_ports": 262_140,
     "max_tool_wall_seconds": 86_400,
     "max_workers": 128,
+    "max_state_changing_requests": 100_000,
+    "max_hosts": 100_000,
 }
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
@@ -141,14 +143,19 @@ def _budget(value: Any) -> ScanBudget:
     normalized: dict[str, int] = {}
     for name in BUDGET_KEYS:
         amount = raw[name]
+        minimum = 0 if name == "max_state_changing_requests" else 1
         if isinstance(amount, bool) or not isinstance(amount, int):
-            raise WorkerScanContractError(f"{name} must be a positive integer")
-        if not 1 <= amount <= BUDGET_CEILINGS[name]:
+            qualifier = "non-negative" if minimum == 0 else "positive"
+            raise WorkerScanContractError(f"{name} must be a {qualifier} integer")
+        if not minimum <= amount <= BUDGET_CEILINGS[name]:
             raise WorkerScanContractError(
-                f"{name} must be between 1 and {BUDGET_CEILINGS[name]}"
+                f"{name} must be between {minimum} and {BUDGET_CEILINGS[name]}"
             )
         normalized[name] = amount
-    return ScanBudget(**normalized)
+    try:
+        return ScanBudget(**normalized)
+    except ValueError as exc:
+        raise WorkerScanContractError(str(exc)) from exc
 
 
 def _profile(value: Any) -> str:
@@ -184,11 +191,16 @@ def validate_execution_plan(options: Mapping[str, Any]) -> ScanExecutionPlan:
         raise WorkerScanContractError("scan execution plan generation is invalid")
     if raw["engine"] != SCAN_ENGINE:
         raise WorkerScanContractError("scan execution plan engine is invalid")
+    policy = _policy(raw["policy"])
     plan = ScanExecutionPlan(
-        policy=_policy(raw["policy"]),
+        policy=policy,
         budget_profile=_profile(raw["budget_profile"]),
         budget=_budget(raw["budget"]),
     )
+    if plan.budget.max_state_changing_requests and not policy.allow_state_changing_http:
+        raise WorkerScanContractError(
+            "mutation budget requires state-changing HTTP authority"
+        )
     canonical = plan.canonical_dict()
     if raw != canonical:
         raise WorkerScanContractError("scan execution plan is not canonical")

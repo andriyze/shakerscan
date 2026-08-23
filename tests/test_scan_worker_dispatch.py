@@ -24,7 +24,10 @@ def _plan(*, active: bool = False) -> ScanExecutionPlan:
             approval_receipt_id="approval-1" if active else None,
         ),
         budget_profile="balanced",
-        budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4),
+        budget=ScanBudget(
+            1200, 5000, 2000, 200, 5000, 900, 4,
+            100 if active else 0, 100,
+        ),
     )
 
 

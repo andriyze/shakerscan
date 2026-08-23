@@ -2838,6 +2838,9 @@ class _FakeConn:
         self.executes.append((query, args))
         return "OK"
 
+    def transaction(self):
+        return _FakeAcquire(self)
+
 
 class _FailingRedis:
     def __init__(self):
@@ -3283,6 +3286,23 @@ def test_canonical_schedule_queues_scan_job_v2_without_legacy_identity(monkeypat
     assert persisted_job["schema_version"] == api_module.SCAN_JOB_SCHEMA
     assert insert[1][13]
     assert not {"scan_type", "quick", "thorough"} & set(persisted_options)
+
+
+def test_public_scan_schema_exposes_independent_host_and_mutation_ceilings():
+    request = api_module.ScanRequest(
+        target="https://example.test",
+        advanced={
+            "max_hosts": 8,
+            "max_state_changing_requests": 3,
+        },
+    )
+    assert request.advanced.max_hosts == 8
+    assert request.advanced.max_state_changing_requests == 3
+    with pytest.raises(api_module.ValidationError):
+        api_module.ScanRequest(
+            target="https://example.test",
+            advanced={"parallel_magic_mode": 2},
+        )
 
 
 def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):

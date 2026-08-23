@@ -269,4 +269,8 @@ def test_schema_migration_failure_blocks_startup_and_releases_lock(monkeypatch):
         "CREATE TABLE IF NOT EXISTS budget_reservations" in query
         for query, _args in conn.executed
     )
+    assert any(
+        "CREATE TABLE IF NOT EXISTS scan_capability_actions" in query
+        for query, _args in conn.executed
+    )
     assert any("pg_advisory_unlock(8675309)" in query for query, _args in conn.executed)

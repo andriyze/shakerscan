@@ -141,6 +141,73 @@ def digest_input_bindings(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def credential_profile_action_refs(
+    refs: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Reduce admitted profile metadata to versioned, content-free plan refs."""
+    result: list[dict[str, Any]] = []
+    for raw in refs:
+        profile_id = str(raw.get("profile_id") or "").strip()
+        lane = str(raw.get("scan_lane") or raw.get("lane") or "").strip().lower()
+        try:
+            version = int(raw.get("profile_version") or raw.get("version") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionPlanError("credential profile version is invalid") from exc
+        if not profile_id or lane not in {"primary", "secondary", "service", "ssh"} or version < 1:
+            raise ScanActionPlanError("credential profile action reference is incomplete")
+        material = {
+            "profile_id": profile_id,
+            "version": version,
+            "lane": lane,
+            "target_kind": str(raw.get("target_kind") or "").strip().lower(),
+            "auth_kind": str(raw.get("auth_kind") or "").strip().lower(),
+        }
+        result.append({
+            "profile_id": profile_id,
+            "version": version,
+            "digest": digest_input_bindings(material),
+            "lane": lane,
+        })
+    return tuple(result)
+
+
+def request_collection_action_refs(
+    refs: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Reduce saved executable selections to immutable Scan plan refs."""
+    result: list[dict[str, Any]] = []
+    for raw in refs:
+        collection_id = str(raw.get("collection_id") or "").strip()
+        selection_digest = str(raw.get("selection_digest") or "").strip().lower()
+        replay_policy = str(raw.get("replay_policy") or "").strip().lower()
+        if replay_policy not in {"safe_reads", "confirmed_active"}:
+            continue
+        try:
+            selected = int(raw.get("selected_requests") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionPlanError("request collection selected count is invalid") from exc
+        selector = raw.get("selector") if isinstance(raw.get("selector"), Mapping) else {}
+        try:
+            selector_limit = int(selector.get("max_requests") or selector.get("limit") or 500)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionPlanError("request collection limit is invalid") from exc
+        if (
+            not collection_id
+            or not _HEX_64_RE.fullmatch(selection_digest)
+            or selected < 1
+            or selector_limit < 1
+        ):
+            raise ScanActionPlanError("request collection action reference is incomplete")
+        result.append({
+            "collection_id": collection_id,
+            "version": 1,
+            "selection_digest": selection_digest,
+            "active": replay_policy == "confirmed_active",
+            "max_requests": min(2_000, selected, selector_limit),
+        })
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class ScanAction:
     action_id: str
@@ -156,6 +223,8 @@ class ScanAction:
     required: bool
     supporting: bool
     output_schema: str
+    admission_status: str = "planned"
+    reason_code: str | None = None
     schema_version: str = SCAN_ACTION_SCHEMA
     action_digest: str | None = field(default=None, compare=True)
 
@@ -169,6 +238,16 @@ class ScanAction:
             raise ScanActionPlanError("action ordinal must be a non-negative integer")
         if not isinstance(self.required, bool) or not isinstance(self.supporting, bool):
             raise ScanActionPlanError("action classification flags must be booleans")
+        admission_status = str(self.admission_status or "").strip()
+        reason_code = str(self.reason_code or "").strip() or None
+        if admission_status not in {"planned", "skipped"}:
+            raise ScanActionPlanError("action admission_status is invalid")
+        if admission_status == "planned" and reason_code is not None:
+            raise ScanActionPlanError("planned action cannot have a skip reason")
+        if admission_status == "skipped" and reason_code not in {
+            "insufficient_plan_budget", "dependency_failed", "policy_disabled",
+        }:
+            raise ScanActionPlanError("skipped action requires a stable reason_code")
         dependencies = tuple(
             _token(item, name="dependency action_id") for item in self.dependencies
         )
@@ -203,6 +282,8 @@ class ScanAction:
         object.__setattr__(self, "requested_budget", _budget(self.requested_budget))
         object.__setattr__(self, "placement", _freeze(placement))
         object.__setattr__(self, "dependencies", dependencies)
+        object.__setattr__(self, "admission_status", admission_status)
+        object.__setattr__(self, "reason_code", reason_code)
         object.__setattr__(self, "output_schema", _schema(
             self.output_schema, name="output_schema",
         ))
@@ -228,6 +309,8 @@ class ScanAction:
             "required": self.required,
             "supporting": self.supporting,
             "output_schema": self.output_schema,
+            "admission_status": self.admission_status,
+            "reason_code": self.reason_code,
         }
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -239,7 +322,7 @@ class ScanAction:
             "schema_version", "action_id", "stage", "ordinal", "capability_name",
             "capability_args", "target_binding_digest", "input_binding_digest",
             "requested_budget", "placement", "dependencies", "required", "supporting",
-            "output_schema", "action_digest",
+            "output_schema", "admission_status", "reason_code", "action_digest",
         }
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ScanActionPlanError("Scan action fields are invalid")
@@ -415,10 +498,39 @@ class ScanActionPlanCompiler:
             name="request collection",
             allowed_keys=frozenset({
                 "collection_id", "version", "selection_digest", "principal_ref", "active",
+                "max_requests",
             }),
             required_keys=frozenset({"collection_id", "version", "selection_digest"}),
             maximum=32,
         )
+        for reference in credentials:
+            if (
+                isinstance(reference.get("version"), bool)
+                or not isinstance(reference.get("version"), int)
+                or int(reference["version"]) < 1
+                or not _HEX_64_RE.fullmatch(str(reference.get("digest") or ""))
+                or reference.get("lane") not in {"primary", "secondary", "service", "ssh"}
+            ):
+                raise ScanActionPlanError("credential profile reference is invalid")
+        for reference in collections:
+            if (
+                isinstance(reference.get("version"), bool)
+                or not isinstance(reference.get("version"), int)
+                or int(reference["version"]) < 1
+                or not _HEX_64_RE.fullmatch(
+                    str(reference.get("selection_digest") or "")
+                )
+                or not isinstance(reference.get("active", False), bool)
+                or (
+                    "max_requests" in reference
+                    and (
+                        isinstance(reference["max_requests"], bool)
+                        or not isinstance(reference["max_requests"], int)
+                        or not 1 <= reference["max_requests"] <= 2_000
+                    )
+                )
+            ):
+                raise ScanActionPlanError("request collection reference is invalid")
         endpoint_ref = _canonical_value(endpoint_manifest_ref or {})
         candidate_ref = _canonical_value(candidate_manifest_ref or {})
         template_ref = _canonical_value(template_manifest_ref or {})
@@ -456,6 +568,7 @@ class ScanActionPlanCompiler:
         sqli = active and self._family_enabled(execution_plan, "sqli")
         nuclei = active and self._family_enabled(execution_plan, "nuclei")
         bola = active and self._family_enabled(execution_plan, "bola")
+        explicitly_requested = set(policy.include_families)
         needs_candidates = xss or sqli or nuclei
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
@@ -546,7 +659,7 @@ class ScanActionPlanCompiler:
             supporting=needs_candidates,
         )
 
-        crawl_required = needs_candidates and not endpoint_ref and not candidate_ref
+        crawl_required = bool(explicitly_requested) and needs_candidates and not endpoint_ref and not candidate_ref
         if active and (self._family_enabled(execution_plan, "recon") or needs_candidates):
             add(
                 "discover.web_crawl",
@@ -626,7 +739,7 @@ class ScanActionPlanCompiler:
                     "template_manifest_ref": template_ref or None,
                 },
                 dependencies=candidate_dependencies,
-                required=True,
+                required="nuclei" in explicitly_requested,
             )
         if xss:
             add(
@@ -635,7 +748,7 @@ class ScanActionPlanCompiler:
                 "xss.verify",
                 {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
                 dependencies=candidate_dependencies,
-                required=True,
+                required="xss" in explicitly_requested,
             )
         if sqli:
             add(
@@ -644,7 +757,7 @@ class ScanActionPlanCompiler:
                 "sqli.verify",
                 {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
                 dependencies=candidate_dependencies,
-                required=True,
+                required="sqli" in explicitly_requested,
             )
         if bola and {"primary", "secondary"} <= set(lane_refs):
             add(
@@ -653,7 +766,7 @@ class ScanActionPlanCompiler:
                 "authz.verify",
                 {"principal_lanes": ["primary", "secondary"], "endpoint_manifest_ref": endpoint_ref or None},
                 dependencies=tuple(dict.fromkeys((*auth_dependencies, *discovery_dependencies))),
-                required=True,
+                required="bola" in explicitly_requested,
             )
 
         add(
@@ -712,6 +825,20 @@ class ScanActionPlanCompiler:
             requested = override_budgets.get(
                 blueprint.action_id, specification.budget_cost,
             )
+            if (
+                blueprint.capability_name
+                in {"collections.replay_safe", "collections.replay_active"}
+                and blueprint.action_id not in override_budgets
+            ):
+                collection_ref = blueprint.capability_args.get("request_collection_ref")
+                if isinstance(collection_ref, Mapping):
+                    request_limit = int(collection_ref.get("max_requests") or 0)
+                    requested = {
+                        name: min(amount, request_limit)
+                        if name in {"http_requests", "state_changing_requests"}
+                        else amount
+                        for name, amount in specification.budget_cost.items()
+                    }
             action_bindings = {
                 **global_bindings,
                 "action_id": blueprint.action_id,

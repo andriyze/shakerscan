@@ -336,27 +336,22 @@ def scan_budget_ledger_limits(
     budget: Mapping[str, Any], *, allow_zero: bool = False,
 ) -> dict[str, int]:
     """Map one canonical Scan budget to the shared reservation dimensions."""
-    http = _budget_integer(
-        budget, "max_http_requests", allow_zero=allow_zero,
-    )
-    endpoints = _budget_integer(
-        budget, "max_endpoints", allow_zero=allow_zero,
-    )
     return {
-        "http_requests": http,
-        # Scan has no independent mutation ceiling yet. Permission is enforced by
-        # policy, while this prevents writes from exceeding total HTTP authority.
-        "state_changing_requests": http,
+        "http_requests": _budget_integer(
+            budget, "max_http_requests", allow_zero=allow_zero,
+        ),
+        "state_changing_requests": _budget_integer(
+            budget, "max_state_changing_requests", allow_zero=True,
+        ),
         "browser_actions": _budget_integer(
             budget, "max_browser_actions", allow_zero=allow_zero,
         ),
         "tcp_ports_attempted": _budget_integer(
             budget, "max_tcp_ports", allow_zero=allow_zero,
         ),
-        # A root-bound discovery action consumes one host attempt. The endpoint
-        # ceiling is the existing Scan-level bound until max_hosts becomes a
-        # separately configurable public Scan field.
-        "hosts_attempted": endpoints,
+        "hosts_attempted": _budget_integer(
+            budget, "max_hosts", allow_zero=allow_zero,
+        ),
         "tool_wall_seconds": _budget_integer(
             budget, "max_tool_wall_seconds", allow_zero=allow_zero,
         ),

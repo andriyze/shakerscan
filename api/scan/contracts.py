@@ -23,9 +23,9 @@ from .legacy import (
 
 
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
-    "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2),
-    "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4),
-    "thorough": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 2_700, 8),
+    "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 20, 25),
+    "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4, 100, 100),
+    "thorough": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 2_700, 8, 500, 500),
 }
 
 _BUDGET_CEILINGS = {
@@ -36,6 +36,8 @@ _BUDGET_CEILINGS = {
     "max_tcp_ports": 262_140,
     "max_tool_wall_seconds": 86_400,
     "max_workers": 128,
+    "max_state_changing_requests": 100_000,
+    "max_hosts": 100_000,
 }
 
 SCAN_AUTHENTICATION_KEYS = frozenset({
@@ -110,7 +112,12 @@ def bind_scan_scope_receipt(
     return replace(contract, policy=policy, execution_plan=plan)
 
 
-def _resolve_budget(profile: str, advanced: Mapping[str, Any] | None) -> ScanBudget:
+def _resolve_budget(
+    profile: str,
+    advanced: Mapping[str, Any] | None,
+    *,
+    state_changing_allowed: bool,
+) -> ScanBudget:
     try:
         base = asdict(BUDGET_PROFILES[profile])
     except KeyError as exc:
@@ -131,9 +138,28 @@ def _resolve_budget(profile: str, advanced: Mapping[str, Any] | None) -> ScanBud
             value = int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{key} must be a positive integer") from exc
-        if not 1 <= value <= ceiling:
-            raise ValueError(f"{key} must be between 1 and {ceiling}")
+        minimum = 0 if key == "max_state_changing_requests" else 1
+        if not minimum <= value <= ceiling:
+            raise ValueError(f"{key} must be between {minimum} and {ceiling}")
+        if value > int(base[key]):
+            raise ValueError(
+                f"{key} cannot exceed the {profile} profile ceiling of {base[key]}"
+            )
         base[key] = value
+    if "max_hosts" not in advanced:
+        base["max_hosts"] = min(base["max_hosts"], base["max_endpoints"])
+    if "max_state_changing_requests" not in advanced:
+        base["max_state_changing_requests"] = min(
+            base["max_state_changing_requests"], base["max_http_requests"],
+        )
+    if not state_changing_allowed:
+        if int(base.get("max_state_changing_requests") or 0) > 0 and (
+            "max_state_changing_requests" in advanced
+        ):
+            raise ValueError(
+                "max_state_changing_requests requires state-changing HTTP authority"
+            )
+        base["max_state_changing_requests"] = 0
     if advanced.get("force_single_worker"):
         base["max_workers"] = 1
     return ScanBudget(**base)
@@ -209,12 +235,27 @@ def resolve_scan_contract(
     )
     if resolved_policy.allow_state_changing_http and not resolved_policy.active_testing:
         raise ValueError("state-changing HTTP requires active_testing")
+    if (
+        resolved_policy.allow_state_changing_http
+        and not resolved_policy.approval_receipt_id
+    ):
+        raise ValueError(
+            "state-changing HTTP requires a target-bound approval receipt"
+        )
     if resolved_policy.network_discovery and not resolved_policy.active_testing:
         raise ValueError("network_discovery requires active_testing")
     if resolved_policy.network_discovery and not resolved_policy.approval_receipt_id:
         raise ValueError("network_discovery requires a target-bound approval receipt")
     merged_advanced = {**compatibility_advanced, **dict(advanced or {})}
-    budget = _resolve_budget(profile, merged_advanced)
+    budget = _resolve_budget(
+        profile,
+        merged_advanced,
+        state_changing_allowed=(
+            resolved_policy.active_testing
+            and resolved_policy.allow_state_changing_http
+            and bool(resolved_policy.approval_receipt_id)
+        ),
+    )
     execution_plan = ScanExecutionPlan(
         policy=resolved_policy,
         budget_profile=profile,

@@ -170,6 +170,7 @@ jobs:
             tests/test_scan_execution_plan.py \
             tests/test_scan_action_plan.py \
             tests/test_scan_action_compiler.py \
+            tests/test_scan_budget_allocator.py \
             tests/test_scan_action_store.py \
             tests/test_scan_capability_result.py \
             tests/test_observation_manifests.py \

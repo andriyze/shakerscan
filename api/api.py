@@ -453,6 +453,17 @@ try:
         prepare_worker_dispatch,
     )
     from scan.executor import build_native_scan_execution
+    from scan.action_plan import (
+        ScanActionPlanCompiler,
+        ScanActionPlanError,
+        credential_profile_action_refs,
+        request_collection_action_refs,
+    )
+    from scan.action_store import PostgresScanActionStore
+    from scan.budget_allocator import (
+        ScanBudgetAllocationError,
+        allocate_scan_action_plan,
+    )
     from scan.stage_store import (
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
@@ -492,6 +503,17 @@ except ModuleNotFoundError:
         prepare_worker_dispatch,
     )
     from api.scan.executor import build_native_scan_execution
+    from api.scan.action_plan import (
+        ScanActionPlanCompiler,
+        ScanActionPlanError,
+        credential_profile_action_refs,
+        request_collection_action_refs,
+    )
+    from api.scan.action_store import PostgresScanActionStore
+    from api.scan.budget_allocator import (
+        ScanBudgetAllocationError,
+        allocate_scan_action_plan,
+    )
     from api.scan.stage_store import (
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
@@ -3740,6 +3762,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
             scan_role = 'parent' if parallel_enabled else 'standalone'
 
             canonical_job = None
+            scan_action_plan = None
             if canonical_schedule:
                 scan_options["runtime_scope_guard"] = await _freeze_scan_target_binding(
                     target_id=target_id,
@@ -3750,19 +3773,20 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     existing_guard=scan_options.get("runtime_scope_guard"),
                 )
                 target_guard = scan_options["runtime_scope_guard"]
+                target_binding = TargetBinding(
+                    target_id=str(target_id),
+                    target_kind="web",
+                    canonical_host=target_guard.get("canonical_host"),
+                    allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
+                    allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
+                    allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
+                    environment=str(target_guard.get("environment") or "unknown"),
+                    scope_receipt_id=scan_contract.policy.scope_receipt_id,
+                )
                 canonical_job = CanonicalScanJob.create(
                     job_id=job_id,
                     scan_id=scan_id,
-                    target=TargetBinding(
-                        target_id=str(target_id),
-                        target_kind="web",
-                        canonical_host=target_guard.get("canonical_host"),
-                        allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
-                        allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
-                        allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
-                        environment=str(target_guard.get("environment") or "unknown"),
-                        scope_receipt_id=scan_contract.policy.scope_receipt_id,
-                    ),
+                    target=target_binding,
                     execution_plan=scan_contract.execution_plan,
                     request_collections=admitted_request_collection_job_refs(
                         [
@@ -3777,23 +3801,50 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         ]
                     ),
                 )
+                try:
+                    scan_action_plan = _compile_allocated_scan_action_plan(
+                        scan_id=scan_id,
+                        scan_contract=scan_contract,
+                        target_binding=target_binding,
+                        credential_refs=[
+                            dict(item)
+                            for item in scan_options.get("credential_profile_refs") or ()
+                            if isinstance(item, Mapping)
+                        ],
+                        request_collection_refs=[
+                            dict(item)
+                            for item in scan_options.get("request_collections") or ()
+                            if isinstance(item, Mapping)
+                        ],
+                    )
+                except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
+                    print(
+                        f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}",
+                        flush=True,
+                    )
+                    continue
 
-            await conn.execute("""
-                INSERT INTO scans (
-                    id, target_id, target_url, job_id, status, options, scan_type, scan_role,
-                    scan_generation, policy_json, budget_json, coverage_status, coverage_json,
-                    scan_job_payload, scan_job_digest
-                ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, $11, $12,
-                          $13, $14)
-            """, uuid.UUID(scan_id), target_id, target_url, job_id,
-                 json.dumps(scan_options), "scan" if canonical_schedule else scan_type, scan_role,
-                 "v2" if canonical_schedule else "legacy",
-                 json.dumps(scan_options.get("scan_policy") or {}),
-                 json.dumps(scan_options.get("resolved_scan_budget") or {}),
-                 "pending" if canonical_schedule else None,
-                 json.dumps({"status": "pending", "reasons": []}) if canonical_schedule else json.dumps({}),
-                 json.dumps(canonical_job.payload()) if canonical_job else None,
-                 canonical_job.payload_digest if canonical_job else None)
+            async with conn.transaction():
+                await conn.execute("""
+                    INSERT INTO scans (
+                        id, target_id, target_url, job_id, status, options, scan_type, scan_role,
+                        scan_generation, policy_json, budget_json, coverage_status, coverage_json,
+                        scan_job_payload, scan_job_digest
+                    ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, $11, $12,
+                              $13, $14)
+                """, uuid.UUID(scan_id), target_id, target_url, job_id,
+                     json.dumps(scan_options), "scan" if canonical_schedule else scan_type, scan_role,
+                     "v2" if canonical_schedule else "legacy",
+                     json.dumps(scan_options.get("scan_policy") or {}),
+                     json.dumps(scan_options.get("resolved_scan_budget") or {}),
+                     "pending" if canonical_schedule else None,
+                     json.dumps({"status": "pending", "reasons": []}) if canonical_schedule else json.dumps({}),
+                     json.dumps(canonical_job.payload()) if canonical_job else None,
+                     canonical_job.payload_digest if canonical_job else None)
+                if scan_action_plan is not None:
+                    await PostgresScanActionStore().persist_plan(
+                        conn, plan=scan_action_plan,
+                    )
 
         job_data = (
             canonical_job.queue_payload(
@@ -4604,6 +4655,26 @@ class ScanOptions(BaseModel):
         return check_registry.validate_scan_focus_family(value)
 
 
+class ScanAdvancedLimits(BaseModel):
+    """Public lower ceilings for one immutable Scan budget."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=172_800)
+    max_http_requests: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    max_state_changing_requests: Optional[int] = Field(
+        default=None, ge=0, le=100_000,
+    )
+    max_endpoints: Optional[int] = Field(default=None, ge=1, le=100_000)
+    max_hosts: Optional[int] = Field(default=None, ge=1, le=100_000)
+    max_browser_actions: Optional[int] = Field(default=None, ge=1, le=20_000)
+    max_tcp_ports: Optional[int] = Field(default=None, ge=1, le=262_140)
+    max_tool_wall_seconds: Optional[int] = Field(default=None, ge=1, le=86_400)
+    max_workers: Optional[int] = Field(default=None, ge=1, le=128)
+    include_families: list[str] = Field(default_factory=list, max_length=100)
+    exclude_families: list[str] = Field(default_factory=list, max_length=100)
+    force_single_worker: bool = False
+
+
 class ScanRequest(BaseModel):
     target: str
     name: Optional[str] = None
@@ -4613,7 +4684,7 @@ class ScanRequest(BaseModel):
     authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
-    advanced: Optional[dict[str, Any]] = None
+    advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
 
@@ -4833,7 +4904,7 @@ class BatchRequest(BaseModel):
     authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
-    advanced: Optional[dict[str, Any]] = None
+    advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
 
@@ -28097,6 +28168,28 @@ async def deactivate_request_collection_selection(
     }
 
 
+def _compile_allocated_scan_action_plan(
+    *,
+    scan_id: str,
+    scan_contract: ResolvedScanContract,
+    target_binding: TargetBinding,
+    credential_refs: Sequence[Mapping[str, Any]] = (),
+    request_collection_refs: Sequence[Mapping[str, Any]] = (),
+):
+    raw_plan = ScanActionPlanCompiler().compile(
+        scan_id=scan_id,
+        execution_plan=scan_contract.execution_plan,
+        target_binding=target_binding,
+        credential_profile_refs=credential_profile_action_refs(credential_refs),
+        request_collection_refs=request_collection_action_refs(
+            request_collection_refs
+        ),
+    )
+    return allocate_scan_action_plan(
+        raw_plan, scan_contract.budget,
+    ).plan
+
+
 def normalize_dast_scan_options(options: ScanOptions) -> str:
     """Resolve scan_type from explicit or legacy options and mutate options consistently.
 
@@ -28175,7 +28268,10 @@ async def submit_scan(request: ScanRequest):
         scan_contract = resolve_scan_contract(
             budget_profile=request.budget_profile or request.options.budget_profile,
             policy=request.policy,
-            advanced=request.advanced,
+            advanced=(
+                request.advanced.model_dump(exclude_none=True)
+                if request.advanced is not None else None
+            ),
             approval_receipt_id=approval_receipt_id,
             legacy_scan_type=legacy_scan_type,
         )
@@ -28427,23 +28523,34 @@ async def submit_scan(request: ScanRequest):
             existing_guard=options_payload.get("runtime_scope_guard"),
         )
         target_guard = options_payload["runtime_scope_guard"]
+        target_binding = TargetBinding(
+            target_id=str(target_id),
+            target_kind=request.target_kind,
+            canonical_host=target_guard.get("canonical_host"),
+            allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
+            allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
+            allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
+            environment=str(target_guard.get("environment") or "unknown"),
+            scope_receipt_id=scan_contract.policy.scope_receipt_id,
+        )
         canonical_job = CanonicalScanJob.create(
             job_id=job_id,
             scan_id=scan_id,
-            target=TargetBinding(
-                target_id=str(target_id),
-                target_kind=request.target_kind,
-                canonical_host=target_guard.get("canonical_host"),
-                allowed_origins=tuple(target_guard.get("allowed_origins") or ()),
-                allowed_addresses=tuple(target_guard.get("allowed_addresses") or ()),
-                allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
-                environment=str(target_guard.get("environment") or "unknown"),
-                scope_receipt_id=scan_contract.policy.scope_receipt_id,
-            ),
+            target=target_binding,
             execution_plan=scan_contract.execution_plan,
             request_collections=admitted_request_collection_job_refs(collection_refs),
             credential_profile_ids=admitted_credential_profile_ids(credential_refs),
         )
+        try:
+            scan_action_plan = _compile_allocated_scan_action_plan(
+                scan_id=scan_id,
+                scan_contract=scan_contract,
+                target_binding=target_binding,
+                credential_refs=credential_refs,
+                request_collection_refs=executable_collection_refs,
+            )
+        except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         canonical_job_payload = canonical_job.payload()
         persisted_options = _attach_target_note(
             options_payload, request.target, target_note, scheme_inferred,
@@ -28452,44 +28559,49 @@ async def submit_scan(request: ScanRequest):
         # Parallel scans become a parent row; the scan_plan job fans out shards.
         scan_role = 'parent' if parallel_enabled else 'standalone'
 
-        # Create scan record
-        await conn.execute("""
-            INSERT INTO scans (
-                id, target_id, target_url, job_id, status, options, scan_type, scan_role,
-                scan_generation, policy_json, budget_json, coverage_status, coverage_json,
-                scan_job_payload, scan_job_digest
-            ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10,
-                      $11, $12)
-        """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
-             json.dumps(persisted_options),
-             public_scan_type, scan_role, json.dumps(options_payload.get("scan_policy") or {}),
-             json.dumps(options_payload.get("resolved_scan_budget") or {}),
-             json.dumps({"status": "pending", "reasons": []}),
-             json.dumps(canonical_job_payload), canonical_job.payload_digest)
-        command_result = await _record_command_result(
-            conn,
-            command="scan.submit",
-            status="queued",
-            risk_tier=(
-                "credential"
-                if credential_refs
-                else "active" if scan_contract.policy.active_testing else "passive"
-            ),
-            scan_id=scan_id,
-            scope_receipt_id=options_payload.get("scope_receipt_id"),
-            approval_receipt_id=options_payload.get("approval_receipt_id"),
-            operator_message=f"Queued {'legacy ' + legacy_scan_type if legacy_scan_type else 'Scan'} for {normalized_target}",
-            result_json={
-                "target": normalized_target,
-                "scan_type": public_scan_type,
-                "scan_generation": "v2",
-                "policy": options_payload.get("scan_policy"),
-                "budget": options_payload.get("resolved_scan_budget"),
-                "job_id": job_id,
-                "scan_role": scan_role,
-            },
-            next_action=f"/scans/{scan_id}",
-        )
+        # Persist the scan row, complete action index, and audit record atomically.
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO scans (
+                    id, target_id, target_url, job_id, status, options, scan_type, scan_role,
+                    scan_generation, policy_json, budget_json, coverage_status, coverage_json,
+                    scan_job_payload, scan_job_digest
+                ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'v2', $8, $9, 'pending', $10,
+                          $11, $12)
+            """, uuid.UUID(scan_id), target_id, normalized_target, job_id,
+                 json.dumps(persisted_options),
+                 public_scan_type, scan_role, json.dumps(options_payload.get("scan_policy") or {}),
+                 json.dumps(options_payload.get("resolved_scan_budget") or {}),
+                 json.dumps({"status": "pending", "reasons": []}),
+                 json.dumps(canonical_job_payload), canonical_job.payload_digest)
+            await PostgresScanActionStore().persist_plan(
+                conn, plan=scan_action_plan,
+            )
+            command_result = await _record_command_result(
+                conn,
+                command="scan.submit",
+                status="queued",
+                risk_tier=(
+                    "credential"
+                    if credential_refs
+                    else "active" if scan_contract.policy.active_testing else "passive"
+                ),
+                scan_id=scan_id,
+                scope_receipt_id=options_payload.get("scope_receipt_id"),
+                approval_receipt_id=options_payload.get("approval_receipt_id"),
+                operator_message=f"Queued {'legacy ' + legacy_scan_type if legacy_scan_type else 'Scan'} for {normalized_target}",
+                result_json={
+                    "target": normalized_target,
+                    "scan_type": public_scan_type,
+                    "scan_generation": "v2",
+                    "policy": options_payload.get("scan_policy"),
+                    "budget": options_payload.get("resolved_scan_budget"),
+                    "job_id": job_id,
+                    "scan_action_plan_digest": scan_action_plan.plan_digest,
+                    "scan_role": scan_role,
+                },
+                next_action=f"/scans/{scan_id}",
+            )
 
     # Queue the job
     canonical_queue = True
@@ -28574,7 +28686,10 @@ async def submit_batch(request: BatchRequest):
             authentication=dict(request.authentication or {}),
             request_collections=[dict(item) for item in request.request_collections],
             credential_profile_ids=list(request.credential_profile_ids),
-            advanced=dict(request.advanced or {}),
+            advanced=(
+                request.advanced.model_dump(exclude_none=True)
+                if request.advanced is not None else None
+            ),
             approval_receipt_id=request.approval_receipt_id,
             options=request.options.model_copy(deep=True),
         )

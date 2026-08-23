@@ -29,7 +29,9 @@ def _budget() -> dict[str, int]:
     return {
         "max_duration_seconds": 1_200,
         "max_http_requests": 100,
+        "max_state_changing_requests": 6,
         "max_endpoints": 50,
+        "max_hosts": 8,
         "max_browser_actions": 20,
         "max_tcp_ports": 10,
         "max_tool_wall_seconds": 60,
@@ -249,7 +251,9 @@ def test_scan_capacity_reserves_a_minimal_baseline_and_honors_runtime_grant():
 
     assert capacity.http_requests == 14
     assert capacity.tool_wall_seconds == 55
-    assert limits["state_changing_requests"] == limits["http_requests"] == 100
+    assert limits["state_changing_requests"] == 6
+    assert limits["hosts_attempted"] == 8
+    assert limits["http_requests"] == 100
 
 
 def test_scan_replay_does_not_treat_compatibility_active_grant_as_http_budget():

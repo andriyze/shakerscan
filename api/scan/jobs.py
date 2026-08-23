@@ -60,6 +60,7 @@ _POLICY_KEYS = frozenset({
 _BUDGET_KEYS = frozenset({
     "max_duration_seconds", "max_http_requests", "max_endpoints", "max_browser_actions",
     "max_tcp_ports", "max_tool_wall_seconds", "max_workers",
+    "max_state_changing_requests", "max_hosts",
 })
 _TARGET_KEYS = frozenset({
     "target_id", "target_kind", "canonical_host", "allowed_origins", "allowed_addresses",
@@ -95,12 +96,15 @@ _BUDGET_CEILINGS: Mapping[str, int] = {
     "max_tcp_ports": 262_140,
     "max_tool_wall_seconds": 86_400,
     "max_workers": 128,
+    "max_state_changing_requests": 100_000,
+    "max_hosts": 100_000,
 }
 _OPTIONS_DIGEST_IGNORED_KEYS = frozenset({
     "queue_handoff_confirmed", "canonical_shard_authority",
 })
 _SHARD_ZERO_ALLOWED_BUDGET_KEYS = frozenset({
     "max_browser_actions", "max_tcp_ports", "max_tool_wall_seconds",
+    "max_state_changing_requests",
 })
 
 
@@ -342,24 +346,26 @@ def derive_scan_shard_budget(
                 parsed.append(amount)
         return min(parent_value, max(parsed) if parsed else parent_value)
 
+    shard_http_requests = bounded(
+        parent_budget.max_http_requests,
+        custom.get("request_max"), resolved.get("request_max"),
+    )
+    shard_endpoints = bounded(
+        parent_budget.max_endpoints,
+        custom.get("max_urls"), custom.get("api_probe_limit"),
+        custom.get("active_worklist_max"), custom.get("active_max_endpoints"),
+        custom.get("nuclei_max_targets"), resolved.get("max_urls"),
+        resolved.get("active_worklist_max"),
+        len(options.get("custom_endpoints") or ()) or None,
+    )
     return ScanShardBudget(
         max_duration_seconds=bounded(
             parent_budget.max_duration_seconds,
             custom.get("max_duration_minutes"), resolved.get("max_duration_minutes"),
             scale=60,
         ),
-        max_http_requests=bounded(
-            parent_budget.max_http_requests,
-            custom.get("request_max"), resolved.get("request_max"),
-        ),
-        max_endpoints=bounded(
-            parent_budget.max_endpoints,
-            custom.get("max_urls"), custom.get("api_probe_limit"),
-            custom.get("active_worklist_max"), custom.get("active_max_endpoints"),
-            custom.get("nuclei_max_targets"), resolved.get("max_urls"),
-            resolved.get("active_worklist_max"),
-            len(options.get("custom_endpoints") or ()) or None,
-        ),
+        max_http_requests=shard_http_requests,
+        max_endpoints=shard_endpoints,
         max_browser_actions=bounded(
             parent_budget.max_browser_actions,
             custom.get("browser_max_pages"), resolved.get("browser_max_pages"),
@@ -382,6 +388,19 @@ def derive_scan_shard_budget(
                 resolved.get("phase4_max_seconds"), resolved.get("active_max_seconds"),
                 allow_zero=True,
             )
+        ),
+        max_state_changing_requests=bounded(
+            min(parent_budget.max_state_changing_requests, shard_http_requests),
+            custom.get("max_state_changing_requests"),
+            resolved.get("max_state_changing_requests"),
+            allow_zero=True,
+        ),
+        max_hosts=bounded(
+            min(
+                int(parent_budget.max_hosts or parent_budget.max_endpoints),
+                shard_endpoints,
+            ),
+            custom.get("max_hosts"), resolved.get("max_hosts"),
         ),
         max_workers=1,
     )
@@ -447,9 +466,29 @@ def _plan_from_payload(value: Any, supplied_digest: Any) -> ScanExecutionPlan:
     normalized_budget: dict[str, int] = {}
     for name, ceiling in _BUDGET_CEILINGS.items():
         amount = budget_raw[name]
-        if isinstance(amount, bool) or not isinstance(amount, int) or not 1 <= amount <= ceiling:
+        minimum = 0 if name == "max_state_changing_requests" else 1
+        if (
+            isinstance(amount, bool)
+            or not isinstance(amount, int)
+            or not minimum <= amount <= ceiling
+        ):
             raise CanonicalScanJobError(f"execution_plan.budget.{name} is outside its ceiling")
         normalized_budget[name] = amount
+    if normalized_budget["max_state_changing_requests"] > normalized_budget["max_http_requests"]:
+        raise CanonicalScanJobError(
+            "execution_plan.budget.max_state_changing_requests exceeds HTTP authority"
+        )
+    if normalized_budget["max_hosts"] > normalized_budget["max_endpoints"]:
+        raise CanonicalScanJobError(
+            "execution_plan.budget.max_hosts exceeds endpoint authority"
+        )
+    if (
+        normalized_budget["max_state_changing_requests"]
+        and not policy.allow_state_changing_http
+    ):
+        raise CanonicalScanJobError(
+            "execution_plan mutation budget requires state-changing HTTP authority"
+        )
 
     profile = str(raw["budget_profile"] or "").strip().lower()
     if profile not in {"fast", "balanced", "thorough"} or profile != raw["budget_profile"]:
@@ -595,6 +634,8 @@ class ScanShardBudget:
     max_tcp_ports: int
     max_tool_wall_seconds: int
     max_workers: int
+    max_state_changing_requests: int = 0
+    max_hosts: int = 1
 
     def __post_init__(self) -> None:
         for name in _BUDGET_KEYS:
@@ -605,6 +646,14 @@ class ScanShardBudget:
                 raise CanonicalScanJobError(
                     f"shard.sub_budget.{name} must be a {qualifier} integer"
                 )
+        if self.max_state_changing_requests > self.max_http_requests:
+            raise CanonicalScanJobError(
+                "shard mutation budget cannot exceed its HTTP budget"
+            )
+        if self.max_hosts > self.max_endpoints:
+            raise CanonicalScanJobError(
+                "shard host budget cannot exceed its endpoint budget"
+            )
 
     def payload(self) -> dict[str, int]:
         return {name: getattr(self, name) for name in _BUDGET_KEYS}

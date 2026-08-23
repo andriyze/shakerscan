@@ -10,6 +10,8 @@ from api.scan.action_plan import (
     ScanActionPlacementError,
     ScanActionPlanCompiler,
     ScanActionPlanError,
+    credential_profile_action_refs,
+    request_collection_action_refs,
 )
 from api.scan.execution import ScanExecutionPlan
 
@@ -33,10 +35,14 @@ def _target() -> TargetBinding:
     )
 
 
-def _execution(*, include=(), exclude=(), active=True, network=False, subdomains=False):
+def _execution(
+    *, include=(), exclude=(), active=True, network=False, subdomains=False,
+    state=False,
+):
     return ScanExecutionPlan(
         policy=ScanPolicy(
             active_testing=active,
+            allow_state_changing_http=state,
             network_discovery=network,
             subdomain_discovery=subdomains,
             include_families=tuple(include),
@@ -149,3 +155,50 @@ def test_compiler_includes_explicit_network_and_subdomain_dependencies():
     assert by_id["discover.ports"].required is True
     assert by_id["discover.services"].dependencies == ("discover.ports",)
     assert by_id["discover.services"].supporting is True
+
+
+def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
+    credentials = credential_profile_action_refs(({
+        "profile_id": "profile-1",
+        "profile_version": 3,
+        "scan_lane": "primary",
+        "target_kind": "web",
+        "auth_kind": "bearer_token",
+        "secret_values_visible": False,
+    },))
+    collections = request_collection_action_refs(({
+        "collection_id": "collection-1",
+        "selection_digest": "a" * 64,
+        "replay_policy": "confirmed_active",
+        "selected_requests": 8,
+        "selector": {"max_requests": 20},
+    },))
+
+    assert credentials == ({
+        "profile_id": "profile-1",
+        "version": 3,
+        "digest": credentials[0]["digest"],
+        "lane": "primary",
+    },)
+    assert len(credentials[0]["digest"]) == 64
+    assert collections == ({
+        "collection_id": "collection-1",
+        "version": 1,
+        "selection_digest": "a" * 64,
+        "active": True,
+        "max_requests": 8,
+    },)
+
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("bola",), state=True),
+        target_binding=_target(),
+        credential_profile_refs=credentials,
+        request_collection_refs=collections,
+    )
+    replay = next(
+        action for action in plan.actions
+        if action.capability_name == "collections.replay_active"
+    )
+    assert replay.requested_budget["http_requests"] == 8
+    assert replay.requested_budget["state_changing_requests"] == 8

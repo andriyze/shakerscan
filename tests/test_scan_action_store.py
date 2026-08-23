@@ -15,15 +15,19 @@ from api.scan.action_store import (
     SCAN_ACTION_SCHEMA_SQL,
     ScanActionStoreError,
 )
+from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.execution import ScanExecutionPlan
 
 
 SCAN_ID = "20000000-0000-4000-8000-000000000001"
 
 
-def _plan():
+def _plan(*, active=False):
     execution = ScanExecutionPlan(
-        policy=ScanPolicy(active_testing=False),
+        policy=ScanPolicy(
+            active_testing=active,
+            approval_receipt_id="approval-1" if active else None,
+        ),
         budget_profile="fast",
         budget=ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2),
     )
@@ -75,7 +79,8 @@ class FakeConn:
                 "action_digest": args[8],
                 "execution_plan_digest": args[9],
                 "target_binding_digest": args[10],
-                "status": "planned",
+                "status": args[17],
+                "reason_code": args[18],
             }
             existing = self.actions.get(action_id)
             if existing and (
@@ -148,3 +153,19 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "UNIQUE (scan_id, action_id)" in source
         assert "input_binding_digest" in source
         assert "observation_manifest_id" in source
+
+
+def test_action_store_persists_precomputed_optional_skip_reasons():
+    raw = _plan(active=True)
+    plan = allocate_scan_action_plan(
+        raw,
+        ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25),
+    ).plan
+    conn = FakeConn()
+    asyncio.run(PostgresScanActionStore().persist_plan(conn, plan=plan))
+
+    skipped = [row for row in conn.actions.values() if row["status"] == "skipped"]
+    assert skipped
+    assert {row["reason_code"] for row in skipped} <= {
+        "insufficient_plan_budget", "dependency_failed",
+    }

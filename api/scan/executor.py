@@ -128,6 +128,8 @@ def _budget_payload(budget: ScanBudget | ScanShardBudget) -> dict[str, int]:
         "max_tcp_ports": budget.max_tcp_ports,
         "max_tool_wall_seconds": budget.max_tool_wall_seconds,
         "max_workers": budget.max_workers,
+        "max_state_changing_requests": budget.max_state_changing_requests,
+        "max_hosts": int(budget.max_hosts or 0),
     }
 
 
@@ -138,7 +140,7 @@ def _runtime_budget_limits(
 ) -> dict[str, int]:
     values = _budget_payload(budget)
     state_changing = (
-        values["max_http_requests"]
+        values["max_state_changing_requests"]
         if plan.policy.active_testing and plan.policy.allow_state_changing_http
         else 0
     )
@@ -155,7 +157,7 @@ def _runtime_budget_limits(
                 for origin in target.allowed_origins
             ) else 0,
         ),
-        "hosts_attempted": values["max_endpoints"],
+        "hosts_attempted": values["max_hosts"],
         "tool_wall_seconds": values["max_tool_wall_seconds"],
     }
 

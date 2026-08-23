@@ -45,7 +45,9 @@ def _budget(**overrides):
     result = {
         "max_duration_seconds": 1_200,
         "max_http_requests": 100,
+        "max_state_changing_requests": 7,
         "max_endpoints": 50,
+        "max_hosts": 8,
         "max_browser_actions": 20,
         "max_tcp_ports": 10,
         "max_tool_wall_seconds": 60,
@@ -80,10 +82,10 @@ def test_scan_ledger_has_one_shared_dimension_mapping_for_replay_and_discovery()
 
     assert limits == {
         "http_requests": 100,
-        "state_changing_requests": 100,
+        "state_changing_requests": 7,
         "browser_actions": 20,
         "tcp_ports_attempted": 10,
-        "hosts_attempted": 50,
+        "hosts_attempted": 8,
         "tool_wall_seconds": 60,
     }
 
@@ -121,7 +123,7 @@ def test_scan_capability_is_clamped_before_reservation_and_digest_binds_authorit
         fit_prepared_scan_capability(
             _prepared(),
             ledger_limits=scan_budget_ledger_limits(
-                _budget(max_endpoints=0), allow_zero=True,
+                _budget(max_hosts=0), allow_zero=True,
             ),
         )
 

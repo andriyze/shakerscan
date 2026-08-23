@@ -15,11 +15,7 @@ LEGACY_SCAN_MAPPING: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     "standard": {"budget_profile": "balanced", "active_testing": False},
     "deep": {"budget_profile": "thorough", "active_testing": False},
     "full": {"budget_profile": "thorough", "active_testing": True},
-    "aggressive": {
-        "budget_profile": "thorough",
-        "active_testing": True,
-        "advanced": {"max_duration_seconds": 7_200, "max_http_requests": 40_000},
-    },
+    "aggressive": {"budget_profile": "thorough", "active_testing": True},
     "smart": {"budget_profile": "thorough", "active_testing": True},
 })
 

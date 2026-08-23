@@ -31,17 +31,29 @@ class ScanBudget:
     max_tcp_ports: int
     max_tool_wall_seconds: int
     max_workers: int
+    max_state_changing_requests: int = 0
+    max_hosts: int | None = None
 
     def __post_init__(self) -> None:
+        if self.max_hosts is None:
+            object.__setattr__(self, "max_hosts", self.max_endpoints)
         for name, value in self.__dict__.items():
-            if isinstance(value, bool) or int(value) <= 0:
-                raise ValueError(f"{name} must be a positive integer")
+            minimum = 0 if name == "max_state_changing_requests" else 1
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                qualifier = "non-negative" if minimum == 0 else "positive"
+                raise ValueError(f"{name} must be a {qualifier} integer")
+        if self.max_state_changing_requests > self.max_http_requests:
+            raise ValueError("max_state_changing_requests cannot exceed max_http_requests")
+        if int(self.max_hosts or 0) > self.max_endpoints:
+            raise ValueError("max_hosts cannot exceed max_endpoints")
 
     def ledger_limits(self) -> dict[str, int]:
         return {
             "http_requests": self.max_http_requests,
+            "state_changing_requests": self.max_state_changing_requests,
             "browser_actions": self.max_browser_actions,
             "tcp_ports_attempted": self.max_tcp_ports,
+            "hosts_attempted": int(self.max_hosts or 0),
             "tool_wall_seconds": self.max_tool_wall_seconds,
         }
 

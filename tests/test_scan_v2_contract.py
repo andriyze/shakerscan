@@ -114,20 +114,66 @@ def test_active_permission_changes_policy_not_scan_identity():
 def test_advanced_limits_are_resolved_and_bounded():
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        advanced={"max_http_requests": 7_500, "max_workers": 3, "max_endpoints": 3_000},
+        advanced={"max_http_requests": 4_000, "max_workers": 3, "max_endpoints": 1_000},
     )
-    assert contract.budget.max_http_requests == 7_500
+    assert contract.budget.max_http_requests == 4_000
     assert contract.budget.max_workers == 3
-    assert contract.budget.max_endpoints == 3_000
+    assert contract.budget.max_endpoints == 1_000
+    with pytest.raises(ValueError, match="profile ceiling"):
+        resolve_scan_contract(
+            budget_profile="balanced", advanced={"max_http_requests": 7_500},
+        )
     with pytest.raises(ValueError):
         resolve_scan_contract(advanced={"max_workers": 129})
     with pytest.raises(ValueError):
         resolve_scan_contract(advanced={"new_scan_mode": "smart-plus"})
 
 
+def test_host_and_mutation_budgets_are_independent_first_class_authority():
+    passive = resolve_scan_contract(
+        budget_profile="fast", advanced={"max_hosts": 7},
+    )
+    assert passive.budget.max_hosts == 7
+    assert passive.budget.max_state_changing_requests == 0
+
+    active = resolve_scan_contract(
+        budget_profile="fast",
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+        },
+        approval_receipt_id="approval-1",
+        advanced={"max_state_changing_requests": 9, "max_hosts": 6},
+    )
+    assert active.budget.max_state_changing_requests == 9
+    assert active.budget.max_hosts == 6
+    assert active.budget.ledger_limits()["state_changing_requests"] == 9
+    assert active.budget.ledger_limits()["hosts_attempted"] == 6
+
+    narrowed = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+        },
+        approval_receipt_id="approval-1",
+        advanced={"max_http_requests": 40, "max_endpoints": 12},
+    )
+    assert narrowed.budget.max_state_changing_requests == 40
+    assert narrowed.budget.max_hosts == 12
+
+    with pytest.raises(ValueError, match="state-changing HTTP authority"):
+        resolve_scan_contract(advanced={"max_state_changing_requests": 1})
+
+
 def test_active_state_change_family_and_network_policy_fail_closed():
     with pytest.raises(ValueError, match="state-changing"):
         resolve_scan_contract(policy={"allow_state_changing_http": True})
+    with pytest.raises(ValueError, match="target-bound approval receipt"):
+        resolve_scan_contract(policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+        })
     with pytest.raises(ValueError, match="must not overlap"):
         resolve_scan_contract(
             policy={"include_families": ["xss"], "exclude_families": ["xss"]}
@@ -191,7 +237,10 @@ def test_resolved_metadata_contains_only_canonical_plan_and_deprecation_data():
     assert metadata["scan_engine"] == "scan"
     assert metadata["scan_policy"]["approval_receipt_id"] == "approval-1"
     assert metadata["resolved_scan_budget"]["max_duration_seconds"] == 300
-    assert metadata["resolved_scan_budget"] == BUDGET_PROFILES["fast"].__dict__
+    assert metadata["resolved_scan_budget"] == {
+        **BUDGET_PROFILES["fast"].__dict__,
+        "max_state_changing_requests": 0,
+    }
     assert metadata["scan_execution_plan"]["engine"] == "scan"
     assert metadata["scan_execution_plan_digest"] == contract.execution_plan.digest
     assert "scan_compatibility" not in metadata

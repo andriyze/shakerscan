@@ -31,7 +31,7 @@ def _authority():
             approval_receipt_id="approval-1",
         ),
         budget_profile="balanced",
-        budget=ScanBudget(1_200, 100, 50, 20, 10, 60, 2),
+        budget=ScanBudget(1_200, 100, 50, 20, 10, 60, 2, 10, 10),
     )
     target = TargetBinding(
         target_id="target-1",

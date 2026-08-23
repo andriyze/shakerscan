@@ -91,10 +91,10 @@ INSERT INTO scan_capability_actions (
     adapter_name, adapter_version, output_schema,
     action_digest, execution_plan_digest, target_binding_digest,
     input_binding_digest, requested_budget, placement_json,
-    dependencies_json, required, supporting, status
+    dependencies_json, required, supporting, status, reason_code
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-    $13::jsonb,$14::jsonb,$15::jsonb,$16,$17,'planned'
+    $13::jsonb,$14::jsonb,$15::jsonb,$16,$17,$18,$19
 )
 ON CONFLICT (scan_id, action_id) DO UPDATE SET
     updated_at=scan_capability_actions.updated_at
@@ -176,6 +176,8 @@ class PostgresScanActionStore:
                 json.dumps(list(action.dependencies), separators=(",", ":")),
                 action.required,
                 action.supporting,
+                action.admission_status,
+                action.reason_code,
             )
             if row is None:
                 raise ScanActionStoreError(
