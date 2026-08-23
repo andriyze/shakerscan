@@ -149,6 +149,25 @@ def _schema(
     return schema
 
 
+_HTTP_PRINCIPAL_BINDING_PROPERTIES: Mapping[str, Any] = MappingProxyType({
+    "as_principal": {
+        "type": "string", "enum": ["primary", "secondary"],
+    },
+    "principal_binding_digest": {
+        "type": "string", "pattern": "^[0-9a-f]{64}$",
+    },
+})
+
+
+def _http_principal_schema(
+    properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
+) -> Mapping[str, Any]:
+    """Declare the content-free identity binding shared by HTTP capabilities."""
+    merged = dict(properties or {})
+    merged.update(_HTTP_PRINCIPAL_BINDING_PROPERTIES)
+    return _schema(merged, required=required)
+
+
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
         CapabilitySpec(
@@ -173,7 +192,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "web.probe", "Passive HTTP fingerprint of a target-bound URL.",
             "external_tool", "read_only", _HTTP_TARGETS, "httpx", "1",
             None, {"http_requests": 4, "tool_wall_seconds": 30},
-            {"network_reachability": True, "binary": "httpx"}, _schema(),
+            {"network_reachability": True, "binary": "httpx"},
+            _http_principal_schema(),
             "httpx-json/v1", ("http_observation",), "httpx", "httpx", 30_000,
             ("-version",), ("/opt/tools/httpx",),
         ),
@@ -182,7 +202,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "external_tool", "active", _HTTP_TARGETS, "nuclei", "1",
             "active_testing", {"http_requests": 4_000, "tool_wall_seconds": 300},
             {"network_reachability": True, "binary": "nuclei"},
-            _schema({"severity": {"type": "string"}, "tags": {"type": "string"}}),
+            _http_principal_schema({
+                "severity": {"type": "string"}, "tags": {"type": "string"},
+            }),
             "nuclei-jsonl/v1", ("template_match", "request_response"),
             "nuclei", "nuclei", 300_000, ("-version",), ("/opt/tools/nuclei",),
             retest_contract="rerun-template-or-family-on-same-surface",
@@ -191,7 +213,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "web.crawl", "Bounded same-host crawl and JavaScript endpoint discovery.",
             "external_tool", "active", _HTTP_TARGETS, "katana", "1",
             "active_testing", {"http_requests": 150, "tool_wall_seconds": 75},
-            {"network_reachability": True, "binary": "katana"}, _schema(),
+            {"network_reachability": True, "binary": "katana"},
+            _http_principal_schema(),
             "katana-lines/v1", ("crawl_observation",), "katana", "katana", 75_000,
             ("-version",), ("/opt/tools/katana",),
         ),
@@ -200,7 +223,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "external_tool", "active", _HTTP_TARGETS, "ffuf", "1",
             "active_testing", {"http_requests": 220, "tool_wall_seconds": 75},
             {"network_reachability": True, "binary": "ffuf"},
-            _schema({"wordlist": {"type": "string", "enum": ["common", "api", "admin"]}}),
+            _http_principal_schema({
+                "wordlist": {
+                    "type": "string", "enum": ["common", "api", "admin"],
+                },
+            }),
             "ffuf-json/v1", ("content_discovery_observation",), "ffuf", "ffuf", 75_000,
             ("-V",), ("/opt/tools/ffuf",),
         ),
@@ -209,7 +236,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "external_tool", "active", _HTTP_TARGETS, "dalfox", "1",
             "active_testing", {"http_requests": 400, "tool_wall_seconds": 120},
             {"network_reachability": True, "binary": "dalfox"},
-            _schema({"severity": {"type": "string", "enum": ["low", "medium", "high"]}}),
+            _http_principal_schema({
+                "severity": {
+                    "type": "string", "enum": ["low", "medium", "high"],
+                },
+            }),
             "dalfox-jsonl/v1", ("xss_reflection_or_browser_proof",),
             "dalfox", "dalfox", 120_000, ("version",), ("/opt/tools/dalfox",),
         ),
@@ -217,7 +248,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "sqli.verify", "Bounded target-bound SQL injection verification.",
             "external_tool", "active", _HTTP_TARGETS, "sqlmap", "1",
             "active_testing", {"http_requests": 900, "tool_wall_seconds": 300},
-            {"network_reachability": True, "binary": "sqlmap"}, _schema(),
+            {"network_reachability": True, "binary": "sqlmap"},
+            _http_principal_schema(),
             "sqlmap-output/v1", ("sqli_dbms_or_error_proof",),
             "sqlmap", "sqlmap", 300_000, ("--version",), ("/opt/tools/sqlmap",),
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",
@@ -260,17 +292,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "http", "passive", _HTTP_TARGETS, "agent.http_request", "1",
             None, {"http_requests": 1, "tool_wall_seconds": 15},
             {"network_reachability": True, "credentials_resolved_server_side": True},
-            _schema({
+            _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
-                "as_principal": {
-                    "type": "string", "enum": ["primary", "secondary"],
-                },
-                "principal_binding_digest": {
-                    "type": "string", "pattern": "^[0-9a-f]{64}$",
-                },
                 "follow_redirects": {"type": "boolean"},
             }),
             "http-observation/v1", ("http_observation", "tool_receipt"),

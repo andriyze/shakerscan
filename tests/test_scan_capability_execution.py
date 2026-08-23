@@ -444,6 +444,27 @@ def test_scan_external_capability_requires_frozen_binding_and_active_approval():
         "tags": "cve,exposure",
     }
 
+    authenticated = prepare_scan_external_capability(
+        specification=specification,
+        target=_target(),
+        args={
+            "as_principal": "primary",
+            "principal_binding_digest": "a" * 64,
+        },
+        policy=policy,
+    )
+    assert authenticated.redacted_execution["input"] == {
+        "as_principal": "primary",
+        "principal_binding_digest": "a" * 64,
+    }
+    with pytest.raises(ScanCapabilityContractError, match="binding is incomplete"):
+        prepare_scan_external_capability(
+            specification=specification,
+            target=_target(),
+            args={"as_principal": "primary"},
+            policy=policy,
+        )
+
     with pytest.raises(ScanCapabilityContractError, match="active testing approval"):
         prepare_scan_external_capability(
             specification=specification,

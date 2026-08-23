@@ -1751,6 +1751,74 @@ def test_http_baseline_binds_worker_private_primary_headers(monkeypatch):
     assert captured["principal_slot"] == "primary"
 
 
+def test_placed_http_tools_bind_primary_credentials_without_public_secrets(
+    monkeypatch,
+):
+    _plan, _target, options = _authority(enabled=False, network=True)
+    secret = "Bearer external-tool-worker-private"
+    options = {
+        **options,
+        "auth_header": secret,
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    }
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            kwargs["capability_name"],
+            observations=[],
+            amounts={
+                key: min(1, int(value))
+                for key, value in kwargs["reservation_limits"].items()
+            },
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    functions_and_targets = (
+        (worker._execute_scan_web_probe_capability,
+         "https://app.example.test/"),
+        (worker._execute_scan_web_crawl_capability,
+         "https://app.example.test/"),
+        (worker._execute_scan_content_discovery_capability,
+         "https://app.example.test/"),
+        (worker._execute_scan_template_capability,
+         "https://app.example.test/"),
+        (worker._execute_scan_xss_verification_capability,
+         "https://app.example.test/search?q=test"),
+        (worker._execute_scan_sqli_verification_capability,
+         "https://app.example.test/search?id=1"),
+    )
+    summaries = []
+    for index, (operation, execution_target) in enumerate(
+        functions_and_targets, start=1,
+    ):
+        summaries.append(asyncio.run(operation(
+            execution_target,
+            options,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id=f"job-{index}",
+        )))
+
+    assert len(calls) == len(functions_and_targets)
+    for call in calls:
+        assert call["capability_args"]["as_principal"] == "primary"
+        assert len(call["capability_args"]["principal_binding_digest"]) == 64
+        assert secret not in json.dumps(call["capability_args"])
+        assert call["scanner_process_payload"]["trusted_headers"] == {
+            "Authorization": secret,
+        }
+    assert secret not in json.dumps(summaries)
+
+
 def test_http_redirect_probe_skips_when_http_origin_is_not_bound(monkeypatch):
     _plan, _target, options = _authority(enabled=True, network=False)
 

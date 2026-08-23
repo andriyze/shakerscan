@@ -454,6 +454,12 @@ def _normalize_external_capability_args(
         raise ScanCapabilityContractError(
             f"missing {specification.name} input: {', '.join(missing)}"
         )
+    principal_fields = {"as_principal", "principal_binding_digest"}
+    supplied_principal_fields = principal_fields.intersection(args)
+    if supplied_principal_fields and supplied_principal_fields != principal_fields:
+        raise ScanCapabilityContractError(
+            f"{specification.name} principal binding is incomplete"
+        )
     normalized: dict[str, Any] = {}
     for raw_name, value in args.items():
         name = str(raw_name)

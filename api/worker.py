@@ -11247,13 +11247,14 @@ async def _execute_scan_web_probe_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         authorized_addresses[0], authorized_addresses,
     )
+    principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
         scan_id=scan_id,
         job_id=job_id,
         capability_name="web.probe",
-        capability_args={},
+        capability_args=principal.capability_args(),
         action_id="deterministic_recon.web.probe",
         target_binding=target,
         reservation_limits=allocation,
@@ -11263,6 +11264,7 @@ async def _execute_scan_web_probe_capability(
             "execution_target": execution_target,
             "registered_target": registered_target,
             "scanner_options": {},
+            "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
             "authorized_addresses": authorized_addresses,
@@ -11381,13 +11383,14 @@ async def _execute_scan_web_crawl_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         authorized_addresses[0], authorized_addresses,
     )
+    principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
         scan_id=scan_id,
         job_id=job_id,
         capability_name="web.crawl",
-        capability_args={},
+        capability_args=principal.capability_args(),
         action_id="deterministic_recon.web.crawl",
         target_binding=target,
         reservation_limits=allocation,
@@ -11397,6 +11400,7 @@ async def _execute_scan_web_crawl_capability(
             "execution_target": execution_target,
             "registered_target": registered_target,
             "scanner_options": {},
+            "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
             "authorized_addresses": authorized_addresses,
@@ -11519,13 +11523,16 @@ async def _execute_scan_content_discovery_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         authorized_addresses[0], authorized_addresses,
     )
+    principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
         scan_id=scan_id,
         job_id=job_id,
         capability_name="web.content_discover",
-        capability_args={"wordlist": "common"},
+        capability_args={
+            "wordlist": "common", **principal.capability_args(),
+        },
         action_id="deterministic_recon.web.content_discover",
         target_binding=target,
         reservation_limits=allocation,
@@ -11535,6 +11542,7 @@ async def _execute_scan_content_discovery_capability(
             "execution_target": execution_target,
             "registered_target": registered_target,
             "scanner_options": {"wordlist": "common"},
+            "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
             "authorized_addresses": authorized_addresses,
@@ -11666,6 +11674,7 @@ async def _execute_scan_xss_verification_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         authorized_addresses[0], authorized_addresses,
     )
+    principal = resolve_scan_http_principal(options, lane="primary")
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -11673,7 +11682,9 @@ async def _execute_scan_xss_verification_capability(
         scan_id=scan_id,
         job_id=job_id,
         capability_name="xss.verify",
-        capability_args={"severity": "high"},
+        capability_args={
+            "severity": "high", **principal.capability_args(),
+        },
         action_id=f"deterministic_verify.xss.{candidate_digest}",
         target_binding=target,
         reservation_limits=allocation,
@@ -11683,6 +11694,7 @@ async def _execute_scan_xss_verification_capability(
             "execution_target": execution_target,
             "registered_target": registered_target,
             "scanner_options": {"severity": "high"},
+            "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
             "authorized_addresses": authorized_addresses,
@@ -11874,6 +11886,7 @@ async def _execute_scan_sqli_verification_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         authorized_addresses[0], authorized_addresses,
     )
+    principal = resolve_scan_http_principal(options, lane="primary")
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -11881,7 +11894,7 @@ async def _execute_scan_sqli_verification_capability(
         scan_id=scan_id,
         job_id=job_id,
         capability_name="sqli.verify",
-        capability_args={},
+        capability_args=principal.capability_args(),
         action_id=f"deterministic_verify.sqli.{candidate_digest}",
         target_binding=target,
         reservation_limits=allocation,
@@ -11891,6 +11904,7 @@ async def _execute_scan_sqli_verification_capability(
             "execution_target": execution_target,
             "registered_target": registered_target,
             "scanner_options": {},
+            "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
             "authorized_addresses": authorized_addresses,
@@ -11955,13 +11969,14 @@ async def _execute_scan_template_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         authorized_addresses[0], authorized_addresses,
     )
+    principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
         scan_id=scan_id,
         job_id=job_id,
         capability_name="templates.scan",
-        capability_args={},
+        capability_args=principal.capability_args(),
         action_id="deterministic_baseline.templates.scan",
         target_binding=target,
         reservation_limits=allocation,
@@ -11971,6 +11986,7 @@ async def _execute_scan_template_capability(
             "execution_target": execution_target,
             "registered_target": registered_target,
             "scanner_options": {},
+            "trusted_headers": principal.headers(),
             "timeout_ms": int(allocation["tool_wall_seconds"]) * 1_000,
             "pinned_address": pinned_address,
             "authorized_addresses": authorized_addresses,
@@ -12309,14 +12325,26 @@ async def _execute_reserved_deterministic_scan(
             verification.get("proof_contracts") or {}
         )
         authentication = primary_principal.public_dict()
-        authentication["applied_capabilities"] = [
-            "http.request"
-        ] if (
-            primary_principal.authenticated
-            and isinstance(baseline.get("http.request"), Mapping)
-            and str(baseline["http.request"].get("status") or "")
-            in {"success", "partial"}
-        ) else []
+        authenticated_candidates = {
+            "web.probe": surface.get("web.probe"),
+            "web.crawl": surface.get("web.crawl"),
+            "web.content_discover": surface.get("web.content_discover"),
+            "http.request": baseline.get("http.request"),
+            "templates.scan": baseline.get("templates.scan"),
+            "xss.verify": active.get("xss.verify"),
+            "sqli.verify": active.get("sqli.verify"),
+        }
+        authentication["applied_capabilities"] = (
+            sorted(
+                capability_name
+                for capability_name, capability_summary
+                in authenticated_candidates.items()
+                if isinstance(capability_summary, Mapping)
+                and str(capability_summary.get("status") or "")
+                in {"success", "partial"}
+            )
+            if primary_principal.authenticated else []
+        )
         authentication["secondary_principal"] = (
             secondary_principal.public_dict()
         )
@@ -18293,6 +18321,7 @@ async def _execute_agent_scanner_process(
             pinned_proxy_url=pinned_proxy.proxy_url,
             oob_interactsh_server=job_data.get("oob_interactsh_server"),
             oob_interactsh_token=job_data.get("oob_interactsh_token"),
+            trusted_headers=job_data.get("trusted_headers"),
         )
         if name == "sqlmap":
             scratch_dir = tempfile.mkdtemp(

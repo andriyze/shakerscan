@@ -21,7 +21,7 @@ import ipaddress
 import os
 import re
 import urllib.parse
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
 
@@ -456,6 +456,58 @@ def _apply_nuclei_interactsh(argv: list[str], server: str | None, token: str | N
     return result
 
 
+_TRUSTED_SCANNER_HEADER_NAME = re.compile(
+    r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$"
+)
+_RESERVED_TRUSTED_SCANNER_HEADERS = frozenset({
+    "connection", "content-length", "host", "transfer-encoding",
+})
+_HTTP_HEADER_SCANNER_FLAGS: dict[str, str] = {
+    "httpx": "-H",
+    "nuclei": "-H",
+    "katana": "-H",
+    "ffuf": "-H",
+    "dalfox": "--header",
+}
+
+
+def _trusted_scanner_header_args(
+    name: str, trusted_headers: Mapping[str, Any] | None,
+) -> list[str]:
+    """Render worker-resolved headers for fixed HTTP adapters, never planner options."""
+    if not trusted_headers:
+        return []
+    if not isinstance(trusted_headers, Mapping):
+        raise AgentToolError("trusted scanner headers must be a mapping")
+    rendered: list[tuple[str, str]] = []
+    normalized_names: set[str] = set()
+    for raw_name, raw_value in trusted_headers.items():
+        header_name = str(raw_name or "").strip()
+        header_value = str(raw_value or "")
+        normalized_name = header_name.lower()
+        if (
+            not _TRUSTED_SCANNER_HEADER_NAME.fullmatch(header_name)
+            or normalized_name in _RESERVED_TRUSTED_SCANNER_HEADERS
+            or normalized_name in normalized_names
+            or not header_value
+            or not header_value.isascii()
+            or len(header_value.encode("ascii")) > 8_192
+            or any(ord(character) < 32 or ord(character) == 127
+                   for character in header_value)
+        ):
+            raise AgentToolError("trusted scanner headers are invalid")
+        normalized_names.add(normalized_name)
+        rendered.append((header_name, header_value))
+    rendered.sort(key=lambda item: item[0].lower())
+    lines = [f"{header_name}: {header_value}" for header_name, header_value in rendered]
+    if name == "sqlmap":
+        return ["--headers", "\n".join(lines)]
+    flag = _HTTP_HEADER_SCANNER_FLAGS.get(name)
+    if not flag:
+        raise AgentToolError(f"{name} does not accept HTTP credential headers")
+    return [value for line in lines for value in (flag, line)]
+
+
 def build_scanner_argv(
     name: str,
     url: str,
@@ -465,6 +517,7 @@ def build_scanner_argv(
     pinned_proxy_url: str | None = None,
     oob_interactsh_server: str | None = None,
     oob_interactsh_token: str | None = None,
+    trusted_headers: Mapping[str, Any] | None = None,
 ) -> tuple[str, list[str], int]:
     """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
     (passed separately to the subprocess); every flag is hardcoded in the template."""
@@ -508,7 +561,11 @@ def build_scanner_argv(
             pin_args = ["--header", f"Host: {host_header}"]
         elif name == "sqlmap":
             pin_args = ["--host", host_header]
-    argv = template["build"](execution_url, options or {}) + pin_args
+    argv = (
+        template["build"](execution_url, options or {})
+        + pin_args
+        + _trusted_scanner_header_args(name, trusted_headers)
+    )
     if name == "nuclei":
         argv = _apply_nuclei_interactsh(argv, oob_interactsh_server, oob_interactsh_token)
     return (

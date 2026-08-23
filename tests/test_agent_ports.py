@@ -378,6 +378,88 @@ def test_run_tool_rejects_flag_injection():
     assert "-o" not in argv and "/etc/passwd" not in argv
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "header_flag"),
+    [
+        ("httpx", "-H"),
+        ("nuclei", "-H"),
+        ("katana", "-H"),
+        ("ffuf", "-H"),
+        ("dalfox", "--header"),
+    ],
+)
+def test_worker_private_credentials_bind_to_fixed_http_scanner_argv(
+    tool_name, header_flag,
+):
+    _, argv, _ = at.build_scanner_argv(
+        tool_name,
+        "https://app.example.test/account?id=1",
+        {},
+        trusted_headers={
+            "Cookie": "session=worker-private",
+            "Authorization": "Bearer worker-private",
+        },
+    )
+
+    header_values = [
+        argv[index + 1]
+        for index, value in enumerate(argv[:-1])
+        if value == header_flag
+    ]
+    assert "Authorization: Bearer worker-private" in header_values
+    assert "Cookie: session=worker-private" in header_values
+
+
+def test_sqlmap_worker_private_credentials_use_one_bounded_header_argument():
+    _, argv, _ = at.build_scanner_argv(
+        "sqlmap",
+        "https://app.example.test/account?id=1",
+        {},
+        trusted_headers={
+            "Cookie": "session=worker-private",
+            "Authorization": "Bearer worker-private",
+        },
+    )
+
+    value = argv[argv.index("--headers") + 1]
+    assert value == (
+        "Authorization: Bearer worker-private\n"
+        "Cookie: session=worker-private"
+    )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Host": "evil.example"},
+        {"Authorization": "Bearer good\r\nX-Evil: injected"},
+        {"Authorization": "Bearer one", "authorization": "Bearer two"},
+    ],
+)
+def test_worker_private_scanner_headers_fail_closed(headers):
+    with pytest.raises(at.AgentToolError, match="headers are invalid"):
+        at.build_scanner_argv(
+            "httpx", "https://app.example.test/", {},
+            trusted_headers=headers,
+        )
+
+    with pytest.raises(at.AgentToolError, match="does not accept HTTP"):
+        at.build_scanner_argv(
+            "nmap", "https://app.example.test/", {},
+            trusted_headers={"Authorization": "Bearer worker-private"},
+        )
+
+
+def test_planner_scanner_options_cannot_inject_credentials():
+    _, argv, _ = at.build_scanner_argv(
+        "httpx",
+        "https://app.example.test/",
+        {"headers": {"Authorization": "Bearer planner-controlled"}},
+    )
+
+    assert not any("planner-controlled" in value for value in argv)
+
+
 def test_run_tool_unknown_rejected():
     try:
         at.coerce_run_tool({"name": "metasploit", "target": "/x"})

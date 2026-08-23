@@ -121,6 +121,20 @@ def test_every_capability_declares_runtime_contract():
         assert spec.evidence_contract
 
 
+def test_canonical_http_tools_declare_content_free_principal_bindings():
+    for capability_name in (
+        "web.probe", "web.crawl", "web.content_discover", "templates.scan",
+        "xss.verify", "sqli.verify", "http.request",
+    ):
+        properties = CAPABILITY_REGISTRY.require(
+            capability_name
+        ).input_schema["properties"]
+        assert properties["as_principal"]["enum"] == ["primary", "secondary"]
+        assert properties["principal_binding_digest"]["pattern"] == (
+            "^[0-9a-f]{64}$"
+        )
+
+
 def test_budget_ledger_reserves_before_commit_and_refunds_unused_capacity():
     ledger = BudgetLedger({"http_requests": 10, "tool_wall_seconds": 20})
     reservation = ledger.reserve({"http_requests": 7, "tool_wall_seconds": 10})
