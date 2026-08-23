@@ -164,6 +164,7 @@ from scan.stages import (
     execute_scan_stage_graph,
 )
 from scan.stage_store import PostgresScanStageCheckpointStore
+from scan.surface_manifest import build_scan_surface_manifest
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -12557,12 +12558,24 @@ async def _execute_reserved_deterministic_scan(
         content = await _execute_scan_content_discovery_capability(
             target, effective_options, scan_id=scan_id, job_id=job_id,
         )
+        endpoint_manifest = build_scan_surface_manifest(
+            target_url=target,
+            target=execution.target_binding,
+            options=effective_options,
+            collection_replay=collection_replay_summary,
+            subdomains=subdomains,
+            probe=probe,
+            crawl=crawl,
+            content=content,
+            max_endpoints=admission.plan.budget.max_endpoints,
+        )
         output: dict[str, Any] = {
             "collections.replay": collection_replay_summary,
             "subdomains.discover": subdomains,
             "web.probe": probe,
             "web.crawl": crawl,
             "web.content_discover": content,
+            "endpoint_manifest": endpoint_manifest,
         }
         capability_names = [
             *replay_capability_names,
@@ -12865,6 +12878,27 @@ async def _execute_reserved_deterministic_scan(
             if isinstance(collection_replay, Mapping)
             else _empty_scan_request_collection_replay_summary()
         )
+        endpoint_manifest = surface.get("endpoint_manifest")
+        if isinstance(endpoint_manifest, Mapping):
+            discovery = (
+                dict(result.get("discovery") or {})
+                if isinstance(result.get("discovery"), Mapping) else {}
+            )
+            discovery["endpoint_manifest"] = dict(endpoint_manifest)
+            result["discovery"] = discovery
+            metadata = (
+                dict(result.get("scan_metadata") or {})
+                if isinstance(result.get("scan_metadata"), Mapping) else {}
+            )
+            metadata["endpoint_manifest_digest"] = hashlib.sha256(
+                json.dumps(
+                    endpoint_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            result["scan_metadata"] = metadata
         status = "partial" if (
             result.get("error") or summary.get("partial") or summary.get("timed_out")
         ) else "completed"

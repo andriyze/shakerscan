@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 import os
 from pathlib import Path
+import re
 from types import SimpleNamespace
 import sys
 import types
@@ -940,6 +941,15 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
         "receipt"
     ]["budget_reservation_state"] == "committed"
     assert result["network_discovery"]["status"] == "success"
+    endpoint_manifest = result["discovery"]["endpoint_manifest"]
+    assert endpoint_manifest["schema_version"] == "endpoint-manifest/v1"
+    assert endpoint_manifest["status"] == "complete"
+    assert endpoint_manifest["endpoint_count"] == 3
+    assert endpoint_manifest["producers"]["web.crawl"]["count"] == 1
+    assert endpoint_manifest["producers"]["web.content_discover"]["count"] == 1
+    assert re.fullmatch(
+        r"[0-9a-f]{64}", result["scan_metadata"]["endpoint_manifest_digest"],
+    )
     stage_execution = result["canonical_stage_execution"]
     assert [row["name"] for row in stage_execution["stages"]] == [
         "bind_target",
@@ -955,6 +965,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     assert stage_execution["stages"][3]["capability_names"] == [
         "ports.discover", "service.fingerprint",
     ]
+    assert "endpoint_manifest" in stage_execution["stages"][2]["output_keys"]
     assert stage_execution["stages"][5]["capability_names"] == [
         "xss.verify", "sqli.verify", "authz.verify",
     ]
