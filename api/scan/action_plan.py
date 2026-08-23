@@ -7,13 +7,19 @@ import hashlib
 import json
 import re
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 import uuid
 
 try:
     from runtime.budgets import BUDGET_DIMENSIONS
+    from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
+    from runtime.models import TargetBinding
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
+    from ..runtime.models import TargetBinding
+
+from .execution import ScanExecutionPlan
 
 
 SCAN_ACTION_PLAN_SCHEMA = "scan-action-plan/v1"
@@ -28,6 +34,10 @@ _MAX_DEPENDENCIES = 64
 
 class ScanActionPlanError(ValueError):
     """Action authority is malformed, ambiguous, or not content-addressed."""
+
+
+class ScanActionPlacementError(ScanActionPlanError):
+    """No selected backend can execute the complete deterministic action plan."""
 
 
 def _digest(value: Any) -> str:
@@ -316,4 +326,422 @@ class ScanActionPlan:
             target_binding_digest=value["target_binding_digest"],
             actions=tuple(ScanAction.from_dict(item) for item in raw_actions),
             plan_digest=value["plan_digest"],
+        )
+
+
+@dataclass(frozen=True)
+class _ActionBlueprint:
+    action_id: str
+    stage: str
+    capability_name: str
+    capability_args: Mapping[str, Any]
+    dependencies: tuple[str, ...] = ()
+    required: bool = False
+    supporting: bool = False
+
+
+def _reference_list(
+    value: Sequence[Mapping[str, Any]],
+    *,
+    name: str,
+    allowed_keys: frozenset[str],
+    required_keys: frozenset[str],
+    maximum: int,
+) -> tuple[dict[str, Any], ...]:
+    if len(value) > maximum:
+        raise ScanActionPlanError(f"too many {name} references")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ScanActionPlanError(f"{name} reference must be an object")
+        keys = set(item)
+        if not required_keys <= keys or keys - allowed_keys:
+            raise ScanActionPlanError(f"{name} reference fields are invalid")
+        canonical = _canonical_value(item)
+        if not isinstance(canonical, dict):
+            raise ScanActionPlanError(f"{name} reference must be an object")
+        result.append(canonical)
+    result.sort(key=lambda item: json.dumps(
+        item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ))
+    return tuple(result)
+
+
+class ScanActionPlanCompiler:
+    """Compile policy plus opaque references into one deterministic action DAG.
+
+    This compiler selects actions and closes prerequisites. The next admission
+    boundary may pass a complete ``action_budgets`` allocation; otherwise the
+    registry's conservative fixed profiles are used as exact maximum holds.
+    """
+
+    plan_schema_version = SCAN_ACTION_PLAN_SCHEMA
+
+    def __init__(self, registry: CapabilityRegistry = CAPABILITY_REGISTRY) -> None:
+        self._registry = registry
+
+    @staticmethod
+    def _family_enabled(plan: ScanExecutionPlan, family: str) -> bool:
+        include = set(plan.policy.include_families)
+        exclude = set(plan.policy.exclude_families)
+        return family not in exclude and (not include or family in include)
+
+    def compile(
+        self,
+        *,
+        scan_id: str,
+        execution_plan: ScanExecutionPlan,
+        target_binding: TargetBinding,
+        credential_profile_refs: Sequence[Mapping[str, Any]] = (),
+        request_collection_refs: Sequence[Mapping[str, Any]] = (),
+        endpoint_manifest_ref: Mapping[str, Any] | None = None,
+        candidate_manifest_ref: Mapping[str, Any] | None = None,
+        template_manifest_ref: Mapping[str, Any] | None = None,
+        authority_refs: Mapping[str, Any] | None = None,
+        shard_authority: Mapping[str, Any] | None = None,
+        available_placement_capabilities: Iterable[str] | None = None,
+        placement_backends: Sequence[str] = ("local", "broker"),
+        action_budgets: Mapping[str, Mapping[str, int]] | None = None,
+    ) -> ScanActionPlan:
+        credentials = _reference_list(
+            credential_profile_refs,
+            name="credential profile",
+            allowed_keys=frozenset({"profile_id", "version", "digest", "lane", "principal_ref"}),
+            required_keys=frozenset({"profile_id", "version", "digest", "lane"}),
+            maximum=4,
+        )
+        collections = _reference_list(
+            request_collection_refs,
+            name="request collection",
+            allowed_keys=frozenset({
+                "collection_id", "version", "selection_digest", "principal_ref", "active",
+            }),
+            required_keys=frozenset({"collection_id", "version", "selection_digest"}),
+            maximum=32,
+        )
+        endpoint_ref = _canonical_value(endpoint_manifest_ref or {})
+        candidate_ref = _canonical_value(candidate_manifest_ref or {})
+        template_ref = _canonical_value(template_manifest_ref or {})
+        authority = _canonical_value({
+            "scope_receipt_id": execution_plan.policy.scope_receipt_id,
+            "approval_receipt_id": execution_plan.policy.approval_receipt_id,
+            **dict(authority_refs or {}),
+        })
+        shard = _canonical_value(shard_authority or {})
+        for name, value in (
+            ("endpoint_manifest_ref", endpoint_ref),
+            ("candidate_manifest_ref", candidate_ref),
+            ("template_manifest_ref", template_ref),
+            ("authority_refs", authority),
+            ("shard_authority", shard),
+        ):
+            if not isinstance(value, Mapping):
+                raise ScanActionPlanError(f"{name} must be an object")
+
+        backends = tuple(dict.fromkeys(_token(item, name="placement backend") for item in placement_backends))
+        if not backends:
+            raise ScanActionPlacementError("at least one placement backend is required")
+        available = (
+            None
+            if available_placement_capabilities is None
+            else frozenset(
+                _token(item, name="available placement capability")
+                for item in available_placement_capabilities
+            )
+        )
+
+        policy = execution_plan.policy
+        active = policy.active_testing
+        xss = active and self._family_enabled(execution_plan, "xss")
+        sqli = active and self._family_enabled(execution_plan, "sqli")
+        nuclei = active and self._family_enabled(execution_plan, "nuclei")
+        bola = active and self._family_enabled(execution_plan, "bola")
+        needs_candidates = xss or sqli or nuclei
+        lane_refs = {str(item.get("lane") or ""): item for item in credentials}
+
+        blueprints: list[_ActionBlueprint] = []
+
+        def add(
+            action_id: str,
+            stage: str,
+            capability_name: str,
+            capability_args: Mapping[str, Any],
+            *,
+            dependencies: Sequence[str] = (),
+            required: bool = False,
+            supporting: bool = False,
+        ) -> None:
+            blueprints.append(_ActionBlueprint(
+                action_id=action_id,
+                stage=stage,
+                capability_name=capability_name,
+                capability_args=capability_args,
+                dependencies=tuple(dependencies),
+                required=required,
+                supporting=supporting,
+            ))
+
+        for lane in ("primary", "secondary", "service", "ssh"):
+            reference = lane_refs.get(lane)
+            if reference is not None and lane in {"primary", "secondary"}:
+                add(
+                    f"inputs.auth_{lane}",
+                    "resolve_inputs",
+                    "auth.session.establish",
+                    {"lane": lane, "credential_profile_ref": reference},
+                    required=True,
+                    supporting=True,
+                )
+
+        auth_dependencies = tuple(
+            row.action_id for row in blueprints if row.capability_name == "auth.session.establish"
+        )
+        primary_dependency = (
+            ("inputs.auth_primary",) if "primary" in lane_refs else ()
+        )
+        add(
+            "baseline.http",
+            "deterministic_baseline",
+            "http.request",
+            {"method": "GET", "path": "/", "follow_redirects": False, "principal": "primary" if primary_dependency else None},
+            dependencies=primary_dependency,
+            required=True,
+        )
+        add(
+            "baseline.http_redirect",
+            "deterministic_baseline",
+            "http.request",
+            {"method": "GET", "path": "/", "scheme": "http", "follow_redirects": True, "max_redirects": 1},
+            dependencies=("baseline.http",),
+        )
+        add(
+            "baseline.security_txt",
+            "deterministic_baseline",
+            "http.request",
+            {"method": "GET", "path": "/.well-known/security.txt", "follow_redirects": False},
+            dependencies=("baseline.http",),
+        )
+        if target_binding.canonical_host:
+            add(
+                "baseline.dns",
+                "deterministic_baseline",
+                "dns.inspect",
+                {"canonical_host": target_binding.canonical_host},
+            )
+        if any(origin.startswith("https://") for origin in target_binding.allowed_origins):
+            add(
+                "baseline.tls",
+                "deterministic_baseline",
+                "tls.inspect",
+                {"origin_ref": "canonical_https_origin"},
+                required=True,
+            )
+        add(
+            "discover.web_probe",
+            "discover_surface",
+            "web.probe",
+            {"target_ref": "canonical_origin", "endpoint_manifest_ref": endpoint_ref or None},
+            dependencies=primary_dependency,
+            required=True,
+            supporting=needs_candidates,
+        )
+
+        crawl_required = needs_candidates and not endpoint_ref and not candidate_ref
+        if active and (self._family_enabled(execution_plan, "recon") or needs_candidates):
+            add(
+                "discover.web_crawl",
+                "discover_surface",
+                "web.crawl",
+                {"endpoint_manifest_ref": endpoint_ref or None, "read_only": True},
+                dependencies=("discover.web_probe",),
+                required=crawl_required,
+                supporting=needs_candidates,
+            )
+            if self._family_enabled(execution_plan, "recon"):
+                add(
+                    "discover.web_content",
+                    "discover_surface",
+                    "web.content_discover",
+                    {"target_manifest_ref": endpoint_ref or None},
+                    dependencies=("discover.web_probe",),
+                )
+        if policy.subdomain_discovery:
+            add(
+                "discover.subdomains",
+                "discover_surface",
+                "subdomains.discover",
+                {"root_domains": list(target_binding.allowed_root_domains)},
+                required=True,
+                supporting=True,
+            )
+        if policy.network_discovery:
+            add(
+                "discover.ports",
+                "discover_network",
+                "ports.discover",
+                {"address_ref": "frozen_target_addresses"},
+                required=True,
+                supporting=True,
+            )
+            add(
+                "discover.services",
+                "discover_network",
+                "service.fingerprint",
+                {"open_port_manifest_ref": "discover.ports"},
+                dependencies=("discover.ports",),
+                required=True,
+                supporting=True,
+            )
+        for index, reference in enumerate(collections):
+            capability_name = (
+                "collections.replay_active"
+                if reference.get("active") is True and policy.allow_state_changing_http
+                else "collections.replay_safe"
+            )
+            add(
+                f"inputs.collection_{index:02d}",
+                "discover_surface",
+                capability_name,
+                {"request_collection_ref": reference},
+                dependencies=primary_dependency,
+                required=True,
+                supporting=True,
+            )
+
+        discovery_dependencies = tuple(
+            row.action_id for row in blueprints
+            if row.stage == "discover_surface" and row.capability_name != "subdomains.discover"
+        )
+        candidate_dependencies = tuple(
+            item for item in ("discover.web_probe", "discover.web_crawl")
+            if any(row.action_id == item for row in blueprints)
+        )
+        if nuclei:
+            add(
+                "active.templates",
+                "deterministic_active",
+                "templates.scan",
+                {
+                    "target_manifest_ref": endpoint_ref or "discover.web_crawl",
+                    "template_manifest_ref": template_ref or None,
+                },
+                dependencies=candidate_dependencies,
+                required=True,
+            )
+        if xss:
+            add(
+                "verify.xss",
+                "verify_candidates",
+                "xss.verify",
+                {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
+                dependencies=candidate_dependencies,
+                required=True,
+            )
+        if sqli:
+            add(
+                "verify.sqli",
+                "verify_candidates",
+                "sqli.verify",
+                {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
+                dependencies=candidate_dependencies,
+                required=True,
+            )
+        if bola and {"primary", "secondary"} <= set(lane_refs):
+            add(
+                "verify.authz",
+                "verify_candidates",
+                "authz.verify",
+                {"principal_lanes": ["primary", "secondary"], "endpoint_manifest_ref": endpoint_ref or None},
+                dependencies=tuple(dict.fromkeys((*auth_dependencies, *discovery_dependencies))),
+                required=True,
+            )
+
+        add(
+            "finalize.report",
+            "finalize_evidence",
+            "scan.execute",
+            {"report_only": True},
+            dependencies=tuple(row.action_id for row in blueprints),
+            required=True,
+        )
+
+        stage_order = {
+            name: index for index, name in enumerate((
+                "bind_target", "resolve_inputs", "discover_surface", "discover_network",
+                "deterministic_baseline", "deterministic_active", "verify_candidates",
+                "finalize_evidence",
+            ))
+        }
+        blueprints.sort(key=lambda row: stage_order[row.stage])
+
+        override_budgets = dict(action_budgets or {})
+        known_action_ids = {row.action_id for row in blueprints}
+        unknown_allocations = set(override_budgets) - known_action_ids
+        if unknown_allocations:
+            raise ScanActionPlanError(
+                "action budget allocation contains unknown actions: "
+                + ", ".join(sorted(unknown_allocations))
+            )
+        global_bindings = {
+            "execution_plan_digest": execution_plan.digest,
+            "target_binding_digest": target_binding.digest,
+            "credential_profile_refs": list(credentials),
+            "request_collection_refs": list(collections),
+            "endpoint_manifest_ref": endpoint_ref,
+            "candidate_manifest_ref": candidate_ref,
+            "template_manifest_ref": template_ref,
+            "authority_refs": authority,
+            "shard_authority": shard,
+        }
+        actions: list[ScanAction] = []
+        for ordinal, blueprint in enumerate(blueprints):
+            try:
+                specification = self._registry.require(blueprint.capability_name)
+            except KeyError as exc:
+                raise ScanActionPlanError(
+                    f"action capability is absent from the canonical registry: {blueprint.capability_name}"
+                ) from exc
+            if target_binding.target_kind not in specification.target_kinds:
+                raise ScanActionPlanError(
+                    f"{blueprint.capability_name} does not support target kind {target_binding.target_kind}"
+                )
+            if available is not None and blueprint.capability_name not in available:
+                raise ScanActionPlacementError(
+                    f"placement cannot execute capability {blueprint.capability_name}"
+                )
+            requested = override_budgets.get(
+                blueprint.action_id, specification.budget_cost,
+            )
+            action_bindings = {
+                **global_bindings,
+                "action_id": blueprint.action_id,
+                "capability_args": blueprint.capability_args,
+            }
+            placement = {
+                "schema_version": "scan-action-placement/v1",
+                "eligible_backends": list(backends),
+                "requirements": dict(specification.placement_requirements),
+                "adapter_name": specification.adapter,
+                "adapter_version": specification.adapter_version,
+            }
+            actions.append(ScanAction(
+                action_id=blueprint.action_id,
+                stage=blueprint.stage,
+                ordinal=ordinal,
+                capability_name=blueprint.capability_name,
+                capability_args=blueprint.capability_args,
+                target_binding_digest=target_binding.digest,
+                input_binding_digest=digest_input_bindings(action_bindings),
+                requested_budget=requested,
+                placement=placement,
+                dependencies=blueprint.dependencies,
+                required=blueprint.required,
+                supporting=blueprint.supporting,
+                output_schema=specification.output_schema,
+            ))
+        return ScanActionPlan(
+            scan_id=scan_id,
+            execution_plan_digest=execution_plan.digest,
+            target_binding_digest=target_binding.digest,
+            actions=tuple(actions),
         )
