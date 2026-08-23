@@ -225,6 +225,13 @@ def test_shared_executor_reserves_and_settles_exact_scan_replay():
             },
             transport=transport,
             additional_budget={"tool_wall_seconds": 10},
+            authorized_budget={
+                "http_requests": 4,
+                "state_changing_requests": 3,
+                "tool_wall_seconds": 20,
+            },
+            receipt_capability_name="collections.replay_active",
+            receipt_input_digest="c" * 64,
             on_reservation=persist_transition,
             on_settlement=persist_settlement,
             require_durable_persistence=True,
@@ -235,9 +242,16 @@ def test_shared_executor_reserves_and_settles_exact_scan_replay():
 
     assert [item[0] for item in transitions] == ["requested", "reserved", "running"]
     assert outcome.reservation.status == "committed"
+    assert dict(outcome.reservation.requested) == {
+        "http_requests": 4,
+        "state_changing_requests": 3,
+        "tool_wall_seconds": 20,
+    }
     assert outcome.reservation.actual["http_requests"] == 1
     assert outcome.reservation.actual["state_changing_requests"] == 1
     assert settlements[0][1].scan_id == "scan-1"
+    assert settlements[0][1].capability_name == "collections.replay_active"
+    assert settlements[0][1].input_digest == "c" * 64
     assert wire["body"] == b'{"name":"exact"}'
 
 
@@ -316,6 +330,9 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert 'summary["cancelled"] = True' in handler
     assert "Pinn" in handler and "ReplayTransport" in handler
     assert '"require_durable_persistence": True' in handler
+    assert 'canonical_action.action_id' in handler
+    assert 'canonical_action.action_digest' in handler
+    assert '"authorized_budget": requested_budget' in handler
     assert "_execute_scan_request_collections" not in process
     assert process.index("_hydrate_generic_scan_credentials") < process.index(
         "_execute_reserved_deterministic_scan("

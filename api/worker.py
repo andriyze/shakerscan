@@ -13749,6 +13749,7 @@ async def _execute_scan_request_collections(
     options: Mapping[str, Any], scan_id: str, *, job_id: str,
     runtime_request_grant: int | None = None,
     trusted_primary_headers: Mapping[str, str] | None = None,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Execute saved Scan selections through the canonical exact replay executor."""
     try:
@@ -13773,6 +13774,34 @@ async def _execute_scan_request_collections(
         for item in persisted_options.get("request_collections") or []
         if isinstance(item, Mapping)
     ]
+    if canonical_action is not None:
+        if str(canonical_action.capability_name) not in {
+            "collections.replay_safe", "collections.replay_active",
+        }:
+            raise ScanCollectionReplayContractError(
+                "canonical collection action has the wrong capability"
+            )
+        bound_ref = canonical_action.capability_args.get(
+            "request_collection_ref"
+        )
+        if not isinstance(bound_ref, Mapping):
+            raise ScanCollectionReplayContractError(
+                "canonical collection action has no selection reference"
+            )
+        bound_selection_id = str(bound_ref.get("selection_id") or "")
+        bound_selection_digest = str(
+            bound_ref.get("selection_digest") or ""
+        ).lower()
+        refs = [
+            item for item in refs
+            if str(item.get("selection_id") or "") == bound_selection_id
+            and str(item.get("selection_digest") or "").lower()
+            == bound_selection_digest
+        ]
+        if len(refs) != 1:
+            raise ScanCollectionReplayContractError(
+                "canonical collection selection changed after plan admission"
+            )
     executable = [
         item
         for item in refs
@@ -13849,6 +13878,13 @@ async def _execute_scan_request_collections(
             if replay_policy == "confirmed_active"
             else "collections.replay_safe"
         )
+        if (
+            canonical_action is not None
+            and replay_capability_name != canonical_action.capability_name
+        ):
+            raise ScanCollectionReplayContractError(
+                "canonical collection policy differs from its capability"
+            )
         expected_payload_sha256 = str(ref.get("payload_sha256") or "").lower()
         expected_selection_digest = str(ref.get("selection_digest") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_payload_sha256):
@@ -14029,6 +14065,17 @@ async def _execute_scan_request_collections(
             )
         wall_reservation = min(300, capacity.tool_wall_seconds)
         runtime_limit = min(capacity.http_requests, wall_reservation * 10)
+        if canonical_action is not None:
+            wall_reservation = int(
+                canonical_action.requested_budget.get("tool_wall_seconds") or 0
+            )
+            runtime_limit = int(
+                canonical_action.requested_budget.get("http_requests") or 0
+            )
+            if wall_reservation < 1 or runtime_limit < 1:
+                raise ScanCollectionReplayContractError(
+                    "canonical collection action has no executable budget"
+                )
         runtime_selector = scan_replay_selector(
             stored_selection, replay_policy, runtime_limit=runtime_limit,
         )
@@ -14080,13 +14127,29 @@ async def _execute_scan_request_collections(
             )
 
         additional_budget = {"tool_wall_seconds": wall_reservation}
-        requested_budget = replay_reservation_budget(plan, additional_budget)
+        requested_budget = (
+            dict(canonical_action.requested_budget)
+            if canonical_action is not None
+            else replay_reservation_budget(plan, additional_budget)
+        )
         reservation_id = str(uuid.uuid4())
-        action_id = f"collection_replay:{selection_id}"
+        action_id = (
+            canonical_action.action_id
+            if canonical_action is not None
+            else f"collection_replay:{selection_id}"
+        )
+        action_digest = (
+            canonical_action.action_digest
+            if canonical_action is not None else plan.input_digest
+        )
+        reservation_capability_name = (
+            canonical_action.capability_name
+            if canonical_action is not None else "collections.replay"
+        )
         requested = DurableBudgetReservation.request(
             owner_kind="scan",
             owner_id=scan_id,
-            capability_name="collections.replay",
+            capability_name=reservation_capability_name,
             amounts=requested_budget,
             reservation_id=reservation_id,
         )
@@ -14106,7 +14169,7 @@ async def _execute_scan_request_collections(
                 stored = await store.create_requested(
                     conn,
                     action_id=action_id,
-                    action_digest=plan.input_digest,
+                    action_digest=action_digest,
                     record=requested,
                 )
                 if stored.record.terminal:
@@ -14294,6 +14357,9 @@ async def _execute_scan_request_collections(
                 "additional_budget": additional_budget,
                 "initial_reservation": persisted.record,
                 "receipt_context": receipt_context,
+                "authorized_budget": requested_budget,
+                "receipt_capability_name": reservation_capability_name,
+                "receipt_input_digest": action_digest,
             },
         )
         execution = await CapabilityExecutor().execute(

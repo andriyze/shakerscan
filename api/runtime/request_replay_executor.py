@@ -372,11 +372,13 @@ def _receipt(
     errors: Sequence[str],
     receipt_id: str | None,
     receipt_context: Mapping[str, Any] | None,
+    receipt_capability_name: str,
+    receipt_input_digest: str,
 ) -> CapabilityReceipt:
     redacted_execution = plan.public_dict()
     redacted_execution.update(_normalize_receipt_context(receipt_context))
     return CapabilityReceipt(
-        capability_name="collections.replay",
+        capability_name=receipt_capability_name,
         adapter_name="pinned_http_replay",
         adapter_version="1",
         target_id=target.target_id,
@@ -388,7 +390,7 @@ def _receipt(
         status=status,
         partial=partial,
         timed_out=timed_out,
-        input_digest=plan.input_digest,
+        input_digest=receipt_input_digest,
         parser_version="request-replay-observations/v1",
         receipt_id=receipt_id or reservation.reservation_id,
         started_at=started_at.isoformat(),
@@ -455,6 +457,9 @@ async def execute_replay_plan(
     additional_budget: Mapping[str, int] | None = None,
     initial_reservation: DurableBudgetReservation | None = None,
     receipt_context: Mapping[str, Any] | None = None,
+    authorized_budget: Mapping[str, int] | None = None,
+    receipt_capability_name: str = "collections.replay",
+    receipt_input_digest: str | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> ReplayExecutionOutcome:
     """Execute one exact ReplayPlan with reserve-before-send accounting.
@@ -485,13 +490,34 @@ async def execute_replay_plan(
         timeout_seconds=float(timeout_seconds),
     )
 
-    requested_budget = replay_reservation_budget(plan, additional_budget)
+    minimum_budget = replay_reservation_budget(plan, additional_budget)
+    requested_budget = dict(authorized_budget or minimum_budget)
+    if (
+        any(
+            name not in requested_budget
+            or int(requested_budget[name]) < int(amount)
+            for name, amount in minimum_budget.items()
+        )
+        or any(
+            isinstance(amount, bool) or not isinstance(amount, int) or amount < 0
+            for amount in requested_budget.values()
+        )
+    ):
+        raise ReplayExecutionError(
+            "authorized replay budget is smaller than the exact request plan"
+        )
+    normalized_receipt_capability = str(receipt_capability_name or "").strip()
+    normalized_receipt_digest = str(receipt_input_digest or plan.input_digest).strip().lower()
+    if not normalized_receipt_capability or not re.fullmatch(
+        r"[0-9a-f]{64}", normalized_receipt_digest,
+    ):
+        raise ReplayExecutionError("replay receipt authority is invalid")
     if initial_reservation is None:
         now = _utc(clock)
         requested = DurableBudgetReservation.request(
             owner_kind=owner_kind,
             owner_id=owner,
-            capability_name="collections.replay",
+            capability_name=normalized_receipt_capability,
             amounts=requested_budget,
             now=now,
             reservation_id=reservation_id,
@@ -503,7 +529,7 @@ async def execute_replay_plan(
             requested.status not in {"requested", "reserved"}
             or requested.owner_kind != owner_kind
             or requested.owner_id != owner
-            or requested.capability_name != "collections.replay"
+            or requested.capability_name != normalized_receipt_capability
             or dict(requested.requested) != requested_budget
             or (reservation_id is not None and requested.reservation_id != reservation_id)
         ):
@@ -573,6 +599,8 @@ async def execute_replay_plan(
             timed_out=False, started_at=started_at, finished_at=finished_at,
             observations=observations, errors=(*errors, "execution_cancelled"),
             receipt_id=receipt_id, receipt_context=receipt_context,
+            receipt_capability_name=normalized_receipt_capability,
+            receipt_input_digest=normalized_receipt_digest,
         )
         failed = running.fail(
             reason="execution_cancelled", now=finished_at, actual=actual,
@@ -595,6 +623,8 @@ async def execute_replay_plan(
             started_at=started_at, finished_at=finished_at,
             observations=observations, errors=(*errors, "execution_cancelled"),
             receipt_id=receipt_id, receipt_context=receipt_context,
+            receipt_capability_name=normalized_receipt_capability,
+            receipt_input_digest=normalized_receipt_digest,
         )
         failed = running.fail(
             reason="execution_cancelled", now=finished_at, actual=actual,
@@ -619,6 +649,8 @@ async def execute_replay_plan(
             timed_out=False, started_at=started_at, finished_at=finished_at,
             observations=observations, errors=(*errors, error_code), receipt_id=receipt_id,
             receipt_context=receipt_context,
+            receipt_capability_name=normalized_receipt_capability,
+            receipt_input_digest=normalized_receipt_digest,
         )
         failed = running.fail(
             reason=error_code, now=finished_at, actual=actual,
@@ -642,6 +674,8 @@ async def execute_replay_plan(
         timed_out=any_timeout, started_at=started_at, finished_at=finished_at,
         observations=observations, errors=errors, receipt_id=receipt_id,
         receipt_context=receipt_context,
+        receipt_capability_name=normalized_receipt_capability,
+        receipt_input_digest=normalized_receipt_digest,
     )
     committed = running.commit(
         actual=actual,
