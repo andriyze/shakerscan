@@ -28,9 +28,10 @@ def _adapter(*, requested):
         calls.append(dict(payload))
         await heartbeat()
         return {
-            "status": "completed",
+            "status": "success",
             "typed_output": {"records": []},
-            "request_settlement": {"mode": "exact", "actual": 1},
+            "settlement": {"mode": "exact", "actual": 1},
+            "elapsed_seconds": 1,
         }
 
     instance = ScannerExecutionAdapter(
@@ -98,9 +99,10 @@ def test_non_scan_external_execution_is_not_changed_by_the_guard():
     async def runner(payload, *, heartbeat):
         calls.append(dict(payload))
         return {
-            "status": "completed",
+            "status": "success",
             "typed_output": {"records": []},
-            "request_settlement": {"mode": "exact", "actual": 1},
+            "settlement": {"mode": "exact", "actual": 1},
+            "elapsed_seconds": 1,
         }
 
     adapter = ScannerExecutionAdapter(
