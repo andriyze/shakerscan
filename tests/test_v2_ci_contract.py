@@ -114,3 +114,23 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "docker compose build" in text
     assert "scripts/docker_api_overlay_smoke.sh" in text
     assert "npm --prefix ui run build" in text
+
+
+def test_package_native_and_legacy_scan_contracts_run_in_isolated_processes():
+    workflow = yaml.safe_load(_workflow_text())
+    step = next(
+        item
+        for item in workflow["jobs"]["contracts"]["steps"]
+        if item.get("name") == "Validate canonical Scan and worker contracts"
+    )
+
+    assert "env" not in step
+    commands = [
+        line.strip()
+        for line in step["run"].splitlines()
+        if line.strip().startswith("python -m pytest")
+    ]
+    assert len(commands) == 2
+    assert step["run"].index("tests/test_scan_action_plan.py") < step["run"].index(
+        "tests/test_scan_v2_contract.py"
+    )

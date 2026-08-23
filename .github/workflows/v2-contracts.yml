@@ -162,27 +162,29 @@ jobs:
           PyYAML==6.0.3 redis==8.0.1
 
       - name: Validate canonical Scan and worker contracts
-        env:
-          PYTHONPATH: api:scanner
         run: |
+          # Package-native contract tests must run in their own process. Legacy
+          # compatibility tests import api/api.py as the top-level `api` module;
+          # mixing both import worlds in one pytest collection masks `api.scan`.
           python -m pytest -q -p no:cacheprovider \
-            tests/test_scan_v2_contract.py \
-            tests/test_scan_execution_plan.py \
             tests/test_scan_action_plan.py \
             tests/test_scan_action_compiler.py \
             tests/test_scan_budget_allocator.py \
             tests/test_scan_action_store.py \
             tests/test_scan_capability_result.py \
             tests/test_scan_orchestrator.py \
-            tests/test_scan_action_resume.py \
             tests/test_worker_action_executor.py \
             tests/test_scan_authorization_revalidation.py \
-            tests/test_scan_dns_rebinding.py \
             tests/test_scan_finalizer.py \
             tests/test_scan_work_manifests.py \
             tests/test_observation_manifests.py \
             tests/test_observation_store.py \
-            tests/test_scan_placement_transport.py \
+            tests/test_scan_placement_transport.py
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_scan_v2_contract.py \
+            tests/test_scan_execution_plan.py \
+            tests/test_scan_action_resume.py \
+            tests/test_scan_dns_rebinding.py \
             tests/test_scan_job_contract.py \
             tests/test_scan_worker_contract.py \
             tests/test_scan_worker_dispatch.py \
