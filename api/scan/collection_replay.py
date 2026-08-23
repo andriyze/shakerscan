@@ -23,6 +23,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.request_replay import ReplayAuthorization
 
 from .capability_execution import scan_budget_ledger_limits
+from .work_manifests import ScanWorkManifest
 
 
 EXECUTABLE_REPLAY_POLICIES = frozenset({"safe_reads", "confirmed_active"})
@@ -30,6 +31,33 @@ EXECUTABLE_REPLAY_POLICIES = frozenset({"safe_reads", "confirmed_active"})
 
 class ScanCollectionReplayContractError(ValueError):
     """Saved replay input cannot execute under the immutable Scan contract."""
+
+
+def validate_scan_replay_request_manifest(
+    plan: Any,
+    manifest: ScanWorkManifest,
+) -> None:
+    """Fail closed if decrypted replay work differs from its public manifest."""
+    expected_requests = tuple(
+        (
+            str(item["request_ref_id"]),
+            str(item["method"]),
+            bool(item["safe_method"]),
+        )
+        for item in manifest.entries
+    )
+    actual_requests = tuple(
+        (
+            request.request_id,
+            request.method,
+            request.method in {"GET", "HEAD", "OPTIONS"},
+        )
+        for request in plan.requests
+    )
+    if actual_requests != expected_requests:
+        raise ScanCollectionReplayContractError(
+            "decrypted replay plan differs from its immutable request manifest"
+        )
 
 
 def _positive_integer(value: Any, *, name: str) -> int:

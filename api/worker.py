@@ -129,6 +129,7 @@ from scan.collection_replay import (
     scan_replay_ledger_limits,
     scan_replay_runtime_http_ceiling,
     scan_replay_selector,
+    validate_scan_replay_request_manifest,
 )
 from scan.capability_execution import (
     ScanCapabilityContractError,
@@ -13475,6 +13476,9 @@ class _CanonicalLocalScanDispatcher:
                     self.options, session.headers(), lane=lane,
                 )
         elif action.action_id.startswith("inputs.collection_"):
+            request_manifest = await self._work_manifest(
+                action, "request_manifest_ref", ScanWorkManifestKind.REQUEST,
+            )
             summary = await _execute_scan_request_collections(
                 self.options,
                 self.scan_id,
@@ -13484,6 +13488,7 @@ class _CanonicalLocalScanDispatcher:
                     self.options, lane="primary",
                 ).headers(),
                 canonical_action=action,
+                canonical_request_manifest=request_manifest,
             )
             if self.collection_replay_result_holder is not None:
                 self.collection_replay_result_holder.update(summary)
@@ -14312,6 +14317,7 @@ async def _execute_scan_request_collections(
     runtime_request_grant: int | None = None,
     trusted_primary_headers: Mapping[str, str] | None = None,
     canonical_action: Any | None = None,
+    canonical_request_manifest: ScanWorkManifest | None = None,
 ) -> dict[str, Any]:
     """Execute saved Scan selections through the canonical exact replay executor."""
     try:
@@ -14363,6 +14369,16 @@ async def _execute_scan_request_collections(
         if len(refs) != 1:
             raise ScanCollectionReplayContractError(
                 "canonical collection selection changed after plan admission"
+            )
+        if (
+            canonical_request_manifest is None
+            or canonical_request_manifest.kind is not ScanWorkManifestKind.REQUEST
+            or canonical_request_manifest.scan_id != str(scan_uuid)
+            or canonical_action.action_id
+            not in canonical_request_manifest.source_action_ids
+        ):
+            raise ScanCollectionReplayContractError(
+                "canonical collection action has no exact request manifest"
             )
     executable = [
         item
@@ -14678,6 +14694,10 @@ async def _execute_scan_request_collections(
             ),
             authorization=authorization,
         )
+        if canonical_request_manifest is not None:
+            validate_scan_replay_request_manifest(
+                plan, canonical_request_manifest,
+            )
         async with db_pool.acquire() as conn:
             plan, receipt_context = await _bind_scan_replay_primary_credential(
                 conn,
@@ -16478,12 +16498,21 @@ def _compile_parallel_child_action_plan(
     endpoint_ref = child_options.get("endpoint_manifest_ref")
     candidate_ref = child_options.get("candidate_manifest_ref")
     template_ref = child_options.get("template_manifest_ref")
+    request_manifest_refs = child_options.get("request_manifest_refs")
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=child_job.scan_id,
         execution_plan=child_job.execution_plan,
         target_binding=child_job.target,
         credential_profile_refs=credential_profile_action_refs(credential_refs),
         request_collection_refs=request_collection_action_refs(collection_refs),
+        request_manifest_refs=(
+            {
+                str(key): dict(value)
+                for key, value in request_manifest_refs.items()
+                if isinstance(value, Mapping)
+            }
+            if isinstance(request_manifest_refs, Mapping) else None
+        ),
         endpoint_manifest_ref=(
             dict(endpoint_ref) if isinstance(endpoint_ref, Mapping) else None
         ),

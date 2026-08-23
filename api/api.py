@@ -475,8 +475,11 @@ try:
     from runtime.observation_store import PostgresObservationManifestStore
     from scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
     from scan.work_manifests import (
+        ScanWorkManifest,
         ScanWorkManifestError,
         ScanWorkManifestReference,
+        build_request_manifest,
+        route_id as scan_manifest_route_id,
         work_manifest_references_in,
     )
     from scan.budget_allocator import (
@@ -544,8 +547,11 @@ except ModuleNotFoundError:
     from api.runtime.observation_store import PostgresObservationManifestStore
     from api.scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
     from api.scan.work_manifests import (
+        ScanWorkManifest,
         ScanWorkManifestError,
         ScanWorkManifestReference,
+        build_request_manifest,
+        route_id as scan_manifest_route_id,
         work_manifest_references_in,
     )
     from api.scan.budget_allocator import (
@@ -3801,7 +3807,42 @@ async def run_due_schedules(pool: asyncpg.Pool):
 
             canonical_job = None
             scan_action_plan = None
+            request_work_manifests: tuple[ScanWorkManifest, ...] = ()
             if canonical_schedule:
+                scheduled_bindings = [
+                    dict(item)
+                    for item in scan_options.get("request_collections") or ()
+                    if isinstance(item, Mapping)
+                ]
+                (
+                    scheduled_collection_refs,
+                    scheduled_collection_endpoints,
+                    scheduled_manifest_requests,
+                ) = await _generic_collection_refs(
+                    conn,
+                    target_id=target_id,
+                    target_kind="web",
+                    bindings=scheduled_bindings,
+                )
+                scan_options["request_collections"] = scheduled_collection_refs
+                if scheduled_collection_endpoints:
+                    scan_options["custom_endpoints"] = list(dict.fromkeys((
+                        *list(scan_options.get("custom_endpoints") or ()),
+                        *scheduled_collection_endpoints,
+                    )))[:2000]
+                scheduled_executable_refs = _executable_scan_collection_refs(
+                    scheduled_collection_refs
+                )
+                if scheduled_executable_refs:
+                    scan_options["runtime_scope_guard"] = (
+                        await _freeze_scan_collection_target_binding(
+                            target_id=target_id,
+                            target_kind="web",
+                            target_url=target_url,
+                            refs=scheduled_executable_refs,
+                            existing_guard=scan_options.get("runtime_scope_guard"),
+                        )
+                    )
                 scan_options["runtime_scope_guard"] = await _freeze_scan_target_binding(
                     target_id=target_id,
                     target_kind="web",
@@ -3821,16 +3862,26 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     environment=str(target_guard.get("environment") or "unknown"),
                     scope_receipt_id=scan_contract.policy.scope_receipt_id,
                 )
+                (
+                    request_work_manifests,
+                    scheduled_request_manifest_refs,
+                ) = _compile_scan_request_work_manifests(
+                    scan_id=scan_id,
+                    target_binding=target_binding,
+                    collection_refs=scheduled_executable_refs,
+                    selection_requests=scheduled_manifest_requests,
+                )
+                if scheduled_request_manifest_refs:
+                    scan_options["request_manifest_refs"] = (
+                        scheduled_request_manifest_refs
+                    )
                 canonical_job = CanonicalScanJob.create(
                     job_id=job_id,
                     scan_id=scan_id,
                     target=target_binding,
                     execution_plan=scan_contract.execution_plan,
                     request_collections=admitted_request_collection_job_refs(
-                        [
-                            dict(item) for item in scan_options.get("request_collections") or ()
-                            if isinstance(item, Mapping)
-                        ]
+                        scheduled_collection_refs
                     ),
                     credential_profile_ids=admitted_credential_profile_ids(
                         [
@@ -3849,11 +3900,8 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             for item in scan_options.get("credential_profile_refs") or ()
                             if isinstance(item, Mapping)
                         ],
-                        request_collection_refs=[
-                            dict(item)
-                            for item in scan_options.get("request_collections") or ()
-                            if isinstance(item, Mapping)
-                        ],
+                        request_collection_refs=scheduled_executable_refs,
+                        request_manifest_refs=scheduled_request_manifest_refs,
                     )
                 except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
                     print(
@@ -3883,6 +3931,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     await PostgresScanActionStore().persist_plan(
                         conn, plan=scan_action_plan,
                     )
+                    for manifest in request_work_manifests:
+                        await PostgresScanManifestStore().persist(
+                            conn, manifest=manifest,
+                        )
 
         job_data = (
             canonical_job.queue_payload(
@@ -27880,7 +27932,11 @@ async def _generic_collection_refs(
     conn: Any, *, target_id: Any = None, device_target_id: Any = None,
     target_kind: str | None = None,
     bindings: Sequence[Mapping[str, Any]] = (),
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+    dict[str, list[dict[str, Any]]],
+]:
     """Freeze exact target-bound selection refs and derive safe endpoint seeds."""
     requested: list[tuple[uuid.UUID, Mapping[str, Any]]] = []
     for raw in list(bindings)[:16]:
@@ -27894,7 +27950,7 @@ async def _generic_collection_refs(
             _uuid_or_400(str(value), "request collection or selection id"), raw,
         ))
     if not requested:
-        return [], []
+        return [], [], {}
     if len({value for value, _raw in requested}) != len(requested):
         raise HTTPException(status_code=422, detail="request collection references must be unique")
     normalized_kind = str(target_kind or ("device" if device_target_id else "web")).lower()
@@ -27908,6 +27964,7 @@ async def _generic_collection_refs(
         raise HTTPException(status_code=422, detail="request collection target is missing")
     endpoints: list[str] = []
     refs: list[dict[str, Any]] = []
+    manifest_requests: dict[str, list[dict[str, Any]]] = {}
     for reference_id, raw in requested:
         row = await conn.fetchrow(
             """SELECT rc.id, rc.target_id, rc.device_target_id, rc.name, rc.format,
@@ -28038,6 +28095,26 @@ async def _generic_collection_refs(
             row["id"],
         )
         selected_rows = _select_request_collection_index_rows(index_rows, selector)
+        execution_rows = (
+            [item for item in selected_rows if item.get("safe_method")]
+            if replay_policy == "safe_reads"
+            else selected_rows
+        )
+        manifest_requests[selection_digest] = [
+            {
+                "request_id": str(item.get("request_id") or ""),
+                "method": str(item.get("method") or "GET").upper(),
+                "redacted_url": str(item.get("redacted_url") or ""),
+                "normalized_path": str(item.get("normalized_path") or "/"),
+                "auth_type": str(item.get("auth_type") or "none"),
+                "body_mode": str(item.get("body_mode") or "none"),
+                "safe_method": bool(item.get("safe_method")),
+                "allowed_origins": list(
+                    _decode_json_value(binding.get("allowed_origins")) or []
+                ),
+            }
+            for item in execution_rows
+        ]
         for item in selected_rows:
             if not item.get("safe_method"):
                 continue
@@ -28056,14 +28133,14 @@ async def _generic_collection_refs(
             "selector": selector.public_dict(),
             "replay_policy": replay_policy,
             "selection_digest": selection_digest,
-            "selected_requests": len(selected_rows),
-            "selected_safe_requests": sum(1 for item in selected_rows if item.get("safe_method")),
-            "selected_mutating_requests": sum(1 for item in selected_rows if not item.get("safe_method")),
+            "selected_requests": len(execution_rows),
+            "selected_safe_requests": sum(1 for item in execution_rows if item.get("safe_method")),
+            "selected_mutating_requests": sum(1 for item in execution_rows if not item.get("safe_method")),
             "payload_sha256": row["payload_sha256"],
             "environment_sha256": binding.get("environment_sha256"),
             "secret_values_visible": False,
         })
-    return refs, list(dict.fromkeys(endpoints))[:2000]
+    return refs, list(dict.fromkeys(endpoints))[:2000], manifest_requests
 
 
 def _executable_scan_collection_refs(
@@ -28075,6 +28152,7 @@ def _executable_scan_collection_refs(
         for item in refs
         if str(item.get("replay_policy") or "").strip().lower()
         in EXECUTABLE_REPLAY_POLICIES
+        and int(item.get("selected_requests") or 0) > 0
     ]
 
 
@@ -28725,6 +28803,105 @@ async def deactivate_request_collection_selection(
     }
 
 
+def _compile_scan_request_work_manifests(
+    *,
+    scan_id: str,
+    target_binding: TargetBinding,
+    collection_refs: Sequence[Mapping[str, Any]],
+    selection_requests: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[
+    tuple[ScanWorkManifest, ...],
+    dict[str, dict[str, Any]],
+]:
+    """Freeze each executable saved selection into its action-owned request list."""
+    action_refs = sorted(
+        request_collection_action_refs(collection_refs),
+        key=lambda item: json.dumps(
+            item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ),
+    )
+    manifests: list[ScanWorkManifest] = []
+    references: dict[str, dict[str, Any]] = {}
+    for index, action_ref in enumerate(action_refs):
+        selection_digest = str(action_ref["selection_digest"])
+        raw_requests = list(selection_requests.get(selection_digest) or ())
+        maximum = int(action_ref.get("max_requests") or 0)
+        if not raw_requests or maximum < 1:
+            raise ScanActionPlanError(
+                "request collection selection has no immutable request work"
+            )
+        entries: list[dict[str, Any]] = []
+        for raw in raw_requests[:maximum]:
+            allowed_origins = tuple(
+                canonical_collection_origin(item)
+                for item in raw.get("allowed_origins") or () if str(item)
+            )
+            redacted_url = str(raw.get("redacted_url") or "").strip()
+            parsed = urllib.parse.urlsplit(redacted_url)
+            if parsed.scheme and parsed.netloc:
+                origin = urllib.parse.urlunsplit((
+                    parsed.scheme, parsed.netloc, "", "", "",
+                ))
+            elif allowed_origins:
+                origin = allowed_origins[0]
+            else:
+                raise ScanActionPlanError(
+                    "request collection manifest has no exact origin"
+                )
+            try:
+                origin = canonical_collection_origin(origin)
+            except RequestCollectionContractError as exc:
+                raise ScanActionPlanError(
+                    "request collection manifest origin is invalid"
+                ) from exc
+            if origin not in allowed_origins:
+                raise ScanActionPlanError(
+                    "request collection manifest origin exceeds its binding"
+                )
+            origin_parts = urllib.parse.urlsplit(origin)
+            scheme = str(origin_parts.scheme).lower()
+            host = str(origin_parts.hostname or "").lower().rstrip(".")
+            port = int(origin_parts.port or (443 if scheme == "https" else 80))
+            method = str(raw.get("method") or "GET").upper()
+            path = str(raw.get("normalized_path") or "/")
+            query_names = sorted({
+                str(name) for name, _value in urllib.parse.parse_qsl(
+                    parsed.query, keep_blank_values=True,
+                ) if str(name)
+            })
+            entries.append({
+                "request_ref_id": str(raw.get("request_id") or ""),
+                "route_id": scan_manifest_route_id(
+                    target_binding_digest=target_binding.digest,
+                    method=method,
+                    scheme=scheme,
+                    host=host,
+                    port=port,
+                    canonical_path=path,
+                    query_parameter_names=query_names,
+                ),
+                "method": method,
+                "auth_lane": (
+                    "primary"
+                    if str(raw.get("auth_type") or "none").lower() != "none"
+                    else "anonymous"
+                ),
+                "selected_shard": None,
+                "safe_method": bool(raw.get("safe_method")),
+                "body_schema_digest": None,
+            })
+        manifest = build_request_manifest(
+            scan_id=scan_id,
+            target_binding_digest=target_binding.digest,
+            source_action_ids=(f"inputs.collection_{index:02d}",),
+            requests=entries,
+            maximum=maximum,
+        )
+        manifests.append(manifest)
+        references[selection_digest] = manifest.reference().canonical_dict()
+    return tuple(manifests), references
+
+
 def _compile_allocated_scan_action_plan(
     *,
     scan_id: str,
@@ -28732,6 +28909,7 @@ def _compile_allocated_scan_action_plan(
     target_binding: TargetBinding,
     credential_refs: Sequence[Mapping[str, Any]] = (),
     request_collection_refs: Sequence[Mapping[str, Any]] = (),
+    request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
 ):
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=scan_id,
@@ -28741,6 +28919,7 @@ def _compile_allocated_scan_action_plan(
         request_collection_refs=request_collection_action_refs(
             request_collection_refs
         ),
+        request_manifest_refs=request_manifest_refs,
     )
     return allocate_scan_action_plan(
         raw_plan, scan_contract.budget,
@@ -28963,7 +29142,11 @@ async def submit_scan(request: ScanRequest):
                  _default_asm_enabled_for_new_web_target("manual"),
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
-        collection_refs, collection_endpoints = await _generic_collection_refs(
+        (
+            collection_refs,
+            collection_endpoints,
+            collection_manifest_requests,
+        ) = await _generic_collection_refs(
             conn, target_id=target_id, target_kind=request.target_kind,
             bindings=request.request_collections,
         )
@@ -29090,6 +29273,20 @@ async def submit_scan(request: ScanRequest):
             environment=str(target_guard.get("environment") or "unknown"),
             scope_receipt_id=scan_contract.policy.scope_receipt_id,
         )
+        try:
+            (
+                request_work_manifests,
+                request_work_manifest_refs,
+            ) = _compile_scan_request_work_manifests(
+                scan_id=scan_id,
+                target_binding=target_binding,
+                collection_refs=executable_collection_refs,
+                selection_requests=collection_manifest_requests,
+            )
+        except (ScanActionPlanError, ScanWorkManifestError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if request_work_manifest_refs:
+            options_payload["request_manifest_refs"] = request_work_manifest_refs
         canonical_job = CanonicalScanJob.create(
             job_id=job_id,
             scan_id=scan_id,
@@ -29105,6 +29302,7 @@ async def submit_scan(request: ScanRequest):
                 target_binding=target_binding,
                 credential_refs=credential_refs,
                 request_collection_refs=executable_collection_refs,
+                request_manifest_refs=request_work_manifest_refs,
             )
         except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -29134,6 +29332,10 @@ async def submit_scan(request: ScanRequest):
             await PostgresScanActionStore().persist_plan(
                 conn, plan=scan_action_plan,
             )
+            for manifest in request_work_manifests:
+                await PostgresScanManifestStore().persist(
+                    conn, manifest=manifest,
+                )
             command_result = await _record_command_result(
                 conn,
                 command="scan.submit",
@@ -38282,7 +38484,11 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 conn, contract, target_uuid,
             )
             origins = await _target_web_origins(conn, target_uuid, target_url)
-            collection_refs, _collection_endpoints = await _generic_collection_refs(
+            (
+                collection_refs,
+                _collection_endpoints,
+                _collection_manifest_requests,
+            ) = await _generic_collection_refs(
                 conn,
                 target_id=target_uuid,
                 target_kind=contract.target_kind,
@@ -38317,7 +38523,11 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             credential_rows = await _validate_hunt_credential_references(
                 conn, contract, target_uuid,
             )
-            collection_refs, _collection_endpoints = await _generic_collection_refs(
+            (
+                collection_refs,
+                _collection_endpoints,
+                _collection_manifest_requests,
+            ) = await _generic_collection_refs(
                 conn,
                 device_target_id=target_uuid,
                 target_kind="device",

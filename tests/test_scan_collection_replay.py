@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +21,9 @@ from api.scan.collection_replay import (
     scan_replay_ledger_limits,
     scan_replay_runtime_http_ceiling,
     scan_replay_selector,
+    validate_scan_replay_request_manifest,
 )
+from api.scan.work_manifests import build_request_manifest
 from scanner.scanner_tools.request_collections import validate_and_index
 from scanner.scanner_tools.request_replay import build_selected_replay_plan
 
@@ -37,6 +40,35 @@ def _budget() -> dict[str, int]:
         "max_tool_wall_seconds": 60,
         "max_workers": 2,
     }
+
+
+def test_decrypted_replay_plan_must_match_immutable_request_manifest():
+    manifest = build_request_manifest(
+        scan_id="40000000-0000-4000-8000-000000000001",
+        target_binding_digest="a" * 64,
+        source_action_ids=("inputs.collection_00",),
+        requests=({
+            "request_ref_id": "get-health",
+            "route_id": "b" * 64,
+            "method": "GET",
+            "auth_lane": "primary",
+            "selected_shard": None,
+            "safe_method": True,
+            "body_schema_digest": None,
+        },),
+    )
+    matching = SimpleNamespace(requests=(SimpleNamespace(
+        request_id="get-health", method="GET",
+    ),))
+    substituted = SimpleNamespace(requests=(SimpleNamespace(
+        request_id="get-admin", method="GET",
+    ),))
+
+    validate_scan_replay_request_manifest(matching, manifest)
+    with pytest.raises(
+        ScanCollectionReplayContractError, match="immutable request manifest",
+    ):
+        validate_scan_replay_request_manifest(substituted, manifest)
 
 
 def test_database_json_fields_decode_serialized_arrays_and_objects():

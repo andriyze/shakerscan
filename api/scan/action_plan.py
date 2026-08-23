@@ -470,7 +470,7 @@ def _work_manifest_reference(
         return {}
     try:
         reference = ScanWorkManifestReference.from_dict(value)
-    except (ScanWorkManifestError, ValueError) as exc:
+    except (ScanWorkManifestError, TypeError, ValueError) as exc:
         raise ScanActionPlanError(f"{kind.value} manifest reference is invalid") from exc
     if reference.kind is not kind:
         raise ScanActionPlanError(
@@ -506,6 +506,7 @@ class ScanActionPlanCompiler:
         target_binding: TargetBinding,
         credential_profile_refs: Sequence[Mapping[str, Any]] = (),
         request_collection_refs: Sequence[Mapping[str, Any]] = (),
+        request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
         endpoint_manifest_ref: Mapping[str, Any] | None = None,
         candidate_manifest_ref: Mapping[str, Any] | None = None,
         template_manifest_ref: Mapping[str, Any] | None = None,
@@ -567,6 +568,22 @@ class ScanActionPlanCompiler:
                 )
             ):
                 raise ScanActionPlanError("request collection reference is invalid")
+        request_refs: dict[str, dict[str, Any]] = {}
+        for raw_digest, raw_reference in dict(request_manifest_refs or {}).items():
+            digest = str(raw_digest or "").strip().lower()
+            if not _HEX_64_RE.fullmatch(digest):
+                raise ScanActionPlanError("request manifest selection digest is invalid")
+            reference = _work_manifest_reference(
+                raw_reference, kind=ScanWorkManifestKind.REQUEST,
+            )
+            request_refs[digest] = reference
+        collection_digests = {
+            str(reference["selection_digest"]) for reference in collections
+        }
+        if set(request_refs) != collection_digests:
+            raise ScanActionPlanError(
+                "request manifests must exactly cover executable collection selections"
+            )
         endpoint_ref = _work_manifest_reference(
             endpoint_manifest_ref, kind=ScanWorkManifestKind.ENDPOINT,
         )
@@ -769,7 +786,12 @@ class ScanActionPlanCompiler:
                 f"inputs.collection_{index:02d}",
                 "discover_surface",
                 capability_name,
-                {"request_collection_ref": reference},
+                {
+                    "request_collection_ref": reference,
+                    "request_manifest_ref": request_refs[
+                        str(reference["selection_digest"])
+                    ],
+                },
                 dependencies=primary_dependency,
                 required=True,
                 supporting=True,
@@ -995,6 +1017,7 @@ class ScanActionPlanCompiler:
             "target_binding_digest": target_binding.digest,
             "credential_profile_refs": list(credentials),
             "request_collection_refs": list(collections),
+            "request_manifest_refs": request_refs,
             "endpoint_manifest_ref": endpoint_ref,
             "candidate_manifest_ref": candidate_ref,
             "template_manifest_ref": template_ref,

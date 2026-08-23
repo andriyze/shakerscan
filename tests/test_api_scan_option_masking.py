@@ -189,7 +189,7 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
             assert "FROM request_collection_requests" in query
             return index
 
-    refs, endpoints = asyncio.run(api_module._generic_collection_refs(
+    refs, endpoints, manifest_requests = asyncio.run(api_module._generic_collection_refs(
         Connection(),
         target_id=target_id,
         target_kind="web",
@@ -207,6 +207,16 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
     assert refs[0]["environment_id"] == str(environment_id)
     assert refs[0]["selection_digest"] == digest
     assert refs[0]["secret_values_visible"] is False
+    assert manifest_requests[digest] == [{
+        "request_id": "get-health",
+        "method": "GET",
+        "redacted_url": "https://api.example.test/health",
+        "normalized_path": "/health",
+        "auth_type": "bearer",
+        "body_mode": "none",
+        "safe_method": True,
+        "allowed_origins": origins,
+    }]
 
     with pytest.raises(api_module.HTTPException) as error:
         asyncio.run(api_module._generic_collection_refs(
@@ -248,6 +258,7 @@ def test_scan_collection_replay_freezes_exact_origins_and_addresses(monkeypatch)
         target_url="https://api.example.test/root",
         refs=[{
             "replay_policy": "safe_reads",
+            "selected_requests": 1,
             "allowed_origins": [
                 "https://api.example.test",
                 "https://api.example.test:8443",
@@ -272,6 +283,49 @@ def test_scan_collection_replay_freezes_exact_origins_and_addresses(monkeypatch)
     assert calls == [
         ("https://api.example.test/root", "Scan request collection target"),
     ]
+
+
+def test_scan_collection_selection_compiles_exact_value_free_request_manifest():
+    scan_id = "40000000-0000-4000-8000-000000000001"
+    digest = "a" * 64
+    target = api_module.TargetBinding(
+        target_id="40000000-0000-4000-8000-000000000002",
+        target_kind="web",
+        canonical_host="api.example.test",
+        allowed_origins=("https://api.example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    manifests, references = api_module._compile_scan_request_work_manifests(
+        scan_id=scan_id,
+        target_binding=target,
+        collection_refs=({
+            "collection_id": "40000000-0000-4000-8000-000000000003",
+            "selection_id": "40000000-0000-4000-8000-000000000004",
+            "binding_id": "40000000-0000-4000-8000-000000000005",
+            "selection_digest": digest,
+            "replay_policy": "safe_reads",
+            "selected_requests": 1,
+            "selector": {"max_requests": 1},
+        },),
+        selection_requests={digest: ({
+            "request_id": "get-health",
+            "method": "GET",
+            "redacted_url": "https://api.example.test/health?verbose=1",
+            "normalized_path": "/health",
+            "auth_type": "bearer",
+            "body_mode": "none",
+            "safe_method": True,
+            "allowed_origins": ["https://api.example.test"],
+        },)},
+    )
+
+    assert len(manifests) == 1
+    assert manifests[0].source_action_ids == ("inputs.collection_00",)
+    assert manifests[0].entries[0]["request_ref_id"] == "get-health"
+    assert manifests[0].entries[0]["auth_lane"] == "primary"
+    assert references[digest] == manifests[0].reference().canonical_dict()
+    assert "verbose=1" not in json.dumps(manifests[0].canonical_dict())
 
 
 def test_parallel_parent_rollup_derives_progress_from_shards():

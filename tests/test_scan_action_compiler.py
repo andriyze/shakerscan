@@ -60,6 +60,17 @@ def _execution(
     )
 
 
+def _request_manifest_ref(manifest_id: str, digest: str, count: int = 1):
+    return ScanWorkManifestReference(
+        manifest_id=manifest_id,
+        kind="request",
+        content_schema="request-manifest/v1",
+        manifest_digest=digest,
+        entry_count=count,
+        status="complete",
+    ).canonical_dict()
+
+
 def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families():
     plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -108,6 +119,14 @@ def test_compiler_binds_opaque_inputs_and_is_independent_of_reference_order():
         target_binding=_target(),
         credential_profile_refs=credentials,
         request_collection_refs=collections,
+        request_manifest_refs={
+            "f" * 64: _request_manifest_ref(
+                "10000000-0000-4000-8000-000000000080", "1" * 64,
+            ),
+            "a" * 64: _request_manifest_ref(
+                "10000000-0000-4000-8000-000000000081", "2" * 64,
+            ),
+        },
         authority_refs={"approval_receipt_digest": "b" * 64},
     )
     second = compiler.compile(
@@ -116,6 +135,14 @@ def test_compiler_binds_opaque_inputs_and_is_independent_of_reference_order():
         target_binding=_target(),
         credential_profile_refs=tuple(reversed(credentials)),
         request_collection_refs=tuple(reversed(collections)),
+        request_manifest_refs={
+            "a" * 64: _request_manifest_ref(
+                "10000000-0000-4000-8000-000000000081", "2" * 64,
+            ),
+            "f" * 64: _request_manifest_ref(
+                "10000000-0000-4000-8000-000000000080", "1" * 64,
+            ),
+        },
         authority_refs={"approval_receipt_digest": "b" * 64},
     )
 
@@ -165,6 +192,21 @@ def test_compiler_fails_closed_on_missing_placement_or_untrusted_reference_field
             credential_profile_refs=({
                 "profile_id": "profile", "version": 1, "digest": "a" * 64,
                 "lane": "primary", "password": "must-not-enter-plan",
+            },),
+        )
+
+    with pytest.raises(ScanActionPlanError, match="exactly cover"):
+        ScanActionPlanCompiler().compile(
+            scan_id=SCAN_ID,
+            execution_plan=_execution(active=False),
+            target_binding=_target(),
+            request_collection_refs=({
+                "collection_id": "collection-1",
+                "selection_id": "selection-1",
+                "binding_id": "binding-1",
+                "version": 1,
+                "selection_digest": "a" * 64,
+                "active": False,
             },),
         )
 
@@ -340,11 +382,18 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
         target_binding=_target(),
         credential_profile_refs=credentials,
         request_collection_refs=collections,
+        request_manifest_refs={
+            "a" * 64: _request_manifest_ref(
+                "10000000-0000-4000-8000-000000000082", "3" * 64,
+                count=8,
+            ),
+        },
     )
     replay = next(
         action for action in plan.actions
         if action.capability_name == "collections.replay_active"
     )
     assert replay.capability_args["request_collection_ref"] == collections[0]
+    assert replay.capability_args["request_manifest_ref"]["entry_count"] == 8
     assert replay.requested_budget["http_requests"] == 8
     assert replay.requested_budget["state_changing_requests"] == 8
