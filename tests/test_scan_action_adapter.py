@@ -17,6 +17,7 @@ from scan.capability_result import (
     CapabilityResultStatus,
 )
 from scan.execution_backend import ActionLease
+from scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
 
 
 TARGET = TargetBinding(
@@ -35,6 +36,7 @@ def _action(
     ordinal: int,
     *,
     dependencies=(),
+    capability_args=None,
 ) -> ScanAction:
     spec = CAPABILITY_REGISTRY.require(capability)
     return ScanAction(
@@ -42,7 +44,11 @@ def _action(
         stage="finalize_evidence" if action_id == "finalize.report" else "resolve_inputs",
         ordinal=ordinal,
         capability_name=capability,
-        capability_args={"report_only": True} if action_id == "finalize.report" else {},
+        capability_args=(
+            dict(capability_args)
+            if capability_args is not None
+            else {"report_only": True} if action_id == "finalize.report" else {}
+        ),
         target_binding_digest=TARGET.digest,
         input_binding_digest=str(ordinal + 1) * 64,
         requested_budget=dict(spec.budget_cost),
@@ -61,9 +67,10 @@ def _action(
 
 
 class Backend:
-    def __init__(self, results=None, observations=None):
+    def __init__(self, results=None, observations=None, manifests=None):
         self.results = dict(results or {})
         self.observations = dict(observations or {})
+        self.manifests = dict(manifests or {})
 
     async def load_result(self, action_id):
         return self.results.get(action_id)
@@ -71,8 +78,11 @@ class Backend:
     async def load_observations(self, action_id):
         return tuple(self.observations.get(action_id) or ())
 
+    async def load_work_manifest(self, _action_id, reference):
+        return self.manifests[reference.manifest_id]
 
-def _dispatcher(plan, backend, *, target=TARGET):
+
+def _dispatcher(plan, backend, *, target=TARGET, policy=None):
     async def process_runner(*_args, **_kwargs):
         raise AssertionError("process runner must not be used")
 
@@ -80,7 +90,7 @@ def _dispatcher(plan, backend, *, target=TARGET):
         target_url="https://app.example.test/",
         options={},
         target=target,
-        policy=ScanPolicy(),
+        policy=policy or ScanPolicy(),
         scan_id=plan.scan_id,
         job_id="job-1",
         worker_id="broker:worker-1",
@@ -316,3 +326,98 @@ def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monke
     assert receipt.status == "success"
     assert captured["addresses"] == ("192.0.2.10",)
     assert len(captured["ports"]) == 4
+
+
+def test_database_neutral_active_action_executes_exact_manifest_candidate(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/one", "concrete_path": "/one",
+                    "query_keys": ["first"], "source": "web.crawl",
+                },
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/two", "concrete_path": "/two",
+                    "query_keys": ["second"], "source": "web.crawl",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidate_manifest = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.web_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.xss.00001",
+        "xss.verify",
+        0,
+        capability_args={
+            "candidate_manifest_ref": candidate_manifest.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "candidate_index": 1,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class ExternalAdapter:
+        manages_cancellation = True
+
+        def __init__(
+            self, *, specification, process_payload, requested_budget, **_kwargs,
+        ):
+            self.capability_name = specification.name
+            self.adapter_name = specification.adapter
+            self.adapter_version = specification.adapter_version
+            self.requested_budget = dict(requested_budget)
+            captured.update(process_payload)
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    name: min(amount, 1)
+                    for name, amount in self.requested_budget.items()
+                },
+                execution_started=True,
+                parser_version="dalfox-jsonl/v1",
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "ScannerExecutionAdapter", ExternalAdapter,
+    )
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidate_manifest.manifest_id: candidate_manifest,
+    })
+    dispatcher = _dispatcher(
+        plan,
+        backend,
+        policy=ScanPolicy(
+            active_testing=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["execution_target"] == "https://app.example.test/two?second=1"
+    assert captured["registered_target"] == "https://app.example.test"

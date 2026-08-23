@@ -22,6 +22,9 @@ from api.scan.work_manifests import (
     build_request_manifest,
     build_template_manifest,
     execution_url_for_endpoint,
+    execution_url_for_manifest_candidate,
+    execution_url_for_manifest_endpoint,
+    unique_work_manifest_reference_dicts,
     work_manifest_references_in,
 )
 
@@ -106,6 +109,10 @@ def test_manifest_reference_extraction_accepts_only_canonical_nested_references(
             **reference.canonical_dict(), "entry_count": 99,
         }),
     )
+    assert unique_work_manifest_reference_dicts((
+        {"first": reference.canonical_dict()},
+        {"duplicate": reference.canonical_dict()},
+    )) == (reference.canonical_dict(),)
 
 
 def test_candidate_manifest_covers_every_parameter_and_marks_bounded_truncation():
@@ -126,6 +133,24 @@ def test_candidate_manifest_covers_every_parameter_and_marks_bounded_truncation(
     assert partial.status == "partial"
     assert partial.reason_code == "candidate_limit_reached"
     assert len(partial.entries) == 2
+
+
+def test_manifest_execution_selects_exact_endpoint_and_candidate_index():
+    endpoint = _endpoint_manifest(query_keys=("a", "b"))
+    candidates = build_candidate_manifest(
+        endpoint,
+        source_action_ids=("discover.candidates",),
+        maximum=10,
+    )
+
+    assert execution_url_for_manifest_endpoint(endpoint, 0) == (
+        "https://app.example.test/api/orders/1?a=1&b=1"
+    )
+    assert execution_url_for_manifest_candidate(endpoint, candidates, 1) == (
+        "https://app.example.test/api/orders/1?b=1"
+    )
+    with pytest.raises(ScanWorkManifestError, match="outside immutable content"):
+        execution_url_for_manifest_candidate(endpoint, candidates, 2)
 
 
 def test_request_and_template_manifests_are_complete_bounded_and_deterministic():

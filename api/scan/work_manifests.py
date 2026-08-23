@@ -396,6 +396,22 @@ def work_manifest_references_in(value: Any) -> tuple[ScanWorkManifestReference, 
     return tuple(references[key] for key in sorted(references))
 
 
+def unique_work_manifest_reference_dicts(
+    values: Iterable[Any],
+) -> tuple[dict[str, Any], ...]:
+    """Return one stable public reference for each manifest used by a plan."""
+    references: dict[tuple[str, ...], ScanWorkManifestReference] = {}
+    for value in values:
+        for reference in work_manifest_references_in(value):
+            key = tuple(
+                str(part) for part in reference.canonical_dict().values()
+            )
+            references[key] = reference
+    return tuple(
+        references[key].canonical_dict() for key in sorted(references)
+    )
+
+
 @dataclass(frozen=True)
 class ScanWorkManifest:
     scan_id: str
@@ -748,3 +764,70 @@ def execution_url_for_endpoint(
     )
     query = urllib.parse.urlencode([(name, "1") for name in names])
     return urllib.parse.urlunsplit((scheme, authority, path, query, ""))
+
+
+def execution_url_for_manifest_endpoint(
+    manifest: ScanWorkManifest, index: int,
+) -> str:
+    """Select one exact endpoint from immutable manifest authority."""
+    if manifest.kind is not ScanWorkManifestKind.ENDPOINT:
+        raise ScanWorkManifestError("execution target requires an endpoint manifest")
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ScanWorkManifestError("endpoint manifest index is invalid")
+    try:
+        endpoint = manifest.entries[index]
+    except IndexError as exc:
+        raise ScanWorkManifestError(
+            "endpoint manifest index is outside immutable content"
+        ) from exc
+    return execution_url_for_endpoint(endpoint)
+
+
+def execution_url_for_manifest_candidate(
+    endpoint_manifest: ScanWorkManifest,
+    candidate_manifest: ScanWorkManifest,
+    index: int,
+) -> str:
+    """Join one candidate to its exact endpoint without rediscovery or values."""
+    if (
+        endpoint_manifest.kind is not ScanWorkManifestKind.ENDPOINT
+        or candidate_manifest.kind is not ScanWorkManifestKind.CANDIDATE
+    ):
+        raise ScanWorkManifestError(
+            "candidate execution requires endpoint and candidate manifests"
+        )
+    if (
+        endpoint_manifest.target_binding_digest
+        != candidate_manifest.target_binding_digest
+    ):
+        raise ScanWorkManifestError("candidate and endpoint target authority differs")
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ScanWorkManifestError("candidate manifest index is invalid")
+    try:
+        candidate = candidate_manifest.entries[index]
+    except IndexError as exc:
+        raise ScanWorkManifestError(
+            "candidate manifest index is outside immutable content"
+        ) from exc
+    endpoint = next(
+        (
+            item for item in endpoint_manifest.entries
+            if item["route_id"] == candidate["route_id"]
+        ),
+        None,
+    )
+    if endpoint is None:
+        raise ScanWorkManifestError(
+            "candidate route is absent from its endpoint manifest"
+        )
+    if (
+        endpoint["method"] != candidate["method"]
+        or endpoint["canonical_path"] != candidate["canonical_path"]
+        or candidate["parameter_name"] not in endpoint["query_parameter_names"]
+    ):
+        raise ScanWorkManifestError(
+            "candidate identity conflicts with its endpoint manifest"
+        )
+    return execution_url_for_endpoint(
+        endpoint, parameter_name=str(candidate["parameter_name"]),
+    )

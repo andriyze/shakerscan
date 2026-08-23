@@ -781,8 +781,117 @@ class ScanActionPlanCompiler:
         active_dependencies = tuple(dict.fromkeys((
             *primary_dependency, *candidate_dependencies,
         )))
+
+        def blueprint_budget(blueprint: _ActionBlueprint) -> Mapping[str, int]:
+            override = dict(action_budgets or {}).get(blueprint.action_id)
+            if override is not None:
+                return override
+            specification = self._registry.require(blueprint.capability_name)
+            requested = dict(specification.budget_cost)
+            if blueprint.capability_name in {
+                "collections.replay_safe", "collections.replay_active",
+            }:
+                reference = blueprint.capability_args.get("request_collection_ref")
+                if isinstance(reference, Mapping):
+                    request_limit = int(reference.get("max_requests") or 0)
+                    requested = {
+                        name: min(amount, request_limit)
+                        if name in {"http_requests", "state_changing_requests"}
+                        else amount
+                        for name, amount in requested.items()
+                    }
+            return requested
+
+        def add_manifest_breadth(
+            base_action_id: str,
+            stage: str,
+            capability_name: str,
+            capability_args: Mapping[str, Any],
+            *,
+            manifest_ref: Mapping[str, Any],
+            index_name: str,
+            dependencies: Sequence[str],
+            required: bool,
+            reserve_dependency_slots: int = 0,
+        ) -> None:
+            """Compile every exact manifest item affordable by the Scan ceiling."""
+            if not manifest_ref:
+                add(
+                    base_action_id,
+                    stage,
+                    capability_name,
+                    capability_args,
+                    dependencies=dependencies,
+                    required=required,
+                )
+                return
+            entry_count = int(manifest_ref.get("entry_count") or 0)
+            if entry_count < 1:
+                return
+            specification = self._registry.require(capability_name)
+            limits = execution_plan.budget.ledger_limits()
+            reserved = {name: 0 for name in limits}
+            finalizer_budget = dict(action_budgets or {}).get(
+                "finalize.report",
+                self._registry.require("scan.execute").budget_cost,
+            )
+            for name, amount in finalizer_budget.items():
+                reserved[name] = reserved.get(name, 0) + amount
+            for blueprint in blueprints:
+                if not (
+                    blueprint.required
+                    or blueprint.action_id in {
+                        "baseline.http", "baseline.tls", "discover.web_probe",
+                    }
+                ):
+                    continue
+                for name, amount in blueprint_budget(blueprint).items():
+                    reserved[name] = reserved.get(name, 0) + amount
+            affordable = entry_count
+            for name, amount in specification.budget_cost.items():
+                if amount > 0:
+                    available = max(0, limits.get(name, 0) - reserved.get(name, 0))
+                    affordable = min(affordable, available // amount)
+            # Preserve an explicit family request as a required admission check
+            # even when its first fixed-profile action cannot fit.
+            count = max(1 if required else 0, affordable)
+            available_dependencies = (
+                _MAX_DEPENDENCIES - len(blueprints) - reserve_dependency_slots
+            )
+            count = min(entry_count, count, max(0, available_dependencies))
+            if required and count < 1:
+                raise ScanActionPlanError(
+                    f"required manifest action {base_action_id} exceeds plan graph capacity"
+                )
+            for index in range(count):
+                action_id = (
+                    base_action_id
+                    if index == 0
+                    else f"{base_action_id}.{index:05d}"
+                )
+                add(
+                    action_id,
+                    stage,
+                    capability_name,
+                    {**dict(capability_args), index_name: index},
+                    dependencies=dependencies,
+                    required=required,
+                )
+
+        def has_manifest_work(
+            enabled: bool, reference: Mapping[str, Any],
+        ) -> bool:
+            return enabled and (
+                not reference or int(reference.get("entry_count") or 0) > 0
+            )
+
+        authz_will_run = (
+            scope != "discovery"
+            and bola
+            and {"primary", "secondary"} <= set(lane_refs)
+        )
         if scope != "discovery" and nuclei:
-            add(
+            add_manifest_breadth(
                 "active.templates",
                 "deterministic_active",
                 "templates.scan",
@@ -790,32 +899,50 @@ class ScanActionPlanCompiler:
                     "target_manifest_ref": endpoint_ref or "discover.web_crawl",
                     "template_manifest_ref": template_ref or None,
                 },
+                manifest_ref=endpoint_ref,
+                index_name="endpoint_index",
                 dependencies=active_dependencies,
                 required="nuclei" in explicitly_requested,
+                reserve_dependency_slots=(
+                    int(has_manifest_work(xss, candidate_ref))
+                    + int(has_manifest_work(sqli, candidate_ref))
+                    + int(authz_will_run)
+                ),
             )
         if scope != "discovery" and xss:
-            add(
+            add_manifest_breadth(
                 "verify.xss",
                 "verify_candidates",
                 "xss.verify",
-                {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                index_name="candidate_index",
                 dependencies=active_dependencies,
                 required="xss" in explicitly_requested,
+                reserve_dependency_slots=(
+                    int(has_manifest_work(sqli, candidate_ref))
+                    + int(authz_will_run)
+                ),
             )
         if scope != "discovery" and sqli:
-            add(
+            add_manifest_breadth(
                 "verify.sqli",
                 "verify_candidates",
                 "sqli.verify",
-                {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                index_name="candidate_index",
                 dependencies=active_dependencies,
                 required="sqli" in explicitly_requested,
+                reserve_dependency_slots=int(authz_will_run),
             )
-        if (
-            scope != "discovery"
-            and bola
-            and {"primary", "secondary"} <= set(lane_refs)
-        ):
+        if authz_will_run:
             add(
                 "verify.authz",
                 "verify_candidates",

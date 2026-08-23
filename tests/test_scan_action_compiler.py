@@ -13,6 +13,7 @@ from api.scan.action_plan import (
     credential_profile_action_refs,
     request_collection_action_refs,
 )
+from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.work_manifests import ScanWorkManifestReference
 from api.scan.execution import ScanExecutionPlan
 
@@ -211,14 +212,25 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     )
     endpoint_by_id = {action.action_id: action for action in endpoint.actions}
     assert set(endpoint_by_id) == {
-        "inputs.auth_primary", "verify.xss", "finalize.report",
+        "inputs.auth_primary", "verify.xss", "verify.xss.00001",
+        "verify.xss.00002", "verify.xss.00003", "finalize.report",
     }
-    assert endpoint_by_id["verify.xss"].dependencies == (
-        "inputs.auth_primary",
+    xss_actions = [
+        action for action in endpoint.actions
+        if action.capability_name == "xss.verify"
+    ]
+    assert all(
+        action.dependencies == ("inputs.auth_primary",)
+        for action in xss_actions
     )
-    assert endpoint_by_id["verify.xss"].capability_args[
-        "candidate_manifest_ref"
-    ] == candidate_ref
+    assert [
+        action.capability_args["candidate_index"] for action in xss_actions
+    ] == [0, 1, 2, 3]
+    assert all(
+        action.capability_args["candidate_manifest_ref"] == candidate_ref
+        and action.capability_args["endpoint_manifest_ref"] == endpoint_ref
+        for action in xss_actions
+    )
 
     discovery = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -233,6 +245,49 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     assert "discover.web_crawl" in discovery_ids
     assert "baseline.http" not in discovery_ids
     assert "verify.xss" not in discovery_ids
+
+
+def test_manifest_breadth_is_capped_by_fixed_profile_resource_ceiling():
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000092",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="7" * 64,
+        entry_count=100,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000093",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="6" * 64,
+        entry_count=100,
+        status="complete",
+    ).canonical_dict()
+
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("xss",), exclude=("recon",)),
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        action_scope="full",
+    )
+    actions = [
+        action for action in plan.actions if action.capability_name == "xss.verify"
+    ]
+
+    # Required baseline/probe/crawl holds leave room for six 120-second actions.
+    assert len(actions) == 6
+    assert [action.capability_args["candidate_index"] for action in actions] == list(
+        range(6)
+    )
+    allocation = allocate_scan_action_plan(plan, _budget())
+    assert all(
+        action.admission_status == "planned"
+        for action in allocation.plan.actions
+        if action.required
+    )
 
 
 def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():

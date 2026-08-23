@@ -83,7 +83,15 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
-from .work_manifests import ScanWorkManifest, ScanWorkManifestReference
+from .work_manifests import (
+    ScanWorkManifest,
+    ScanWorkManifestError,
+    ScanWorkManifestKind,
+    ScanWorkManifestReference,
+    execution_url_for_manifest_candidate,
+    execution_url_for_manifest_endpoint,
+    unique_work_manifest_reference_dicts,
+)
 
 
 ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
@@ -193,6 +201,62 @@ class DatabaseNeutralScanActionDispatcher:
 
     async def _observations(self, action_id: str) -> tuple[Mapping[str, Any], ...]:
         return await self.backend.load_observations(action_id)
+
+    async def _work_manifest(
+        self,
+        action: ScanAction,
+        argument_name: str,
+        expected_kind: ScanWorkManifestKind,
+    ) -> ScanWorkManifest | None:
+        raw = action.capability_args.get(argument_name)
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            reference = ScanWorkManifestReference.from_dict(raw)
+        except ScanWorkManifestError as exc:
+            raise ScanActionAdapterError(
+                f"action {action.action_id} has an invalid {argument_name}"
+            ) from exc
+        if reference.kind is not expected_kind:
+            raise ScanActionAdapterError(
+                f"action {action.action_id} has the wrong manifest kind"
+            )
+        return await self.backend.load_work_manifest(action.action_id, reference)
+
+    async def _manifest_endpoint(self, action: ScanAction) -> str | None:
+        manifest = await self._work_manifest(
+            action, "target_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if manifest is None:
+            return None
+        try:
+            return execution_url_for_manifest_endpoint(
+                manifest, action.capability_args.get("endpoint_index"),
+            )
+        except ScanWorkManifestError as exc:
+            raise ScanActionAdapterError(str(exc)) from exc
+
+    async def _manifest_candidate(self, action: ScanAction) -> str | None:
+        candidates = await self._work_manifest(
+            action, "candidate_manifest_ref", ScanWorkManifestKind.CANDIDATE,
+        )
+        if candidates is None:
+            return None
+        endpoints = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if endpoints is None:
+            raise ScanActionAdapterError(
+                "candidate action has no endpoint manifest authority"
+            )
+        try:
+            return execution_url_for_manifest_candidate(
+                endpoints,
+                candidates,
+                action.capability_args.get("candidate_index"),
+            )
+        except ScanWorkManifestError as exc:
+            raise ScanActionAdapterError(str(exc)) from exc
 
     async def _execute_adapter(
         self,
@@ -431,17 +495,25 @@ class DatabaseNeutralScanActionDispatcher:
         }
         tool = tool_by_capability[action.capability_name]
         execution_target = self.target_url
-        if action.capability_name in {"xss.verify", "sqli.verify"}:
-            crawl = await self._observations("discover.web_crawl")
-            candidates = scan_parameterized_execution_candidates(
-                self.target_url,
-                target=self.target,
-                options=self.options,
-                crawl_observations=crawl,
+        if action.capability_name == "templates.scan":
+            execution_target = (
+                await self._manifest_endpoint(action) or execution_target
             )
-            if not candidates:
-                return self._skip(action, "not_applicable")
-            execution_target = candidates[0]
+        if action.capability_name in {"xss.verify", "sqli.verify"}:
+            manifest_candidate = await self._manifest_candidate(action)
+            if manifest_candidate is not None:
+                execution_target = manifest_candidate
+            else:
+                crawl = await self._observations("discover.web_crawl")
+                candidates = scan_parameterized_execution_candidates(
+                    self.target_url,
+                    target=self.target,
+                    options=self.options,
+                    crawl_observations=crawl,
+                )
+                if not candidates:
+                    return self._skip(action, "not_applicable")
+                execution_target = candidates[0]
         parsed = urllib.parse.urlsplit(execution_target)
         registered_target = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, "", "", "")
@@ -542,6 +614,9 @@ class DatabaseNeutralScanActionDispatcher:
             target_url=self.target_url,
             action_results=results,
             observations=observations,
+            work_manifest_references=unique_work_manifest_reference_dicts(
+                planned.capability_args for planned in self.plan.actions
+            ),
         )
         now = datetime.now(timezone.utc).isoformat()
         return self._receipt(

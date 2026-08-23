@@ -172,8 +172,14 @@ from scan.budget_allocator import allocate_scan_action_plan
 from scan.manifest_store import PostgresScanManifestStore
 from scan.work_manifests import (
     ScanWorkManifest,
+    ScanWorkManifestError,
+    ScanWorkManifestKind,
+    ScanWorkManifestReference,
     build_candidate_manifest,
     build_endpoint_manifest,
+    execution_url_for_manifest_candidate,
+    execution_url_for_manifest_endpoint,
+    unique_work_manifest_reference_dicts,
 )
 from scan.capability_result import CapabilityResultReference
 from scan.execution_backend import (
@@ -13322,7 +13328,64 @@ class _CanonicalLocalScanDispatcher:
         )
         return await self._load_budget_receipt(action)
 
-    async def _candidate(self) -> str | None:
+    async def _work_manifest(
+        self,
+        action: ScanAction,
+        argument_name: str,
+        expected_kind: ScanWorkManifestKind,
+    ) -> ScanWorkManifest | None:
+        raw = action.capability_args.get(argument_name)
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            reference = ScanWorkManifestReference.from_dict(raw)
+        except ScanWorkManifestError as exc:
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} has an invalid {argument_name}"
+            ) from exc
+        if reference.kind is not expected_kind:
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} has the wrong manifest kind"
+            )
+        return await self.backend.load_work_manifest(action.action_id, reference)
+
+    async def _manifest_endpoint(self, action: ScanAction) -> str | None:
+        manifest = await self._work_manifest(
+            action, "target_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if manifest is None:
+            return None
+        try:
+            return execution_url_for_manifest_endpoint(
+                manifest, action.capability_args.get("endpoint_index"),
+            )
+        except ScanWorkManifestError as exc:
+            raise ScanCapabilityContractError(
+                str(exc)
+            ) from exc
+
+    async def _candidate(self, action: ScanAction) -> str | None:
+        candidate_manifest = await self._work_manifest(
+            action, "candidate_manifest_ref", ScanWorkManifestKind.CANDIDATE,
+        )
+        if candidate_manifest is not None:
+            endpoint_manifest = await self._work_manifest(
+                action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+            )
+            if endpoint_manifest is None:
+                raise ScanCapabilityContractError(
+                    "candidate action has no endpoint manifest authority"
+                )
+            try:
+                return execution_url_for_manifest_candidate(
+                    endpoint_manifest,
+                    candidate_manifest,
+                    action.capability_args.get("candidate_index"),
+                )
+            except ScanWorkManifestError as exc:
+                raise ScanCapabilityContractError(
+                    str(exc)
+                ) from exc
         crawl = await self._observations("discover.web_crawl")
         candidates = scan_parameterized_execution_candidates(
             self.target_url,
@@ -13347,17 +13410,14 @@ class _CanonicalLocalScanDispatcher:
             observations[planned.action_id] = await self._observations(
                 planned.action_id
             )
-        work_references: list[Mapping[str, Any]] = []
-        for planned in self.plan.actions:
-            for name, value in planned.capability_args.items():
-                if name.endswith("manifest_ref") and isinstance(value, Mapping):
-                    work_references.append(dict(value))
         report = finalize_scan_report(
             plan=self.plan,
             target_url=self.target_url,
             action_results=results,
             observations=observations,
-            work_manifest_references=tuple(work_references),
+            work_manifest_references=unique_work_manifest_reference_dicts(
+                planned.capability_args for planned in self.plan.actions
+            ),
         )
         now = datetime.now(timezone.utc).isoformat()
         return CapabilityReceipt(
@@ -13474,16 +13534,19 @@ class _CanonicalLocalScanDispatcher:
             )
         elif action.action_id in {"discover.ports", "discover.services"}:
             return await self._network_action(action, lease)
-        elif action.action_id == "active.templates":
+        elif action.capability_name == "templates.scan":
+            execution_target = await self._manifest_endpoint(action)
             summary = await _execute_scan_template_capability(
-                self.target_url, self.options, scan_id=self.scan_id,
+                execution_target or self.target_url,
+                self.options,
+                scan_id=self.scan_id,
                 job_id=self.job_id, canonical_action=action,
             )
-        elif action.action_id in {"verify.xss", "verify.sqli"}:
-            candidate = await self._candidate()
+        elif action.capability_name in {"xss.verify", "sqli.verify"}:
+            candidate = await self._candidate(action)
             helper = (
                 _execute_scan_xss_verification_capability
-                if action.action_id == "verify.xss"
+                if action.capability_name == "xss.verify"
                 else _execute_scan_sqli_verification_capability
             )
             summary = await helper(
