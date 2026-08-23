@@ -97,6 +97,22 @@ def test_auth_session_registry_contract_is_target_bound_and_worker_private():
     assert specification.planner_visible is False
 
 
+def test_authz_verification_is_read_only_proof_gated_and_planner_hidden():
+    specification = CAPABILITY_REGISTRY.require("authz.verify")
+
+    assert specification.execution_kind == "http"
+    assert specification.risk_tier == "active"
+    assert specification.required_approval == "active_testing"
+    assert specification.budget_cost == {
+        "http_requests": 4,
+        "tool_wall_seconds": 60,
+    }
+    assert specification.placement_requirements[
+        "deterministic_proof_contract"
+    ] is True
+    assert specification.planner_visible is False
+
+
 def test_ssh_proposal_registry_budget_is_control_plane_only():
     proposal = CAPABILITY_REGISTRY.require("device.ssh.propose")
 

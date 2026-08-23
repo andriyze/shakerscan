@@ -414,6 +414,122 @@ def _sqli_verification_placement_summary():
     }
 
 
+def _authz_verification_placement_summary():
+    return {
+        "schema_version": "canonical-scan-authz-verification-execution/v1",
+        "capability_name": "authz.verify",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "authz_differential",
+            "proof_state": "verified",
+            "reason": None,
+            "principal_contexts_distinct": True,
+            "route_count": 1,
+            "producers_tested": 1,
+            "replays_completed": 1,
+            "write_replays_attempted": 0,
+            "secret_values_visible": False,
+            "method": "GET",
+            "producer_url": "https://app.example.test/api/orders",
+            "consumer_url": (
+                "https://app.example.test/api/orders/<owner-object>"
+            ),
+            "resource_id_sha256": "7" * 64,
+            "object_id_key": "id",
+            "object_id_location": "body",
+            "owner_status": 200,
+            "attacker_status": 200,
+            "accepted_principal_responses": {
+                "owner_listing_status": 200,
+                "attacker_listing_status": 200,
+                "owner_replay_status": 200,
+                "attacker_replay_status": 200,
+            },
+            "object_absent_from_secondary_listing": True,
+            "responses_equivalent": True,
+            "sensitive_field_names": ["email"],
+            "proof_type": "cross_principal_replay",
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 4, "tool_wall_seconds": 1},
+        "receipt": {"receipt_hash": "6" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def test_canonical_authz_verification_is_bound_and_proof_promoted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {
+                "authz.verify": _authz_verification_placement_summary(),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    findings = scanner_mod._canonical_authz_findings(
+        placements["authz.verify"]
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["tool"] == "smart_authz"
+    assert findings[0]["cwe"] == "CWE-639"
+    assert findings[0]["verified"] is True
+    assert findings[0]["evidence"]["resource_id"] == "7" * 64
+    assert findings[0]["evidence"]["capability_receipt"][
+        "receipt_hash"
+    ] == "6" * 64
+    validated = apply_validation_to_finding(
+        findings[0], validate_finding(findings[0], ""),
+    )
+    [promoted] = apply_dast_precision_policy([validated])
+    assert promoted["verified"] is True
+    assert promoted["proof_state"] == "exploited"
+    assert promoted["registry_contract"]["contract_satisfied"] is True
+
+
+def test_canonical_authz_inconclusive_observation_never_becomes_finding():
+    summary = _authz_verification_placement_summary()
+    summary["observations"][0]["proof_state"] = "inconclusive"
+
+    assert scanner_mod._canonical_authz_findings(summary) == []
+
+
+def test_canonical_authz_placement_rejects_unapproved_observation_fields(
+    monkeypatch,
+):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+    }
+    summary = _authz_verification_placement_summary()
+    summary["observations"][0]["authorization"] = "Bearer must-not-pass"
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            **execution,
+            "capabilities": {"authz.verify": summary},
+        }),
+    )
+
+    with pytest.raises(SystemExit, match="observation contract"):
+        scanner_mod._load_canonical_scan_placements(execution)
+
+
 def test_canonical_sqli_verification_is_bound_and_stays_suspected(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,

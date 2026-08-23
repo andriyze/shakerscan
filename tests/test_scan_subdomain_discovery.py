@@ -715,7 +715,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     ]
     assert stage_execution["stages"][5]["adapter"] == "native_worker"
     assert stage_execution["stages"][5]["capability_names"] == [
-        "xss.verify", "sqli.verify",
+        "xss.verify", "sqli.verify", "authz.verify",
     ]
     assert stage_execution["stages"][6]["adapter"] == (
         "native_worker.proof_contracts"
@@ -1220,6 +1220,7 @@ def _stored_network_capability(
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
         "auth.session.establish": ("auth.session", "credential-session/v1"),
+        "authz.verify": ("authz.differential", "authz-differential/v1"),
         "http.request": ("agent.http_request", "http-observation/v1"),
         "dns.inspect": ("scanner.dns", "dns-posture-observation/v1"),
         "tls.inspect": ("scanner.tls", "tls-observation/v1"),
@@ -2011,6 +2012,95 @@ def test_secondary_form_session_uses_its_own_reserved_action(monkeypatch):
     assert calls[0]["capability_args"]["lane"] == "secondary"
     assert holder["session"] is session
     assert summary["status"] == "success"
+
+
+def test_authz_proof_reserves_content_free_binding_before_differential(
+    monkeypatch,
+):
+    _plan, target, options = _authority(enabled=False, network=True)
+    primary_secret = "Bearer owner-worker-private"
+    secondary_secret = "Bearer attacker-worker-private"
+    options = {
+        **options,
+        "auth_header": primary_secret,
+        "user2_header": secondary_secret,
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }, {
+            "profile_id": "profile-2",
+            "profile_version": 4,
+            "auth_kind": "bearer_token",
+            "principal_slot": "secondary",
+            "scan_lane": "secondary",
+        }],
+    }
+    routes = ["/api/orders"]
+    calls = []
+
+    async def verify(base_url, supplied_routes, **kwargs):
+        assert base_url == "https://app.example.test"
+        assert supplied_routes == routes
+        assert kwargs["target"] == target
+        assert kwargs["primary_headers"] == {
+            "Authorization": primary_secret,
+        }
+        assert kwargs["secondary_headers"] == {
+            "Authorization": secondary_secret,
+        }
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "authz_differential",
+                "proof_state": "verified",
+                "principal_contexts_distinct": True,
+                "secret_values_visible": False,
+            },
+            "budget_consumed": {
+                "http_requests": 4,
+                "tool_wall_seconds": 1,
+            },
+        }
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        operation_result = await kwargs["inline_operation"]()
+        return _stored_network_capability(
+            "authz.verify",
+            observations=[operation_result["observation"]],
+            amounts={"http_requests": 4, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "verify_target_bound_object_authorization", verify,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_authz_verification_capability(
+        "https://app.example.test",
+        routes,
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert calls[0]["capability_name"] == "authz.verify"
+    assert calls[0]["action_id"] == "verify_candidates.authz.verify"
+    assert calls[0]["reservation_limits"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 60,
+    }
+    assert calls[0]["capability_args"]["route_count"] == 1
+    assert len(calls[0]["capability_args"]["route_inventory_digest"]) == 64
+    assert primary_secret not in json.dumps(calls[0]["capability_args"])
+    assert secondary_secret not in json.dumps(calls[0]["capability_args"])
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["proof_state"] == "verified"
 
 
 def test_placed_http_tools_bind_primary_credentials_without_public_secrets(

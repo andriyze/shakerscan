@@ -153,6 +153,10 @@ class AuthSessionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize a worker-private credential exchange to content-free evidence."""
 
 
+class AuthzVerificationExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize one read-only cross-principal authorization differential."""
+
+
 class ControlPlaneExecutionAdapter(_InlineAdapter):
     """Normalize one bounded, target-owned control-plane capability."""
 

@@ -336,6 +336,38 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "authz.verify",
+            "Verify one read-only cross-principal object-authorization differential.",
+            "http", "active", _HTTP_TARGETS, "authz.differential", "1",
+            "active_testing", {"http_requests": 4, "tool_wall_seconds": 60},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "credentials_resolved_server_side": True,
+                "deterministic_proof_contract": True,
+            },
+            _schema({
+                "primary_binding_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "secondary_binding_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "route_inventory_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "route_count": {
+                    "type": "integer", "minimum": 1, "maximum": 50,
+                },
+            }, required=(
+                "primary_binding_digest", "secondary_binding_digest",
+                "route_inventory_digest", "route_count",
+            )),
+            "authz-differential/v1",
+            ("cross_principal_ownership_differential", "tool_receipt"),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "tls.inspect", "Inspect TLS configuration for a target-bound origin.",
             "internal", "passive", _HTTP_TARGETS, "scanner.tls", "1", None,
             {"tcp_ports_attempted": 1, "tool_wall_seconds": 15},

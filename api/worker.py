@@ -68,9 +68,14 @@ from capabilities.network import (
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.http import execute_bound_http_request
 from capabilities.auth import establish_target_bound_http_session
+from capabilities.authz import (
+    authz_route_inventory_digest,
+    verify_target_bound_object_authorization,
+)
 from capabilities.dns import inspect_dns_posture
 from capabilities.inline import (
     AuthSessionExecutionAdapter,
+    AuthzVerificationExecutionAdapter,
     DnsInspectionExecutionAdapter,
     HttpRequestExecutionAdapter,
     TlsInspectionExecutionAdapter,
@@ -9940,7 +9945,8 @@ async def _execute_reserved_scan_capability(
             "deterministic Scan runner requires scan.execute"
         )
     if internal_inline and capability_name not in {
-        "auth.session.establish", "dns.inspect", "http.request", "tls.inspect",
+        "auth.session.establish", "authz.verify", "dns.inspect", "http.request",
+        "tls.inspect",
     }:
         raise ScanCapabilityContractError(
             "unsupported inline Scan capability adapter"
@@ -10269,6 +10275,8 @@ async def _execute_reserved_scan_capability(
         inline_adapter = (
             AuthSessionExecutionAdapter
             if capability_name == "auth.session.establish"
+            else AuthzVerificationExecutionAdapter
+            if capability_name == "authz.verify"
             else HttpRequestExecutionAdapter
             if capability_name == "http.request"
             else DnsInspectionExecutionAdapter
@@ -11870,9 +11878,182 @@ def _skipped_scan_sqli_verification_summary(reason: str) -> dict[str, Any]:
     }
 
 
+def _skipped_scan_authz_verification_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-authz-verification-execution/v1",
+        "capability_name": "authz.verify",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def _scan_authz_verification_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "authz_differential"
+        and item.get("proof_state") in {"verified", "inconclusive"}
+    ][:1]
+    return {
+        "schema_version": "canonical-scan-authz-verification-execution/v1",
+        "capability_name": "authz.verify",
+        "enabled": True,
+        "status": status,
+        "reason": None,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+def _scan_authz_route_inventory(
+    options: Mapping[str, Any],
+    *,
+    crawl_observations: Any = None,
+    content_observations: Any = None,
+) -> list[str]:
+    routes: list[str] = []
+    for item in options.get("custom_endpoints") or []:
+        if isinstance(item, str) and item.strip():
+            routes.append(item.strip())
+    for observations in (crawl_observations, content_observations):
+        for item in observations or []:
+            if not isinstance(item, Mapping) or not item.get("url"):
+                continue
+            method = str(item.get("method") or "GET").upper()
+            if method == "GET":
+                routes.append(str(item["url"]))
+    return list(dict.fromkeys(routes))[:50]
+
+
+async def _execute_scan_authz_verification_capability(
+    target_url: str,
+    routes: list[str],
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run one proof-gated read-only BOLA differential under Scan authority."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_authz_verification_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    policy = admission.plan.policy
+    if execution.discovery_manifest_only:
+        return _skipped_scan_authz_verification_summary(
+            "discovery_manifest_only"
+        )
+    if execution.focused_family and execution.focused_family != "bola":
+        return _skipped_scan_authz_verification_summary(
+            "focused_other_family"
+        )
+    include = set(policy.include_families)
+    exclude = set(policy.exclude_families)
+    if "bola" in exclude or "access_control" in exclude:
+        return _skipped_scan_authz_verification_summary("policy_excluded")
+    if include and not ({"bola", "access_control"} & include):
+        return _skipped_scan_authz_verification_summary("policy_not_included")
+    if not policy.active_testing:
+        return _skipped_scan_authz_verification_summary(
+            "active_testing_not_authorized"
+        )
+    if not policy.approval_receipt_id:
+        return _skipped_scan_authz_verification_summary(
+            "active_approval_missing"
+        )
+    primary = resolve_scan_http_principal(options, lane="primary")
+    secondary = resolve_scan_http_principal(options, lane="secondary")
+    if not primary.authenticated or not secondary.authenticated:
+        return _skipped_scan_authz_verification_summary(
+            "two_authenticated_principals_required"
+        )
+    if not routes:
+        return _skipped_scan_authz_verification_summary(
+            "no_authz_route_candidates"
+        )
+    budget = execution.payload()["execution_budget"]
+    if (
+        int(budget.get("max_http_requests") or 0) < 4
+        or int(budget.get("max_tool_wall_seconds") or 0) < 45
+    ):
+        return _skipped_scan_authz_verification_summary(
+            "insufficient_stage_budget"
+        )
+    route_digest = authz_route_inventory_digest(routes)
+    target = execution.target_binding
+
+    async def verify() -> Mapping[str, Any]:
+        return await verify_target_bound_object_authorization(
+            target_url,
+            routes,
+            target=target,
+            primary_headers=primary.headers(),
+            secondary_headers=secondary.headers(),
+        )
+
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="authz.verify",
+        capability_args={
+            "primary_binding_digest": str(primary.binding_digest),
+            "secondary_binding_digest": str(secondary.binding_digest),
+            "route_inventory_digest": route_digest,
+            "route_count": len(routes),
+        },
+        action_id="verify_candidates.authz.verify",
+        target_binding=target,
+        reservation_limits={
+            "http_requests": 4,
+            "tool_wall_seconds": min(
+                60, int(budget["max_tool_wall_seconds"]),
+            ),
+        },
+        inline_operation=verify,
+    )
+    return _scan_authz_verification_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+
+
 def _canonical_candidate_verification_summary(
     xss: Mapping[str, Any],
     sqli: Mapping[str, Any],
+    authz: Mapping[str, Any] | None = None,
     *,
     candidate_count: int,
 ) -> dict[str, Any]:
@@ -11901,6 +12082,16 @@ def _canonical_candidate_verification_summary(
         1 for item in sqli_observations
         if item.get("kind") == "sqli_finding"
     )
+    authz_observations = [
+        dict(item)
+        for item in (authz or {}).get("observations") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "authz_differential"
+    ]
+    verified_authz = sum(
+        1 for item in authz_observations
+        if item.get("proof_state") == "verified"
+    )
     return {
         "schema_version": "canonical-candidate-verification/v1",
         "candidate_count": max(0, int(candidate_count)),
@@ -11918,6 +12109,14 @@ def _canonical_candidate_verification_summary(
             "suspected_count": suspected_sqli,
             "promotion_blocked_reason": (
                 "deterministic_differential_missing" if suspected_sqli else None
+            ),
+        },
+        "authz": {
+            "contract": "cross_principal_ownership_differential",
+            "observation_count": len(authz_observations),
+            "verified_count": verified_authz,
+            "inconclusive_count": max(
+                0, len(authz_observations) - verified_authz,
             ),
         },
     }
@@ -12410,13 +12609,32 @@ async def _execute_reserved_deterministic_scan(
         sqli = await _execute_scan_sqli_verification_capability(
             candidate, effective_options, scan_id=scan_id, job_id=job_id,
         )
+        content = surface.get("web.content_discover")
+        authz_routes = _scan_authz_route_inventory(
+            effective_options,
+            crawl_observations=(
+                crawl.get("observations") if isinstance(crawl, Mapping) else None
+            ),
+            content_observations=(
+                content.get("observations")
+                if isinstance(content, Mapping) else None
+            ),
+        )
+        authz = await _execute_scan_authz_verification_capability(
+            target,
+            authz_routes,
+            effective_options,
+            scan_id=scan_id,
+            job_id=job_id,
+        )
         return stage_capabilities(
             {
                 "xss.verify": xss,
                 "sqli.verify": sqli,
+                "authz.verify": authz,
                 "candidate_count": len(candidates),
             },
-            capability_names=("xss.verify", "sqli.verify"),
+            capability_names=("xss.verify", "sqli.verify", "authz.verify"),
         )
 
     async def verify_candidates_stage(
@@ -12444,11 +12662,17 @@ async def _execute_reserved_deterministic_scan(
             if isinstance(active.get("sqli.verify"), Mapping)
             else {}
         )
+        authz = (
+            dict(active.get("authz.verify") or {})
+            if isinstance(active.get("authz.verify"), Mapping)
+            else {}
+        )
         return ScanStageRunResult(
             output={
                 "proof_contracts": _canonical_candidate_verification_summary(
                     xss,
                     sqli,
+                    authz,
                     candidate_count=int(active.get("candidate_count") or 0),
                 ),
             },
@@ -12493,6 +12717,8 @@ async def _execute_reserved_deterministic_scan(
             or _skipped_scan_xss_verification_summary("stage_disabled"),
             "sqli.verify": active.get("sqli.verify")
             or _skipped_scan_sqli_verification_summary("stage_disabled"),
+            "authz.verify": active.get("authz.verify")
+            or _skipped_scan_authz_verification_summary("stage_disabled"),
         }
         result_holder: dict[str, Any] = {}
 
@@ -12563,6 +12789,7 @@ async def _execute_reserved_deterministic_scan(
             "templates.scan": baseline.get("templates.scan"),
             "xss.verify": active.get("xss.verify"),
             "sqli.verify": active.get("sqli.verify"),
+            "authz.verify": active.get("authz.verify"),
         }
         authentication["applied_capabilities"] = (
             sorted(

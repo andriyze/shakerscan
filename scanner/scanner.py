@@ -9593,6 +9593,10 @@ async def build_report(target: str,
             canonical_scan_placements.get("sqli.verify")
             if isinstance(canonical_scan_placements, dict) else None
         )
+        placed_authz = (
+            canonical_scan_placements.get("authz.verify")
+            if isinstance(canonical_scan_placements, dict) else None
+        )
         active_block = {
             "targets": [],
             "dalfox": _canonical_xss_observations(placed_xss),
@@ -9614,10 +9618,28 @@ async def build_report(target: str,
                     "reason": "canonical_sqli_placement_missing",
                 }
             ),
+            "canonical_authz_verification": (
+                dict(placed_authz) if isinstance(placed_authz, Mapping) else {
+                    "status": "blocked",
+                    "reason": "canonical_authz_placement_missing",
+                }
+            ),
             "legacy_active_execution": False,
         }
         report["findings"].extend(_canonical_xss_findings(placed_xss))
         report["findings"].extend(_canonical_sqli_findings(placed_sqli))
+        report["findings"].extend(_canonical_authz_findings(placed_authz))
+        if isinstance(report.get("access_control"), dict):
+            report["access_control"]["bola"] = {
+                "canonical_authz_verification": (
+                    dict(placed_authz)
+                    if isinstance(placed_authz, Mapping) else {
+                        "status": "blocked",
+                        "reason": "canonical_authz_placement_missing",
+                    }
+                ),
+                "legacy_active_execution": False,
+            }
         report["active_checks"] = active_block
     # Optional: active checks (sampled outside of smart/complete mode)
     elif active_checks and not public_only:
@@ -14775,7 +14797,7 @@ def _load_canonical_scan_placements(
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
         "http.request", "http.request.scheme_redirect",
         "http.request.security_txt", "dns.inspect", "tls.inspect",
-        "xss.verify", "sqli.verify",
+        "xss.verify", "sqli.verify", "authz.verify",
     }
     if unknown:
         raise SystemExit(
@@ -15114,6 +15136,90 @@ def _load_canonical_scan_placements(
             if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
                 raise SystemExit("canonical sqli.verify receipt is missing")
         result["sqli.verify"] = sqli_verification
+    authz_verification = capabilities.get("authz.verify")
+    if authz_verification is not None:
+        if not isinstance(authz_verification, dict) or set(
+            authz_verification
+        ) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical authz.verify placement is malformed")
+        if (
+            authz_verification.get("schema_version")
+            != "canonical-scan-authz-verification-execution/v1"
+            or authz_verification.get("capability_name") != "authz.verify"
+            or not isinstance(authz_verification.get("enabled"), bool)
+            or authz_verification.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit(
+                "canonical authz.verify placement contract is invalid"
+            )
+        observations = authz_verification.get("observations")
+        if not isinstance(observations, list) or len(observations) > 1:
+            raise SystemExit(
+                "canonical authz.verify observations are invalid"
+            )
+        allowed_observation_fields = {
+            "kind", "proof_state", "reason", "principal_contexts_distinct",
+            "route_count", "producers_tested", "replays_completed",
+            "write_replays_attempted", "secret_values_visible", "method",
+            "producer_url", "consumer_url", "resource_id_sha256",
+            "object_id_key", "object_id_location", "owner_status",
+            "attacker_status", "accepted_principal_responses",
+            "object_absent_from_secondary_listing", "responses_equivalent",
+            "sensitive_field_names", "proof_type",
+        }
+        for observation in observations:
+            if (
+                not isinstance(observation, dict)
+                or set(observation) - allowed_observation_fields
+                or observation.get("kind") != "authz_differential"
+                or observation.get("proof_state")
+                not in {"verified", "inconclusive"}
+                or observation.get("secret_values_visible") is not False
+            ):
+                raise SystemExit(
+                    "canonical authz.verify observation contract is invalid"
+                )
+            if observation.get("proof_state") == "verified" and (
+                observation.get("proof_type") != "cross_principal_replay"
+                or observation.get("principal_contexts_distinct") is not True
+                or observation.get("object_absent_from_secondary_listing")
+                is not True
+                or observation.get("responses_equivalent") is not True
+                or observation.get("owner_status") != 200
+                or observation.get("attacker_status") != 200
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(observation.get("resource_id_sha256") or ""),
+                )
+            ):
+                raise SystemExit(
+                    "canonical authz.verify proof contract is incomplete"
+                )
+        if authz_verification.get("observation_count") != len(observations):
+            raise SystemExit(
+                "canonical authz.verify observation count is invalid"
+            )
+        if not isinstance(authz_verification.get("receipt"), dict):
+            raise SystemExit(
+                "canonical authz.verify receipt reference is invalid"
+            )
+        if (
+            authz_verification.get("enabled")
+            and authz_verification.get("status") != "skipped"
+        ):
+            receipt_hash = str(
+                authz_verification["receipt"].get("receipt_hash") or ""
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical authz.verify receipt is missing")
+        result["authz.verify"] = authz_verification
     template = capabilities.get("templates.scan")
     if template is None:
         return result
@@ -15695,6 +15801,68 @@ def _canonical_sqli_findings(summary: Any) -> list[dict[str, Any]]:
         )
         findings.append(finding)
     return findings[:100]
+
+
+def _canonical_authz_findings(summary: Any) -> list[dict[str, Any]]:
+    """Promote only the target-bound ownership differential into a BOLA finding."""
+    if not isinstance(summary, Mapping):
+        return []
+    receipt = dict(summary.get("receipt") or {})
+    findings: list[dict[str, Any]] = []
+    for item in summary.get("observations") or []:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("kind") != "authz_differential"
+            or item.get("proof_state") != "verified"
+            or item.get("proof_type") != "cross_principal_replay"
+        ):
+            continue
+        evidence = {
+            "url": item.get("consumer_url"),
+            "method": "GET",
+            "producer_url": item.get("producer_url"),
+            "resource_id_sha256": item.get("resource_id_sha256"),
+            "resource_template": item.get("consumer_url"),
+            "resource_id": item.get("resource_id_sha256"),
+            "object_id_key": item.get("object_id_key"),
+            "object_id_location": item.get("object_id_location"),
+            "owner_status": item.get("owner_status"),
+            "attacker_status": item.get("attacker_status"),
+            "accepted_principal_responses": dict(
+                item.get("accepted_principal_responses") or {}
+            ),
+            "authenticated_responses_accepted": True,
+            "primary_auth": True,
+            "second_user_auth": True,
+            "status_delta": "secondary_listing_absent_then_owner_object_accepted",
+            "distinct_principal_control": item.get(
+                "principal_contexts_distinct"
+            ) is True,
+            "object_id_absent_from_attacker_listing": item.get(
+                "object_absent_from_secondary_listing"
+            ) is True,
+            "responses_equivalent": item.get("responses_equivalent") is True,
+            "sensitive_fields": list(item.get("sensitive_field_names") or []),
+            "proof_type": "cross_principal_replay",
+            "canonical_capability": "authz.verify",
+            "capability_receipt": receipt,
+        }
+        finding = normalize_finding(
+            "smart_authz",
+            "Verified broken object authorization",
+            "high",
+            evidence,
+            "CWE-639",
+        )
+        finding["verified"] = True
+        finding["suspected"] = False
+        finding["needs_verification"] = False
+        finding["proof_state"] = "verified"
+        finding["verification_reason"] = (
+            "Deterministic cross-principal owner-object replay proof satisfied"
+        )
+        findings.append(finding)
+    return findings[:1]
 
 
 def _canonical_nuclei_result(summary: Mapping[str, Any]) -> dict[str, Any]:

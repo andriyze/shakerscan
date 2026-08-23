@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from capabilities.inline import (
     AuthSessionExecutionAdapter,
+    AuthzVerificationExecutionAdapter,
     ControlPlaneExecutionAdapter,
     DeviceExecutionAdapter,
     HttpRequestExecutionAdapter,
@@ -247,6 +248,50 @@ def test_auth_session_adapter_persists_content_free_measured_observation():
         "kind": "credential_session",
         "lane": "primary",
         "header_names": ["Authorization"],
+        "secret_values_visible": False,
+    },)
+
+
+def test_authz_adapter_persists_only_measured_differential_observation():
+    specification = CAPABILITY_REGISTRY.require("authz.verify")
+    requested = {"http_requests": 4, "tool_wall_seconds": 60}
+
+    async def operation():
+        return {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "authz_differential",
+                "proof_state": "inconclusive",
+                "principal_contexts_distinct": True,
+                "secret_values_visible": False,
+            },
+            "budget_consumed": {
+                "http_requests": 2,
+                "tool_wall_seconds": 1,
+            },
+        }
+
+    result = _execute(
+        specification,
+        AuthzVerificationExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"route_count": 1},
+        ),
+        requested,
+    )
+
+    assert result.status == "success"
+    assert result.actual_budget == {
+        "http_requests": 2,
+        "tool_wall_seconds": 1,
+    }
+    assert result.observations == ({
+        "kind": "authz_differential",
+        "proof_state": "inconclusive",
+        "principal_contexts_distinct": True,
         "secret_values_visible": False,
     },)
 
