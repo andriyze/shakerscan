@@ -702,6 +702,10 @@ class DatabaseNeutralScanActionDispatcher:
             "xss.verify", "sqli.verify",
         }:
             return await self._external(action, heartbeat)
+        if action.capability_name in {
+            "xss.request_verify", "sqli.request_verify",
+        }:
+            return self._skip(action, "private_request_unavailable")
         if action.capability_name == "authz.verify":
             return await self._authz(action, heartbeat)
         raise ScanActionAdapterError(

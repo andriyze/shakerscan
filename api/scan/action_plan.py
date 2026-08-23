@@ -902,6 +902,7 @@ class ScanActionPlanCompiler:
             dependencies: Sequence[str],
             required: bool,
             reserve_dependency_slots: int = 0,
+            minimum_count: int = 0,
         ) -> None:
             """Compile every exact manifest item affordable by the Scan ceiling."""
             if not manifest_ref:
@@ -956,7 +957,7 @@ class ScanActionPlanCompiler:
                     affordable = min(affordable, available // amount)
             # Preserve an explicit family request as a required admission check
             # even when its first fixed-profile action cannot fit.
-            count = max(1 if required else 0, affordable)
+            count = max(1 if required else 0, int(minimum_count), affordable)
             available_dependencies = (
                 _MAX_DEPENDENCIES - len(blueprints) - reserve_dependency_slots
             )
@@ -1067,8 +1068,9 @@ class ScanActionPlanCompiler:
                     dependencies=tuple(dict.fromkeys((
                         *primary_dependency, *private_request_dependencies,
                     ))),
-                    required="xss" in explicitly_requested,
+                    required=False,
                     reserve_dependency_slots=int(sqli),
+                    minimum_count=1,
                 )
             if sqli:
                 add_manifest_breadth(
@@ -1081,7 +1083,8 @@ class ScanActionPlanCompiler:
                     dependencies=tuple(dict.fromkeys((
                         *primary_dependency, *private_request_dependencies,
                     ))),
-                    required="sqli" in explicitly_requested,
+                    required=False,
+                    minimum_count=1,
                 )
         if authz_will_run and not defer_manifest_actions:
             add(

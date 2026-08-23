@@ -328,6 +328,53 @@ def test_scan_collection_selection_compiles_exact_value_free_request_manifest():
     assert "verbose=1" not in json.dumps(manifests[0].canonical_dict())
 
 
+def test_state_changing_selection_compiles_separate_private_request_candidates():
+    scan_id = "40000000-0000-4000-8000-000000000011"
+    digest = "b" * 64
+    target = api_module.TargetBinding(
+        target_id="40000000-0000-4000-8000-000000000012",
+        target_kind="api",
+        canonical_host="api.example.test",
+        allowed_origins=("https://api.example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    manifests, _references = api_module._compile_scan_request_work_manifests(
+        scan_id=scan_id,
+        target_binding=target,
+        collection_refs=({
+            "collection_id": "40000000-0000-4000-8000-000000000013",
+            "selection_id": "40000000-0000-4000-8000-000000000014",
+            "binding_id": "40000000-0000-4000-8000-000000000015",
+            "selection_digest": digest,
+            "replay_policy": "confirmed_active",
+            "selected_requests": 1,
+            "selector": {"max_requests": 1},
+        },),
+        selection_requests={digest: ({
+            "request_id": "create-order",
+            "method": "POST",
+            "redacted_url": "https://api.example.test/orders?tenant=redacted",
+            "normalized_path": "/orders",
+            "auth_type": "bearer",
+            "body_mode": "application/json",
+            "safe_method": False,
+            "allowed_origins": ["https://api.example.test"],
+        },)},
+    )
+
+    candidates = api_module._compile_scan_request_candidate_work_manifest(
+        request_manifests=manifests,
+        maximum=10,
+    )
+
+    assert candidates is not None
+    assert candidates.entries[0]["request_ref_id"] == "create-order"
+    encoded = json.dumps(candidates.canonical_dict(), sort_keys=True)
+    assert "tenant=redacted" not in encoded
+    assert "application/json" not in encoded
+
+
 def test_parallel_parent_rollup_derives_progress_from_shards():
     result = {"status": "running", "progress": 5}
     shards = [
@@ -2195,6 +2242,12 @@ def test_broker_plan_rejects_private_inputs_until_sealed_exchange_exists():
 
     assert not api_module._broker_action_plan_requires_local_private_inputs(public_plan)
     assert api_module._broker_action_plan_requires_local_private_inputs(private_plan)
+    request_verifier_plan = types.SimpleNamespace(actions=(
+        types.SimpleNamespace(capability_name="xss.request_verify"),
+    ))
+    assert api_module._broker_action_plan_requires_local_private_inputs(
+        request_verifier_plan
+    )
 
 
 def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):

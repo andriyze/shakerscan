@@ -84,6 +84,7 @@ from capabilities.scanner import ScannerExecutionAdapter
 from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.tls import inspect_tls_binding
 from capabilities.replay import ReplayExecutionAdapter
+from capabilities.request_mutation import RequestMutationVerificationAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
@@ -187,6 +188,7 @@ from scan.work_manifests import (
     build_candidate_manifest,
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
+    build_request_candidate_manifest,
     canonical_nuclei_options_for_manifest,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
@@ -13198,6 +13200,7 @@ class _CanonicalLocalScanDispatcher:
         self.collection_replay_result_holder = collection_replay_result_holder
         self.primary_session_holder: dict[str, Any] = {}
         self.secondary_session_holder: dict[str, Any] = {}
+        self.private_request_holder: dict[str, Any] = {}
 
     @property
     def target(self) -> TargetBinding:
@@ -13428,7 +13431,106 @@ class _CanonicalLocalScanDispatcher:
         )
         return candidates[0] if candidates else None
 
+    async def _request_candidate(
+        self, action: ScanAction,
+    ) -> Mapping[str, Any] | None:
+        manifest = await self._work_manifest(
+            action,
+            "request_candidate_manifest_ref",
+            ScanWorkManifestKind.REQUEST_CANDIDATE,
+        )
+        if manifest is None or not manifest.entries:
+            return None
+        index = action.capability_args.get("request_candidate_index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ScanCapabilityContractError(
+                "request verifier has no immutable candidate index"
+            )
+        if not 0 <= index < len(manifest.entries):
+            raise ScanCapabilityContractError(
+                "request verifier candidate index is outside immutable content"
+            )
+        return manifest.entries[index]
+
+    async def _request_mutation_action(
+        self,
+        action: ScanAction,
+        lease: ActionLease,
+        heartbeat: Callable[[], Awaitable[None]],
+    ) -> CapabilityReceipt:
+        policy = self.execution.execution_plan.policy
+        if (
+            not policy.active_testing
+            or not policy.allow_state_changing_http
+            or not policy.approval_receipt_id
+        ):
+            return self._synthetic_receipt(
+                action, lease, status="blocked",
+                reason="state_changing_authority_missing",
+            )
+        candidate = await self._request_candidate(action)
+        if candidate is None:
+            return self._synthetic_receipt(
+                action, lease, status="skipped", reason="manifest_unavailable",
+            )
+        private_request = self.private_request_holder.get(
+            str(candidate.get("request_ref_id") or "")
+        )
+        if private_request is None:
+            return self._synthetic_receipt(
+                action, lease, status="skipped",
+                reason="private_request_unavailable",
+            )
+        specification = agent_tools.CAPABILITY_REGISTRY.require(
+            action.capability_name
+        )
+        adapter = RequestMutationVerificationAdapter(
+            specification=specification,
+            target=self.target,
+            request=private_request,
+            candidate=candidate,
+            transport=PinnedAiohttpReplayTransport(),
+            requested_budget=action.requested_budget,
+        )
+        started = datetime.now(timezone.utc)
+        execution = await CapabilityExecutor().execute(
+            CapabilityExecutionContext(
+                specification=specification,
+                target=self.target,
+                requested_budget=action.requested_budget,
+                adapter_managed_cancellation=True,
+            ),
+            adapter,
+            heartbeat=heartbeat,
+            cancelled=lambda: _scan_cancel_requested(self.scan_id),
+        )
+        return CapabilityReceipt(
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            target_id=self.target.target_id,
+            scan_id=self.scan_id,
+            worker_id=lease.worker_id,
+            scope_receipt_id=self.target.scope_receipt_id,
+            approval_receipt_id=policy.approval_receipt_id,
+            status=execution.status,
+            partial=execution.partial,
+            timed_out=execution.timed_out,
+            input_digest=str(action.action_digest),
+            parser_version=execution.parser_version,
+            started_at=started.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            redacted_execution=dict(execution.redacted_execution),
+            budget_reserved=action.requested_budget,
+            budget_consumed=execution.actual_budget,
+            observations=execution.observations,
+            errors=execution.errors,
+        )
+
     async def _finalize(self, action: ScanAction, lease: ActionLease) -> CapabilityReceipt:
+        # Exact request values are no longer needed after all action dependencies
+        # are terminal. Keep the pure finalizer credential- and body-free.
+        self.private_request_holder.clear()
         results: dict[str, CapabilityResultReference] = {}
         observations: dict[str, tuple[dict[str, Any], ...]] = {}
         for planned in self.plan.actions:
@@ -13521,6 +13623,7 @@ class _CanonicalLocalScanDispatcher:
                 ).headers(),
                 canonical_action=action,
                 canonical_request_manifest=request_manifest,
+                private_request_holder=self.private_request_holder,
             )
             if self.collection_replay_result_holder is not None:
                 self.collection_replay_result_holder.update(summary)
@@ -13599,6 +13702,12 @@ class _CanonicalLocalScanDispatcher:
                 scan_id=self.scan_id,
                 job_id=self.job_id, canonical_action=action,
                 canonical_template_options=template_options,
+            )
+        elif action.capability_name in {
+            "xss.request_verify", "sqli.request_verify",
+        }:
+            return await self._request_mutation_action(
+                action, lease, heartbeat,
             )
         elif action.capability_name in {"xss.verify", "sqli.verify"}:
             candidate = await self._candidate(action)
@@ -13697,6 +13806,23 @@ async def _materialize_local_scan_continuation(
         observations=observations,
         request_manifests=request_manifests,
     )
+    request_candidates = (
+        build_request_candidate_manifest(
+            request_manifests,
+            source_action_ids=tuple(dict.fromkeys(
+                action_id
+                for manifest in request_manifests
+                for action_id in manifest.source_action_ids
+            )),
+            maximum=max(
+                1,
+                min(2_000, allocation.budget_ceiling.get(
+                    "state_changing_requests", 0,
+                )),
+            ),
+        )
+        if request_manifests else None
+    )
     credential_refs = [
         dict(item)
         for item in dispatcher.options.get("credential_profile_refs") or ()
@@ -13731,6 +13857,11 @@ async def _materialize_local_scan_continuation(
         ),
         endpoint_manifest_ref=endpoints.reference().canonical_dict(),
         candidate_manifest_ref=candidates.reference().canonical_dict(),
+        request_candidate_manifest_ref=(
+            request_candidates.reference().canonical_dict()
+            if request_candidates is not None and request_candidates.entries
+            else None
+        ),
         template_manifest_ref=(
             dict(template_ref) if isinstance(template_ref, Mapping) else None
         ),
@@ -13751,6 +13882,8 @@ async def _materialize_local_scan_continuation(
             manifest_store = PostgresScanManifestStore()
             await manifest_store.persist(conn, manifest=endpoints)
             await manifest_store.persist(conn, manifest=candidates)
+            if request_candidates is not None:
+                await manifest_store.persist(conn, manifest=request_candidates)
             await PostgresScanActionStore().amend_plan(
                 conn,
                 parent_plan=parent_plan,
@@ -13768,6 +13901,11 @@ async def _materialize_local_scan_continuation(
                     "endpoint_manifest_id": str(endpoints.manifest_id),
                     "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
                     "candidate_manifest_ref": candidates.reference().canonical_dict(),
+                    "request_candidate_manifest_ref": (
+                        request_candidates.reference().canonical_dict()
+                        if request_candidates is not None and request_candidates.entries
+                        else None
+                    ),
                     "scan_continuation_plan_digest": amended.plan_digest,
                 }),
             )
@@ -13775,6 +13913,11 @@ async def _materialize_local_scan_continuation(
         "endpoint_manifest_id": str(endpoints.manifest_id),
         "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
         "candidate_manifest_ref": candidates.reference().canonical_dict(),
+        "request_candidate_manifest_ref": (
+            request_candidates.reference().canonical_dict()
+            if request_candidates is not None and request_candidates.entries
+            else None
+        ),
         "scan_continuation_plan_digest": amended.plan_digest,
     })
     return amended
@@ -14564,6 +14707,7 @@ async def _execute_scan_request_collections(
     trusted_primary_headers: Mapping[str, str] | None = None,
     canonical_action: Any | None = None,
     canonical_request_manifest: ScanWorkManifest | None = None,
+    private_request_holder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute saved Scan selections through the canonical exact replay executor."""
     try:
@@ -14953,6 +15097,17 @@ async def _execute_scan_request_collections(
                 options=persisted_options,
                 trusted_primary_headers=trusted_primary_headers,
             )
+        if private_request_holder is not None:
+            for private_request in plan.requests:
+                existing = private_request_holder.get(private_request.request_id)
+                if (
+                    existing is not None
+                    and existing.digest_dict() != private_request.digest_dict()
+                ):
+                    raise ScanCollectionReplayContractError(
+                        "duplicate private request reference changed during execution"
+                    )
+                private_request_holder[private_request.request_id] = private_request
 
         additional_budget = {"tool_wall_seconds": wall_reservation}
         requested_budget = (
@@ -16743,6 +16898,7 @@ def _compile_parallel_child_action_plan(
     ]
     endpoint_ref = child_options.get("endpoint_manifest_ref")
     candidate_ref = child_options.get("candidate_manifest_ref")
+    request_candidate_ref = child_options.get("request_candidate_manifest_ref")
     template_ref = child_options.get("template_manifest_ref")
     request_manifest_refs = child_options.get("request_manifest_refs")
     raw_plan = ScanActionPlanCompiler().compile(
@@ -16764,6 +16920,10 @@ def _compile_parallel_child_action_plan(
         ),
         candidate_manifest_ref=(
             dict(candidate_ref) if isinstance(candidate_ref, Mapping) else None
+        ),
+        request_candidate_manifest_ref=(
+            dict(request_candidate_ref)
+            if isinstance(request_candidate_ref, Mapping) else None
         ),
         template_manifest_ref=(
             dict(template_ref) if isinstance(template_ref, Mapping) else None

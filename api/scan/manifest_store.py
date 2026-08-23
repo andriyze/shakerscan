@@ -14,12 +14,14 @@ from .work_manifests import (
 )
 
 
-MIGRATION_NAME = "v2_scan_work_manifests_v1"
+MIGRATION_NAME = "v2_scan_work_manifests_request_candidates_v1"
 SCAN_WORK_MANIFEST_SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS scan_work_manifests (
     id UUID PRIMARY KEY,
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('endpoint','candidate','request','template')),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('endpoint','candidate','request_candidate','request','template')
+    ),
     schema_version TEXT NOT NULL,
     content_schema TEXT NOT NULL,
     target_binding_digest CHAR(64) NOT NULL CHECK (
@@ -38,6 +40,12 @@ CREATE TABLE IF NOT EXISTS scan_work_manifests (
         OR (status<>'complete' AND reason_code IS NOT NULL)
     )
 );
+ALTER TABLE scan_work_manifests
+    DROP CONSTRAINT IF EXISTS scan_work_manifests_kind_check;
+ALTER TABLE scan_work_manifests
+    ADD CONSTRAINT scan_work_manifests_kind_check CHECK (
+        kind IN ('endpoint','candidate','request_candidate','request','template')
+    );
 CREATE INDEX IF NOT EXISTS idx_scan_work_manifests_scan_kind
     ON scan_work_manifests(scan_id, kind, created_at DESC);
 CREATE TABLE IF NOT EXISTS app_schema_migrations (
@@ -45,7 +53,7 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO app_schema_migrations(name)
-VALUES ('v2_scan_work_manifests_v1')
+VALUES ('v2_scan_work_manifests_request_candidates_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 
