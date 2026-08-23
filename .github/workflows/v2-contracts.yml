@@ -168,6 +168,9 @@ jobs:
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py \
+            tests/test_scan_action_plan.py \
+            tests/test_scan_capability_result.py \
+            tests/test_observation_manifests.py \
             tests/test_scan_job_contract.py \
             tests/test_scan_worker_contract.py \
             tests/test_scan_worker_dispatch.py \
