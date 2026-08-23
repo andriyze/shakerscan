@@ -12349,7 +12349,6 @@ async def _execute_reserved_deterministic_scan(
     *,
     scan_id: str,
     job_id: str,
-    subdomain_discovery_summary: Mapping[str, Any] | None = None,
     network_discovery_summary: Mapping[str, Any] | None = None,
     collection_replay_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -12515,6 +12514,14 @@ async def _execute_reserved_deterministic_scan(
     async def discover_surface_stage(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
+        subdomains = await _execute_scan_subdomain_discovery(
+            effective_options, scan_id, job_id=job_id,
+        )
+        if str(subdomains.get("status") or "").strip().lower() == "cancelled":
+            return stage_capabilities(
+                {"subdomains.discover": subdomains},
+                capability_names=("subdomains.discover",),
+            )
         probe = await _execute_scan_web_probe_capability(
             target, effective_options, scan_id=scan_id, job_id=job_id,
         )
@@ -12525,16 +12532,15 @@ async def _execute_reserved_deterministic_scan(
             target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         output: dict[str, Any] = {
+            "subdomains.discover": subdomains,
             "web.probe": probe,
             "web.crawl": crawl,
             "web.content_discover": content,
         }
         capability_names = [
-            "web.probe", "web.crawl", "web.content_discover",
+            "subdomains.discover", "web.probe", "web.crawl",
+            "web.content_discover",
         ]
-        if isinstance(subdomain_discovery_summary, Mapping):
-            output["subdomains.discover"] = dict(subdomain_discovery_summary)
-            capability_names.append("subdomains.discover")
         if isinstance(collection_replay_summary, Mapping):
             output["collections.replay"] = dict(collection_replay_summary)
             capability_names.append("collections.replay")
@@ -12806,6 +12812,12 @@ async def _execute_reserved_deterministic_scan(
             secondary_principal.public_dict()
         )
         result["canonical_authentication"] = authentication
+        result = _attach_scan_subdomain_summary(
+            result,
+            surface.get("subdomains.discover")
+            if isinstance(surface.get("subdomains.discover"), Mapping)
+            else None,
+        )
         status = "partial" if (
             result.get("error") or summary.get("partial") or summary.get("timed_out")
         ) else "completed"
@@ -14292,7 +14304,6 @@ async def process_scan_job(job_data: dict):
     heartbeat_thread.start()
 
     collection_replay_summary: dict[str, Any] | None = None
-    subdomain_discovery_summary: dict[str, Any] | None = None
     network_discovery_summary: dict[str, Any] | None = None
     try:
         try:
@@ -14307,13 +14318,6 @@ async def process_scan_job(job_data: dict):
                     and run_kind not in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
                 ):
                     if isinstance(options.get("_canonical_target_binding"), Mapping):
-                        subdomain_discovery_summary = (
-                            await _execute_scan_subdomain_discovery(
-                                options, scan_id, job_id=job_id,
-                            )
-                        )
-                        if subdomain_discovery_summary.get("status") == "cancelled":
-                            raise ValueError("Cancelled by user")
                         network_discovery_summary = (
                             await _execute_scan_network_discovery(
                                 options, scan_id, job_id=job_id,
@@ -14343,7 +14347,6 @@ async def process_scan_job(job_data: dict):
                         options,
                         scan_id=scan_id,
                         job_id=job_id,
-                        subdomain_discovery_summary=subdomain_discovery_summary,
                         network_discovery_summary=network_discovery_summary,
                         collection_replay_summary=collection_replay_summary,
                     )
@@ -14413,9 +14416,6 @@ async def process_scan_job(job_data: dict):
 
         if collection_replay_summary is not None:
             result["request_collection_replay"] = collection_replay_summary
-        result = _attach_scan_subdomain_summary(
-            result, subdomain_discovery_summary,
-        )
         result = _attach_scan_network_summary(
             result, network_discovery_summary,
         )
@@ -16565,7 +16565,6 @@ async def process_scan_shard_job(job_data: dict):
         name=f"heartbeat-{job_id[:8]}", daemon=True,
     )
     heartbeat_thread.start()
-    subdomain_discovery_summary: dict[str, Any] | None = None
     network_discovery_summary: dict[str, Any] | None = None
     try:
         try:
@@ -16576,13 +16575,6 @@ async def process_scan_shard_job(job_data: dict):
                     parallel_discovery
                     and isinstance(options.get("_canonical_target_binding"), Mapping)
                 ):
-                    subdomain_discovery_summary = (
-                        await _execute_scan_subdomain_discovery(
-                            options, scan_id, job_id=job_id,
-                        )
-                    )
-                    if subdomain_discovery_summary.get("status") == "cancelled":
-                        raise ValueError("Cancelled by user")
                     network_discovery_summary = (
                         await _execute_scan_network_discovery(
                             options, scan_id, job_id=job_id,
@@ -16597,7 +16589,6 @@ async def process_scan_shard_job(job_data: dict):
                     options,
                     scan_id=scan_id,
                     job_id=job_id,
-                    subdomain_discovery_summary=subdomain_discovery_summary,
                     network_discovery_summary=network_discovery_summary,
                 )
         except Exception as e:
@@ -16608,9 +16599,6 @@ async def process_scan_shard_job(job_data: dict):
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result['shard_label'] = label
-        result = _attach_scan_subdomain_summary(
-            result, subdomain_discovery_summary,
-        )
         result = _attach_scan_network_summary(
             result, network_discovery_summary,
         )

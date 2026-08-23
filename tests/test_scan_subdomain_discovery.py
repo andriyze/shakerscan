@@ -264,6 +264,36 @@ def test_scan_subdomain_discovery_reserves_before_target_traffic_and_settles(
     assert connection.row["budget_used_json"]["hosts_attempted"] == 1
 
 
+def test_cancelled_subdomain_stage_stops_before_web_surface_traffic(monkeypatch):
+    plan, _target, options = _authority(enabled=True)
+    connection = _Connection(plan)
+
+    async def cancelled_subdomains(*_args, **_kwargs):
+        summary = worker._skipped_scan_subdomain_summary("cancelled_by_user")
+        summary.update({"enabled": True, "status": "cancelled"})
+        return summary
+
+    async def unexpected_surface_traffic(*_args, **_kwargs):
+        raise AssertionError("web surface traffic continued after cancellation")
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(
+        worker, "_execute_scan_subdomain_discovery", cancelled_subdomains,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_scan_web_probe_capability", unexpected_surface_traffic,
+    )
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    with pytest.raises(ValueError, match="Cancelled by user"):
+        asyncio.run(worker._execute_reserved_deterministic_scan(
+            "https://app.example.test",
+            options,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+        ))
+
+
 def test_deterministic_scan_reserves_remaining_budget_before_process_and_redelivery(
     monkeypatch,
 ):
@@ -296,6 +326,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     store = _ReservationStore(events)
     calls = 0
     session_calls = 0
+    subdomain_calls = 0
 
     async def fake_run_scan(
         target,
@@ -375,6 +406,12 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         ).authenticated is True
         return worker._skipped_scan_web_probe_summary("test_isolation")
 
+    async def skip_subdomains(runtime_options, _scan_id, **_kwargs):
+        nonlocal subdomain_calls
+        subdomain_calls += 1
+        assert runtime_options["auth_cookies"] == session_cookie
+        return worker._skipped_scan_subdomain_summary("test_isolation")
+
     async def skip_tls(*_args, **_kwargs):
         return worker._skipped_scan_tls_summary("test_isolation")
 
@@ -399,6 +436,11 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         worker,
         "_execute_scan_web_probe_capability",
         skip_web_probe,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_subdomain_discovery",
+        skip_subdomains,
     )
     monkeypatch.setattr(worker, "_execute_scan_tls_capability", skip_tls)
     monkeypatch.setattr(
@@ -431,6 +473,10 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     assert events[-1] == ("terminal", "committed")
     assert calls == 1
     assert session_calls == 1
+    assert subdomain_calls == 1
+    assert result["subdomain_discovery"]["reason"] == "test_isolation"
+    surface_stage = result["canonical_stage_execution"]["stages"][2]
+    assert surface_stage["capability_names"][0] == "subdomains.discover"
     assert set(store.current.record.actual) == {"tool_wall_seconds"}
     assert result["deterministic_scan_execution"]["receipt"][
         "budget_reservation_state"
@@ -445,6 +491,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     ))
     assert calls == 1
     assert session_calls == 2
+    assert subdomain_calls == 2
     assert redelivered["deterministic_scan_execution"][
         "idempotent_redelivery"
     ] is True
@@ -2544,7 +2591,7 @@ def test_network_policy_runs_two_registry_actions_with_partitioned_budget(
     assert summary["durable_budget_settled"] is True
 
 
-def test_worker_wires_discovery_before_credentials_and_only_once_per_scan_role():
+def test_worker_runs_subdomain_discovery_inside_the_fixed_surface_stage():
     source = (Path(__file__).resolve().parents[1] / "api" / "worker.py").read_text()
     reservation_start = source.index(
         "async def _execute_reserved_scan_capability("
@@ -2553,6 +2600,10 @@ def test_worker_wires_discovery_before_credentials_and_only_once_per_scan_role()
     reservation_helper = source[reservation_start:helper_start]
     helper_end = source.index("\n\ndef _attach_scan_subdomain_summary", helper_start)
     helper = source[helper_start:helper_end]
+    deterministic_start = source.index(
+        "async def _execute_reserved_deterministic_scan("
+    )
+    deterministic = source[deterministic_start:helper_start]
     standalone_start = source.index("async def process_scan_job(")
     standalone_end = source.index("\n\nasync def process_scan_plan_job", standalone_start)
     standalone = source[standalone_start:standalone_end]
@@ -2576,16 +2627,20 @@ def test_worker_wires_discovery_before_credentials_and_only_once_per_scan_role()
     assert 'capability_name="ports.discover"' in helper
     assert 'capability_name="service.fingerprint"' in helper
     assert "automatically_scanned_discovered_hosts" in source
-    assert standalone.index("_execute_scan_subdomain_discovery(") < standalone.index(
-        "_hydrate_generic_scan_credentials("
-    ) < standalone.index("_execute_reserved_deterministic_scan(")
+    assert deterministic.index("_execute_scan_subdomain_discovery(") < (
+        deterministic.index("_execute_scan_web_probe_capability(")
+    )
+    assert '"subdomains.discover": subdomains' in deterministic
+    assert '"subdomains.discover", "web.probe"' in deterministic
+    assert "_execute_scan_subdomain_discovery(" not in standalone
+    assert standalone.index("_hydrate_generic_scan_credentials(") < (
+        standalone.index("_execute_reserved_deterministic_scan(")
+    )
     assert standalone.index("_execute_scan_network_discovery(") < standalone.index(
         "_hydrate_generic_scan_credentials("
     )
     assert "parallel_discovery" in shard
-    assert shard.index("_execute_scan_subdomain_discovery(") < shard.index(
-        "result = await _execute_reserved_deterministic_scan("
-    )
+    assert "_execute_scan_subdomain_discovery(" not in shard
     assert "canonical_subdomain_discovery" in plan
     assert "canonical_network_discovery" in plan
     assert "needs_placed_discovery" in plan
