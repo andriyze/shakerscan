@@ -714,6 +714,60 @@ def test_canonical_security_txt_rejects_non_fixed_path(monkeypatch):
         scanner_mod._load_canonical_scan_placements(execution)
 
 
+def test_canonical_pre_scan_uses_frozen_receipts_without_network():
+    execution = {
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    result = scanner_mod._canonical_pre_scan_validation(
+        "https://app.example.test",
+        execution,
+        {
+            "http.request": _http_baseline_placement_summary(),
+            "tls.inspect": _tls_placement_summary(),
+        },
+    )
+
+    assert result["can_proceed"] is True
+    assert result["validation_attempts"] == 0
+    assert result["validation_source"] == "canonical_capability_receipts"
+    assert result["warnings"] == []
+    assert result["connectivity"]["details"] == {
+        "hostname": "app.example.test",
+        "scheme": "https",
+        "target_port": 443,
+        "ip_addresses": ["192.0.2.10"],
+        "http_status": 200,
+        "http_url": "https://app.example.test/home",
+        "target_port_open": True,
+        "reachable_via": "canonical_http_receipt",
+        "canonical_preflight": True,
+    }
+
+
+def test_canonical_pre_scan_fails_closed_without_settled_reachability():
+    result = scanner_mod._canonical_pre_scan_validation(
+        "https://app.example.test",
+        {
+            "target_binding": {
+                "canonical_host": "app.example.test",
+                "allowed_origins": ["https://app.example.test"],
+                "allowed_addresses": ["192.0.2.10"],
+            },
+        },
+        {},
+    )
+
+    assert result["can_proceed"] is False
+    assert result["connectivity"]["http_ok"] is False
+    assert result["warnings"] == [
+        "Canonical preflight found no settled HTTP or TLS reachability evidence"
+    ]
+
+
 def test_canonical_report_assembly_never_repeats_base_header_request():
     source = inspect.getsource(scanner_mod.build_report)
     start = source.index("if canonical_scan_execution is not None:", source.index(
@@ -769,6 +823,24 @@ def test_canonical_report_assembly_reuses_protocol_evidence():
     assert "supports_http2(base_url)" in posture_block[legacy_start:]
     assert "supports_http3(base_url)" in posture_block[legacy_start:]
     assert "fetch_security_txt(base_url)" in posture_block[legacy_start:]
+
+
+def test_canonical_report_assembly_reuses_pre_scan_evidence():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index("# Pre-scan connectivity validation")
+    end = source.index('emit_progress("pre_scan", 10', start)
+    preflight_block = source[start:end]
+    canonical_start = preflight_block.index(
+        "if canonical_scan_execution is not None:"
+    )
+    legacy_start = preflight_block.index("\n        else:", canonical_start)
+    canonical_block = preflight_block[canonical_start:legacy_start]
+
+    assert "_canonical_pre_scan_validation(" in canonical_block
+    assert "pre_scan_validation(" not in canonical_block.replace(
+        "_canonical_pre_scan_validation(", "",
+    )
+    assert "await pre_scan_validation(target)" in preflight_block[legacy_start:]
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):

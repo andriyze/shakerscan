@@ -4364,8 +4364,15 @@ async def build_report(target: str,
     pre_scan_issues = []
     pre_scan_validation_result = None
     try:
-        from scanner_tools.health_check import pre_scan_validation
-        pre_scan_validation_result = await pre_scan_validation(target)
+        if canonical_scan_execution is not None:
+            pre_scan_validation_result = _canonical_pre_scan_validation(
+                target,
+                canonical_scan_execution,
+                canonical_scan_placements,
+            )
+        else:
+            from scanner_tools.health_check import pre_scan_validation
+            pre_scan_validation_result = await pre_scan_validation(target)
         if not pre_scan_validation_result["can_proceed"]:
             logging.warning(f"Pre-scan validation failed for {target}: {pre_scan_validation_result['warnings']}")
             pre_scan_issues = pre_scan_validation_result["warnings"]
@@ -15055,6 +15062,124 @@ def _canonical_security_txt_result(
             }
     default["canonical_status"] = str(summary.get("status") or "missing")
     return default
+
+
+def _canonical_pre_scan_validation(
+    target: str,
+    execution: Mapping[str, Any],
+    placements: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Derive reachability from frozen authority and settled capabilities."""
+    binding = execution.get("target_binding") or {}
+    allowed_addresses = [
+        str(address) for address in binding.get("allowed_addresses") or []
+        if str(address)
+    ]
+    placed = placements if isinstance(placements, Mapping) else {}
+    http_observations: list[Mapping[str, Any]] = []
+    for capability_name in ("http.request",):
+        summary = placed.get(capability_name)
+        if not isinstance(summary, Mapping):
+            continue
+        http_observations.extend(
+            item for item in summary.get("observations") or []
+            if isinstance(item, Mapping)
+        )
+    status_code: int | None = None
+    http_url: str | None = None
+    for item in http_observations:
+        response = item.get("response")
+        candidate_status = (
+            response.get("status")
+            if isinstance(response, Mapping) else item.get("status")
+        )
+        if (
+            isinstance(candidate_status, int)
+            and not isinstance(candidate_status, bool)
+            and 100 <= candidate_status < 600
+        ):
+            status_code = candidate_status
+            request = item.get("request") or {}
+            http_url = str(
+                (
+                    response.get("final_url")
+                    if isinstance(response, Mapping) else None
+                )
+                or item.get("url")
+                or (
+                    request.get("origin")
+                    if isinstance(request, Mapping) else None
+                )
+                or target
+            )
+            break
+    tls_summary = placed.get("tls.inspect")
+    tls_observations = (
+        tls_summary.get("observations") or []
+        if isinstance(tls_summary, Mapping) else []
+    )
+    tls_reachable = any(
+        isinstance(item, Mapping)
+        and item.get("kind") == "tls_protocol"
+        and item.get("pinned_address") in allowed_addresses
+        for item in tls_observations
+    )
+    http_reachable = status_code is not None
+    reachable = bool(allowed_addresses and (http_reachable or tls_reachable))
+    parsed_target = urllib.parse.urlsplit(str(target or ""))
+    target_port = parsed_target.port or (
+        443 if parsed_target.scheme.lower() == "https" else 80
+    )
+    warnings: list[str] = []
+    if not allowed_addresses:
+        warnings.append("Frozen target binding has no resolved address")
+    if allowed_addresses and not (http_reachable or tls_reachable):
+        warnings.append(
+            "Canonical preflight found no settled HTTP or TLS reachability evidence"
+        )
+    details = {
+        "hostname": str(binding.get("canonical_host") or parsed_target.hostname or ""),
+        "scheme": parsed_target.scheme.lower(),
+        "target_port": target_port,
+        "ip_addresses": allowed_addresses,
+        "http_status": status_code,
+        "http_url": http_url or str(target),
+        "target_port_open": bool(tls_reachable or http_reachable),
+        "reachable_via": (
+            "canonical_http_receipt"
+            if http_reachable else "canonical_tls_receipt"
+            if tls_reachable else None
+        ),
+        "canonical_preflight": True,
+    }
+    connectivity = {
+        "reachable": reachable,
+        "dns_ok": bool(allowed_addresses),
+        "port_443_open": bool(
+            (tls_reachable or http_reachable) and target_port == 443
+        ),
+        "port_80_open": bool(
+            (tls_reachable or http_reachable) and target_port == 80
+        ),
+        "target_port_open": bool(tls_reachable or http_reachable),
+        "target_port": target_port,
+        "http_ok": http_reachable,
+        "issues": warnings,
+        "details": details,
+        "recommendation": (
+            None if reachable
+            else "Review the settled canonical capability receipts before retrying."
+        ),
+    }
+    return {
+        "target": target,
+        "connectivity": connectivity,
+        "can_proceed": reachable,
+        "warnings": warnings,
+        "recommendation": connectivity["recommendation"],
+        "validation_attempts": 0,
+        "validation_source": "canonical_capability_receipts",
+    }
 
 
 def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:
