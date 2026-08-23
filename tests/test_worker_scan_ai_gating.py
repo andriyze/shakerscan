@@ -2015,6 +2015,7 @@ class _FakePlanConn:
         self.executions = []
         self.inserted_children = []
         self.persisted_action_scan_ids = set()
+        self.persisted_manifest_rows = []
 
     async def fetchrow(self, query, *args):
         if "SELECT target_id, target_url, status FROM scans" in query:
@@ -2034,6 +2035,9 @@ class _FakePlanConn:
                 "ordinal": args[3],
                 "status": args[17],
             }
+        if "INSERT INTO scan_work_manifests" in query:
+            self.persisted_manifest_rows.append((str(args[1]), args[2]))
+            return {"content_json": json.loads(args[11])}
         return None
 
     async def fetchval(self, query, *args):
@@ -2170,6 +2174,44 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     assert action_plan.actions[0].input_binding_digest
 
 
+def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    contract = resolve_scan_contract(budget_profile="balanced")
+    parent = CanonicalScanJob.create(
+        job_id="parent-job",
+        scan_id="parent-scan",
+        target=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
+        execution_plan=contract.execution_plan,
+    )
+    options, manifests = worker._compile_parallel_child_work_manifests(
+        child_scan_id="22222222-2222-4222-8222-222222222223",
+        target_url="https://example.test",
+        parent_job=parent,
+        child_options={"custom_budget": {"request_max": 50, "max_urls": 20}},
+        selected_shard=1,
+        endpoints=("GET /v1/items?account=must-not-persist",),
+    )
+
+    endpoint, candidates = manifests
+    assert options["endpoint_manifest_ref"] == endpoint.reference().canonical_dict()
+    assert options["candidate_manifest_ref"] == candidates.reference().canonical_dict()
+    assert endpoint.entries[-1]["query_parameter_names"] == ("account",)
+    assert candidates.entries[0]["parameter_name"] == "account"
+    assert "must-not-persist" not in json.dumps([
+        endpoint.canonical_dict(), candidates.canonical_dict(),
+    ])
+
+
 def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch):
     from runtime.models import TargetBinding
     from scan.contracts import resolve_scan_contract
@@ -2244,6 +2286,10 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
     assert all(len(args[13]) == 64 for args in conn.inserted_children)
     assert conn.persisted_action_scan_ids == {
         str(uuid.UUID(str(args[0]))) for args in conn.inserted_children
+    }
+    assert len(conn.persisted_manifest_rows) == 4
+    assert {kind for _scan_id, kind in conn.persisted_manifest_rows} == {
+        "endpoint", "candidate",
     }
 
 
