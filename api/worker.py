@@ -12454,13 +12454,18 @@ async def _execute_reserved_deterministic_scan(
         async def scan_runner(
             runtime_budget: Mapping[str, int],
         ) -> Mapping[str, Any]:
+            report_placements = {
+                name: summary
+                for name, summary in placed_capabilities.items()
+                if name != "auth.session.establish"
+            }
             return await run_scan(
                 target,
                 dict(options),
                 scan_id=scan_id,
                 job_id=job_id,
                 canonical_runtime_budget=runtime_budget,
-                canonical_placed_capabilities=placed_capabilities,
+                canonical_placed_capabilities=report_placements,
             )
 
         stored, idempotent_redelivery = await _execute_reserved_scan_capability(

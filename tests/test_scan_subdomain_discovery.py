@@ -312,6 +312,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         assert runtime_options["scan_execution_plan_digest"] == plan.digest
         assert runtime_options["login_password"] == login_secret
         assert session_cookie not in json.dumps(runtime_options)
+        assert "auth.session.establish" not in dict(
+            _kwargs["canonical_placed_capabilities"]
+        )
         assert canonical_runtime_budget == {
             "http_requests": 0,
             "state_changing_requests": 0,
