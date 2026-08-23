@@ -10544,12 +10544,32 @@ def _scan_http_baseline_summary_from_stored(
     }
 
 
+def _skipped_scan_http_redirect_summary(reason: str) -> dict[str, Any]:
+    summary = _skipped_scan_http_baseline_summary(reason)
+    summary["schema_version"] = "canonical-scan-http-redirect-execution/v1"
+    return summary
+
+
+def _scan_http_redirect_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    summary = _scan_http_baseline_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+    summary["schema_version"] = "canonical-scan-http-redirect-execution/v1"
+    return summary
+
+
 async def _run_scan_http_baseline_operation(
     *,
     origin: str,
     capability_args: Mapping[str, Any],
     target: TargetBinding,
     timeout_seconds: int,
+    allow_bound_origin_redirects: bool = False,
 ) -> dict[str, Any]:
     """Execute the shared adapter and retain only public header evidence."""
     result = dict(await execute_bound_http_request(
@@ -10559,6 +10579,7 @@ async def _run_scan_http_baseline_operation(
         allow_write=False,
         selected_headers=_SCAN_BASELINE_RESPONSE_HEADERS,
         timeout_seconds=timeout_seconds,
+        allow_bound_origin_redirects=allow_bound_origin_redirects,
     ))
     request = (
         dict(result.get("request") or {})
@@ -10655,6 +10676,69 @@ async def _execute_scan_http_baseline_capability(
         ),
     )
     return _scan_http_baseline_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+
+
+async def _execute_scan_http_redirect_capability(
+    target_url: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Probe HTTP downgrade posture only when that origin is explicitly bound."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_http_redirect_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    if execution.discovery_manifest_only:
+        return _skipped_scan_http_redirect_summary("discovery_manifest_only")
+    parsed_target = urllib.parse.urlsplit(str(target_url or ""))
+    if parsed_target.scheme.lower() != "https":
+        return _skipped_scan_http_redirect_summary("target_is_http")
+    target = execution.target_binding
+    http_origins = [
+        str(origin)
+        for origin in target.allowed_origins
+        if urllib.parse.urlsplit(str(origin)).scheme.lower() == "http"
+        and urllib.parse.urlsplit(str(origin)).hostname == target.canonical_host
+    ]
+    if not http_origins:
+        return _skipped_scan_http_redirect_summary("http_origin_not_bound")
+    allocation = scan_http_baseline_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_http_redirect_summary(
+            "insufficient_stage_budget"
+        )
+    origin = http_origins[0]
+    capability_args = {
+        "method": "HEAD",
+        "path": "/",
+        "follow_redirects": True,
+    }
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="http.request",
+        capability_args=capability_args,
+        action_id="deterministic_baseline.http_redirect",
+        target_binding=target,
+        reservation_limits=allocation,
+        inline_operation=lambda: _run_scan_http_baseline_operation(
+            origin=origin,
+            capability_args=capability_args,
+            target=target,
+            timeout_seconds=int(allocation["tool_wall_seconds"]),
+            allow_bound_origin_redirects=True,
+        ),
+    )
+    return _scan_http_redirect_summary_from_stored(
         stored,
         idempotent_redelivery=idempotent_redelivery,
     )
@@ -11770,6 +11854,9 @@ async def _execute_reserved_deterministic_scan(
         http_baseline = await _execute_scan_http_baseline_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
+        http_redirect = await _execute_scan_http_redirect_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
         tls = await _execute_scan_tls_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
@@ -11779,6 +11866,7 @@ async def _execute_reserved_deterministic_scan(
         return stage_capabilities(
             {
                 "http.request": http_baseline,
+                "http.request.scheme_redirect": http_redirect,
                 "tls.inspect": tls,
                 "templates.scan": template,
             },
@@ -11868,6 +11956,9 @@ async def _execute_reserved_deterministic_scan(
             or _skipped_scan_content_discovery_summary("stage_disabled"),
             "http.request": baseline.get("http.request")
             or _skipped_scan_http_baseline_summary("stage_disabled"),
+            "http.request.scheme_redirect": baseline.get(
+                "http.request.scheme_redirect"
+            ) or _skipped_scan_http_redirect_summary("stage_disabled"),
             "tls.inspect": baseline.get("tls.inspect")
             or _skipped_scan_tls_summary("stage_disabled"),
             "templates.scan": baseline.get("templates.scan")

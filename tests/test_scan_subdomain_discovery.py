@@ -1678,6 +1678,95 @@ def test_http_baseline_stage_uses_registered_inline_capability(monkeypatch):
     assert summary["observations"][0]["kind"] == "http_observation"
 
 
+def test_http_redirect_probe_skips_when_http_origin_is_not_bound(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+
+    async def unexpected_execution(**_kwargs):
+        raise AssertionError("unbound HTTP origin must never reach the wire")
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", unexpected_execution,
+    )
+    summary = asyncio.run(worker._execute_scan_http_redirect_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert summary["status"] == "skipped"
+    assert summary["reason"] == "http_origin_not_bound"
+    assert summary["observations"] == []
+
+
+def test_http_redirect_probe_uses_bound_http_origin(monkeypatch):
+    _plan, _target, options = _authority(enabled=True, network=False)
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=(
+            "https://app.example.test", "http://app.example.test",
+        ),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+        scope_receipt_id="scope-1",
+    )
+    options["_canonical_target_binding"] = target.canonical_dict()
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "http.request",
+            observations=[{
+                "kind": "http_observation",
+                "request": {
+                    "method": "HEAD",
+                    "origin": "http://app.example.test",
+                    "path": "/",
+                    "pinned_address": "192.0.2.10",
+                },
+                "response": {
+                    "status": 200,
+                    "selected_headers": {"server": "nginx"},
+                },
+                "redirect_chain": [],
+            }],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_http_redirect_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "http.request"
+    assert call["capability_args"] == {
+        "method": "HEAD",
+        "path": "/",
+        "follow_redirects": True,
+    }
+    assert call["action_id"] == "deterministic_baseline.http_redirect"
+    assert call["target_binding"] == target
+    assert call["reservation_limits"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 15,
+    }
+    assert callable(call["inline_operation"])
+    assert summary["schema_version"] == (
+        "canonical-scan-http-redirect-execution/v1"
+    )
+    assert summary["status"] == "success"
+
+
 def test_http_baseline_receipt_redacts_paths_queries_and_bodies(monkeypatch):
     _plan, target, _options = _authority(enabled=True, network=False)
 

@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import http_experiment as he
 import agent_tools as at
+from capabilities.http import execute_bound_http_request
+from runtime.models import TargetBinding
 
 # api/api.py imports asyncpg/redis/fastapi at module load; stub the ones missing in
 # the host test environment (mirrors tests/test_api_helpers.py).
@@ -305,6 +307,56 @@ def test_executor_stops_and_records_terminal_status_on_cross_origin_hop(monkeypa
     ]
     # the rejected 302 IS the terminal response the planner sees
     assert result["response"]["status"] == 302
+
+
+def test_scan_only_redirect_mode_crosses_between_bound_origins(monkeypatch):
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.scheme, request.headers.get("host", "")))
+        if request.url.scheme == "http":
+            return httpx.Response(
+                301, headers={"location": "https://shop.test/home"},
+            )
+        return httpx.Response(200)
+
+    class _MockClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="shop.test",
+        allowed_origins=("http://shop.test", "https://shop.test"),
+        allowed_addresses=("203.0.113.10",),
+        allowed_root_domains=("shop.test",),
+        scope_receipt_id="scope-1",
+    )
+    args = {"method": "HEAD", "path": "/", "follow_redirects": True}
+
+    strict = asyncio.run(execute_bound_http_request(
+        "http://shop.test", args, target=target,
+    ))
+    assert strict["hops_followed"] == 0
+    assert strict["redirect_chain"][0]["stopped"] == "cross_origin"
+
+    seen.clear()
+    redirect_probe = asyncio.run(execute_bound_http_request(
+        "http://shop.test",
+        args,
+        target=target,
+        allow_bound_origin_redirects=True,
+    ))
+    assert redirect_probe["ok"] is True
+    assert redirect_probe["hops_followed"] == 1
+    assert redirect_probe["response"]["status"] == 200
+    assert seen == [
+        ("http", "shop.test"),
+        ("https", "shop.test"),
+    ]
 
 
 def test_executor_caps_the_chain_at_three_hops(monkeypatch):

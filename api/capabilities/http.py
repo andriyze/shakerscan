@@ -75,6 +75,35 @@ def _trusted_headers(values: Mapping[str, Any] | None) -> dict[str, str]:
     return result
 
 
+def _bound_redirect_url(
+    current_url: str,
+    location: Any,
+    *,
+    allowed_origin_keys: set[tuple[str, str, int]],
+) -> str | None:
+    text = str(location or "").strip()
+    if not text or any(ord(character) < 32 for character in text):
+        return None
+    try:
+        candidate = urllib.parse.urljoin(current_url, text)
+        parsed = urllib.parse.urlsplit(candidate)
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or _origin_key(candidate) not in allowed_origin_keys
+    ):
+        return None
+    return urllib.parse.urlunsplit((
+        parsed.scheme.lower(), parsed.netloc.lower(),
+        parsed.path or "/", parsed.query, "",
+    ))
+
+
 async def execute_bound_http_request(
     base_url: str,
     args: Mapping[str, Any],
@@ -86,6 +115,7 @@ async def execute_bound_http_request(
     principal_slot: str = "anonymous",
     selected_headers: list[str] | None = None,
     timeout_seconds: int = 15,
+    allow_bound_origin_redirects: bool = False,
 ) -> dict[str, Any]:
     """Execute one bounded request while revalidating every destination hop."""
     import httpx
@@ -231,6 +261,14 @@ async def execute_bound_http_request(
                     })
                     break
                 next_url = validate_next_hop(current_url, location)
+                if next_url is None and allow_bound_origin_redirects:
+                    next_url = _bound_redirect_url(
+                        current_url,
+                        location,
+                        allowed_origin_keys={
+                            key for key in allowed_by_key if key is not None
+                        },
+                    )
                 if (
                     next_url is None
                     or _origin_key(next_url) not in allowed_by_key

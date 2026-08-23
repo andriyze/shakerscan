@@ -212,6 +212,46 @@ def _http_baseline_placement_summary():
     }
 
 
+def _http_redirect_placement_summary():
+    return {
+        "schema_version": "canonical-scan-http-redirect-execution/v1",
+        "capability_name": "http.request",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "http_observation",
+            "request": {
+                "method": "HEAD",
+                "origin": "http://app.example.test",
+                "path": "/",
+                "pinned_address": "192.0.2.10",
+                "follow_redirects": True,
+            },
+            "response": {
+                "status": 200,
+                "http_version": "HTTP/1.1",
+                "final_url": "https://app.example.test/home",
+                "selected_headers": {"server": "nginx"},
+                "set_cookie_metadata": [],
+            },
+            "redirect_chain": [{
+                "status": 301,
+                "location": "https://app.example.test/home",
+                "followed": True,
+            }],
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 1},
+        "receipt": {"receipt_hash": "4" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
 def _xss_verification_placement_summary():
     return {
         "schema_version": "canonical-scan-xss-verification-execution/v1",
@@ -484,6 +524,71 @@ def test_canonical_http_baseline_is_bound_and_adapted(monkeypatch):
     assert result["advertises_h3"] is True
 
 
+def test_canonical_http_redirect_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": [
+                "https://app.example.test", "http://app.example.test",
+            ],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {
+                "http.request.scheme_redirect": (
+                    _http_redirect_placement_summary()
+                ),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    result = scanner_mod._canonical_http_baseline_result(
+        placements["http.request.scheme_redirect"],
+        base_url="http://app.example.test",
+    )
+
+    assert result["status"] == "HTTP/1.1 200"
+    assert result["final_url"] == "https://app.example.test/home"
+    assert result["remote_ip"] == "192.0.2.10"
+
+
+def test_canonical_http_redirect_rejects_unbound_http_origin(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {
+                "http.request.scheme_redirect": (
+                    _http_redirect_placement_summary()
+                ),
+            },
+        }),
+    )
+
+    with pytest.raises(SystemExit, match="observation contract"):
+        scanner_mod._load_canonical_scan_placements(execution)
+
+
 def test_canonical_report_assembly_never_repeats_base_header_request():
     source = inspect.getsource(scanner_mod.build_report)
     start = source.index("if canonical_scan_execution is not None:", source.index(
@@ -499,6 +604,22 @@ def test_canonical_report_assembly_never_repeats_base_header_request():
     assert baseline_block.index("_canonical_http_baseline_result(") < (
         baseline_block.index("else:")
     ) < baseline_block.index("curl_headers(base_url)")
+
+
+def test_canonical_report_assembly_never_repeats_http_redirect_request():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index("# Check HTTP->HTTPS redirect explicitly")
+    end = source.index("if focused_scope.skip_posture():", start)
+    redirect_block = source[start:end]
+
+    assert 'get("http.request.scheme_redirect")' in redirect_block
+    assert "_canonical_http_baseline_result(" in redirect_block
+    assert "if canonical_scan_execution is not None:" in redirect_block
+    assert "else:" in redirect_block
+    assert 'curl_headers(f"http://{host}")' in redirect_block
+    assert redirect_block.index("_canonical_http_baseline_result(") < (
+        redirect_block.index("else:")
+    ) < redirect_block.index('curl_headers(f"http://{host}")')
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
