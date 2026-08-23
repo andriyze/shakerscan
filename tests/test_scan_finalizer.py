@@ -109,6 +109,15 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     assert report["verification_summary"] == {
         "verified": 1, "suspected": 1, "unproven_critical_high": 1,
     }
+    assert report["result"] == {
+        "score": 80,
+        "grade": "B*",
+        "grade_reliable": False,
+        "score_policy": "verified_and_suspected_severity_weight/v1",
+    }
+    assert report["coverage"]["grade_reliability"]["reasons"] == [
+        "unproven_critical_high"
+    ]
 
 
 def test_finalizer_explains_required_action_degradation():

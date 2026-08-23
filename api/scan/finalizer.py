@@ -384,6 +384,11 @@ def finalize_scan_report(
             == "placement_unavailable"
         )
     ]
+    unproven_critical_high = sum(
+        1 for item in findings
+        if item.get("severity") in {"critical", "high"}
+        and item.get("verified") is not True
+    )
     required_incomplete = [
         (action, result)
         for action, result in required_rows
@@ -397,7 +402,8 @@ def finalize_scan_report(
         )
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
-      | ({"placement_unavailable"} if placement_gaps else set()))
+      | ({"placement_unavailable"} if placement_gaps else set())
+      | ({"unproven_critical_high"} if unproven_critical_high else set()))
     grade_reliable = not reliability_reasons
     rendered_grade = grade if grade_reliable else f"{grade}*"
     coverage_reasons = sorted(
@@ -453,6 +459,7 @@ def finalize_scan_report(
             "score": score,
             "grade": rendered_grade,
             "grade_reliable": grade_reliable,
+            "score_policy": "verified_and_suspected_severity_weight/v1",
         },
         "coverage": {
             "status": coverage_status,
@@ -471,11 +478,7 @@ def finalize_scan_report(
         "verification_summary": {
             "verified": verified,
             "suspected": suspected,
-            "unproven_critical_high": sum(
-                1 for item in findings
-                if item.get("severity") in {"critical", "high"}
-                and item.get("verified") is not True
-            ),
+            "unproven_critical_high": unproven_critical_high,
         },
         "canonical_action_execution": {
             "schema_version": "canonical-scan-action-execution/v1",

@@ -45,6 +45,7 @@ _REASON_LABELS = {
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
+    "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "missing_terminal_result": "A required capability has no terminal result",
 }
 
