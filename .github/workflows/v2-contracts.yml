@@ -14,9 +14,12 @@ on:
       - api/parallel_scan.py
       - api/api.py
       - api/worker.py
+      - api/broker_worker.py
+      - api/broker_worker_v2.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
       - db/repairs/2026-08-22_v2_budget_reservations.sql
+      - scanner/*.py
       - scanner/manifests.py
       - scanner/scanner.py
       - scanner/scanner_tools/**
@@ -31,6 +34,9 @@ on:
       - tests/test_*capability*.py
       - tests/test_*adapter*.py
       - tests/test_parallel_*.py
+      - tests/test_broker_scan_execution.py
+      - tests/test_broker_worker.py
+      - tests/test_sitecustomize_frozen_dns.py
       - tests/test_request_meter.py
       - tests/test_subprocess_receipts.py
       - tests/test_worker_scan_ai_gating.py
@@ -71,9 +77,12 @@ on:
       - api/parallel_scan.py
       - api/api.py
       - api/worker.py
+      - api/broker_worker.py
+      - api/broker_worker_v2.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
       - db/repairs/2026-08-22_v2_budget_reservations.sql
+      - scanner/*.py
       - scanner/manifests.py
       - scanner/scanner.py
       - scanner/scanner_tools/**
@@ -88,6 +97,9 @@ on:
       - tests/test_*capability*.py
       - tests/test_*adapter*.py
       - tests/test_parallel_*.py
+      - tests/test_broker_scan_execution.py
+      - tests/test_broker_worker.py
+      - tests/test_sitecustomize_frozen_dns.py
       - tests/test_request_meter.py
       - tests/test_subprocess_receipts.py
       - tests/test_worker_scan_ai_gating.py
@@ -175,6 +187,19 @@ jobs:
             tests/test_worker_scan_ai_gating.py::test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan \
             tests/test_worker_scan_ai_gating.py::test_canonical_shard_builder_emits_secret_free_v2_queue_authority
 
+      - name: Validate fleet and broker Scan authority
+        env:
+          PYTHONPATH: api:scanner
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_broker_scan_execution.py \
+            tests/test_broker_worker.py
+
+      - name: Validate canonical frozen DNS resolution
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_sitecustomize_frozen_dns.py
+
       - name: Validate unified Hunt capability reservations
         env:
           PYTHONPATH: api:scanner
@@ -255,9 +280,12 @@ jobs:
             api/hunt \
             api/api.py \
             api/worker.py \
+            api/broker_worker.py \
+            api/broker_worker_v2.py \
             api/agent_tools.py \
             api/hunt/capability_executor.py \
             api/capabilities \
+            scanner/*.py \
             scanner/manifests.py \
             scanner/scanner.py \
             scanner/scanner_tools/build_fingerprint.py \
