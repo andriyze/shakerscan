@@ -10,3 +10,22 @@
 /install/STABLE_VERSION @andriyze
 /VERSION @andriyze
 /docs/releases/ @andriyze
+
+# V2 trusted execution boundary. Changes here alter capability authority,
+# target traffic, budget enforcement, evidence truth, or fleet behavior.
+/api/capabilities/ @andriyze
+/api/runtime/ @andriyze
+/api/scan/ @andriyze
+/api/hunt/ @andriyze
+/api/agent_tools.py @andriyze
+/api/api.py @andriyze
+/api/worker.py @andriyze
+/api/broker_worker.py @andriyze
+/api/broker_worker_v2.py @andriyze
+/api/parallel_scan.py @andriyze
+/scanner/scanner.py @andriyze
+/scanner/scanner_tools/request_meter.py @andriyze
+/scanner/scanner_tools/request_replay.py @andriyze
+/db/ @andriyze
+/tests/test_scan_*.py @andriyze
+/tests/test_broker_*.py @andriyze
