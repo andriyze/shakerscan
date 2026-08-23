@@ -12766,6 +12766,7 @@ async def _execute_reserved_deterministic_scan(
                 name: summary
                 for name, summary in placed_capabilities.items()
                 if not name.startswith("auth.session.establish")
+                and not name.startswith("collections.replay")
             }
             return await run_scan(
                 target,

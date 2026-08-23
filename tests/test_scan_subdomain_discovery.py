@@ -481,6 +481,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         assert "auth.session.establish" not in dict(
             _kwargs["canonical_placed_capabilities"]
         )
+        assert "collections.replay_safe" not in dict(
+            _kwargs["canonical_placed_capabilities"]
+        )
         assert canonical_runtime_budget == {
             "http_requests": 0,
             "state_changing_requests": 0,
@@ -645,6 +648,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     assert surface_calls[:2] == ["replay", "subdomains"]
     assert replay_holder == result["request_collection_replay"]
     assert result["request_collection_replay"]["replayed"] == 2
+    assert result["canonical_capabilities"]["collections.replay_safe"] == (
+        result["request_collection_replay"]
+    )
     assert result["subdomain_discovery"]["reason"] == "test_isolation"
     surface_stage = result["canonical_stage_execution"]["stages"][2]
     assert surface_stage["capability_names"][0] == "collections.replay_safe"
