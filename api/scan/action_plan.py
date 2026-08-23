@@ -34,7 +34,7 @@ _TOKEN_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$")
 _SCHEMA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/-]{0,127}$")
 _MAX_CANONICAL_BYTES = 512 * 1024
 _MAX_ACTIONS = 512
-_MAX_DEPENDENCIES = 64
+_MAX_DEPENDENCIES = 511
 
 
 class ScanActionPlanError(ValueError):
@@ -513,6 +513,8 @@ class ScanActionPlanCompiler:
         authority_refs: Mapping[str, Any] | None = None,
         shard_authority: Mapping[str, Any] | None = None,
         action_scope: str = "full",
+        defer_manifest_actions: bool = False,
+        include_finalizer: bool = True,
         available_placement_capabilities: Iterable[str] | None = None,
         placement_backends: Sequence[str] = ("local", "broker"),
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
@@ -520,6 +522,14 @@ class ScanActionPlanCompiler:
         scope = str(action_scope or "").strip().lower()
         if scope not in {"full", "discovery", "endpoint"}:
             raise ScanActionPlanError("action_scope is invalid")
+        if not isinstance(defer_manifest_actions, bool):
+            raise ScanActionPlanError("defer_manifest_actions must be a boolean")
+        if not isinstance(include_finalizer, bool):
+            raise ScanActionPlanError("include_finalizer must be a boolean")
+        if defer_manifest_actions and scope != "full":
+            raise ScanActionPlanError(
+                "manifest action deferral is only valid for a full admission phase"
+            )
         credentials = _reference_list(
             credential_profile_refs,
             name="credential profile",
@@ -627,7 +637,7 @@ class ScanActionPlanCompiler:
         sqli = active and self._family_enabled(execution_plan, "sqli")
         nuclei = active and self._family_enabled(execution_plan, "nuclei")
         bola = active and self._family_enabled(execution_plan, "bola")
-        if scope != "discovery" and nuclei and (
+        if scope != "discovery" and nuclei and not defer_manifest_actions and (
             not template_ref
             or int(template_ref.get("entry_count") or 0) != 1
             or template_ref.get("status") != "complete"
@@ -962,7 +972,7 @@ class ScanActionPlanCompiler:
             and bola
             and {"primary", "secondary"} <= set(lane_refs)
         )
-        if scope != "discovery" and nuclei:
+        if scope != "discovery" and nuclei and not defer_manifest_actions:
             add_manifest_breadth(
                 "active.templates",
                 "deterministic_active",
@@ -981,7 +991,7 @@ class ScanActionPlanCompiler:
                     + int(authz_will_run)
                 ),
             )
-        if scope != "discovery" and xss:
+        if scope != "discovery" and xss and not defer_manifest_actions:
             add_manifest_breadth(
                 "verify.xss",
                 "verify_candidates",
@@ -999,7 +1009,7 @@ class ScanActionPlanCompiler:
                     + int(authz_will_run)
                 ),
             )
-        if scope != "discovery" and sqli:
+        if scope != "discovery" and sqli and not defer_manifest_actions:
             add_manifest_breadth(
                 "verify.sqli",
                 "verify_candidates",
@@ -1014,7 +1024,7 @@ class ScanActionPlanCompiler:
                 required="sqli" in explicitly_requested,
                 reserve_dependency_slots=int(authz_will_run),
             )
-        if authz_will_run:
+        if authz_will_run and not defer_manifest_actions:
             add(
                 "verify.authz",
                 "verify_candidates",
@@ -1027,14 +1037,15 @@ class ScanActionPlanCompiler:
                 required="bola" in explicitly_requested,
             )
 
-        add(
-            "finalize.report",
-            "finalize_evidence",
-            "scan.execute",
-            {"report_only": True},
-            dependencies=tuple(row.action_id for row in blueprints),
-            required=True,
-        )
+        if include_finalizer:
+            add(
+                "finalize.report",
+                "finalize_evidence",
+                "scan.execute",
+                {"report_only": True},
+                dependencies=tuple(row.action_id for row in blueprints),
+                required=True,
+            )
 
         stage_order = {
             name: index for index, name in enumerate((
@@ -1065,6 +1076,8 @@ class ScanActionPlanCompiler:
             "authority_refs": authority,
             "shard_authority": shard,
             "action_scope": scope,
+            "defer_manifest_actions": defer_manifest_actions,
+            "include_finalizer": include_finalizer,
         }
         actions: list[ScanAction] = []
         for ordinal, blueprint in enumerate(blueprints):

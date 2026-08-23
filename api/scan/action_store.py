@@ -12,14 +12,22 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
 
 from .action_plan import ScanActionPlan, ScanActionPlanError
+from .continuation import (
+    ScanContinuationAllocation,
+    ScanContinuationError,
+)
 
 
 MIGRATION_NAME = "v2_scan_capability_actions_v1"
 ACTION_LEASE_MIGRATION_NAME = "v2_scan_action_leases_v1"
+ACTION_CONTINUATION_MIGRATION_NAME = "v2_scan_action_continuations_v1"
 SCAN_ACTION_SCHEMA_SQL = r"""
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_json JSONB;
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_digest TEXT;
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_schema TEXT;
+ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_continuation_allocation_json JSONB;
+ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_continuation_allocation_digest TEXT;
+ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_continuation_applied_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS scan_capability_actions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
@@ -82,6 +90,17 @@ ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_expires_at TI
 CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_lease_expiry
     ON scan_capability_actions(lease_expires_at)
     WHERE status IN ('leased','running');
+CREATE TABLE IF NOT EXISTS scan_action_plan_revisions (
+    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    plan_digest CHAR(64) NOT NULL CHECK (plan_digest ~ '^[0-9a-f]{64}$'),
+    parent_plan_digest CHAR(64),
+    continuation_allocation_digest CHAR(64),
+    plan_json JSONB NOT NULL CHECK (jsonb_typeof(plan_json) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scan_id, revision),
+    UNIQUE (scan_id, plan_digest)
+);
 CREATE TABLE IF NOT EXISTS app_schema_migrations (
     name TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -91,6 +110,9 @@ VALUES ('v2_scan_capability_actions_v1')
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_action_leases_v1')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_scan_action_continuations_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 
@@ -124,6 +146,34 @@ WHERE scan_capability_actions.action_digest=EXCLUDED.action_digest
   AND scan_capability_actions.execution_plan_digest=EXCLUDED.execution_plan_digest
   AND scan_capability_actions.target_binding_digest=EXCLUDED.target_binding_digest
 RETURNING id, action_id, action_digest, ordinal, status
+"""
+
+
+_PERSIST_CONTINUATION_SQL = r"""
+UPDATE scans
+SET scan_continuation_allocation_json=$3::jsonb,
+    scan_continuation_allocation_digest=$2
+WHERE id=$1
+  AND scan_action_plan_digest=$4
+  AND (
+      scan_continuation_allocation_digest IS NULL
+      OR scan_continuation_allocation_digest=$2
+  )
+RETURNING id, scan_continuation_allocation_digest
+"""
+
+
+_AMEND_PLAN_SQL = r"""
+UPDATE scans
+SET scan_action_plan_json=$5::jsonb,
+    scan_action_plan_digest=$4,
+    scan_action_plan_schema=$6,
+    scan_continuation_applied_at=NOW()
+WHERE id=$1
+  AND scan_action_plan_digest=$2
+  AND scan_continuation_allocation_digest=$3
+  AND scan_continuation_applied_at IS NULL
+RETURNING id, scan_action_plan_digest
 """
 
 
@@ -205,6 +255,194 @@ class PostgresScanActionStore:
                     f"Scan action {action.action_id} conflicts with immutable authority"
                 )
             stored.append(row)
+        return tuple(stored)
+
+    async def persist_continuation_allocation(
+        self,
+        conn: ScanActionDatabase,
+        *,
+        allocation: ScanContinuationAllocation,
+        parent_plan: ScanActionPlan,
+    ) -> Mapping[str, Any]:
+        """Freeze the only residual budget authority before discovery runs."""
+        if (
+            allocation.scan_id != parent_plan.scan_id
+            or allocation.parent_plan_digest != parent_plan.plan_digest
+            or allocation.execution_plan_digest != parent_plan.execution_plan_digest
+            or allocation.target_binding_digest != parent_plan.target_binding_digest
+        ):
+            raise ScanActionStoreError(
+                "continuation allocation differs from its parent plan"
+            )
+        allocation_json = json.dumps(
+            allocation.canonical_dict(), sort_keys=True, separators=(",", ":"),
+        )
+        row = await conn.fetchrow(
+            _PERSIST_CONTINUATION_SQL,
+            uuid.UUID(allocation.scan_id),
+            allocation.allocation_digest,
+            allocation_json,
+            parent_plan.plan_digest,
+        )
+        if row is None:
+            raise ScanActionStoreError(
+                "Scan continuation allocation conflicts with persisted authority"
+            )
+        await conn.execute(
+            """
+            INSERT INTO scan_action_plan_revisions (
+                scan_id, revision, plan_digest, parent_plan_digest,
+                continuation_allocation_digest, plan_json
+            ) VALUES ($1,0,$2,NULL,$3,$4::jsonb)
+            ON CONFLICT (scan_id, plan_digest) DO NOTHING
+            """,
+            uuid.UUID(allocation.scan_id),
+            parent_plan.plan_digest,
+            allocation.allocation_digest,
+            json.dumps(
+                parent_plan.canonical_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        return row
+
+    async def load_continuation_allocation(
+        self,
+        conn: ScanActionDatabase,
+        *,
+        scan_id: str,
+    ) -> ScanContinuationAllocation | None:
+        try:
+            normalized_scan_id = uuid.UUID(str(scan_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ScanActionStoreError("scan_id is invalid") from exc
+        row = await conn.fetchrow(
+            """
+            SELECT scan_continuation_allocation_json,
+                   scan_continuation_allocation_digest
+            FROM scans WHERE id=$1
+            """,
+            normalized_scan_id,
+        )
+        if row is None or row.get("scan_continuation_allocation_json") is None:
+            return None
+        try:
+            allocation = ScanContinuationAllocation.from_dict(_json_object(
+                row["scan_continuation_allocation_json"],
+                name="scan_continuation_allocation_json",
+            ))
+        except ScanContinuationError as exc:
+            raise ScanActionStoreError(
+                f"stored Scan continuation allocation is invalid: {exc}"
+            ) from exc
+        if str(row.get("scan_continuation_allocation_digest") or "") != (
+            allocation.allocation_digest
+        ):
+            raise ScanActionStoreError(
+                "stored Scan continuation metadata is inconsistent"
+            )
+        return allocation
+
+    async def amend_plan(
+        self,
+        conn: ScanActionDatabase,
+        *,
+        parent_plan: ScanActionPlan,
+        amended_plan: ScanActionPlan,
+        allocation: ScanContinuationAllocation,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Apply one append-only continuation under compare-and-swap authority."""
+        if (
+            parent_plan.scan_id != amended_plan.scan_id
+            or allocation.scan_id != amended_plan.scan_id
+            or allocation.parent_plan_digest != parent_plan.plan_digest
+            or amended_plan.execution_plan_digest != allocation.execution_plan_digest
+            or amended_plan.target_binding_digest != allocation.target_binding_digest
+            or tuple(amended_plan.actions[:len(parent_plan.actions)])
+            != parent_plan.actions
+        ):
+            raise ScanActionStoreError(
+                "amended Scan plan does not preserve its immutable parent prefix"
+            )
+        plan_json = json.dumps(
+            amended_plan.canonical_dict(), sort_keys=True, separators=(",", ":"),
+        )
+        row = await conn.fetchrow(
+            _AMEND_PLAN_SQL,
+            uuid.UUID(amended_plan.scan_id),
+            parent_plan.plan_digest,
+            allocation.allocation_digest,
+            amended_plan.plan_digest,
+            plan_json,
+            amended_plan.schema_version,
+        )
+        if row is None:
+            current = await conn.fetchrow(
+                """
+                SELECT scan_action_plan_digest,
+                       scan_continuation_allocation_digest,
+                       scan_continuation_applied_at
+                FROM scans WHERE id=$1
+                """,
+                uuid.UUID(amended_plan.scan_id),
+            )
+            if (
+                current is None
+                or str(current.get("scan_action_plan_digest") or "")
+                != amended_plan.plan_digest
+                or str(current.get("scan_continuation_allocation_digest") or "")
+                != allocation.allocation_digest
+                or current.get("scan_continuation_applied_at") is None
+            ):
+                raise ScanActionStoreError(
+                    "Scan continuation conflicts with persisted plan authority"
+                )
+
+        stored: list[Mapping[str, Any]] = []
+        for action in amended_plan.actions:
+            specification = self._registry.require(action.capability_name)
+            action_row = await conn.fetchrow(
+                _PERSIST_ACTION_SQL,
+                uuid.UUID(amended_plan.scan_id),
+                action.action_id,
+                action.stage,
+                action.ordinal,
+                action.capability_name,
+                specification.adapter,
+                specification.adapter_version,
+                action.output_schema,
+                action.action_digest,
+                amended_plan.execution_plan_digest,
+                amended_plan.target_binding_digest,
+                action.input_binding_digest,
+                json.dumps(dict(action.requested_budget), sort_keys=True, separators=(",", ":")),
+                json.dumps(action.canonical_dict()["placement"], sort_keys=True, separators=(",", ":")),
+                json.dumps(list(action.dependencies), separators=(",", ":")),
+                action.required,
+                action.supporting,
+                action.admission_status,
+                action.reason_code,
+            )
+            if action_row is None:
+                raise ScanActionStoreError(
+                    f"continued action {action.action_id} conflicts with immutable authority"
+                )
+            stored.append(action_row)
+        await conn.execute(
+            """
+            INSERT INTO scan_action_plan_revisions (
+                scan_id, revision, plan_digest, parent_plan_digest,
+                continuation_allocation_digest, plan_json
+            ) VALUES ($1,1,$2,$3,$4,$5::jsonb)
+            ON CONFLICT (scan_id, plan_digest) DO NOTHING
+            """,
+            uuid.UUID(amended_plan.scan_id),
+            amended_plan.plan_digest,
+            parent_plan.plan_digest,
+            allocation.allocation_digest,
+            plan_json,
+        )
         return tuple(stored)
 
     async def load_plan(

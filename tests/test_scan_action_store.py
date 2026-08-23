@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import uuid
@@ -10,6 +11,7 @@ import pytest
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.action_store import (
+    ACTION_CONTINUATION_MIGRATION_NAME,
     ACTION_LEASE_MIGRATION_NAME,
     MIGRATION_NAME,
     PostgresScanActionStore,
@@ -17,6 +19,10 @@ from api.scan.action_store import (
     ScanActionStoreError,
 )
 from api.scan.budget_allocator import allocate_scan_action_plan
+from api.scan.continuation import (
+    ScanContinuationAllocation,
+    merge_scan_action_continuation,
+)
 from api.scan.execution import ScanExecutionPlan
 from api.scan.work_manifests import build_canonical_nuclei_template_manifest
 
@@ -24,7 +30,7 @@ from api.scan.work_manifests import build_canonical_nuclei_template_manifest
 SCAN_ID = "20000000-0000-4000-8000-000000000001"
 
 
-def _plan(*, active=False):
+def _plan(*, active=False, defer=False):
     execution = ScanExecutionPlan(
         policy=ScanPolicy(
             active_testing=active,
@@ -55,6 +61,8 @@ def _plan(*, active=False):
         template_manifest_ref=(
             template.reference().canonical_dict() if template is not None else None
         ),
+        defer_manifest_actions=defer,
+        include_finalizer=not defer,
     )
 
 
@@ -69,6 +77,39 @@ class FakeConn:
         return "OK"
 
     async def fetchrow(self, query, *args):
+        if "SET scan_continuation_allocation_json=" in query:
+            scan_id, digest, raw, parent_digest = args
+            if (
+                self.plan_row is None
+                or self.plan_row["scan_action_plan_digest"] != parent_digest
+                or self.plan_row.get("scan_continuation_allocation_digest")
+                not in {None, digest}
+            ):
+                return None
+            self.plan_row.update({
+                "scan_continuation_allocation_json": json.loads(raw),
+                "scan_continuation_allocation_digest": digest,
+                "scan_continuation_applied_at": None,
+            })
+            return self.plan_row
+        if "SET scan_action_plan_json=$5::jsonb" in query:
+            scan_id, parent_digest, allocation_digest, digest, raw, schema = args
+            if (
+                self.plan_row is None
+                or self.plan_row["scan_action_plan_digest"] != parent_digest
+                or self.plan_row.get("scan_continuation_allocation_digest")
+                != allocation_digest
+                or self.plan_row.get("scan_continuation_applied_at") is not None
+            ):
+                return None
+            self.plan_row.update({
+                "id": scan_id,
+                "scan_action_plan_json": json.loads(raw),
+                "scan_action_plan_digest": digest,
+                "scan_action_plan_schema": schema,
+                "scan_continuation_applied_at": "applied",
+            })
+            return self.plan_row
         if query.lstrip().startswith("UPDATE scans"):
             scan_id, digest, schema, raw = args
             if self.plan_row and self.plan_row["scan_action_plan_digest"] != digest:
@@ -154,6 +195,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     assert conn.executed == [(SCAN_ACTION_SCHEMA_SQL, ())]
     assert MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_LEASE_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_CONTINUATION_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
 
     init_sql = Path("db/init.sql").read_text(encoding="utf-8")
@@ -165,6 +207,9 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     ).read_text(encoding="utf-8")
     receipt_repair_sql = Path(
         "db/repairs/2026-08-23_v2_scan_action_receipts.sql"
+    ).read_text(encoding="utf-8")
+    continuation_repair_sql = Path(
+        "db/repairs/2026-08-23_v2_scan_action_continuations.sql"
     ).read_text(encoding="utf-8")
     for source in (init_sql, repair_sql):
         assert "scan_action_plan_json" in source
@@ -178,6 +223,74 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "result_json" in source
     for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, receipt_repair_sql):
         assert "receipt_json" in source
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, continuation_repair_sql):
+        assert "scan_continuation_allocation_json" in source
+        assert "scan_action_plan_revisions" in source
+
+
+def test_action_store_applies_one_idempotent_continuation_revision():
+    parent = _plan(defer=True)
+    complete = _plan()
+    finalizer = next(
+        action for action in complete.actions
+        if action.action_id == "finalize.report"
+    )
+    continuation = type(complete)(
+        scan_id=complete.scan_id,
+        execution_plan_digest=complete.execution_plan_digest,
+        target_binding_digest=complete.target_binding_digest,
+        actions=(replace(
+            finalizer, ordinal=0, dependencies=(), action_digest=None,
+        ),),
+    )
+    allocation = ScanContinuationAllocation(
+        scan_id=parent.scan_id,
+        parent_plan_digest=parent.plan_digest,
+        execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest,
+        parent_action_ids=tuple(action.action_id for action in parent.actions),
+        budget_ceiling={
+            "http_requests": 1_000,
+            "state_changing_requests": 0,
+            "browser_actions": 50,
+            "tcp_ports_attempted": 1_000,
+            "hosts_attempted": 500,
+            "tool_wall_seconds": 180,
+        },
+        max_endpoint_entries=500,
+        max_candidate_entries=1_000,
+    )
+    amended = merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        allocation=allocation,
+    )
+    conn = FakeConn()
+    store = PostgresScanActionStore()
+
+    asyncio.run(store.persist_plan(conn, plan=parent))
+    asyncio.run(store.persist_continuation_allocation(
+        conn, allocation=allocation, parent_plan=parent,
+    ))
+    loaded_allocation = asyncio.run(store.load_continuation_allocation(
+        conn, scan_id=SCAN_ID,
+    ))
+    first = asyncio.run(store.amend_plan(
+        conn,
+        parent_plan=parent,
+        amended_plan=amended,
+        allocation=allocation,
+    ))
+    second = asyncio.run(store.amend_plan(
+        conn,
+        parent_plan=parent,
+        amended_plan=amended,
+        allocation=allocation,
+    ))
+
+    assert loaded_allocation == allocation
+    assert len(first) == len(second) == len(amended.actions)
+    assert asyncio.run(store.load_plan(conn, scan_id=SCAN_ID)) == amended
 
 
 def test_action_store_persists_precomputed_optional_skip_reasons():

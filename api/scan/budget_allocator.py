@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Protocol
 
 try:
     from runtime.models import ScanBudget
@@ -42,6 +42,10 @@ class ScanBudgetAllocation:
     skipped_action_ids: tuple[str, ...]
 
 
+class ScanBudgetLimits(Protocol):
+    def ledger_limits(self) -> Mapping[str, int]: ...
+
+
 def _phase(action: ScanAction) -> int:
     if action.action_id in MANDATORY_ACTION_IDS:
         return 0
@@ -54,9 +58,10 @@ def _phase(action: ScanAction) -> int:
 
 def allocate_scan_action_plan(
     plan: ScanActionPlan,
-    budget: ScanBudget,
+    budget: ScanBudget | ScanBudgetLimits,
     *,
     assign_residual_to_finalizer: bool = True,
+    require_finalizer: bool = True,
 ) -> ScanBudgetAllocation:
     """Admit the complete worst-case graph before any action may execute.
 
@@ -122,11 +127,19 @@ def allocate_scan_action_plan(
             allocated[name] += amount
 
     finalizer = admitted.get("finalize.report")
-    if finalizer is None or finalizer.admission_status != "planned":
+    if require_finalizer and (
+        finalizer is None or finalizer.admission_status != "planned"
+    ):
         raise ScanBudgetAllocationError("finalize.report", {"action": 1})
+    if not require_finalizer and finalizer is not None:
+        raise ScanBudgetAllocationError(
+            "finalize.report", {"unexpected_action": 1},
+        )
 
     residual = {name: limits[name] - allocated[name] for name in limits}
     if assign_residual_to_finalizer:
+        if finalizer is None:
+            raise ScanBudgetAllocationError("finalize.report", {"action": 1})
         final_budget = dict(finalizer.requested_budget)
         for name, amount in residual.items():
             if amount:

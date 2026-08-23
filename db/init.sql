@@ -116,6 +116,9 @@ CREATE TABLE scans (
     scan_action_plan_json JSONB,
     scan_action_plan_digest TEXT,
     scan_action_plan_schema TEXT,
+    scan_continuation_allocation_json JSONB,
+    scan_continuation_allocation_digest TEXT,
+    scan_continuation_applied_at TIMESTAMPTZ,
     coverage_status TEXT,
     coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp, model_intake
@@ -238,6 +241,18 @@ CREATE INDEX idx_scan_capability_actions_scan_status
 CREATE INDEX idx_scan_capability_actions_lease_expiry
     ON scan_capability_actions(lease_expires_at)
     WHERE status IN ('leased','running');
+
+CREATE TABLE scan_action_plan_revisions (
+    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    plan_digest CHAR(64) NOT NULL CHECK (plan_digest ~ '^[0-9a-f]{64}$'),
+    parent_plan_digest CHAR(64),
+    continuation_allocation_digest CHAR(64),
+    plan_json JSONB NOT NULL CHECK (jsonb_typeof(plan_json) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scan_id, revision),
+    UNIQUE (scan_id, plan_digest)
+);
 
 CREATE TABLE scan_work_manifests (
     id UUID PRIMARY KEY,
