@@ -271,6 +271,19 @@ async def run(
 
     Uses a semaphore to limit concurrent subprocess executions and prevent resource exhaustion.
     """
+    if os.environ.get("SHAKERSCAN_CANONICAL_REPORT_ONLY", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        error = "canonical report assembly cannot execute subprocesses"
+        _record_subprocess_receipt(
+            cmd,
+            timeout_seconds=timeout,
+            exit_code=75,
+            timed_out=False,
+            started_at=time.monotonic(),
+            error=error,
+        )
+        return "", error, 75
     # The adaptive throttle only engages for HTTP (curl) requests during an active
     # scan; it paces the shared request stream so a single-process target under
     # load stops returning degraded responses that make detectors flake. No-op
@@ -545,6 +558,19 @@ async def run_streaming(
         raise ValueError("deadlines must satisfy 0 < soft <= soft+flush <= hard")
     if max_stdout_bytes < 0 or max_stderr_bytes < 0:
         raise ValueError("output limits must be non-negative")
+    if os.environ.get("SHAKERSCAN_CANONICAL_REPORT_ONLY", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return StreamingRunResult(
+            stdout="",
+            stderr="canonical report assembly cannot execute subprocesses",
+            returncode=75,
+            status="blocked",
+            partial=False,
+            timed_out=False,
+            soft_deadline_reached=False,
+            cancelled=False,
+        )
 
     async with _get_semaphore():
         started = time.monotonic()

@@ -372,11 +372,12 @@ def prepare_scan_process_capability(
     allow_state_changing_http: bool,
     allocation_limits: Mapping[str, int] | None = None,
 ) -> tuple[PreparedExecution, dict[str, int]]:
-    """Bind the deterministic scanner to the exact remaining durable hold.
+    """Bind the deterministic report assembler to its remaining wall-time hold.
 
-    Missing mandatory HTTP/host/wall capacity is represented as a one-unit
-    request that the locked ledger will reject. This still yields a durable
-    blocked reservation and receipt without allowing the scanner to start.
+    Target traffic is owned by the separately placed fixed-stage capabilities.
+    ``scan.execute`` receives no HTTP, browser, TCP, host, or mutation grant.
+    Missing wall capacity is represented as a one-unit request that the locked
+    ledger will reject, producing a durable blocked receipt.
     """
     limits = {str(name): max(0, int(amount)) for name, amount in ledger_limits.items()}
     used = {str(name): max(0, int(amount)) for name, amount in consumed.items()}
@@ -397,19 +398,11 @@ def prepare_scan_process_capability(
             )
         remaining[name] = min(remaining[name], amount)
     runtime_budget = {
-        "http_requests": remaining.get("http_requests", 0),
-        "state_changing_requests": (
-            min(
-                remaining.get("state_changing_requests", 0),
-                remaining.get("http_requests", 0),
-            )
-            if allow_state_changing_http else 0
-        ),
-        "browser_actions": remaining.get("browser_actions", 0),
-        # TCP actions execute as separately registered, durably reserved
-        # capabilities. The report-assembly subprocess receives no TCP grant.
+        "http_requests": 0,
+        "state_changing_requests": 0,
+        "browser_actions": 0,
         "tcp_ports_attempted": 0,
-        "hosts_attempted": remaining.get("hosts_attempted", 0),
+        "hosts_attempted": 0,
         "tool_wall_seconds": remaining.get("tool_wall_seconds", 0),
     }
     requested = {
@@ -417,11 +410,8 @@ def prepare_scan_process_capability(
         for name, amount in runtime_budget.items()
         if amount > 0
     }
-    for mandatory in (
-        "http_requests", "hosts_attempted", "tool_wall_seconds",
-    ):
-        if runtime_budget[mandatory] <= 0:
-            requested[mandatory] = 1
+    if runtime_budget["tool_wall_seconds"] <= 0:
+        requested["tool_wall_seconds"] = 1
     input_payload = {
         "schema_version": "deterministic-scan-capability/v1",
         "execution_plan_digest": str(execution_plan_digest).lower(),

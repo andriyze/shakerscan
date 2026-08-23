@@ -3104,7 +3104,9 @@ async def run_scan(
     )
 
     # Scan-time AI should only run when scan classification is explicitly enabled.
-    scan_ai_enabled = bool(ai_scan_classify_enabled)
+    scan_ai_enabled = bool(
+        ai_scan_classify_enabled and native_scan_execution is None
+    )
 
     if scan_ai_enabled and ai_url and ai_api_key and model:
         cmd.append('--ai')
@@ -3161,6 +3163,7 @@ async def run_scan(
     scan_env.pop("SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS", None)
     if native_scan_execution is not None:
         native_payload = native_scan_execution.payload()
+        scan_env["SHAKERSCAN_CANONICAL_REPORT_ONLY"] = "true"
         scan_env["SHAKERSCAN_CANONICAL_SCAN_EXECUTION"] = json.dumps(
             native_payload,
             sort_keys=True,
@@ -3224,10 +3227,13 @@ async def run_scan(
         budget_profile=options.get("budget_profile"),
         custom_budget=custom_budget if isinstance(custom_budget, dict) else None,
     )
-    scan_env["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] = str(
-        max(0, int(resolved_request_budget.get("request_max") or 0))
+    scan_env["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] = (
+        "0" if native_scan_execution is not None
+        else str(max(0, int(resolved_request_budget.get("request_max") or 0)))
     )
-    if options.get("request_budget_reserved") is not None:
+    if native_scan_execution is not None:
+        scan_env["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] = "0"
+    elif options.get("request_budget_reserved") is not None:
         scan_env["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] = str(
             max(0, int(options.get("request_budget_reserved") or 0))
         )

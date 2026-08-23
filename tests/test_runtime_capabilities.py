@@ -53,7 +53,7 @@ def test_registry_filters_target_kind_and_active_permission():
 
     assert safe_web == {
         "scan.execute",
-        "web.probe", "http.request", "subdomains.discover", "tls.inspect", "browser.navigate",
+        "web.probe", "http.request", "dns.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
         "browser.interact",
         "collections.inspect", "collections.select", "collections.replay_safe",
     }
@@ -64,6 +64,19 @@ def test_registry_filters_target_kind_and_active_permission():
     }
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
+
+
+def test_scan_execute_is_a_placed_evidence_report_assembler():
+    specification = CAPABILITY_REGISTRY.require("scan.execute")
+
+    assert specification.budget_cost == {"tool_wall_seconds": 1}
+    assert specification.placement_requirements == {
+        "network_reachability": False,
+        "runtime_target_binding": True,
+        "fixed_stage_plan": True,
+        "durable_reservation": True,
+        "placed_evidence_only": True,
+    }
 
 
 def test_ssh_proposal_registry_budget_is_control_plane_only():

@@ -3904,6 +3904,10 @@ def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatc
     assert "worker-only-password" not in " ".join(captured["cmd"])
     assert "worker-only-secret" not in json.dumps(captured["env"])
     assert "worker-only-password" not in json.dumps(captured["env"])
+    assert captured["env"]["SHAKERSCAN_CANONICAL_REPORT_ONLY"] == "true"
+    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] == "0"
+    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] == "0"
+    assert captured["env"]["AI_SCAN_CLASSIFICATION_ENABLED"] == "false"
     assert "--budget-profile" not in captured["cmd"]
     assert not any(item.startswith("--budget-") for item in captured["cmd"])
     execution = validate_native_scan_execution_payload(json.loads(

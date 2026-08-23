@@ -160,7 +160,7 @@ class _Store:
         return self.current
 
 
-def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
+def test_broker_scan_reserves_report_wall_time_before_lease_and_heartbeats():
     plan, execution = _authority()
     conn = _Connection(plan)
     store = _Store()
@@ -182,14 +182,14 @@ def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
     assert admission.lease is not None
     assert store.events == ["requested", "reserved", "running"]
     assert admission.lease.runtime_budget == {
-        "http_requests": 40,
-        "state_changing_requests": 40,
-        "browser_actions": 19,
+        "http_requests": 0,
+        "state_changing_requests": 0,
+        "browser_actions": 0,
         "tcp_ports_attempted": 0,
-        "hosts_attempted": 49,
+        "hosts_attempted": 0,
         "tool_wall_seconds": 55,
     }
-    assert conn.row["budget_used_json"]["http_requests"] == 47
+    assert conn.row["budget_used_json"]["http_requests"] == 7
     metadata = admission.lease.storage_payload()
 
     conn.row["status"] = "running"
@@ -225,16 +225,11 @@ def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
     ))
 
     assert settled.record.status == "committed"
-    assert settled.record.actual == {
-        "http_requests": 3,
-        "state_changing_requests": 1,
-        "browser_actions": 2,
-        "hosts_attempted": 1,
-        # Remote elapsed time is not independently trusted.
-        "tool_wall_seconds": 55,
-    }
-    assert conn.row["budget_used_json"]["http_requests"] == 10
-    assert conn.row["budget_used_json"]["state_changing_requests"] == 3
+    # Remote elapsed time is not independently trusted, so the complete wall
+    # hold is charged. No target-traffic dimension belongs to scan.execute.
+    assert settled.record.actual == {"tool_wall_seconds": 55}
+    assert conn.row["budget_used_json"]["http_requests"] == 7
+    assert conn.row["budget_used_json"]["state_changing_requests"] == 2
     assert summary["durable_budget_settled"] is True
     assert summary["transport"] == "broker"
 
@@ -263,10 +258,10 @@ def test_broker_scan_reserves_before_lease_heartbeats_and_settles_exact_http():
     assert store.events.count("requested") == 1
 
 
-def test_broker_scan_refuses_to_lease_when_mandatory_budget_is_exhausted():
+def test_broker_scan_refuses_to_lease_when_report_wall_budget_is_exhausted():
     plan, execution = _authority()
     conn = _Connection(plan)
-    conn.row["budget_used_json"]["http_requests"] = 100
+    conn.row["budget_used_json"]["tool_wall_seconds"] = 60
     store = _Store()
 
     admission = asyncio.run(reserve_broker_scan_execution(
@@ -285,5 +280,5 @@ def test_broker_scan_refuses_to_lease_when_mandatory_budget_is_exhausted():
 
     assert admission.lease is None
     assert admission.stored.record.status == "failed"
-    assert admission.stored.record.actual["http_requests"] == 0
+    assert admission.stored.record.actual["tool_wall_seconds"] == 0
     assert store.events == ["requested", "failed"]

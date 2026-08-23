@@ -293,11 +293,11 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         assert target == "https://app.example.test"
         assert runtime_options["scan_execution_plan_digest"] == plan.digest
         assert canonical_runtime_budget == {
-            "http_requests": 93,
+            "http_requests": 0,
             "state_changing_requests": 0,
-            "browser_actions": 18,
+            "browser_actions": 0,
             "tcp_ports_attempted": 0,
-            "hosts_attempted": 49,
+            "hosts_attempted": 0,
             "tool_wall_seconds": 55,
         }
         return {
@@ -375,8 +375,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     assert ("traffic", "running") in events
     assert events[-1] == ("terminal", "committed")
     assert calls == 1
-    assert store.current.record.actual["http_requests"] == 3
-    assert store.current.record.actual["browser_actions"] == 2
+    assert set(store.current.record.actual) == {"tool_wall_seconds"}
     assert result["deterministic_scan_execution"]["receipt"][
         "budget_reservation_state"
     ] == "committed"

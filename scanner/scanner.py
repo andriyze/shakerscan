@@ -4074,7 +4074,11 @@ async def build_report(target: str,
     if thorough_params and not effective_budget_profile and not custom_budget:
         effective_budget_profile = "thorough"
     scan_budget = resolve_scan_budget(budget_scan_type, effective_budget_profile, custom_budget)
-    request_limit = int(scan_budget.get("request_max") or 0)
+    request_limit = (
+        0
+        if canonical_scan_execution is not None
+        else int(scan_budget.get("request_max") or 0)
+    )
     env_request_limit = os.environ.get("SHAKERSCAN_REQUEST_BUDGET_LIMIT")
     if env_request_limit is not None:
         try:
@@ -15787,7 +15791,7 @@ _CANONICAL_FORBIDDEN_BOOLEAN_ARGS = (
     "vuln_injection", "vuln_web", "exposure_client", "exposure_infra",
     "threat_intel", "full", "aggressive", "smart", "standard", "deep",
     "no_early_stop", "thorough_params", "budget_disable_nuclei_early_stop",
-    "auto_auth",
+    "auto_auth", "ai",
 )
 _CANONICAL_FORBIDDEN_VALUE_ARGS = (
     "check_family", "oob_callback_url", "budget_profile", "api_token",
@@ -15797,6 +15801,7 @@ _CANONICAL_FORBIDDEN_VALUE_ARGS = (
     "oauth_client_id", "oauth_client_secret", "oauth_token_url",
     "oauth_scope", "oauth_username", "oauth_password", "user2_cookies",
     "user2_header", "user2_login_username", "user2_login_password",
+    "ai_url", "ai_api_key", "ai_fallback_model",
     "budget_max_duration_minutes", "budget_discovery_depth", "budget_max_urls",
     "budget_browser_max_pages", "budget_browser_max_depth",
     "budget_api_probe_limit", "budget_param_discovery_url_limit",
@@ -16205,13 +16210,20 @@ async def cli_main():
     if args.oob_max_findings is None:
         args.oob_max_findings = SMART_SCAN_BUDGETS.oob_max_findings
 
-    # Auto-enable AI when environment variables are set
-    if not args.ai_url:
-        args.ai_url = os.environ.get("AI_URL")
-    if not args.ai_api_key:
-        args.ai_api_key = os.environ.get("AI_API_KEY")
-    if args.ai_url and args.ai_api_key:
-        args.ai = True
+    # AI classification is a separate external action. Canonical scan.execute
+    # only assembles placed deterministic evidence and cannot inherit ambient
+    # provider credentials or network authority.
+    if canonical_scan_execution is None:
+        if not args.ai_url:
+            args.ai_url = os.environ.get("AI_URL")
+        if not args.ai_api_key:
+            args.ai_api_key = os.environ.get("AI_API_KEY")
+        if args.ai_url and args.ai_api_key:
+            args.ai = True
+    else:
+        args.ai = False
+        args.ai_url = None
+        args.ai_api_key = None
 
     raw_endpoint_lines: list[str] = []
     if args.endpoints:

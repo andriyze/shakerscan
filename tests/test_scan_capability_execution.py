@@ -295,7 +295,7 @@ def test_external_target_must_match_the_exact_frozen_origin():
         )
 
 
-def test_scan_process_reserves_exact_remaining_multidimensional_budget():
+def test_scan_process_reserves_only_remaining_report_wall_time():
     prepared, runtime = prepare_scan_process_capability(
         execution_plan_digest="a" * 64,
         target=_target(),
@@ -313,20 +313,16 @@ def test_scan_process_reserves_exact_remaining_multidimensional_budget():
     )
 
     assert runtime == {
-        "http_requests": 93,
-        "state_changing_requests": 93,
-        "browser_actions": 17,
+        "http_requests": 0,
+        "state_changing_requests": 0,
+        "browser_actions": 0,
         "tcp_ports_attempted": 0,
-        "hosts_attempted": 46,
+        "hosts_attempted": 0,
         "tool_wall_seconds": 55,
     }
     assert prepared.capability_name == "scan.execute"
     assert prepared.adapter_name == "scanner.dast"
     assert prepared.estimated_budget == {
-        "http_requests": 93,
-        "state_changing_requests": 93,
-        "browser_actions": 17,
-        "hosts_attempted": 46,
         "tool_wall_seconds": 55,
     }
 
@@ -407,7 +403,7 @@ def test_dns_posture_has_fixed_host_and_wall_hold():
     assert len(prepared.redacted_execution["input_binding_digest"]) == 64
 
 
-def test_scan_process_requests_missing_mandatory_capacity_to_fail_closed():
+def test_scan_process_requests_missing_wall_capacity_to_fail_closed():
     prepared, runtime = prepare_scan_process_capability(
         execution_plan_digest="a" * 64,
         target=_target(),
@@ -419,8 +415,7 @@ def test_scan_process_requests_missing_mandatory_capacity_to_fail_closed():
 
     assert runtime["http_requests"] == 0
     assert runtime["tool_wall_seconds"] == 0
-    assert prepared.estimated_budget["http_requests"] == 1
-    assert prepared.estimated_budget["tool_wall_seconds"] == 1
+    assert prepared.estimated_budget == {"tool_wall_seconds": 1}
 
 
 def test_scan_external_capability_requires_frozen_binding_and_active_approval():

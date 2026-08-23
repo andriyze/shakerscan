@@ -8,6 +8,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 from scanner_tools import common  # noqa: E402
 
 
+def test_canonical_report_only_blocks_all_subprocess_execution(monkeypatch):
+    common.reset_subprocess_receipts()
+    monkeypatch.setenv("SHAKERSCAN_CANONICAL_REPORT_ONLY", "true")
+
+    out, err, rc = asyncio.run(common.run([
+        sys.executable, "-c", "raise AssertionError('must not execute')",
+    ]))
+
+    assert (out, rc) == ("", 75)
+    assert err == "canonical report assembly cannot execute subprocesses"
+    receipt = common.snapshot_subprocess_receipts()[0]
+    assert receipt["status"] == "failed"
+    assert receipt["exit_code"] == 75
+
+
+def test_canonical_report_only_blocks_streaming_subprocess_execution(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_CANONICAL_REPORT_ONLY", "true")
+
+    result = asyncio.run(common.run_streaming(
+        [sys.executable, "-c", "raise AssertionError('must not execute')"],
+        soft_timeout=1,
+        flush_grace=0,
+        hard_timeout=1,
+    ))
+
+    assert result.status == "blocked"
+    assert result.returncode == 75
+    assert result.partial is False
+
+
 def test_common_run_records_redacted_subprocess_receipt():
     common.reset_subprocess_receipts()
 

@@ -159,6 +159,8 @@ def test_scanner_applies_native_execution_without_a_legacy_preset():
         ("oauth_client_secret", "secret"),
         ("user2_cookies", "session=secret"),
         ("auto_auth", True),
+        ("ai", True),
+        ("ai_api_key", "provider-secret"),
     ],
 )
 def test_canonical_scanner_rejects_direct_auth_authority(name, value):
