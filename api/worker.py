@@ -156,6 +156,10 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
+from scan.authorization import (
+    ActionAuthorityDecision,
+    revalidate_scan_action_authority,
+)
 from scan.executor import build_native_scan_execution
 from scan.stages import (
     ScanStageCancelled,
@@ -10057,6 +10061,21 @@ async def _execute_reserved_scan_capability(
                 raise ScanCapabilityContractError(
                     "persisted Scan authority changed before capability execution"
                 )
+            if canonical_action is not None:
+                authority_decision = await revalidate_scan_action_authority(
+                    conn,
+                    action=canonical_action,
+                    target_binding=target,
+                    scope_receipt_id=(
+                        target.scope_receipt_id or policy.scope_receipt_id
+                    ),
+                    approval_receipt_id=policy.approval_receipt_id,
+                )
+                if authority_decision is not ActionAuthorityDecision.ALLOWED:
+                    raise ScanCapabilityContractError(
+                        "Scan action authority rejected at dispatch: "
+                        f"{authority_decision.value}"
+                    )
             current_used = _worker_json_object(locked["budget_used_json"])
             current_ledger = {
                 name: int(current_used.get(name) or 0) for name in limits

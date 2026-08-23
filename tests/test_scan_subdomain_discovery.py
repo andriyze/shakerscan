@@ -1347,6 +1347,9 @@ def test_scan_capability_dispatch_is_bound_to_exact_canonical_action(monkeypatch
 
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    async def allow_action(*_args, **_kwargs):
+        return worker.ActionAuthorityDecision.ALLOWED
+    monkeypatch.setattr(worker, "revalidate_scan_action_authority", allow_action)
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
