@@ -285,6 +285,11 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     process_start = worker.index("async def process_scan_job")
     process_end = worker.index("\n\nasync def process_scan_plan_job", process_start)
     process = worker[process_start:process_end]
+    scheduler_start = worker.index("async def _execute_reserved_deterministic_scan")
+    scheduler_end = worker.index(
+        "\n\nasync def _execute_scan_subdomain_discovery", scheduler_start,
+    )
+    scheduler = worker[scheduler_start:scheduler_end]
 
     assert 'FROM scans s JOIN targets t' in handler
     assert 'persisted_options.get("request_collections")' in handler
@@ -307,10 +312,16 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert 'summary["cancelled"] = True' in handler
     assert "Pinn" in handler and "ReplayTransport" in handler
     assert '"require_durable_persistence": True' in handler
-    assert process.index("_execute_scan_request_collections") < process.index(
-        "_hydrate_generic_scan_credentials"
-    ) < process.index("run_scan(")
-    assert 'raise ValueError("Cancelled by user")' in process
+    assert "_execute_scan_request_collections" not in process
+    assert process.index("_hydrate_generic_scan_credentials") < process.index(
+        "_execute_reserved_deterministic_scan("
+    )
+    assert scheduler.index("_execute_scan_request_collections") < scheduler.index(
+        "_execute_scan_subdomain_discovery"
+    )
+    assert "trusted_primary_headers=primary_principal.headers()" in scheduler
+    assert "collection_replay_result_holder.update" in scheduler
+    assert 'raise ValueError("Cancelled by user")' in scheduler
 
 
 def test_scan_api_requires_single_owner_and_freezes_replay_binding():

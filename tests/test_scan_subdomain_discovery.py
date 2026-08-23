@@ -22,6 +22,7 @@ from runtime.capability_settlement import terminalize_capability_reservation
 from runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from runtime.reservation_store import StoredBudgetReservation
 from scan.execution import ScanExecutionPlan
+from scanner_tools.request_replay import ReplayAuthorization, build_replay_plan
 
 
 def _authority(
@@ -294,6 +295,135 @@ def test_cancelled_subdomain_stage_stops_before_web_surface_traffic(monkeypatch)
         ))
 
 
+def test_cancelled_collection_replay_stops_the_surface_stage(monkeypatch):
+    plan, _target, options = _authority(enabled=True)
+    options = {
+        **options,
+        "request_collections": [{"replay_policy": "safe_reads"}],
+    }
+    connection = _Connection(plan)
+    replay_holder = {}
+
+    async def skip_session(*_args, **_kwargs):
+        return worker._skipped_scan_auth_session_summary("test_isolation")
+
+    async def cancelled_replay(*_args, **_kwargs):
+        summary = worker._empty_scan_request_collection_replay_summary()
+        summary.update({
+            "attached_collections": 1,
+            "executable_collections": 1,
+            "status": "cancelled",
+            "cancelled": True,
+        })
+        return summary
+
+    async def unexpected_surface_traffic(*_args, **_kwargs):
+        raise AssertionError("surface traffic continued after replay cancellation")
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(
+        worker, "_execute_scan_auth_session_capability", skip_session,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_scan_request_collections", cancelled_replay,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_scan_subdomain_discovery", unexpected_surface_traffic,
+    )
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    with pytest.raises(ValueError, match="Cancelled by user"):
+        asyncio.run(worker._execute_reserved_deterministic_scan(
+            "https://app.example.test",
+            options,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            collection_replay_result_holder=replay_holder,
+        ))
+
+    assert replay_holder["status"] == "cancelled"
+    assert replay_holder["secret_values_visible"] is False
+
+
+def test_collection_replay_uses_only_an_established_interactive_session(
+    monkeypatch,
+):
+    _plan, target, options = _authority(enabled=True, approval=True)
+    profile_id = "00000000-0000-0000-0000-000000000009"
+    options = {
+        **options,
+        "credential_profile_refs": [{
+            "profile_id": profile_id,
+            "profile_version": 3,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    }
+    session_cookie = "session=worker-private-replay-cookie"
+    replay_plan = build_replay_plan(
+        [{
+            "id": "request-1",
+            "method": "GET",
+            "url": "https://app.example.test/account",
+            "headers": {},
+            "body": b"",
+        }],
+        allowed_origins=target.allowed_origins,
+        authorization=ReplayAuthorization(),
+    )
+
+    class Resolution:
+        profile = SimpleNamespace(
+            profile_id=profile_id,
+            current_version=3,
+            auth_kind="form_login",
+            principal_slot="primary",
+            target_kind="web",
+        )
+
+        def http_headers(self):
+            raise worker.CredentialResolutionError("interactive exchange required")
+
+    class ResolutionContext:
+        async def __aenter__(self):
+            return Resolution()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Resolver:
+        def resolve(self, *_args, **_kwargs):
+            return ResolutionContext()
+
+    async def validate_authority(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", Resolver)
+    monkeypatch.setattr(
+        worker, "validate_worker_credential_authority", validate_authority,
+    )
+
+    bound, receipt_context = asyncio.run(
+        worker._bind_scan_replay_primary_credential(
+            object(),
+            plan=replay_plan,
+            target=target,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            options=options,
+            trusted_primary_headers={"Cookie": session_cookie},
+        )
+    )
+
+    assert bound.wire_requests()[0]["headers"]["Cookie"] == session_cookie
+    assert session_cookie not in repr(bound.public_dict())
+    assert receipt_context == {
+        "principal_profile_ref": profile_id,
+        "principal_profile_version": 3,
+        "principal_slot": "primary",
+    }
+
+
 def test_deterministic_scan_reserves_remaining_budget_before_process_and_redelivery(
     monkeypatch,
 ):
@@ -312,6 +442,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
             "principal_slot": "primary",
             "scan_lane": "primary",
         }],
+        "request_collections": [{"replay_policy": "safe_reads"}],
     }
     connection = _Connection(plan)
     connection.row["budget_used_json"] = {
@@ -327,6 +458,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     calls = 0
     session_calls = 0
     subdomain_calls = 0
+    replay_calls = 0
+    surface_calls = []
+    replay_holder = {}
 
     async def fake_run_scan(
         target,
@@ -343,6 +477,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         assert runtime_options["scan_execution_plan_digest"] == plan.digest
         assert runtime_options["login_password"] == login_secret
         assert session_cookie not in json.dumps(runtime_options)
+        assert runtime_options["custom_budget"]["request_max"] == 98
         assert "auth.session.establish" not in dict(
             _kwargs["canonical_placed_capabilities"]
         )
@@ -399,6 +534,30 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         })
         return summary
 
+    async def replay_collections(
+        runtime_options,
+        _scan_id,
+        *,
+        runtime_request_grant,
+        trusted_primary_headers,
+        **_kwargs,
+    ):
+        nonlocal replay_calls
+        replay_calls += 1
+        surface_calls.append("replay")
+        assert runtime_options["auth_cookies"] == session_cookie
+        assert runtime_request_grant == 17
+        assert trusted_primary_headers == {"Cookie": session_cookie}
+        summary = worker._empty_scan_request_collection_replay_summary()
+        summary.update({
+            "attached_collections": 1,
+            "executable_collections": 1,
+            "status": "success",
+            "replayed": 2,
+            "budget_consumed": {"http_requests": 2},
+        })
+        return summary
+
     async def skip_web_probe(_target_url, runtime_options, **_kwargs):
         assert runtime_options["auth_cookies"] == session_cookie
         assert worker.resolve_scan_http_principal(
@@ -409,6 +568,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     async def skip_subdomains(runtime_options, _scan_id, **_kwargs):
         nonlocal subdomain_calls
         subdomain_calls += 1
+        surface_calls.append("subdomains")
         assert runtime_options["auth_cookies"] == session_cookie
         return worker._skipped_scan_subdomain_summary("test_isolation")
 
@@ -431,6 +591,11 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         worker,
         "_execute_scan_auth_session_capability",
         establish_session,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_request_collections",
+        replay_collections,
     )
     monkeypatch.setattr(
         worker,
@@ -462,6 +627,8 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
         job_id="job-1",
+        runtime_request_grant=17,
+        collection_replay_result_holder=replay_holder,
     ))
 
     assert events[:3] == [
@@ -473,10 +640,14 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     assert events[-1] == ("terminal", "committed")
     assert calls == 1
     assert session_calls == 1
+    assert replay_calls == 1
     assert subdomain_calls == 1
+    assert surface_calls[:2] == ["replay", "subdomains"]
+    assert replay_holder == result["request_collection_replay"]
+    assert result["request_collection_replay"]["replayed"] == 2
     assert result["subdomain_discovery"]["reason"] == "test_isolation"
     surface_stage = result["canonical_stage_execution"]["stages"][2]
-    assert surface_stage["capability_names"][0] == "subdomains.discover"
+    assert surface_stage["capability_names"][0] == "collections.replay_safe"
     assert set(store.current.record.actual) == {"tool_wall_seconds"}
     assert result["deterministic_scan_execution"]["receipt"][
         "budget_reservation_state"
@@ -488,9 +659,12 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
         job_id="job-1",
+        runtime_request_grant=17,
+        collection_replay_result_holder=replay_holder,
     ))
     assert calls == 1
     assert session_calls == 2
+    assert replay_calls == 2
     assert subdomain_calls == 2
     assert redelivered["deterministic_scan_execution"][
         "idempotent_redelivery"

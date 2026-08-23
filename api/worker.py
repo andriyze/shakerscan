@@ -12349,7 +12349,8 @@ async def _execute_reserved_deterministic_scan(
     *,
     scan_id: str,
     job_id: str,
-    collection_replay_summary: Mapping[str, Any] | None = None,
+    runtime_request_grant: int | None = None,
+    collection_replay_result_holder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run canonical DAST through the executable fixed-stage worker graph."""
     normalized, admission = prepare_worker_dispatch(options)
@@ -12366,6 +12367,7 @@ async def _execute_reserved_deterministic_scan(
         job_id=job_id,
     )
     effective_options = dict(normalized)
+    composite_options = dict(normalized)
     primary_principal = resolve_scan_http_principal(
         effective_options, lane="primary",
     )
@@ -12471,8 +12473,8 @@ async def _execute_reserved_deterministic_scan(
                 "request_collections"
             ),
             "custom_endpoint_count": count_rows("custom_endpoints"),
-            "collection_replay_placed": isinstance(
-                collection_replay_summary, Mapping,
+            "collection_replay_scheduled": bool(
+                effective_options.get("request_collections")
             ),
             "secret_values_exposed": False,
             "primary_principal": primary_principal.public_dict(),
@@ -12503,13 +12505,48 @@ async def _execute_reserved_deterministic_scan(
     async def discover_surface_stage(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
+        nonlocal effective_options, composite_options
+        replay_capability_names = _scan_request_collection_capability_names(
+            effective_options
+        )
+        if effective_options.get("request_collections"):
+            collection_replay_summary = await _execute_scan_request_collections(
+                effective_options,
+                scan_id,
+                job_id=job_id,
+                runtime_request_grant=runtime_request_grant,
+                trusted_primary_headers=primary_principal.headers(),
+            )
+        else:
+            collection_replay_summary = (
+                _empty_scan_request_collection_replay_summary()
+            )
+        if collection_replay_result_holder is not None:
+            collection_replay_result_holder.clear()
+            collection_replay_result_holder.update(collection_replay_summary)
+        if collection_replay_summary.get("cancelled"):
+            return stage_capabilities(
+                {"collections.replay": collection_replay_summary},
+                capability_names=replay_capability_names,
+            )
+        effective_options = _apply_scan_collection_replay_remaining_budget(
+            effective_options, collection_replay_summary,
+        )
+        composite_options = _apply_scan_collection_replay_remaining_budget(
+            composite_options, collection_replay_summary,
+        )
         subdomains = await _execute_scan_subdomain_discovery(
             effective_options, scan_id, job_id=job_id,
         )
         if str(subdomains.get("status") or "").strip().lower() == "cancelled":
             return stage_capabilities(
-                {"subdomains.discover": subdomains},
-                capability_names=("subdomains.discover",),
+                {
+                    "collections.replay": collection_replay_summary,
+                    "subdomains.discover": subdomains,
+                },
+                capability_names=(
+                    *replay_capability_names, "subdomains.discover",
+                ),
             )
         probe = await _execute_scan_web_probe_capability(
             target, effective_options, scan_id=scan_id, job_id=job_id,
@@ -12521,18 +12558,17 @@ async def _execute_reserved_deterministic_scan(
             target, effective_options, scan_id=scan_id, job_id=job_id,
         )
         output: dict[str, Any] = {
+            "collections.replay": collection_replay_summary,
             "subdomains.discover": subdomains,
             "web.probe": probe,
             "web.crawl": crawl,
             "web.content_discover": content,
         }
         capability_names = [
+            *replay_capability_names,
             "subdomains.discover", "web.probe", "web.crawl",
             "web.content_discover",
         ]
-        if isinstance(collection_replay_summary, Mapping):
-            output["collections.replay"] = dict(collection_replay_summary)
-            capability_names.append("collections.replay")
         return stage_capabilities(
             output, capability_names=tuple(capability_names),
         )
@@ -12715,6 +12751,12 @@ async def _execute_reserved_deterministic_scan(
             "authz.verify": active.get("authz.verify")
             or _skipped_scan_authz_verification_summary("stage_disabled"),
         }
+        collection_replay = surface.get("collections.replay")
+        if isinstance(collection_replay, Mapping):
+            for capability_name in _scan_request_collection_capability_names(
+                effective_options
+            ):
+                placed_capabilities[capability_name] = dict(collection_replay)
         result_holder: dict[str, Any] = {}
 
         async def scan_runner(
@@ -12727,7 +12769,7 @@ async def _execute_reserved_deterministic_scan(
             }
             return await run_scan(
                 target,
-                dict(options),
+                dict(composite_options),
                 scan_id=scan_id,
                 job_id=job_id,
                 canonical_runtime_budget=runtime_budget,
@@ -12786,6 +12828,10 @@ async def _execute_reserved_deterministic_scan(
             "sqli.verify": active.get("sqli.verify"),
             "authz.verify": active.get("authz.verify"),
         }
+        for capability_name in _scan_request_collection_capability_names(
+            effective_options
+        ):
+            authenticated_candidates[capability_name] = collection_replay
         authentication["applied_capabilities"] = (
             sorted(
                 capability_name
@@ -12812,6 +12858,11 @@ async def _execute_reserved_deterministic_scan(
             network.get("network.discovery")
             if isinstance(network.get("network.discovery"), Mapping)
             else None,
+        )
+        result["request_collection_replay"] = (
+            dict(collection_replay)
+            if isinstance(collection_replay, Mapping)
+            else _empty_scan_request_collection_replay_summary()
         )
         status = "partial" if (
             result.get("error") or summary.get("partial") or summary.get("timed_out")
@@ -13406,6 +13457,43 @@ def _attach_scan_subdomain_summary(
     return result
 
 
+def _empty_scan_request_collection_replay_summary() -> dict[str, Any]:
+    return {
+        "schema_version": "scan-request-collection-replay/v1",
+        "attached_collections": 0,
+        "executable_collections": 0,
+        "discovery_only_collections": 0,
+        "collections": [],
+        "replayed": 0,
+        "observation_count": 0,
+        "status": "skipped",
+        "cancelled": False,
+        "observations": [],
+        "budget_consumed": {},
+        "partial": False,
+        "secret_values_visible": False,
+        "durable_budget_settled": True,
+        "network_binding": "runtime_target_binding",
+    }
+
+
+def _scan_request_collection_capability_names(
+    options: Mapping[str, Any],
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in options.get("request_collections") or ():
+        if not isinstance(item, Mapping):
+            continue
+        replay_policy = str(item.get("replay_policy") or "").strip().lower()
+        name = {
+            "safe_reads": "collections.replay_safe",
+            "confirmed_active": "collections.replay_active",
+        }.get(replay_policy)
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 async def _bind_scan_replay_primary_credential(
     conn: Any,
     *,
@@ -13413,6 +13501,7 @@ async def _bind_scan_replay_primary_credential(
     target: TargetBinding,
     scan_id: str,
     options: Mapping[str, Any],
+    trusted_primary_headers: Mapping[str, str] | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
     """Independently resolve the Scan primary identity into one exact replay plan."""
     refs = [
@@ -13465,9 +13554,16 @@ async def _bind_scan_replay_primary_credential(
         try:
             headers = resolved.http_headers().as_dict()
         except CredentialResolutionError as exc:
-            raise ReplayExecutionError(
-                "exact collection replay requires a non-interactive primary credential"
-            ) from exc
+            if (
+                resolved.profile.auth_kind not in {
+                    "form_login", "oauth_client_credentials", "oauth_password",
+                }
+                or not trusted_primary_headers
+            ):
+                raise ReplayExecutionError(
+                    "exact collection replay requires an established primary session"
+                ) from exc
+            headers = dict(trusted_primary_headers)
         bound = bind_replay_credential_headers(
             plan, headers, auth_kind=resolved.profile.auth_kind,
         )
@@ -13482,6 +13578,7 @@ async def _bind_scan_replay_primary_credential(
 async def _execute_scan_request_collections(
     options: Mapping[str, Any], scan_id: str, *, job_id: str,
     runtime_request_grant: int | None = None,
+    trusted_primary_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute saved Scan selections through the canonical exact replay executor."""
     try:
@@ -13512,24 +13609,15 @@ async def _execute_scan_request_collections(
         if str(item.get("replay_policy") or "").strip().lower()
         in EXECUTABLE_REPLAY_POLICIES
     ]
-    summary: dict[str, Any] = {
-        "schema_version": "scan-request-collection-replay/v1",
+    summary = _empty_scan_request_collection_replay_summary()
+    summary.update({
         "attached_collections": len(refs),
         "executable_collections": len(executable),
         "discovery_only_collections": len(refs) - len(executable),
-        "collections": [],
-        "replayed": 0,
-        "observation_count": 0,
-        "cancelled": False,
-        "observations": [],
-        "budget_consumed": {},
-        "partial": False,
-        "secret_values_visible": False,
-        "durable_budget_settled": True,
-        "network_binding": "runtime_target_binding",
-    }
+    })
     if not executable:
         return summary
+    summary["status"] = "success"
     if str(row["status"] or "") != "running":
         raise ScanCollectionReplayContractError("Scan is no longer executable")
 
@@ -13586,6 +13674,11 @@ async def _execute_scan_request_collections(
                 "Scan replay requires a saved collection selection"
             ) from exc
         replay_policy = str(ref.get("replay_policy") or "").strip().lower()
+        replay_capability_name = (
+            "collections.replay_active"
+            if replay_policy == "confirmed_active"
+            else "collections.replay_safe"
+        )
         expected_payload_sha256 = str(ref.get("payload_sha256") or "").lower()
         expected_selection_digest = str(ref.get("selection_digest") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_payload_sha256):
@@ -13774,6 +13867,7 @@ async def _execute_scan_request_collections(
             summary["collections"].append({
                 "collection_id": collection_id,
                 "selection_id": selection_id,
+                "capability_name": replay_capability_name,
                 "replay_policy": replay_policy,
                 "status": "skipped",
                 "reason": "saved_selection_resolved_to_no_requests",
@@ -13812,6 +13906,7 @@ async def _execute_scan_request_collections(
                 target=target_binding,
                 scan_id=scan_id,
                 options=persisted_options,
+                trusted_primary_headers=trusted_primary_headers,
             )
 
         additional_budget = {"tool_wall_seconds": wall_reservation}
@@ -13854,6 +13949,7 @@ async def _execute_scan_request_collections(
                     summary["collections"].append({
                         "collection_id": collection_id,
                         "selection_id": selection_id,
+                        "capability_name": replay_capability_name,
                         "replay_policy": replay_policy,
                         "status": "succeeded",
                         "replayed": int(stored.record.actual.get("http_requests") or 0),
@@ -13999,11 +14095,6 @@ async def _execute_scan_request_collections(
                         scan_uuid, json.dumps(current_used),
                     )
 
-        replay_capability_name = (
-            "collections.replay_active"
-            if replay_policy == "confirmed_active"
-            else "collections.replay_safe"
-        )
         replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
             replay_capability_name
         )
@@ -14062,6 +14153,7 @@ async def _execute_scan_request_collections(
         summary["collections"].append({
             "collection_id": collection_id,
             "selection_id": selection_id,
+            "capability_name": replay_capability_name,
             "replay_policy": replay_policy,
             "status": item_status,
             "partial": bool(outcome.receipt.partial),
@@ -14089,6 +14181,7 @@ async def _execute_scan_request_collections(
             summary["budget_consumed"], outcome.reservation.actual,
         )
         if outcome.status == "cancelled":
+            summary["status"] = "cancelled"
             summary["cancelled"] = True
             return summary
         if outcome.reservation.status != "committed":
@@ -14100,6 +14193,8 @@ async def _execute_scan_request_collections(
     summary["observations_truncated"] = (
         summary["observation_count"] > len(summary["observations"])
     )
+    if summary["partial"]:
+        summary["status"] = "partial"
     return summary
 
 
@@ -14303,30 +14398,12 @@ async def process_scan_job(job_data: dict):
     )
     heartbeat_thread.start()
 
-    collection_replay_summary: dict[str, Any] | None = None
+    collection_replay_summary: dict[str, Any] = {}
     try:
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
-                run_kind = str((options or {}).get("run_kind") or "web_dast")
-                if (
-                    target_id
-                    and not device_target_id
-                    and not ai_target_id
-                    and run_kind not in AI_GATE_RUN_KINDS | MODEL_INTAKE_RUN_KINDS
-                ):
-                    collection_replay_summary = await _execute_scan_request_collections(
-                        options,
-                        scan_id,
-                        job_id=job_id,
-                        runtime_request_grant=runtime_request_grant,
-                    )
-                    if collection_replay_summary.get("cancelled"):
-                        raise ValueError("Cancelled by user")
-                    options = _apply_scan_collection_replay_remaining_budget(
-                        options, collection_replay_summary,
-                    )
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
@@ -14338,7 +14415,8 @@ async def process_scan_job(job_data: dict):
                         options,
                         scan_id=scan_id,
                         job_id=job_id,
-                        collection_replay_summary=collection_replay_summary,
+                        runtime_request_grant=runtime_request_grant,
+                        collection_replay_result_holder=collection_replay_summary,
                     )
                 else:
                     result = await run_scan(
@@ -14404,7 +14482,7 @@ async def process_scan_job(job_data: dict):
             result = _unexpected_scan_exception_result(str(target or ""), e)
             print(f"[{job_id[:8]}] Unexpected scan failure: {result['error']}", flush=True)
 
-        if collection_replay_summary is not None:
+        if collection_replay_summary:
             result["request_collection_replay"] = collection_replay_summary
         result['job_id'] = job_id
         result['scan_id'] = scan_id
