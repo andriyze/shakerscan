@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -71,6 +72,27 @@ class FakeConn:
         self.executed = []
         self.plan_row = None
         self.actions = {}
+        self.fail_action_id = None
+
+    class _Transaction:
+        def __init__(self, conn):
+            self.conn = conn
+            self.snapshot = None
+
+        async def __aenter__(self):
+            self.snapshot = (
+                copy.deepcopy(self.conn.plan_row),
+                copy.deepcopy(self.conn.actions),
+            )
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            if exc_type is not None:
+                self.conn.plan_row, self.conn.actions = self.snapshot
+            return False
+
+    def transaction(self):
+        return self._Transaction(self)
 
     async def execute(self, query, *args):
         self.executed.append((query, args))
@@ -123,6 +145,8 @@ class FakeConn:
             return self.plan_row
         if query.lstrip().startswith("INSERT INTO scan_capability_actions"):
             action_id = args[1]
+            if action_id == self.fail_action_id:
+                raise RuntimeError("injected action-index failure")
             incoming = {
                 "id": uuid.uuid4(),
                 "action_id": action_id,
@@ -167,6 +191,18 @@ def test_action_store_persists_and_reloads_content_addressed_plan_idempotently()
     assert loaded == plan
     assert conn.plan_row["scan_action_plan_digest"] == plan.plan_digest
     assert all(row["status"] == "planned" for row in conn.actions.values())
+
+
+def test_action_store_rolls_back_header_and_index_on_mid_plan_failure():
+    plan = _plan()
+    conn = FakeConn()
+    conn.fail_action_id = plan.actions[1].action_id
+
+    with pytest.raises(RuntimeError, match="injected action-index failure"):
+        asyncio.run(PostgresScanActionStore().persist_plan(conn, plan=plan))
+
+    assert conn.plan_row is None
+    assert conn.actions == {}
 
 
 def test_action_store_rejects_changed_plan_and_incomplete_or_tampered_index():

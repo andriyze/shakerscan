@@ -186,6 +186,7 @@ class ScanActionDatabase(Protocol):
     async def execute(self, query: str, *args: Any) -> Any: ...
     async def fetchrow(self, query: str, *args: Any) -> Any: ...
     async def fetch(self, query: str, *args: Any) -> Any: ...
+    def transaction(self) -> Any: ...
 
 
 def _json_object(value: Any, *, name: str) -> dict[str, Any]:
@@ -207,6 +208,20 @@ class PostgresScanActionStore:
         await conn.execute(SCAN_ACTION_SCHEMA_SQL)
 
     async def persist_plan(
+        self,
+        conn: ScanActionDatabase,
+        *,
+        plan: ScanActionPlan,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Persist the plan header and complete action index atomically.
+
+        asyncpg turns this into a savepoint when the caller already owns the
+        wider Scan-admission transaction.
+        """
+        async with conn.transaction():
+            return await self._persist_plan_rows(conn, plan=plan)
+
+    async def _persist_plan_rows(
         self,
         conn: ScanActionDatabase,
         *,
