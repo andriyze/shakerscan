@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
+from scan.action_plan import ScanAction, ScanActionPlan  # noqa: E402
 import broker_worker  # noqa: E402
 sys.path.pop(0)
 
@@ -68,6 +69,63 @@ def _canonical_broker_scan_lease():
     return job, lease, runtime
 
 
+def _canonical_broker_action_lease():
+    scan_id = "33333333-3333-4333-8333-333333333333"
+    target_binding = {
+        "target_id": "target-1",
+        "target_kind": "web",
+        "canonical_host": "app.example.test",
+        "allowed_origins": ["https://app.example.test"],
+        "allowed_addresses": ["192.0.2.10"],
+        "allowed_root_domains": ["example.test"],
+        "environment": "unknown",
+        "scope_receipt_id": "scope-1",
+    }
+    target_digest = broker_worker.hashlib.sha256(json.dumps(
+        target_binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    action = ScanAction(
+        action_id="baseline.http",
+        stage="deterministic_baseline",
+        ordinal=0,
+        capability_name="http.request",
+        capability_args={"method": "GET", "path": "/", "follow_redirects": False},
+        target_binding_digest=target_digest,
+        input_binding_digest="c" * 64,
+        requested_budget={"http_requests": 1, "tool_wall_seconds": 5},
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": {},
+            "adapter_name": "native.http",
+            "adapter_version": "1",
+        },
+        dependencies=(),
+        required=True,
+        supporting=False,
+        output_schema="http-observation/v1",
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target_digest,
+        actions=(action,),
+    )
+    job = {
+        "scan_id": scan_id,
+        "options": {
+            "scan_execution_plan_digest": "a" * 64,
+            "_canonical_target_binding": target_binding,
+        },
+    }
+    lease = {
+        "scan_execution": None,
+        "scan_action_plan": plan.canonical_dict(),
+        "action_worker_id": "broker:node-1:container-a",
+    }
+    return job, lease, plan
+
+
 def test_broker_scan_requires_and_validates_durable_runtime_hold():
     job, lease, runtime = _canonical_broker_scan_lease()
 
@@ -86,6 +144,25 @@ def test_noncanonical_broker_job_rejects_injected_scan_authority():
     _job, lease, _runtime = _canonical_broker_scan_lease()
     with pytest.raises(broker_worker.BrokerWorkerError, match="non-canonical"):
         broker_worker._broker_scan_runtime_budget({"options": {}}, lease)
+
+
+def test_broker_scan_requires_complete_immutable_action_plan():
+    job, lease, plan = _canonical_broker_action_lease()
+
+    parsed, worker_id = broker_worker._broker_scan_action_plan(job, lease)
+
+    assert parsed.plan_digest == plan.plan_digest
+    assert worker_id == "broker:node-1:container-a"
+
+    changed = json.loads(json.dumps(lease))
+    changed["scan_action_plan"]["actions"][0]["capability_args"]["path"] = "/admin"
+    with pytest.raises(broker_worker.BrokerWorkerError, match="invalid"):
+        broker_worker._broker_scan_action_plan(job, changed)
+
+    changed = json.loads(json.dumps(lease))
+    changed["scan_execution"] = _canonical_broker_scan_lease()[1]["scan_execution"]
+    with pytest.raises(broker_worker.BrokerWorkerError, match="deprecated monolithic"):
+        broker_worker._broker_scan_action_plan(job, changed)
 
 
 def test_broker_state_requires_owner_only_https_but_not_data_store_credentials(tmp_path):

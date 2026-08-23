@@ -185,6 +185,24 @@ class BrokerScanExecutionBackend:
         except (TypeError, ValueError) as exc:
             raise ScanExecutionBackendError("broker stored action result is invalid") from exc
 
+    async def load_observations(
+        self, action_id: str,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Fetch the redacted durable observations required by dependencies."""
+        action = self._action(action_id)
+        response = await self._request(
+            "POST", self._path(action.action_id, "observations"),
+            self._authority(action),
+        )
+        if not isinstance(response, Mapping) or set(response) != {"observations"}:
+            raise ScanExecutionBackendError("broker action observations response is invalid")
+        rows = response["observations"]
+        if not isinstance(rows, list) or len(rows) > 100_000:
+            raise ScanExecutionBackendError("broker action observations are invalid")
+        if any(not isinstance(item, Mapping) for item in rows):
+            raise ScanExecutionBackendError("broker action observation is invalid")
+        return tuple(dict(item) for item in rows)
+
     async def cancellation_requested(self) -> bool:
         response = await self._request(
             "POST", f"{self._base_path}/cancel-status",

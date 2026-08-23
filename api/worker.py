@@ -19527,7 +19527,10 @@ async def _execute_agent_scanner_process(
     """Run one fixed-template scanner and return a bounded typed result."""
     job_id = str(job_data.get("job_id") or "").strip()
     cancel_key = f"agent_tool_cancel:{job_id}"
-    redis_client = get_redis()
+    broker_lease = str(
+        os.environ.get("SHAKERSCAN_BROKER_LEASE") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    redis_client = None if broker_lease else get_redis()
     started_at = datetime.now(timezone.utc)
     monotonic_started = time.monotonic()
     proc: asyncio.subprocess.Process | None = None
@@ -19651,7 +19654,7 @@ async def _execute_agent_scanner_process(
         while not wait_process.done():
             if (
                 (cancelled is not None and cancelled())
-                or redis_client.exists(cancel_key)
+                or (redis_client is not None and redis_client.exists(cancel_key))
             ):
                 status, error = "cancelled", "cancelled"
                 _terminate_agent_tool_process_group(proc)

@@ -105,6 +105,8 @@ def test_broker_backend_round_trips_one_strict_action_lease_and_receipt():
             return {"result": _result(action, received).canonical_dict()}
         if path.endswith("/status"):
             return {"result": None}
+        if path.endswith("/observations"):
+            return {"observations": [{"kind": "http_observation"}]}
         return {"cancel_requested": False}
 
     backend = BrokerScanExecutionBackend(
@@ -125,8 +127,10 @@ def test_broker_backend_round_trips_one_strict_action_lease_and_receipt():
         budget_consumed={"http_requests": 1, "tool_wall_seconds": 1},
     )
     stored = asyncio.run(backend.settle(lease, receipt))
+    observations = asyncio.run(backend.load_observations(action.action_id))
 
     assert stored.status is CapabilityResultStatus.SUCCESS
+    assert observations == ({"kind": "http_observation"},)
     assert receipt_holder["receipt"].receipt_hash == receipt.receipt_hash
     assert all(call[2]["plan_digest"] == plan.plan_digest for call in calls)
     assert all(call[2]["action_digest"] == action.action_digest for call in calls)

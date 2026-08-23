@@ -309,6 +309,13 @@ class PostgresScanExecutionBackend:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     async def acquire_action(self, action: ScanAction) -> ActionLease:
+        async with self._pool.acquire() as conn:
+            return await self.acquire_action_with_connection(conn, action)
+
+    async def acquire_action_with_connection(
+        self, conn: Any, action: ScanAction,
+    ) -> ActionLease:
+        """Lease one action on a caller-owned control-plane connection."""
         expected = self._require_action(action.action_id)
         if expected.action_digest != action.action_digest:
             raise ScanExecutionBackendError("action differs from the persisted Scan plan")
@@ -319,9 +326,8 @@ class PostgresScanExecutionBackend:
         if not _LEASE_TOKEN_RE.fullmatch(token):
             raise ScanExecutionBackendError("generated lease token is invalid")
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._lease_seconds)
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE scan_capability_actions
+        row = await conn.fetchrow(
+            """UPDATE scan_capability_actions
                       SET status='leased', backend_name=$6, worker_id=$7,
                           lease_id=$8, lease_token_hash=$9,
                           lease_expires_at=$10, attempt=attempt+1,
@@ -332,33 +338,33 @@ class PostgresScanExecutionBackend:
                       AND target_binding_digest=$5
                       AND status='planned'
                 RETURNING attempt""",
+            uuid.UUID(self._plan.scan_id),
+            action.action_id,
+            action.action_digest,
+            self._plan.execution_plan_digest,
+            self._plan.target_binding_digest,
+            self.backend_name,
+            self._worker_id,
+            uuid.UUID(lease_id),
+            self._token_hash(token),
+            expires_at,
+        )
+        if row is None:
+            state = await conn.fetchrow(
+                """SELECT status, result_json, action_digest
+                     FROM scan_capability_actions
+                    WHERE scan_id=$1 AND action_id=$2""",
                 uuid.UUID(self._plan.scan_id),
                 action.action_id,
-                action.action_digest,
-                self._plan.execution_plan_digest,
-                self._plan.target_binding_digest,
-                self.backend_name,
-                self._worker_id,
-                uuid.UUID(lease_id),
-                self._token_hash(token),
-                expires_at,
             )
-            if row is None:
-                state = await conn.fetchrow(
-                    """SELECT status, result_json, action_digest
-                         FROM scan_capability_actions
-                        WHERE scan_id=$1 AND action_id=$2""",
-                    uuid.UUID(self._plan.scan_id),
-                    action.action_id,
-                )
-                if state and str(state.get("status") or "") in {
-                    "success", "partial", "skipped", "blocked", "failed",
-                    "cancelled", "timed_out",
-                }:
-                    raise ActionAlreadyTerminal(action.action_id)
-                raise ScanExecutionBackendError(
-                    "action is already leased or its immutable authority changed"
-                )
+            if state and str(state.get("status") or "") in {
+                "success", "partial", "skipped", "blocked", "failed",
+                "cancelled", "timed_out",
+            }:
+                raise ActionAlreadyTerminal(action.action_id)
+            raise ScanExecutionBackendError(
+                "action is already leased or its immutable authority changed"
+            )
         return ActionLease(
             lease_id=lease_id,
             lease_token=token,
@@ -402,10 +408,20 @@ class PostgresScanExecutionBackend:
         lease: ActionLease,
         result: CapabilityResultReference | CapabilityReceipt,
     ) -> CapabilityResultReference:
+        async with self._pool.acquire() as conn:
+            return await self.settle_with_connection(conn, lease, result)
+
+    async def settle_with_connection(
+        self,
+        conn: Any,
+        lease: ActionLease,
+        result: CapabilityResultReference | CapabilityReceipt,
+    ) -> CapabilityResultReference:
+        """Settle one action transactionally on a caller-owned connection."""
         action = self._require_action(lease.action.action_id)
         validate_action_lease(lease, plan=self._plan, action=action)
         receipt_json: str | None = None
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with conn.transaction():
             if isinstance(result, CapabilityReceipt):
                 receipt_json = json.dumps(
                     result.public_dict(), sort_keys=True, separators=(",", ":"),
@@ -589,16 +605,26 @@ class PostgresScanExecutionBackend:
         return result
 
     async def load_result(self, action_id: str) -> CapabilityResultReference | None:
-        action = self._require_action(action_id)
         async with self._pool.acquire() as conn:
-            return await self._load_result_with_conn(conn, action)
+            return await self.load_result_with_connection(conn, action_id)
+
+    async def load_result_with_connection(
+        self, conn: Any, action_id: str,
+    ) -> CapabilityResultReference | None:
+        """Read a result without recursively acquiring the control-plane pool."""
+        action = self._require_action(action_id)
+        return await self._load_result_with_conn(conn, action)
 
     async def cancellation_requested(self) -> bool:
         async with self._pool.acquire() as conn:
-            status = await conn.fetchval(
-                "SELECT status FROM scans WHERE id=$1",
-                uuid.UUID(self._plan.scan_id),
-            )
+            return await self.cancellation_requested_with_connection(conn)
+
+    async def cancellation_requested_with_connection(self, conn: Any) -> bool:
+        """Read cancellation without recursively acquiring the pool."""
+        status = await conn.fetchval(
+            "SELECT status FROM scans WHERE id=$1",
+            uuid.UUID(self._plan.scan_id),
+        )
         if status is None:
             raise ScanExecutionBackendError("Scan owner disappeared during execution")
         return str(status).strip().lower() in {"cancelled", "cancelling"}

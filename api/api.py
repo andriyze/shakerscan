@@ -460,6 +460,19 @@ try:
         request_collection_action_refs,
     )
     from scan.action_store import PostgresScanActionStore
+    from scan.authorization import (
+        ActionAuthorityDecision,
+        revalidate_scan_action_authority,
+    )
+    from scan.execution_backend import (
+        ActionAlreadyTerminal,
+        ActionLease,
+        ActionLeaseLost,
+        PostgresScanExecutionBackend,
+        ScanExecutionBackendError,
+    )
+    from runtime.receipts import CapabilityReceipt
+    from runtime.observation_store import PostgresObservationManifestStore
     from scan.budget_allocator import (
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
@@ -510,6 +523,19 @@ except ModuleNotFoundError:
         request_collection_action_refs,
     )
     from api.scan.action_store import PostgresScanActionStore
+    from api.scan.authorization import (
+        ActionAuthorityDecision,
+        revalidate_scan_action_authority,
+    )
+    from api.scan.execution_backend import (
+        ActionAlreadyTerminal,
+        ActionLease,
+        ActionLeaseLost,
+        PostgresScanExecutionBackend,
+        ScanExecutionBackendError,
+    )
+    from api.runtime.receipts import CapabilityReceipt
+    from api.runtime.observation_store import PostgresObservationManifestStore
     from api.scan.budget_allocator import (
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
@@ -6352,6 +6378,34 @@ class BrokerResultRequest(BaseModel):
     result: dict[str, Any]
 
 
+class BrokerActionAuthorityRequest(BaseModel):
+    """Outer job authority plus one immutable action identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_lease_token: str = Field(min_length=32, max_length=256)
+    worker_id: str = Field(min_length=1, max_length=200)
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(min_length=1, max_length=128)
+    action_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BrokerActionLeaseRequest(BrokerActionAuthorityRequest):
+    action_lease: dict[str, Any]
+
+
+class BrokerActionResultRequest(BrokerActionLeaseRequest):
+    receipt: dict[str, Any]
+
+
+class BrokerActionCancelStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_lease_token: str = Field(min_length=32, max_length=256)
+    worker_id: str = Field(min_length=1, max_length=200)
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def _configure_scan_plan_job(
     job_data: dict[str, Any], parallel_worker_count: int | None = None
 ) -> None:
@@ -10272,6 +10326,10 @@ async def _broker_reserve_request_budget(
 ) -> dict[str, Any] | None:
     """Reserve the same root-domain request budget before remote execution."""
     options = dict(payload.get("options") or {})
+    immutable_actions = bool(
+        str(options.get("scan_action_plan_digest") or "").strip()
+        or str(options.get("scan_execution_plan_digest") or "").strip()
+    )
     mode = str(options.get("request_budget_mode") or "compatibility").strip().lower()
     if mode == "off":
         return {}
@@ -10310,7 +10368,7 @@ async def _broker_reserve_request_budget(
         used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
         remaining = max(0, cap - int(used or 0))
         parent_scan_id = (target or {}).get("parent_scan_id")
-        if parent_scan_id:
+        if parent_scan_id and not immutable_actions:
             # A parallel parent owns one logical per-domain allowance. Without
             # fair sharing, the first broker child can reserve the entire cap
             # and leave every sibling parked for the reservation TTL. Include
@@ -10344,7 +10402,7 @@ async def _broker_reserve_request_budget(
                 root_domain,
                 remaining,
                 reservation_request,
-                all_or_nothing=False,
+                all_or_nothing=immutable_actions,
             )
         except Exception:
             return None
@@ -10472,6 +10530,22 @@ async def _broker_active_scan_cap() -> int:
     return _compute_broker_active_scan_cap(
         nodes,
         override=os.environ.get("SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS"),
+    )
+
+
+_BROKER_PRIVATE_INPUT_CAPABILITIES = frozenset({
+    "auth.session.establish",
+    "collections.replay_safe",
+    "collections.replay_active",
+})
+
+
+def _broker_action_plan_requires_local_private_inputs(plan: Any) -> bool:
+    """Keep worker-private inputs local until their sealed exchange is available."""
+    return any(
+        str(getattr(action, "capability_name", ""))
+        in _BROKER_PRIVATE_INPUT_CAPABILITIES
+        for action in tuple(getattr(plan, "actions", ()) or ())
     )
 
 
@@ -10661,6 +10735,31 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
 
+    if (
+        canonical_materialized is not None
+        and is_deterministic_dast(canonical_materialized.get("options"))
+        and candidate_scan_id is not None
+    ):
+        async with db_pool.acquire() as conn:
+            broker_candidate_plan = await PostgresScanActionStore().load_plan(
+                conn, scan_id=str(candidate_scan_id),
+            )
+        if (
+            broker_candidate_plan is not None
+            and _broker_action_plan_requires_local_private_inputs(
+                broker_candidate_plan,
+            )
+        ):
+            local_payload = dict(queued_payload)
+            local_payload["placement"] = {"node_scope": "local"}
+            enqueue_job(
+                redis_client,
+                str(local_payload.get("_base_queue_name") or QUEUE_NAME),
+                local_payload,
+            )
+            await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+            return Response(status_code=204)
+
     slot_id = _broker_slot_id(str(lease.stream_key), str(lease.message_id))
     broker_cap = await _broker_active_scan_cap()
     if not _broker_take_or_refresh_slot(redis_client, slot_id, cap=broker_cap):
@@ -10683,6 +10782,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     budget_reservation: dict[str, Any] | None = None
     durable_scan_execution: dict[str, Any] | None = None
     durable_scan_terminal = None
+    scan_action_plan_payload: dict[str, Any] | None = None
+    action_worker_id: str | None = None
     row = None
     if canonical_materialized is not None:
         payload = _broker_execution_projection(canonical_materialized)
@@ -10704,35 +10805,28 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                     status_code=409,
                     detail="broker Scan lost canonical execution authority",
                 )
+            try:
+                persisted_action_plan = await PostgresScanActionStore().load_plan(
+                    conn, scan_id=str(payload.get("scan_id") or ""),
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             native_execution = build_native_scan_execution(
                 scan_admission.plan, normalized_options,
             )
-            granted_requests = max(
-                0, int(budget_reservation.get("granted") or 0),
-            )
-            try:
-                durable_admission = await reserve_broker_scan_execution(
-                    conn,
-                    scan_id=str(payload.get("scan_id") or ""),
-                    plan=scan_admission.plan,
-                    execution=native_execution,
-                    worker_id=f"broker:{body.worker_id}",
-                    lease_seconds=BROKER_LEASE_SECONDS,
-                    allocation_limits={
-                        "http_requests": granted_requests,
-                        "state_changing_requests": granted_requests,
-                    },
+            if (
+                persisted_action_plan is None
+                or persisted_action_plan.execution_plan_digest
+                != native_execution.execution_plan.digest
+                or persisted_action_plan.target_binding_digest
+                != native_execution.target_binding.digest
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker Scan action plan conflicts with runtime authority",
                 )
-            except BrokerScanExecutionError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            if durable_admission.lease is None:
-                durable_scan_terminal = durable_admission.stored
-                budget_reservation = None
-            else:
-                durable_scan_execution = durable_admission.lease.remote_payload()
-                budget_reservation["durable_scan_execution"] = (
-                    durable_admission.lease.storage_payload()
-                )
+            scan_action_plan_payload = persisted_action_plan.canonical_dict()
+            action_worker_id = f"broker:{body.worker_id}"
         if budget_reservation is not None:
             await conn.execute(
                 """
@@ -10934,6 +11028,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             "heartbeat_interval_seconds": max(10, BROKER_LEASE_SECONDS // 3),
             "job": payload,
             "scan_execution": durable_scan_execution,
+            "scan_action_plan": scan_action_plan_payload,
+            "action_worker_id": action_worker_id,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -10963,6 +11059,388 @@ async def _broker_lease_row(
     if not row:
         raise HTTPException(status_code=404, detail="broker lease not found")
     return row
+
+
+async def _broker_action_context(
+    conn: Any,
+    *,
+    node_id: str,
+    lease_id: str,
+    job_lease_token: str,
+    worker_id: str,
+    plan_digest: str,
+    action_id: str | None = None,
+    action_digest: str | None = None,
+) -> tuple[Any, Any, Any, Any | None, Any]:
+    """Bind one broker action call to its live outer job and persisted plan."""
+    row = await _broker_lease_row(
+        conn,
+        node_id=node_id,
+        lease_id=lease_id,
+        lease_token=job_lease_token,
+    )
+    if str(row.get("status") or "") != "leased":
+        raise HTTPException(status_code=409, detail=f"broker lease is {row['status']}")
+    if row.get("lease_expires_at") is None or row["lease_expires_at"] <= utc_now():
+        raise HTTPException(status_code=410, detail="broker job lease expired")
+    expected_worker = f"broker:{str(row.get('worker_id') or '')}"
+    if worker_id != expected_worker:
+        raise HTTPException(status_code=409, detail="broker action worker differs from job lease")
+    if not row.get("scan_id"):
+        raise HTTPException(status_code=409, detail="broker job has no Scan owner")
+    action_store = PostgresScanActionStore()
+    try:
+        plan = await action_store.load_plan(conn, scan_id=str(row["scan_id"]))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409, detail="broker Scan action plan is unavailable",
+        ) from exc
+    if plan is None or str(plan.plan_digest) != str(plan_digest):
+        raise HTTPException(status_code=409, detail="broker Scan action plan changed")
+    scan_row = await conn.fetchrow(
+        "SELECT status, target_id, scan_job_payload FROM scans WHERE id=$1",
+        row["scan_id"],
+    )
+    if not scan_row:
+        raise HTTPException(status_code=409, detail="broker Scan owner disappeared")
+    raw_job = parse_json_field(scan_row.get("scan_job_payload")) or {}
+    try:
+        canonical_job = CanonicalScanJob.from_payload(raw_job)
+    except CanonicalScanJobError as exc:
+        raise HTTPException(
+            status_code=409, detail="broker Scan job authority is invalid",
+        ) from exc
+    if (
+        canonical_job.scan_id != plan.scan_id
+        or canonical_job.execution_plan.digest != plan.execution_plan_digest
+        or canonical_job.target.digest != plan.target_binding_digest
+    ):
+        raise HTTPException(
+            status_code=409, detail="broker Scan job and action plan differ",
+        )
+    action = None
+    if action_id is not None:
+        action = next(
+            (item for item in plan.actions if item.action_id == action_id), None,
+        )
+        if action is None or action.action_digest != str(action_digest or ""):
+            raise HTTPException(status_code=409, detail="broker action authority changed")
+        if "broker" not in tuple(action.placement.get("eligible_backends") or ()):
+            raise HTTPException(status_code=409, detail="broker action placement is unavailable")
+    backend = PostgresScanExecutionBackend(
+        pool=db_pool,
+        plan=plan,
+        worker_id=worker_id,
+        backend_name="broker",
+        lease_seconds=min(BROKER_LEASE_SECONDS, 3600),
+    )
+    return row, plan, canonical_job, action, backend
+
+
+async def _revalidate_broker_action_authority(
+    conn: Any,
+    *,
+    action: Any,
+    canonical_job: Any,
+) -> None:
+    target_active = await conn.fetchval(
+        "SELECT is_active FROM targets WHERE id=$1",
+        uuid.UUID(str(canonical_job.target.target_id)),
+    )
+    if target_active is not True:
+        raise HTTPException(status_code=409, detail="broker Scan target is inactive")
+    policy = canonical_job.execution_plan.policy
+    decision = await revalidate_scan_action_authority(
+        conn,
+        action=action,
+        target_binding=canonical_job.target,
+        scope_receipt_id=(
+            canonical_job.target.scope_receipt_id or policy.scope_receipt_id
+        ),
+        approval_receipt_id=policy.approval_receipt_id,
+    )
+    if decision is not ActionAuthorityDecision.ALLOWED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"broker action authorization rejected: {decision.value}",
+        )
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease")
+async def lease_broker_scan_action(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionAuthorityRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    async with db_pool.acquire() as conn, conn.transaction():
+        _row, plan, job, action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+        existing = await backend.load_result_with_connection(
+            conn, action.action_id,
+        )
+        if existing is not None:
+            return JSONResponse(
+                status_code=208,
+                content={"detail": "broker Scan action is already terminal"},
+            )
+        if await backend.cancellation_requested_with_connection(conn):
+            try:
+                cancelled_lease = await backend.acquire_action_with_connection(
+                    conn, action,
+                )
+                now = utc_now().isoformat()
+                cancelled_receipt = CapabilityReceipt(
+                    capability_name=action.capability_name,
+                    adapter_name=str(action.placement.get("adapter_name") or ""),
+                    adapter_version=str(action.placement.get("adapter_version") or ""),
+                    target_id=job.target.target_id,
+                    scan_id=plan.scan_id,
+                    worker_id=body.worker_id,
+                    scope_receipt_id=job.target.scope_receipt_id,
+                    approval_receipt_id=job.execution_plan.policy.approval_receipt_id,
+                    status="cancelled",
+                    input_digest=action.action_digest,
+                    parser_version="broker-cancellation/v1",
+                    started_at=now,
+                    finished_at=now,
+                    budget_reserved=action.requested_budget,
+                    budget_consumed={
+                        name: 0 for name in action.requested_budget
+                    },
+                    redacted_execution={
+                        "action_id": action.action_id,
+                        "execution_started": False,
+                    },
+                    errors=("cancelled",),
+                )
+                await backend.settle_with_connection(
+                    conn, cancelled_lease, cancelled_receipt,
+                )
+            except ActionAlreadyTerminal:
+                pass
+            except ScanExecutionBackendError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return JSONResponse(
+                status_code=208,
+                content={"detail": "broker Scan action was cancelled before execution"},
+            )
+        await _revalidate_broker_action_authority(
+            conn, action=action, canonical_job=job,
+        )
+        try:
+            action_lease = await backend.acquire_action_with_connection(
+                conn, action,
+            )
+        except ActionAlreadyTerminal:
+            return JSONResponse(
+                status_code=208,
+                content={"detail": "broker Scan action is already terminal"},
+            )
+        except ScanExecutionBackendError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"action_lease": action_lease.remote_payload()}
+
+
+def _broker_submitted_action_lease(
+    raw: Mapping[str, Any],
+    *,
+    plan: Any,
+    action: Any,
+    worker_id: str,
+) -> ActionLease:
+    try:
+        lease = ActionLease.from_remote_payload(raw)
+    except ScanExecutionBackendError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if (
+        lease.scan_id != plan.scan_id
+        or lease.plan_digest != plan.plan_digest
+        or lease.execution_plan_digest != plan.execution_plan_digest
+        or lease.target_binding_digest != plan.target_binding_digest
+        or lease.action.action_digest != action.action_digest
+        or lease.action.action_id != action.action_id
+        or lease.backend != "broker"
+        or lease.worker_id != worker_id
+    ):
+        raise HTTPException(status_code=409, detail="submitted broker action lease changed")
+    return lease
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/heartbeat")
+async def heartbeat_broker_scan_action(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionLeaseRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    async with db_pool.acquire() as conn:
+        _row, plan, job, action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+    action_lease = _broker_submitted_action_lease(
+        body.action_lease, plan=plan, action=action, worker_id=body.worker_id,
+    )
+    try:
+        await backend.heartbeat(action_lease)
+    except (ActionLeaseLost, ScanExecutionBackendError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "running"}
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/result")
+async def settle_broker_scan_action(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionResultRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    async with db_pool.acquire() as conn:
+        _row, plan, job, action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+    action_lease = _broker_submitted_action_lease(
+        body.action_lease, plan=plan, action=action, worker_id=body.worker_id,
+    )
+    try:
+        receipt = CapabilityReceipt.from_dict(body.receipt)
+        if (
+            receipt.worker_id != body.worker_id
+            or receipt.target_id != job.target.target_id
+            or receipt.scope_receipt_id != job.target.scope_receipt_id
+            or receipt.approval_receipt_id
+            != job.execution_plan.policy.approval_receipt_id
+        ):
+            raise ValueError("broker action receipt authority changed")
+        stored = await backend.settle(action_lease, receipt)
+    except (ValueError, ActionLeaseLost, ScanExecutionBackendError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"result": stored.canonical_dict()}
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/status")
+async def get_broker_scan_action_status(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionAuthorityRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    async with db_pool.acquire() as conn:
+        _row, _plan, _job, action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+    stored = await backend.load_result(action.action_id)
+    return {"result": stored.canonical_dict() if stored is not None else None}
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/observations")
+async def get_broker_scan_action_observations(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionAuthorityRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    async with db_pool.acquire() as conn:
+        _row, plan, _job, action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+        stored = await backend.load_result_with_connection(
+            conn, action.action_id,
+        )
+        if stored is None:
+            raise HTTPException(status_code=409, detail="broker action is not terminal")
+        if stored.observation_manifest_ref is None:
+            return {"observations": []}
+        observations = await PostgresObservationManifestStore().load(
+            conn,
+            reference=stored.observation_manifest_ref,
+            scan_id=plan.scan_id,
+            action_id=action.action_id,
+        )
+    if observations is None:
+        raise HTTPException(
+            status_code=409, detail="broker action observation manifest is unavailable",
+        )
+    return {"observations": [dict(item) for item in observations]}
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/cancel-status")
+async def get_broker_scan_cancel_status(
+    node_id: str,
+    lease_id: str,
+    body: BrokerActionCancelStatusRequest,
+    request: Request,
+):
+    await _broker_authenticated_node(node_id, request)
+    async with db_pool.acquire() as conn:
+        _row, _plan, _job, _action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+        )
+        cancel_requested = await backend.cancellation_requested_with_connection(
+            conn,
+        )
+    return {"cancel_requested": cancel_requested}
 
 
 @app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat")

@@ -2072,6 +2072,31 @@ def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
             lease_token="x" * 40,
             log_lines=["line"] * 21,
         )
+    authority = api_module.BrokerActionAuthorityRequest(
+        job_lease_token="j" * 40,
+        worker_id="broker:node-1:worker.2",
+        plan_digest="a" * 64,
+        action_id="baseline.http",
+        action_digest="b" * 64,
+    )
+    assert authority.action_id == "baseline.http"
+    with pytest.raises(Exception):
+        api_module.BrokerActionAuthorityRequest(
+            **authority.model_dump(), injected="not-allowed",
+        )
+
+
+def test_broker_plan_rejects_private_inputs_until_sealed_exchange_exists():
+    public_plan = types.SimpleNamespace(actions=(
+        types.SimpleNamespace(capability_name="http.request"),
+    ))
+    private_plan = types.SimpleNamespace(actions=(
+        types.SimpleNamespace(capability_name="http.request"),
+        types.SimpleNamespace(capability_name="auth.session.establish"),
+    ))
+
+    assert not api_module._broker_action_plan_requires_local_private_inputs(public_plan)
+    assert api_module._broker_action_plan_requires_local_private_inputs(private_plan)
 
 
 def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):
@@ -2093,6 +2118,48 @@ def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):
     assert payload["options"]["request_budget_mode"] == "enforce"
     assert payload["options"]["custom_budget"]["request_max"] == 25
     assert payload["options"]["request_budget_domain"] == "example.test"
+
+
+def test_broker_immutable_action_plan_requires_all_or_nothing_domain_budget(monkeypatch):
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {
+                "root_domain": "example.test",
+                "asm_config": {"max_requests_per_hour_per_domain": 100},
+                "parent_scan_id": "22222222-2222-4222-8222-222222222222",
+            }
+
+        async def fetchval(self, *_args):
+            raise AssertionError("immutable action plans must not receive a partial fair share")
+
+    async def tested(*_args, **_kwargs):
+        return 10
+
+    calls = []
+
+    def reserve(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 50
+
+    monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
+    monkeypatch.setattr(api_module.asm_inventory, "reserved_domain_rate_count", lambda *_args: 0)
+    monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", reserve)
+    payload = {
+        "scan_id": "11111111-1111-4111-8111-111111111111",
+        "options": {
+            "scan_type": "standard",
+            "scan_execution_plan_digest": "c" * 64,
+            "custom_budget": {"request_max": 50},
+        },
+    }
+
+    receipt = asyncio.run(
+        api_module._broker_reserve_request_budget(Conn(), object(), payload)
+    )
+
+    assert receipt["granted"] == 50
+    assert calls[0][0][3] == 50
+    assert calls[0][1]["all_or_nothing"] is True
 
 
 def test_broker_request_budget_fairly_partitions_parallel_siblings(monkeypatch):

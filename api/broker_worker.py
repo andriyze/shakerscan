@@ -2,8 +2,8 @@
 """Outbound-only HTTPS broker worker.
 
 This runtime deliberately has no Redis or PostgreSQL connection configuration.
-It receives one node/job-scoped lease, executes the existing scanner subprocess,
-heartbeats ownership, and submits an immutable result for control-plane ingestion.
+Canonical Scan work executes the same immutable action graph as local placement;
+the control plane owns durable action leases and receipt settlement over HTTPS.
 """
 
 from __future__ import annotations
@@ -27,10 +27,21 @@ from pathlib import Path
 from typing import Any
 
 from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
+from runtime.models import ScanPolicy, TargetBinding
+from scan.action_adapter import DatabaseNeutralScanActionDispatcher
+from scan.action_plan import ScanActionPlan, ScanActionPlanError
+from scan.broker_backend import (
+    BrokerActionHTTPError,
+    BrokerScanExecutionBackend,
+)
+from scan.orchestrator import ScanOrchestrator
+from scan.worker_action_executor import ReceiptScanActionExecutor
 from worker import (
     RESULTS_DIR,
     _clear_fleet_busy_marker,
+    _execute_agent_scanner_process,
     _fleet_busy_marker,
+    _scan_cancel_requested,
     _signal_scanner_cancel_file,
     run_scan,
 )
@@ -56,6 +67,67 @@ _SCAN_RUNTIME_BUDGET_DIMENSIONS = frozenset({
     "hosts_attempted",
     "tool_wall_seconds",
 })
+
+
+def _broker_scan_action_plan(
+    job: dict[str, Any], lease: dict[str, Any],
+) -> tuple[ScanActionPlan, str] | None:
+    """Validate the complete immutable plan issued to this broker worker."""
+    options = job.get("options") if isinstance(job.get("options"), dict) else {}
+    execution_digest = str(options.get("scan_execution_plan_digest") or "").lower()
+    raw_plan = lease.get("scan_action_plan")
+    worker_id = str(lease.get("action_worker_id") or "").strip()
+    if not execution_digest:
+        if raw_plan is not None or worker_id:
+            raise BrokerWorkerError(
+                "non-canonical broker job carried Scan action authority"
+            )
+        return None
+    if lease.get("scan_execution") is not None:
+        raise BrokerWorkerError(
+            "canonical broker Scan carried deprecated monolithic authority"
+        )
+    if not isinstance(raw_plan, dict) or not worker_id.startswith("broker:"):
+        raise BrokerWorkerError(
+            "canonical broker Scan is missing immutable action authority"
+        )
+    try:
+        plan = ScanActionPlan.from_dict(raw_plan)
+    except (ScanActionPlanError, TypeError, ValueError) as exc:
+        raise BrokerWorkerError("canonical broker Scan action plan is invalid") from exc
+    target_binding = options.get("_canonical_target_binding")
+    if not isinstance(target_binding, dict):
+        raise BrokerWorkerError(
+            "canonical broker Scan target binding is unavailable"
+        )
+    try:
+        target = TargetBinding(
+            target_id=str(target_binding.get("target_id") or ""),
+            target_kind=str(target_binding.get("target_kind") or ""),
+            canonical_host=target_binding.get("canonical_host"),
+            allowed_origins=tuple(target_binding.get("allowed_origins") or ()),
+            allowed_addresses=tuple(target_binding.get("allowed_addresses") or ()),
+            allowed_root_domains=tuple(
+                target_binding.get("allowed_root_domains") or ()
+            ),
+            environment=str(target_binding.get("environment") or "unknown"),
+            scope_receipt_id=(
+                str(target_binding.get("scope_receipt_id") or "") or None
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise BrokerWorkerError(
+            "canonical broker Scan target binding is invalid"
+        ) from exc
+    if (
+        plan.scan_id != str(job.get("scan_id") or "")
+        or plan.execution_plan_digest != execution_digest
+        or plan.target_binding_digest != target.digest
+    ):
+        raise BrokerWorkerError(
+            "canonical broker Scan action authority does not match the job"
+        )
+    return plan, worker_id
 
 
 def _broker_scan_runtime_budget(
@@ -404,6 +476,118 @@ async def centralize_result_artifacts(
     return await rewrite(result)
 
 
+def _broker_target_binding(options: Mapping[str, Any]) -> TargetBinding:
+    raw = options.get("_canonical_target_binding")
+    if not isinstance(raw, Mapping):
+        raise BrokerWorkerError("canonical broker target binding is unavailable")
+    try:
+        return TargetBinding(
+            target_id=str(raw.get("target_id") or ""),
+            target_kind=str(raw.get("target_kind") or ""),
+            canonical_host=raw.get("canonical_host"),
+            allowed_origins=tuple(raw.get("allowed_origins") or ()),
+            allowed_addresses=tuple(raw.get("allowed_addresses") or ()),
+            allowed_root_domains=tuple(raw.get("allowed_root_domains") or ()),
+            environment=str(raw.get("environment") or "unknown"),
+            scope_receipt_id=str(raw.get("scope_receipt_id") or "") or None,
+        )
+    except (TypeError, ValueError) as exc:
+        raise BrokerWorkerError("canonical broker target binding is invalid") from exc
+
+
+async def _execute_broker_action_plan(
+    state: dict[str, Any],
+    lease: dict[str, Any],
+    job: dict[str, Any],
+    *,
+    plan: ScanActionPlan,
+    worker_id: str,
+) -> dict[str, Any]:
+    """Run the shared ScanOrchestrator over the HTTPS action backend."""
+    node_id = str(state["node_id"])
+    lease_id = str(lease.get("lease_id") or "")
+    lease_token = str(lease.get("lease_token") or "")
+    scan_id = str(job.get("scan_id") or "")
+    options = dict(job.get("options") or {})
+    target = _broker_target_binding(options)
+    raw_execution_plan = options.get("scan_execution_plan")
+    if not isinstance(raw_execution_plan, Mapping) or not isinstance(
+        raw_execution_plan.get("policy"), Mapping,
+    ):
+        raise BrokerWorkerError("canonical broker Scan policy is unavailable")
+    raw_policy = dict(raw_execution_plan["policy"])
+    raw_policy["include_families"] = tuple(raw_policy.get("include_families") or ())
+    raw_policy["exclude_families"] = tuple(raw_policy.get("exclude_families") or ())
+    try:
+        policy = ScanPolicy(**raw_policy)
+    except (TypeError, ValueError) as exc:
+        raise BrokerWorkerError("canonical broker Scan policy is invalid") from exc
+
+    async def request(
+        method: str, path: str, payload: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any] | None:
+        try:
+            return await asyncio.to_thread(
+                api_request,
+                state,
+                method,
+                path,
+                dict(payload) if payload is not None else None,
+                timeout=120,
+            )
+        except BrokerHTTPError as exc:
+            raise BrokerActionHTTPError(exc.status_code, str(exc)) from exc
+
+    base_path = f"/fleet/broker/nodes/{node_id}/leases/{lease_id}"
+    backend = BrokerScanExecutionBackend(
+        plan=plan,
+        worker_id=worker_id,
+        job_lease_token=lease_token,
+        base_path=base_path,
+        request=request,
+    )
+    dispatcher = DatabaseNeutralScanActionDispatcher(
+        target_url=str(job.get("target") or ""),
+        options=options,
+        target=target,
+        policy=policy,
+        scan_id=scan_id,
+        job_id=str(job.get("job_id") or ""),
+        worker_id=worker_id,
+        plan=plan,
+        backend=backend,
+        process_runner=_execute_agent_scanner_process,
+        cancelled=lambda: _scan_cancel_requested(scan_id),
+    )
+    executor = ReceiptScanActionExecutor(
+        scan_id=scan_id,
+        target_id=target.target_id,
+        worker_id=worker_id,
+        dispatcher=dispatcher,
+        scope_receipt_id=target.scope_receipt_id,
+        approval_receipt_id=dispatcher.policy.approval_receipt_id,
+    )
+    orchestration = await ScanOrchestrator(
+        backend=backend,
+        executor=executor,
+    ).run(plan)
+    final = orchestration.action_results.get("finalize.report")
+    if final is None or final.observation_manifest_ref is None:
+        raise BrokerWorkerError("broker Scan finalizer produced no report")
+    observations = await backend.load_observations("finalize.report")
+    if (
+        not observations
+        or observations[0].get("kind") != "scan_report"
+        or not isinstance(observations[0].get("report"), Mapping)
+    ):
+        raise BrokerWorkerError("broker Scan final report observation is invalid")
+    report = dict(observations[0]["report"])
+    report.setdefault("canonical_action_execution", {})["status_matrix"] = dict(
+        orchestration.status_matrix
+    )
+    return report
+
+
 async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     job = lease.get("job") if isinstance(lease.get("job"), dict) else {}
     if job.get("_broker_result_id"):
@@ -413,7 +597,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     job_id = str(job.get("job_id") or "").strip()
     if not target or not scan_id or not job_id:
         raise BrokerWorkerError("broker lease is missing executable scan fields")
-    canonical_runtime_budget = _broker_scan_runtime_budget(job, lease)
+    canonical_action_authority = _broker_scan_action_plan(job, lease)
     node_id = str(state["node_id"])
     lease_id = str(lease.get("lease_id") or "")
     lease_token = str(lease.get("lease_token") or "")
@@ -459,20 +643,24 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     busy_marker = _fleet_busy_marker(job)
     try:
         try:
-            result = await run_scan(
-                target,
-                dict(job.get("options") or {}),
-                scan_id=scan_id,
-                job_id=job_id,
-                progress_callback=progress_callback,
-                canonical_runtime_budget=canonical_runtime_budget,
-                # Broker workers have no PostgreSQL connection by design.
-                # scanner.py still writes the local checkpoint, and this
-                # runtime uploads it through the lease-scoped HTTPS endpoint
-                # below after execution. Do not ask the shared worker path to
-                # create a database-backed artifact manifest locally.
-                persist_checkpoint_artifacts=False,
-            )
+            if canonical_action_authority is not None:
+                action_plan, action_worker_id = canonical_action_authority
+                result = await _execute_broker_action_plan(
+                    state,
+                    lease,
+                    job,
+                    plan=action_plan,
+                    worker_id=action_worker_id,
+                )
+            else:
+                result = await run_scan(
+                    target,
+                    dict(job.get("options") or {}),
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    progress_callback=progress_callback,
+                    persist_checkpoint_artifacts=False,
+                )
         except Exception as exc:
             result = {
                 "target": target,
@@ -493,7 +681,11 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
         )
         broker_artifacts: list[dict[str, Any]] = []
         checkpoint = RESULTS_DIR / f"{scan_id}_checkpoint.json"
-        if checkpoint.is_file() and not checkpoint.is_symlink():
+        if (
+            canonical_action_authority is None
+            and checkpoint.is_file()
+            and not checkpoint.is_symlink()
+        ):
             receipt = await asyncio.to_thread(
                 upload_artifact,
                 state,
