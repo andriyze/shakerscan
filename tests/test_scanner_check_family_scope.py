@@ -147,6 +147,7 @@ def _tls_placement_summary():
             "port": 443,
             "protocol": "TLSv1.3",
             "cipher": "TLS_AES_256_GCM_SHA384",
+            "alpn_protocol": "h2",
             "certificate_sha256": "7" * 64,
             "certificate_bytes": 11,
         }],
@@ -524,6 +525,22 @@ def test_canonical_http_baseline_is_bound_and_adapted(monkeypatch):
     assert result["advertises_h3"] is True
 
 
+def test_canonical_http_protocol_posture_reuses_placed_evidence():
+    assert scanner_mod._canonical_http_protocol_posture(
+        _http_baseline_placement_summary(),
+        _tls_placement_summary(),
+    ) == (True, None)
+
+    http3 = _http_baseline_placement_summary()
+    http3["observations"][0]["response"]["http_version"] = "HTTP/3"
+    assert scanner_mod._canonical_http_protocol_posture(
+        http3, {"observations": []},
+    ) == (False, True)
+    assert scanner_mod._canonical_http_protocol_posture(None, None) == (
+        False, None,
+    )
+
+
 def test_canonical_http_redirect_is_bound_and_adapted(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,
@@ -620,6 +637,27 @@ def test_canonical_report_assembly_never_repeats_http_redirect_request():
     assert redirect_block.index("_canonical_http_baseline_result(") < (
         redirect_block.index("else:")
     ) < redirect_block.index('curl_headers(f"http://{host}")')
+
+
+def test_canonical_report_assembly_reuses_protocol_evidence():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index(
+        "if focused_scope.skip_posture():",
+        source.index("# Check HTTP->HTTPS redirect explicitly"),
+    )
+    end = source.index("# Email/DNS security extras", start)
+    posture_block = source[start:end]
+    canonical_start = posture_block.index(
+        "elif canonical_scan_execution is not None:"
+    )
+    legacy_start = posture_block.index("\n    else:", canonical_start)
+    canonical_block = posture_block[canonical_start:legacy_start]
+
+    assert "_canonical_http_protocol_posture(" in canonical_block
+    assert "supports_http2(" not in canonical_block
+    assert "supports_http3(" not in canonical_block
+    assert "supports_http2(base_url)" in posture_block[legacy_start:]
+    assert "supports_http3(base_url)" in posture_block[legacy_start:]
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):

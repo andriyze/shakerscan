@@ -5068,6 +5068,24 @@ async def build_report(target: str,
         h2_task     = asyncio.create_task(_focused_async_value(False))
         h3_task     = asyncio.create_task(_focused_async_value(None))
         sec_txt_task= asyncio.create_task(_focused_async_value(focused_scope.skipped_result(sec_txt_shape)))
+    elif canonical_scan_execution is not None:
+        canonical_http2, canonical_http3 = _canonical_http_protocol_posture(
+            (
+                canonical_scan_placements.get("http.request")
+                if isinstance(canonical_scan_placements, dict) else None
+            ),
+            (
+                canonical_scan_placements.get("tls.inspect")
+                if isinstance(canonical_scan_placements, dict) else None
+            ),
+        )
+        h2_task = asyncio.create_task(
+            _focused_async_value(canonical_http2)
+        )
+        h3_task = asyncio.create_task(
+            _focused_async_value(canonical_http3)
+        )
+        sec_txt_task = asyncio.create_task(fetch_security_txt(base_url))
     else:
         h2_task     = asyncio.create_task(supports_http2(base_url))
         h3_task     = asyncio.create_task(supports_http3(base_url))
@@ -14407,6 +14425,9 @@ def _validate_canonical_http_placement(
             or not isinstance(selected_headers, dict)
             or set(selected_headers) - _CANONICAL_HTTP_HEADER_NAMES
             or any(not isinstance(value, str) for value in selected_headers.values())
+            or response.get("http_version") not in {
+                None, "", "HTTP/1.0", "HTTP/1.1", "HTTP/2", "HTTP/3",
+            }
             or response.get("body_sample") not in (None, "")
             or response.get("selected_json") not in (None, {})
             or (bool(final_url) and final_origin_key is None)
@@ -14665,6 +14686,7 @@ def _load_canonical_scan_placements(
             or item.get("pinned_address") not in allowed_addresses
             or not isinstance(item.get("port"), int)
             or not 1 <= item.get("port") <= 65535
+            or item.get("alpn_protocol") not in {None, "", "h2", "http/1.1"}
             or (
                 item.get("certificate_sha256") is not None
                 and not re.fullmatch(
@@ -14911,6 +14933,39 @@ def _canonical_http_baseline_result(
         "canonical_capability": "http.request",
         "capability_receipt": dict(placed.get("receipt") or {}),
     }
+
+
+def _canonical_http_protocol_posture(
+    http_summary: Any,
+    tls_summary: Any,
+) -> tuple[bool, bool | None]:
+    """Derive observed HTTP protocols without issuing duplicate requests."""
+    http_observations = (
+        http_summary.get("observations") or []
+        if isinstance(http_summary, Mapping) else []
+    )
+    tls_observations = (
+        tls_summary.get("observations") or []
+        if isinstance(tls_summary, Mapping) else []
+    )
+    versions = {
+        str((item.get("response") or {}).get("http_version") or "").upper()
+        for item in http_observations
+        if isinstance(item, Mapping)
+        and isinstance(item.get("response"), Mapping)
+    }
+    negotiated_protocols = {
+        str(item.get("alpn_protocol") or "").lower()
+        for item in tls_observations
+        if isinstance(item, Mapping)
+    }
+    http2 = any(version.startswith("HTTP/2") for version in versions) or (
+        "h2" in negotiated_protocols
+    )
+    http3_observed = any(
+        version.startswith("HTTP/3") for version in versions
+    ) or any(protocol.startswith("h3") for protocol in negotiated_protocols)
+    return bool(http2), True if http3_observed else None
 
 
 def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:
