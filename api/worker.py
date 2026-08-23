@@ -160,6 +160,16 @@ from scan.authorization import (
     ActionAuthorityDecision,
     revalidate_scan_action_authority,
 )
+from scan.action_plan import ScanAction, ScanActionPlan
+from scan.action_store import PostgresScanActionStore
+from scan.capability_result import CapabilityResultReference
+from scan.execution_backend import (
+    ActionLease,
+    PostgresScanExecutionBackend,
+)
+from scan.finalizer import finalize_scan_report
+from scan.orchestrator import ScanOrchestrator
+from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.executor import build_native_scan_execution
 from scan.stages import (
     ScanStageCancelled,
@@ -185,6 +195,7 @@ from scan.job_runtime import (
     materialize_canonical_scan_job,
 )
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
+from runtime.observation_store import PostgresObservationManifestStore
 from runtime.request_replay_executor import (
     ReplayExecutionError,
     replay_reservation_budget,
@@ -9950,7 +9961,7 @@ async def _execute_reserved_scan_capability(
             or str(getattr(canonical_action, "capability_name", ""))
             != capability_name
             or str(getattr(canonical_action, "target_binding_digest", ""))
-            != target.digest
+            != base_target.digest
         ):
             raise ScanCapabilityContractError(
                 "canonical Scan action differs from capability dispatch authority"
@@ -10153,11 +10164,20 @@ async def _execute_reserved_scan_capability(
                 if (
                     prepared.adapter_name != expected_adapter
                     or prepared.adapter_version != expected_version
-                    or requested_budget != dict(canonical_action.requested_budget)
                 ):
                     raise ScanCapabilityContractError(
                         "prepared capability differs from canonical Scan action"
                     )
+                authorized_budget = dict(canonical_action.requested_budget)
+                if any(
+                    name not in authorized_budget
+                    or int(amount) > int(authorized_budget[name])
+                    for name, amount in requested_budget.items()
+                ):
+                    raise ScanCapabilityContractError(
+                        "prepared capability exceeds canonical Scan action budget"
+                    )
+                requested_budget = authorized_budget
                 action_digest = str(canonical_action.action_digest)
             lease_seconds = max(
                 90,
@@ -12451,7 +12471,7 @@ async def _execute_scan_template_capability(
     )
 
 
-async def _execute_reserved_deterministic_scan(
+async def _execute_legacy_reserved_deterministic_scan(
     target: str,
     options: Mapping[str, Any],
     *,
@@ -13095,6 +13115,472 @@ async def _execute_reserved_deterministic_scan(
     result["deterministic_scan_execution"] = summary
     result["canonical_stage_execution"] = stage_execution
     return result
+
+
+class _CanonicalLocalScanDispatcher:
+    """Map immutable Scan actions onto the existing bounded worker adapters."""
+
+    def __init__(
+        self,
+        *,
+        target_url: str,
+        options: Mapping[str, Any],
+        scan_id: str,
+        job_id: str,
+        plan: ScanActionPlan,
+        backend: PostgresScanExecutionBackend,
+        runtime_request_grant: int | None,
+        collection_replay_result_holder: dict[str, Any] | None,
+    ) -> None:
+        normalized, admission = prepare_worker_dispatch(options)
+        if not admission.canonical or admission.plan is None:
+            raise ScanCapabilityContractError(
+                "canonical action dispatcher requires Scan authority"
+            )
+        self.target_url = str(target_url)
+        self.options = dict(normalized)
+        self.scan_id = str(scan_id)
+        self.job_id = str(job_id)
+        self.plan = plan
+        self.backend = backend
+        self.execution = build_native_scan_execution(
+            admission.plan, self.options,
+        )
+        self.runtime_request_grant = runtime_request_grant
+        self.collection_replay_result_holder = collection_replay_result_holder
+        self.primary_session_holder: dict[str, Any] = {}
+        self.secondary_session_holder: dict[str, Any] = {}
+
+    @property
+    def target(self) -> TargetBinding:
+        return self.execution.target_binding
+
+    def _synthetic_receipt(
+        self,
+        action: ScanAction,
+        lease: ActionLease,
+        *,
+        status: str,
+        reason: str,
+    ) -> CapabilityReceipt:
+        now = datetime.now(timezone.utc).isoformat()
+        return CapabilityReceipt(
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            target_id=self.target.target_id,
+            scan_id=self.scan_id,
+            worker_id=lease.worker_id,
+            scope_receipt_id=self.target.scope_receipt_id,
+            approval_receipt_id=self.execution.execution_plan.policy.approval_receipt_id,
+            status=status,
+            input_digest=str(action.action_digest),
+            parser_version="scan-action-dispatch/v1",
+            started_at=now,
+            finished_at=now,
+            redacted_execution={
+                "action_id": action.action_id,
+                "execution_started": False,
+            },
+            budget_reserved=action.requested_budget,
+            budget_consumed={name: 0 for name in action.requested_budget},
+            observations=(),
+            errors=(reason,),
+        )
+
+    async def _load_budget_receipt(self, action: ScanAction) -> CapabilityReceipt:
+        async with db_pool.acquire() as conn:
+            stored = await PostgresBudgetReservationStore().load_by_action(
+                conn,
+                owner_kind="scan",
+                owner_id=self.scan_id,
+                action_id=action.action_id,
+                for_update=False,
+            )
+        if (
+            stored is None
+            or not stored.record.terminal
+            or not isinstance(stored.receipt, Mapping)
+        ):
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} has no terminal capability receipt"
+            )
+        receipt = CapabilityReceipt.from_dict(stored.receipt)
+        if (
+            receipt.input_digest != action.action_digest
+            or receipt.capability_name != action.capability_name
+        ):
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} receipt conflicts with its plan"
+            )
+        return receipt
+
+    async def _receipt_from_summary(
+        self,
+        action: ScanAction,
+        lease: ActionLease,
+        summary: Mapping[str, Any],
+    ) -> CapabilityReceipt:
+        status = str(summary.get("status") or "").strip().lower()
+        if status == "skipped":
+            return self._synthetic_receipt(
+                action, lease, status="skipped",
+                reason=str(summary.get("reason") or "not_applicable"),
+            )
+        if status == "blocked" and not summary.get("receipt"):
+            return self._synthetic_receipt(
+                action, lease, status="blocked",
+                reason=str(summary.get("reason") or "scope_invalid"),
+            )
+        return await self._load_budget_receipt(action)
+
+    async def _observations(self, action_id: str) -> tuple[dict[str, Any], ...]:
+        if not any(item.action_id == action_id for item in self.plan.actions):
+            return ()
+        result = await self.backend.load_result(action_id)
+        if result is None or result.observation_manifest_ref is None:
+            return ()
+        async with db_pool.acquire() as conn:
+            observations = await PostgresObservationManifestStore().load(
+                conn,
+                reference=result.observation_manifest_ref,
+                scan_id=self.scan_id,
+                action_id=action_id,
+            )
+        if observations is None:
+            raise ScanCapabilityContractError(
+                f"Scan action {action_id} observation manifest is unavailable"
+            )
+        return observations
+
+    async def _network_action(
+        self, action: ScanAction, lease: ActionLease,
+    ) -> CapabilityReceipt:
+        allocation = scan_network_capability_allocation(
+            self.execution.payload()["execution_budget"],
+            available_address_count=len(self.target.allowed_addresses),
+            reserved_tcp_ports=(
+                1 if any(
+                    origin.lower().startswith("https://")
+                    for origin in self.target.allowed_origins
+                ) else 0
+            ),
+        )
+        addresses = tuple(
+            self.target.allowed_addresses[:int(allocation["address_count"])]
+        )
+        bounded_target = TargetBinding(
+            target_id=self.target.target_id,
+            target_kind=self.target.target_kind,
+            canonical_host=self.target.canonical_host,
+            allowed_origins=self.target.allowed_origins,
+            allowed_addresses=addresses,
+            allowed_root_domains=self.target.allowed_root_domains,
+            environment=self.target.environment,
+            scope_receipt_id=self.target.scope_receipt_id,
+        )
+        if action.capability_name == "ports.discover":
+            capability_args = {"ports": list(allocation["ports"])}
+        else:
+            open_ports = sorted({
+                int(item["port"])
+                for item in await self._observations("discover.ports")
+                if item.get("kind") == "open_port" and item.get("port")
+            })
+            if not open_ports:
+                return self._synthetic_receipt(
+                    action, lease, status="skipped", reason="not_applicable",
+                )
+            capability_args = {
+                "ports": open_ports,
+                "profile": "version_light",
+            }
+        _stored, _redelivery = await _execute_reserved_scan_capability(
+            admission=prepare_worker_dispatch(self.options)[1],
+            execution=self.execution,
+            scan_id=self.scan_id,
+            job_id=self.job_id,
+            capability_name=action.capability_name,
+            capability_args=capability_args,
+            action_id=action.action_id,
+            target_binding=bounded_target,
+            reservation_limits=action.requested_budget,
+            canonical_action=action,
+        )
+        return await self._load_budget_receipt(action)
+
+    async def _candidate(self) -> str | None:
+        crawl = await self._observations("discover.web_crawl")
+        candidates = scan_parameterized_execution_candidates(
+            self.target_url,
+            target=self.target,
+            options=self.options,
+            crawl_observations=crawl,
+        )
+        return candidates[0] if candidates else None
+
+    async def _finalize(self, action: ScanAction, lease: ActionLease) -> CapabilityReceipt:
+        results: dict[str, CapabilityResultReference] = {}
+        observations: dict[str, tuple[dict[str, Any], ...]] = {}
+        for planned in self.plan.actions:
+            if planned.action_id == action.action_id:
+                continue
+            result = await self.backend.load_result(planned.action_id)
+            if result is None:
+                raise ScanCapabilityContractError(
+                    "finalization started before every dependency was terminal"
+                )
+            results[planned.action_id] = result
+            observations[planned.action_id] = await self._observations(
+                planned.action_id
+            )
+        work_references: list[Mapping[str, Any]] = []
+        for planned in self.plan.actions:
+            for name, value in planned.capability_args.items():
+                if name.endswith("manifest_ref") and isinstance(value, Mapping):
+                    work_references.append(dict(value))
+        report = finalize_scan_report(
+            plan=self.plan,
+            target_url=self.target_url,
+            action_results=results,
+            observations=observations,
+            work_manifest_references=tuple(work_references),
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        return CapabilityReceipt(
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            target_id=self.target.target_id,
+            scan_id=self.scan_id,
+            worker_id=lease.worker_id,
+            scope_receipt_id=self.target.scope_receipt_id,
+            approval_receipt_id=self.execution.execution_plan.policy.approval_receipt_id,
+            status="succeeded",
+            input_digest=str(action.action_digest),
+            parser_version="pure-receipt-finalizer/v1",
+            started_at=now,
+            finished_at=now,
+            redacted_execution={
+                "action_id": action.action_id,
+                "target_traffic": False,
+                "plan_digest": self.plan.plan_digest,
+            },
+            budget_reserved=action.requested_budget,
+            budget_consumed={name: 0 for name in action.requested_budget},
+            observations=({"kind": "scan_report", "report": report},),
+            errors=(),
+        )
+
+    async def __call__(
+        self,
+        action: ScanAction,
+        lease: ActionLease,
+        heartbeat: Callable[[], Awaitable[None]],
+    ) -> CapabilityReceipt:
+        await heartbeat()
+        summary: Mapping[str, Any]
+        if action.action_id == "finalize.report":
+            return await self._finalize(action, lease)
+        if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
+            lane = "primary" if action.action_id.endswith("primary") else "secondary"
+            holder = (
+                self.primary_session_holder
+                if lane == "primary" else self.secondary_session_holder
+            )
+            summary = await _execute_scan_auth_session_capability(
+                self.options,
+                scan_id=self.scan_id,
+                job_id=self.job_id,
+                private_session_holder=holder,
+                lane=lane,
+                canonical_action=action,
+            )
+            session = holder.get("session")
+            if session is not None and session.established and session.headers():
+                self.options = bind_scan_session_headers(
+                    self.options, session.headers(), lane=lane,
+                )
+        elif action.action_id.startswith("inputs.collection_"):
+            summary = await _execute_scan_request_collections(
+                self.options,
+                self.scan_id,
+                job_id=self.job_id,
+                runtime_request_grant=self.runtime_request_grant,
+                trusted_primary_headers=resolve_scan_http_principal(
+                    self.options, lane="primary",
+                ).headers(),
+                canonical_action=action,
+            )
+            if self.collection_replay_result_holder is not None:
+                self.collection_replay_result_holder.update(summary)
+        elif action.action_id == "baseline.http":
+            summary = await _execute_scan_http_baseline_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "baseline.http_redirect":
+            summary = await _execute_scan_http_redirect_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "baseline.security_txt":
+            summary = await _execute_scan_security_txt_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "baseline.dns":
+            summary = await _execute_scan_dns_capability(
+                self.options, scan_id=self.scan_id, job_id=self.job_id,
+                canonical_action=action,
+            )
+        elif action.action_id == "baseline.tls":
+            summary = await _execute_scan_tls_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "discover.web_probe":
+            summary = await _execute_scan_web_probe_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "discover.web_crawl":
+            summary = await _execute_scan_web_crawl_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "discover.web_content":
+            summary = await _execute_scan_content_discovery_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "discover.subdomains":
+            summary = await _execute_scan_subdomain_discovery(
+                self.options, self.scan_id, job_id=self.job_id,
+                canonical_action=action,
+            )
+        elif action.action_id in {"discover.ports", "discover.services"}:
+            return await self._network_action(action, lease)
+        elif action.action_id == "active.templates":
+            summary = await _execute_scan_template_capability(
+                self.target_url, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id in {"verify.xss", "verify.sqli"}:
+            candidate = await self._candidate()
+            helper = (
+                _execute_scan_xss_verification_capability
+                if action.action_id == "verify.xss"
+                else _execute_scan_sqli_verification_capability
+            )
+            summary = await helper(
+                candidate, self.options, scan_id=self.scan_id,
+                job_id=self.job_id, canonical_action=action,
+            )
+        elif action.action_id == "verify.authz":
+            crawl = await self._observations("discover.web_crawl")
+            content = await self._observations("discover.web_content")
+            routes = _scan_authz_route_inventory(
+                self.options,
+                crawl_observations=crawl,
+                content_observations=content,
+            )
+            summary = await _execute_scan_authz_verification_capability(
+                self.target_url, routes, self.options,
+                scan_id=self.scan_id, job_id=self.job_id,
+                canonical_action=action,
+            )
+        else:
+            raise ScanCapabilityContractError(
+                f"no local adapter is registered for Scan action {action.action_id}"
+            )
+        await heartbeat()
+        return await self._receipt_from_summary(action, lease, summary)
+
+
+async def _execute_reserved_deterministic_scan(
+    target: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+    runtime_request_grant: int | None = None,
+    collection_replay_result_holder: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute the persisted immutable Scan action graph on the local backend."""
+    normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return await run_scan(target, dict(options), scan_id=scan_id, job_id=job_id)
+    action_store = PostgresScanActionStore()
+    async with db_pool.acquire() as conn:
+        plan = await action_store.load_plan(conn, scan_id=scan_id)
+    if plan is None:
+        raise ScanCapabilityContractError(
+            "canonical Scan has no persisted immutable action plan"
+        )
+    execution = build_native_scan_execution(admission.plan, normalized)
+    if (
+        plan.execution_plan_digest != execution.execution_plan.digest
+        or plan.target_binding_digest != execution.target_binding.digest
+    ):
+        raise ScanCapabilityContractError(
+            "persisted Scan action plan conflicts with runtime authority"
+        )
+    worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+    backend = PostgresScanExecutionBackend(
+        pool=db_pool,
+        plan=plan,
+        worker_id=worker_id,
+        backend_name="local",
+    )
+    dispatcher = _CanonicalLocalScanDispatcher(
+        target_url=target,
+        options=normalized,
+        scan_id=scan_id,
+        job_id=job_id,
+        plan=plan,
+        backend=backend,
+        runtime_request_grant=runtime_request_grant,
+        collection_replay_result_holder=collection_replay_result_holder,
+    )
+    executor = ReceiptScanActionExecutor(
+        scan_id=scan_id,
+        target_id=execution.target_binding.target_id,
+        worker_id=worker_id,
+        dispatcher=dispatcher,
+        scope_receipt_id=execution.target_binding.scope_receipt_id,
+        approval_receipt_id=admission.plan.policy.approval_receipt_id,
+    )
+    orchestration = await ScanOrchestrator(
+        backend=backend, executor=executor,
+    ).run(plan)
+    final_result = orchestration.action_results.get("finalize.report")
+    if final_result is not None and final_result.status.value == "cancelled":
+        raise ValueError("Cancelled by user")
+    if final_result is None or final_result.observation_manifest_ref is None:
+        raise ScanCapabilityContractError(
+            "canonical Scan finalization produced no report manifest"
+        )
+    async with db_pool.acquire() as conn:
+        final_observations = await PostgresObservationManifestStore().load(
+            conn,
+            reference=final_result.observation_manifest_ref,
+            scan_id=scan_id,
+            action_id="finalize.report",
+        )
+    if (
+        not final_observations
+        or final_observations[0].get("kind") != "scan_report"
+        or not isinstance(final_observations[0].get("report"), Mapping)
+    ):
+        raise ScanCapabilityContractError(
+            "canonical Scan report observation is invalid"
+        )
+    report = dict(final_observations[0]["report"])
+    report["canonical_action_execution"]["status_matrix"] = dict(
+        orchestration.status_matrix
+    )
+    return report
 
 
 async def _execute_scan_subdomain_discovery(

@@ -326,7 +326,7 @@ def finalize_scan_report(
             "finalization_action": {
                 "action_id": finalization_action.action_id,
                 "action_digest": finalization_action.action_digest,
-                "status": "executing",
+                "status": "success",
             },
             "work_manifests": [dict(item) for item in work_manifest_references],
         },

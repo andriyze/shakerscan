@@ -296,7 +296,7 @@ def test_cancelled_subdomain_stage_stops_before_web_surface_traffic(monkeypatch)
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
     with pytest.raises(ValueError, match="Cancelled by user"):
-        asyncio.run(worker._execute_reserved_deterministic_scan(
+        asyncio.run(worker._execute_legacy_reserved_deterministic_scan(
             "https://app.example.test",
             options,
             scan_id="00000000-0000-0000-0000-000000000001",
@@ -342,7 +342,7 @@ def test_cancelled_collection_replay_stops_the_surface_stage(monkeypatch):
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
     with pytest.raises(ValueError, match="Cancelled by user"):
-        asyncio.run(worker._execute_reserved_deterministic_scan(
+        asyncio.run(worker._execute_legacy_reserved_deterministic_scan(
             "https://app.example.test",
             options,
             scan_id="00000000-0000-0000-0000-000000000001",
@@ -634,7 +634,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
-    result = asyncio.run(worker._execute_reserved_deterministic_scan(
+    result = asyncio.run(worker._execute_legacy_reserved_deterministic_scan(
         "https://app.example.test",
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
@@ -669,7 +669,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     ] == "committed"
 
     connection.row["result"] = result
-    redelivered = asyncio.run(worker._execute_reserved_deterministic_scan(
+    redelivered = asyncio.run(worker._execute_legacy_reserved_deterministic_scan(
         "https://app.example.test",
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
@@ -912,7 +912,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
-    result = asyncio.run(worker._execute_reserved_deterministic_scan(
+    result = asyncio.run(worker._execute_legacy_reserved_deterministic_scan(
         "https://app.example.test",
         options,
         scan_id="00000000-0000-0000-0000-000000000001",
@@ -1086,7 +1086,7 @@ def test_cancelled_network_stage_stops_before_baseline_traffic(
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
     with pytest.raises(ValueError, match="Cancelled by user"):
-        asyncio.run(worker._execute_reserved_deterministic_scan(
+        asyncio.run(worker._execute_legacy_reserved_deterministic_scan(
             "https://app.example.test",
             options,
             scan_id="00000000-0000-0000-0000-000000000001",
@@ -2966,6 +2966,8 @@ def test_worker_runs_subdomain_discovery_inside_the_fixed_surface_stage():
         "async def _execute_reserved_deterministic_scan("
     )
     deterministic = source[deterministic_start:helper_start]
+    dispatcher_start = source.index("class _CanonicalLocalScanDispatcher:")
+    dispatcher = source[dispatcher_start:deterministic_start]
     standalone_start = source.index("async def process_scan_job(")
     standalone_end = source.index("\n\nasync def process_scan_plan_job", standalone_start)
     standalone = source[standalone_start:standalone_end]
@@ -2989,14 +2991,13 @@ def test_worker_runs_subdomain_discovery_inside_the_fixed_surface_stage():
     assert 'capability_name="ports.discover"' in helper
     assert 'capability_name="service.fingerprint"' in helper
     assert "automatically_scanned_discovered_hosts" in source
-    assert deterministic.index("_execute_scan_subdomain_discovery(") < (
-        deterministic.index("_execute_scan_web_probe_capability(")
-    )
-    assert deterministic.index("_execute_scan_network_discovery(") > (
-        deterministic.index("_execute_scan_web_probe_capability(")
-    )
-    assert '"subdomains.discover": subdomains' in deterministic
-    assert '"subdomains.discover", "web.probe"' in deterministic
+    assert "PostgresScanActionStore" in deterministic
+    assert "PostgresScanExecutionBackend" in deterministic
+    assert "ScanOrchestrator(" in deterministic
+    assert "_execute_scan_subdomain_discovery(" in dispatcher
+    assert "_execute_scan_web_probe_capability(" in dispatcher
+    assert "canonical_action=action" in dispatcher
+    assert "run_scan(" not in dispatcher
     assert "_execute_scan_subdomain_discovery(" not in standalone
     assert standalone.index("_hydrate_generic_scan_credentials(") < (
         standalone.index("_execute_reserved_deterministic_scan(")

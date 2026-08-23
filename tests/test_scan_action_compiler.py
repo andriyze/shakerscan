@@ -78,6 +78,7 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
     assert "verify.sqli" not in by_id
     assert "active.templates" not in by_id
     assert "discover.web_content" not in by_id
+    assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 2
     assert plan.actions[-1].action_id == "finalize.report"
     assert set(plan.actions[-1].dependencies) == set(by_id) - {"finalize.report"}
 

@@ -308,6 +308,8 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
         "\n\nasync def _execute_scan_subdomain_discovery", scheduler_start,
     )
     scheduler = worker[scheduler_start:scheduler_end]
+    dispatcher_start = worker.index("class _CanonicalLocalScanDispatcher:")
+    dispatcher = worker[dispatcher_start:scheduler_start]
 
     assert 'FROM scans s JOIN targets t' in handler
     assert 'persisted_options.get("request_collections")' in handler
@@ -337,12 +339,10 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert process.index("_hydrate_generic_scan_credentials") < process.index(
         "_execute_reserved_deterministic_scan("
     )
-    assert scheduler.index("_execute_scan_request_collections") < scheduler.index(
-        "_execute_scan_subdomain_discovery"
-    )
-    assert "trusted_primary_headers=primary_principal.headers()" in scheduler
-    assert "collection_replay_result_holder.update" in scheduler
-    assert 'raise ValueError("Cancelled by user")' in scheduler
+    assert "_execute_scan_request_collections(" in dispatcher
+    assert "trusted_primary_headers=resolve_scan_http_principal(" in dispatcher
+    assert "collection_replay_result_holder.update" in dispatcher
+    assert "ScanOrchestrator(" in scheduler
 
 
 def test_scan_api_requires_single_owner_and_freezes_replay_binding():

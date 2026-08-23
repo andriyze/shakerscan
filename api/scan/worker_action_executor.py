@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -54,7 +55,22 @@ class ReceiptScanActionExecutor:
         lease: ActionLease,
         heartbeat: ActionHeartbeat,
     ) -> CapabilityReceipt:
-        result = await self._dispatcher(action, lease, heartbeat)
+        stop_heartbeats = asyncio.Event()
+
+        async def keep_lease_alive() -> None:
+            interval = max(1.0, min(30.0, float(lease.lease_seconds) / 3.0))
+            while not stop_heartbeats.is_set():
+                try:
+                    await asyncio.wait_for(stop_heartbeats.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    await heartbeat()
+
+        heartbeat_task = asyncio.create_task(keep_lease_alive())
+        try:
+            result = await self._dispatcher(action, lease, heartbeat)
+        finally:
+            stop_heartbeats.set()
+            await heartbeat_task
         if isinstance(result, CapabilityReceipt):
             receipt = result
         elif isinstance(result, Mapping):

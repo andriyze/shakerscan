@@ -855,6 +855,17 @@ class ScanActionPlanCompiler:
                 blueprint.action_id, specification.budget_cost,
             )
             if (
+                blueprint.capability_name == "http.request"
+                and blueprint.action_id == "baseline.http_redirect"
+                and blueprint.action_id not in override_budgets
+            ):
+                requested = {
+                    **dict(specification.budget_cost),
+                    "http_requests": 1 + int(
+                        blueprint.capability_args.get("max_redirects") or 0
+                    ),
+                }
+            if (
                 blueprint.capability_name
                 in {"collections.replay_safe", "collections.replay_active"}
                 and blueprint.action_id not in override_budgets
