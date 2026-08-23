@@ -275,3 +275,26 @@ class CapabilityReceipt:
 
     def public_dict(self) -> dict[str, Any]:
         return {**self.canonical_dict(), "receipt_hash": self.receipt_hash}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CapabilityReceipt":
+        """Rehydrate a persisted receipt and verify its content address."""
+        if not isinstance(value, Mapping):
+            raise ValueError("capability receipt must be an object")
+        payload = dict(value)
+        supplied_hash = payload.pop("receipt_hash", None)
+        expected_fields = {
+            "receipt_id", "capability_name", "adapter_name", "adapter_version",
+            "target_id", "scan_id", "hunt_id", "worker_id", "scope_receipt_id",
+            "approval_receipt_id", "status", "partial", "timed_out",
+            "input_digest", "parser_version", "started_at", "finished_at",
+            "redacted_execution", "budget_reservation_id",
+            "budget_reservation_state", "budget_reserved", "budget_consumed",
+            "output_artifact_id", "artifact_refs", "observations", "errors",
+        }
+        if set(payload) != expected_fields:
+            raise ValueError("capability receipt fields are invalid")
+        receipt = cls(**payload)
+        if supplied_hash is not None and str(supplied_hash).lower() != receipt.receipt_hash:
+            raise ValueError("capability receipt hash does not match canonical content")
+        return receipt

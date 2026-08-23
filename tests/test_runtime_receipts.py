@@ -51,6 +51,19 @@ def test_receipt_hash_binds_budget_reservation_and_measured_usage():
     assert changed.receipt_hash != receipt.receipt_hash
 
 
+def test_receipt_round_trips_and_rejects_a_tampered_persisted_hash():
+    receipt = _receipt(
+        budget_reserved={"http_requests": 2},
+        budget_consumed={"http_requests": 1},
+    )
+    assert CapabilityReceipt.from_dict(receipt.public_dict()) == receipt
+
+    tampered = receipt.public_dict()
+    tampered["budget_consumed"] = {"http_requests": 2}
+    with pytest.raises(ValueError, match="hash"):
+        CapabilityReceipt.from_dict(tampered)
+
+
 def test_receipt_requires_an_owner_and_honest_timeout_state():
     with pytest.raises(ValueError, match="belong to a scan or hunt"):
         _receipt(hunt_id=None)
