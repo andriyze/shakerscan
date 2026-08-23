@@ -20,6 +20,11 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import TargetBinding
 
 from .execution import ScanExecutionPlan
+from .work_manifests import (
+    ScanWorkManifestError,
+    ScanWorkManifestKind,
+    ScanWorkManifestReference,
+)
 
 
 SCAN_ACTION_PLAN_SCHEMA = "scan-action-plan/v1"
@@ -450,6 +455,24 @@ def _reference_list(
     return tuple(result)
 
 
+def _work_manifest_reference(
+    value: Mapping[str, Any] | None,
+    *,
+    kind: ScanWorkManifestKind,
+) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        reference = ScanWorkManifestReference.from_dict(value)
+    except (ScanWorkManifestError, ValueError) as exc:
+        raise ScanActionPlanError(f"{kind.value} manifest reference is invalid") from exc
+    if reference.kind is not kind:
+        raise ScanActionPlanError(
+            f"{kind.value} manifest reference has the wrong kind"
+        )
+    return reference.canonical_dict()
+
+
 class ScanActionPlanCompiler:
     """Compile policy plus opaque references into one deterministic action DAG.
 
@@ -531,9 +554,15 @@ class ScanActionPlanCompiler:
                 )
             ):
                 raise ScanActionPlanError("request collection reference is invalid")
-        endpoint_ref = _canonical_value(endpoint_manifest_ref or {})
-        candidate_ref = _canonical_value(candidate_manifest_ref or {})
-        template_ref = _canonical_value(template_manifest_ref or {})
+        endpoint_ref = _work_manifest_reference(
+            endpoint_manifest_ref, kind=ScanWorkManifestKind.ENDPOINT,
+        )
+        candidate_ref = _work_manifest_reference(
+            candidate_manifest_ref, kind=ScanWorkManifestKind.CANDIDATE,
+        )
+        template_ref = _work_manifest_reference(
+            template_manifest_ref, kind=ScanWorkManifestKind.TEMPLATE,
+        )
         authority = _canonical_value({
             "scope_receipt_id": execution_plan.policy.scope_receipt_id,
             "approval_receipt_id": execution_plan.policy.approval_receipt_id,

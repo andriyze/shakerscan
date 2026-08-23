@@ -13,6 +13,7 @@ from api.scan.action_plan import (
     credential_profile_action_refs,
     request_collection_action_refs,
 )
+from api.scan.work_manifests import ScanWorkManifestReference
 from api.scan.execution import ScanExecutionPlan
 
 
@@ -128,6 +129,22 @@ def test_compiler_fails_closed_on_missing_placement_or_untrusted_reference_field
             execution_plan=_execution(active=False),
             target_binding=_target(),
             available_placement_capabilities=all_capabilities - {"web.probe"},
+        )
+
+    wrong_kind = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000099",
+        kind="template",
+        content_schema="template-manifest/v1",
+        manifest_digest="a" * 64,
+        entry_count=1,
+        status="complete",
+    )
+    with pytest.raises(ScanActionPlanError, match="wrong kind"):
+        ScanActionPlanCompiler().compile(
+            scan_id=SCAN_ID,
+            execution_plan=_execution(active=False),
+            target_binding=_target(),
+            endpoint_manifest_ref=wrong_kind.canonical_dict(),
         )
 
     with pytest.raises(ScanActionPlanError, match="reference fields"):

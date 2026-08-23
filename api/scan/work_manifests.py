@@ -1,0 +1,726 @@
+"""Canonical, content-addressed work manifests shared by every Scan backend."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+import hashlib
+import json
+import re
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping, Sequence
+import urllib.parse
+import uuid
+
+try:
+    from scanner_tools.url_redaction import redact_path
+except ModuleNotFoundError:  # package import through api.scan
+    from scanner.scanner_tools.url_redaction import redact_path
+
+
+SCAN_WORK_MANIFEST_SCHEMA = "scan-work-manifest/v1"
+SCAN_WORK_MANIFEST_REFERENCE_SCHEMA = "scan-work-manifest-reference/v1"
+WORK_MANIFEST_CONTENT_SCHEMAS = MappingProxyType({
+    "endpoint": "endpoint-manifest/v2",
+    "candidate": "candidate-manifest/v1",
+    "request": "request-manifest/v1",
+    "template": "template-manifest/v1",
+})
+_MAX_ENTRIES = MappingProxyType({
+    "endpoint": 100_000,
+    "candidate": 20_000,
+    "request": 2_000,
+    "template": 20_000,
+})
+_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:/{}-]{0,255}$")
+_METHOD_RE = re.compile(r"^[A-Z]{3,12}$")
+_SENSITIVE_KEYS = frozenset({
+    "authorization", "cookie", "password", "secret", "token", "api_key",
+    "private_key", "credential", "header_value", "body_value", "query_value",
+})
+
+
+class ScanWorkManifestError(ValueError):
+    """A work manifest is unsafe, unbounded, or detached from Scan authority."""
+
+
+class ScanWorkManifestKind(str, Enum):
+    ENDPOINT = "endpoint"
+    CANDIDATE = "candidate"
+    REQUEST = "request"
+    TEMPLATE = "template"
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _hex(value: Any, *, name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not _HEX_64_RE.fullmatch(normalized):
+        raise ScanWorkManifestError(f"{name} must be a SHA-256 digest")
+    return normalized
+
+
+def _token(value: Any, *, name: str, optional: bool = False) -> str | None:
+    normalized = str(value or "").strip()
+    if optional and not normalized:
+        return None
+    if not _TOKEN_RE.fullmatch(normalized):
+        raise ScanWorkManifestError(f"{name} is invalid")
+    return normalized
+
+
+def _uuid(value: Any, *, name: str) -> str:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScanWorkManifestError(f"{name} must be a UUID") from exc
+
+
+def _path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path.startswith("/") or "?" in path or "#" in path or len(path) > 4_096:
+        raise ScanWorkManifestError("canonical_path must be a bounded path without query values")
+    redacted = redact_path(path)
+    if redacted != path:
+        raise ScanWorkManifestError("canonical_path must not retain sensitive path material")
+    return path
+
+
+def _string_list(value: Any, *, name: str, maximum: int) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > maximum:
+        raise ScanWorkManifestError(f"{name} must be a bounded list")
+    normalized = tuple(
+        str(_token(item, name=f"{name} entry")) for item in value
+    )
+    if len(set(normalized)) != len(normalized):
+        raise ScanWorkManifestError(f"{name} contains duplicates")
+    return normalized
+
+
+def _integer(value: Any, *, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ScanWorkManifestError(f"{name} is outside its allowed range")
+    return value
+
+
+def _optional_integer(value: Any, *, name: str, minimum: int, maximum: int) -> int | None:
+    if value is None:
+        return None
+    return _integer(value, name=name, minimum=minimum, maximum=maximum)
+
+
+def _reject_sensitive_keys(value: Any, *, depth: int = 0) -> None:
+    if depth > 8:
+        raise ScanWorkManifestError("manifest entry nesting is too deep")
+    if isinstance(value, Mapping):
+        for raw_key, item in value.items():
+            key = str(raw_key or "").strip().lower()
+            if key in _SENSITIVE_KEYS or any(
+                marker in key for marker in ("password", "secret", "private_key")
+            ):
+                raise ScanWorkManifestError("manifest entries cannot contain secret values")
+            _reject_sensitive_keys(item, depth=depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_sensitive_keys(item, depth=depth + 1)
+
+
+def route_id(
+    *,
+    target_binding_digest: str,
+    method: str,
+    scheme: str,
+    host: str,
+    port: int,
+    canonical_path: str,
+    query_parameter_names: Sequence[str],
+) -> str:
+    """Derive one stable, value-free route identity."""
+    return _digest({
+        "target_binding_digest": _hex(
+            target_binding_digest, name="target_binding_digest",
+        ),
+        "method": str(method or "").strip().upper(),
+        "scheme": str(scheme or "").strip().lower(),
+        "host": str(host or "").strip().lower().rstrip("."),
+        "port": int(port),
+        "canonical_path": _path(canonical_path),
+        "query_parameter_names": sorted(str(item) for item in query_parameter_names),
+    })
+
+
+def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str, Any]:
+    expected = {
+        "route_id", "method", "scheme", "host", "port", "canonical_path",
+        "query_parameter_names", "source_tool", "discovery_depth", "auth_lane",
+        "selected_shard", "request_ref_ids",
+    }
+    if set(value) != expected:
+        raise ScanWorkManifestError("endpoint manifest entry fields are invalid")
+    method = str(value["method"] or "").strip().upper()
+    scheme = str(value["scheme"] or "").strip().lower()
+    host = str(value["host"] or "").strip().lower().rstrip(".")
+    if not _METHOD_RE.fullmatch(method) or scheme not in {"http", "https"} or not host:
+        raise ScanWorkManifestError("endpoint protocol identity is invalid")
+    port = _integer(value["port"], name="port", minimum=1, maximum=65_535)
+    canonical_path = _path(value["canonical_path"])
+    query_names = _string_list(
+        value["query_parameter_names"], name="query_parameter_names", maximum=64,
+    )
+    expected_route = route_id(
+        target_binding_digest=target_digest,
+        method=method,
+        scheme=scheme,
+        host=host,
+        port=port,
+        canonical_path=canonical_path,
+        query_parameter_names=query_names,
+    )
+    if _hex(value["route_id"], name="route_id") != expected_route:
+        raise ScanWorkManifestError("route_id does not match endpoint identity")
+    lane = _token(value["auth_lane"], name="auth_lane", optional=True)
+    if lane not in {None, "primary", "secondary", "service", "anonymous"}:
+        raise ScanWorkManifestError("endpoint auth_lane is invalid")
+    return {
+        "route_id": expected_route,
+        "method": method,
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "canonical_path": canonical_path,
+        "query_parameter_names": list(query_names),
+        "source_tool": _token(value["source_tool"], name="source_tool"),
+        "discovery_depth": _integer(
+            value["discovery_depth"], name="discovery_depth", minimum=0, maximum=64,
+        ),
+        "auth_lane": lane,
+        "selected_shard": _optional_integer(
+            value["selected_shard"], name="selected_shard", minimum=0, maximum=16_383,
+        ),
+        "request_ref_ids": list(_string_list(
+            value["request_ref_ids"], name="request_ref_ids", maximum=64,
+        )),
+    }
+
+
+def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "candidate_id", "route_id", "method", "canonical_path", "parameter_name",
+        "source_tool", "auth_lane", "selected_shard", "request_ref_id",
+    }
+    if set(value) != expected:
+        raise ScanWorkManifestError("candidate manifest entry fields are invalid")
+    method = str(value["method"] or "").strip().upper()
+    if not _METHOD_RE.fullmatch(method):
+        raise ScanWorkManifestError("candidate method is invalid")
+    route = _hex(value["route_id"], name="route_id")
+    parameter = str(_token(value["parameter_name"], name="parameter_name"))
+    expected_id = _digest({"route_id": route, "method": method, "parameter_name": parameter})
+    if _hex(value["candidate_id"], name="candidate_id") != expected_id:
+        raise ScanWorkManifestError("candidate_id does not match candidate identity")
+    lane = _token(value["auth_lane"], name="auth_lane", optional=True)
+    if lane not in {None, "primary", "secondary", "service", "anonymous"}:
+        raise ScanWorkManifestError("candidate auth_lane is invalid")
+    return {
+        "candidate_id": expected_id,
+        "route_id": route,
+        "method": method,
+        "canonical_path": _path(value["canonical_path"]),
+        "parameter_name": parameter,
+        "source_tool": _token(value["source_tool"], name="source_tool"),
+        "auth_lane": lane,
+        "selected_shard": _optional_integer(
+            value["selected_shard"], name="selected_shard", minimum=0, maximum=16_383,
+        ),
+        "request_ref_id": _token(
+            value["request_ref_id"], name="request_ref_id", optional=True,
+        ),
+    }
+
+
+def _request_entry(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "request_ref_id", "route_id", "method", "auth_lane", "selected_shard",
+        "safe_method", "body_schema_digest",
+    }
+    if set(value) != expected:
+        raise ScanWorkManifestError("request manifest entry fields are invalid")
+    method = str(value["method"] or "").strip().upper()
+    if not _METHOD_RE.fullmatch(method) or not isinstance(value["safe_method"], bool):
+        raise ScanWorkManifestError("request method contract is invalid")
+    lane = _token(value["auth_lane"], name="auth_lane", optional=True)
+    if lane not in {None, "primary", "secondary", "service", "anonymous"}:
+        raise ScanWorkManifestError("request auth_lane is invalid")
+    body_digest = value["body_schema_digest"]
+    return {
+        "request_ref_id": _token(value["request_ref_id"], name="request_ref_id"),
+        "route_id": _hex(value["route_id"], name="route_id"),
+        "method": method,
+        "auth_lane": lane,
+        "selected_shard": _optional_integer(
+            value["selected_shard"], name="selected_shard", minimum=0, maximum=16_383,
+        ),
+        "safe_method": value["safe_method"],
+        "body_schema_digest": (
+            _hex(body_digest, name="body_schema_digest") if body_digest is not None else None
+        ),
+    }
+
+
+def _template_entry(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {"template_id", "template_digest", "batch_index", "risk", "tags"}
+    if set(value) != expected:
+        raise ScanWorkManifestError("template manifest entry fields are invalid")
+    risk = str(value["risk"] or "").strip().lower()
+    if risk not in {"passive", "safe_active", "intrusive"}:
+        raise ScanWorkManifestError("template risk is invalid")
+    return {
+        "template_id": _token(value["template_id"], name="template_id"),
+        "template_digest": _hex(value["template_digest"], name="template_digest"),
+        "batch_index": _integer(
+            value["batch_index"], name="batch_index", minimum=0, maximum=99_999,
+        ),
+        "risk": risk,
+        "tags": list(_string_list(value["tags"], name="tags", maximum=64)),
+    }
+
+
+def _entry(kind: ScanWorkManifestKind, value: Mapping[str, Any], *, target_digest: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ScanWorkManifestError("manifest entry must be an object")
+    _reject_sensitive_keys(value)
+    if kind is ScanWorkManifestKind.ENDPOINT:
+        return _endpoint_entry(value, target_digest=target_digest)
+    if kind is ScanWorkManifestKind.CANDIDATE:
+        return _candidate_entry(value)
+    if kind is ScanWorkManifestKind.REQUEST:
+        return _request_entry(value)
+    return _template_entry(value)
+
+
+@dataclass(frozen=True)
+class ScanWorkManifestReference:
+    manifest_id: str
+    kind: ScanWorkManifestKind | str
+    content_schema: str
+    manifest_digest: str
+    entry_count: int
+    status: str
+    schema_version: str = SCAN_WORK_MANIFEST_REFERENCE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCAN_WORK_MANIFEST_REFERENCE_SCHEMA:
+            raise ScanWorkManifestError("unsupported work manifest reference schema")
+        kind = self.kind if isinstance(self.kind, ScanWorkManifestKind) else ScanWorkManifestKind(str(self.kind))
+        if self.content_schema != WORK_MANIFEST_CONTENT_SCHEMAS[kind.value]:
+            raise ScanWorkManifestError("work manifest reference content schema is invalid")
+        if self.status not in {"complete", "partial", "cancelled"}:
+            raise ScanWorkManifestError("work manifest reference status is invalid")
+        object.__setattr__(self, "manifest_id", _uuid(self.manifest_id, name="manifest_id"))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "manifest_digest", _hex(
+            self.manifest_digest, name="manifest_digest",
+        ))
+        object.__setattr__(self, "entry_count", _integer(
+            self.entry_count,
+            name="entry_count",
+            minimum=0,
+            maximum=_MAX_ENTRIES[kind.value],
+        ))
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "manifest_id": self.manifest_id,
+            "kind": self.kind.value,
+            "content_schema": self.content_schema,
+            "manifest_digest": self.manifest_digest,
+            "entry_count": self.entry_count,
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ScanWorkManifestReference":
+        expected = {
+            "schema_version", "manifest_id", "kind", "content_schema",
+            "manifest_digest", "entry_count", "status",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ScanWorkManifestError("work manifest reference fields are invalid")
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True)
+class ScanWorkManifest:
+    scan_id: str
+    kind: ScanWorkManifestKind | str
+    target_binding_digest: str
+    source_action_ids: tuple[str, ...]
+    entries: tuple[Mapping[str, Any], ...]
+    status: str = "complete"
+    reason_code: str | None = None
+    schema_version: str = SCAN_WORK_MANIFEST_SCHEMA
+    manifest_id: str | None = None
+    manifest_digest: str | None = field(default=None, compare=True)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCAN_WORK_MANIFEST_SCHEMA:
+            raise ScanWorkManifestError("unsupported Scan work manifest schema")
+        scan_id = _uuid(self.scan_id, name="scan_id")
+        kind = self.kind if isinstance(self.kind, ScanWorkManifestKind) else ScanWorkManifestKind(str(self.kind))
+        target_digest = _hex(self.target_binding_digest, name="target_binding_digest")
+        source_ids = tuple(str(_token(item, name="source_action_id")) for item in self.source_action_ids)
+        if not source_ids or len(source_ids) > 64 or len(set(source_ids)) != len(source_ids):
+            raise ScanWorkManifestError("source_action_ids are missing, duplicated, or too large")
+        if self.status not in {"complete", "partial", "cancelled"}:
+            raise ScanWorkManifestError("work manifest status is invalid")
+        reason = str(self.reason_code or "").strip() or None
+        if self.status == "complete" and reason is not None:
+            raise ScanWorkManifestError("complete work manifest cannot have a reason")
+        if self.status != "complete" and reason is None:
+            raise ScanWorkManifestError("partial/cancelled work manifest requires a reason")
+        if len(self.entries) > _MAX_ENTRIES[kind.value]:
+            raise ScanWorkManifestError("work manifest exceeds its bounded entry ceiling")
+        normalized = tuple(
+            _entry(kind, item, target_digest=target_digest) for item in self.entries
+        )
+        identities = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in normalized]
+        if len(set(identities)) != len(identities):
+            raise ScanWorkManifestError("work manifest contains duplicate entries")
+        material = {
+            "schema_version": self.schema_version,
+            "scan_id": scan_id,
+            "kind": kind.value,
+            "content_schema": WORK_MANIFEST_CONTENT_SCHEMAS[kind.value],
+            "target_binding_digest": target_digest,
+            "source_action_ids": list(source_ids),
+            "entries": list(normalized),
+            "status": self.status,
+            "reason_code": reason,
+        }
+        expected_digest = _digest(material)
+        if self.manifest_digest is not None and _hex(
+            self.manifest_digest, name="manifest_digest",
+        ) != expected_digest:
+            raise ScanWorkManifestError("manifest_digest does not match canonical content")
+        expected_id = str(uuid.uuid5(uuid.UUID(scan_id), f"{kind.value}:{expected_digest}"))
+        if self.manifest_id is not None and _uuid(
+            self.manifest_id, name="manifest_id",
+        ) != expected_id:
+            raise ScanWorkManifestError("manifest_id does not match content address")
+        object.__setattr__(self, "scan_id", scan_id)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "target_binding_digest", target_digest)
+        object.__setattr__(self, "source_action_ids", source_ids)
+        object.__setattr__(self, "entries", tuple(_freeze(item) for item in normalized))
+        object.__setattr__(self, "reason_code", reason)
+        object.__setattr__(self, "manifest_digest", expected_digest)
+        object.__setattr__(self, "manifest_id", expected_id)
+
+    @property
+    def content_schema(self) -> str:
+        return WORK_MANIFEST_CONTENT_SCHEMAS[self.kind.value]
+
+    def digest_material(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "scan_id": self.scan_id,
+            "kind": self.kind.value,
+            "content_schema": self.content_schema,
+            "target_binding_digest": self.target_binding_digest,
+            "source_action_ids": list(self.source_action_ids),
+            "entries": [_thaw(item) for item in self.entries],
+            "status": self.status,
+            "reason_code": self.reason_code,
+        }
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            **self.digest_material(),
+            "manifest_id": self.manifest_id,
+            "manifest_digest": self.manifest_digest,
+        }
+
+    def reference(self) -> ScanWorkManifestReference:
+        return ScanWorkManifestReference(
+            manifest_id=str(self.manifest_id),
+            kind=self.kind,
+            content_schema=self.content_schema,
+            manifest_digest=str(self.manifest_digest),
+            entry_count=len(self.entries),
+            status=self.status,
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ScanWorkManifest":
+        expected = {
+            "schema_version", "scan_id", "kind", "content_schema",
+            "target_binding_digest", "source_action_ids", "entries", "status",
+            "reason_code", "manifest_id", "manifest_digest",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ScanWorkManifestError("Scan work manifest fields are invalid")
+        kind = ScanWorkManifestKind(str(value["kind"]))
+        if value["content_schema"] != WORK_MANIFEST_CONTENT_SCHEMAS[kind.value]:
+            raise ScanWorkManifestError("Scan work manifest content schema is invalid")
+        return cls(**{
+            key: item for key, item in dict(value).items() if key != "content_schema"
+        })
+
+
+def endpoint_entry_from_public_record(
+    record: Mapping[str, Any],
+    *,
+    target_binding_digest: str,
+    source_tool: str | None = None,
+    discovery_depth: int = 0,
+    auth_lane: str | None = None,
+    selected_shard: int | None = None,
+    request_ref_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    method = str(record.get("method") or "GET").upper()
+    scheme = str(record.get("scheme") or "").lower()
+    host = str(record.get("host") or "").lower().rstrip(".")
+    port = int(record.get("port") or (443 if scheme == "https" else 80))
+    path = str(record.get("normalized_path") or record.get("concrete_path") or "/")
+    query_names = sorted(str(item) for item in record.get("query_keys") or ())
+    return {
+        "route_id": route_id(
+            target_binding_digest=target_binding_digest,
+            method=method,
+            scheme=scheme,
+            host=host,
+            port=port,
+            canonical_path=path,
+            query_parameter_names=query_names,
+        ),
+        "method": method,
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "canonical_path": path,
+        "query_parameter_names": query_names,
+        "source_tool": source_tool or str(record.get("source") or "unknown"),
+        "discovery_depth": int(discovery_depth),
+        "auth_lane": auth_lane,
+        "selected_shard": selected_shard,
+        "request_ref_ids": list(request_ref_ids),
+    }
+
+
+def build_endpoint_manifest(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+    surface_manifest: Mapping[str, Any],
+    source_action_ids: Sequence[str],
+    auth_lane: str | None = "anonymous",
+    selected_shard: int | None = None,
+    request_ref_ids_by_route: Mapping[str, Sequence[str]] | None = None,
+) -> ScanWorkManifest:
+    """Upgrade normalized discovery output into the canonical durable endpoint form."""
+    if str(surface_manifest.get("schema_version") or "") not in {
+        "endpoint-manifest/v1", "endpoint-manifest/v2",
+    }:
+        raise ScanWorkManifestError("surface manifest schema is unsupported")
+    status = str(surface_manifest.get("status") or "partial").strip().lower()
+    if status not in {"complete", "partial", "cancelled"}:
+        status = "partial"
+    reason = str(surface_manifest.get("reason") or "").strip() or None
+    if status != "complete" and reason is None:
+        reason = "surface_manifest_incomplete"
+    request_refs = dict(request_ref_ids_by_route or {})
+    depth_by_source = {
+        "seed": 0,
+        "known_endpoints": 0,
+        "collections.replay": 0,
+        "web.probe": 0,
+        "web.crawl": 1,
+        "web.content_discover": 1,
+        "subdomains.discover": 1,
+    }
+    entries: list[dict[str, Any]] = []
+    for raw in surface_manifest.get("endpoints") or ():
+        if not isinstance(raw, Mapping):
+            raise ScanWorkManifestError("surface manifest endpoint must be an object")
+        source = str(raw.get("source") or "unknown")
+        base = endpoint_entry_from_public_record(
+            raw,
+            target_binding_digest=target_binding_digest,
+            source_tool=source,
+            discovery_depth=depth_by_source.get(source, 1),
+            auth_lane=auth_lane,
+            selected_shard=selected_shard,
+        )
+        base["request_ref_ids"] = list(request_refs.get(base["route_id"], ()))
+        entries.append(base)
+    return ScanWorkManifest(
+        scan_id=scan_id,
+        kind=ScanWorkManifestKind.ENDPOINT,
+        target_binding_digest=target_binding_digest,
+        source_action_ids=tuple(source_action_ids),
+        entries=tuple(entries),
+        status=status,
+        reason_code=reason,
+    )
+
+
+def build_candidate_manifest(
+    endpoint_manifest: ScanWorkManifest,
+    *,
+    source_action_ids: Sequence[str],
+    maximum: int,
+) -> ScanWorkManifest:
+    """Expand every named query parameter into a deterministic bounded candidate."""
+    if endpoint_manifest.kind is not ScanWorkManifestKind.ENDPOINT:
+        raise ScanWorkManifestError("candidate source must be an endpoint manifest")
+    limit = _integer(maximum, name="candidate maximum", minimum=1, maximum=20_000)
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    for endpoint in endpoint_manifest.entries:
+        if endpoint["method"] != "GET":
+            continue
+        for parameter in endpoint["query_parameter_names"]:
+            if len(entries) >= limit:
+                truncated = True
+                break
+            entries.append({
+                "candidate_id": _digest({
+                    "route_id": endpoint["route_id"],
+                    "method": endpoint["method"],
+                    "parameter_name": parameter,
+                }),
+                "route_id": endpoint["route_id"],
+                "method": endpoint["method"],
+                "canonical_path": endpoint["canonical_path"],
+                "parameter_name": parameter,
+                "source_tool": endpoint["source_tool"],
+                "auth_lane": endpoint["auth_lane"],
+                "selected_shard": endpoint["selected_shard"],
+                "request_ref_id": (
+                    endpoint["request_ref_ids"][0]
+                    if endpoint["request_ref_ids"] else None
+                ),
+            })
+        if truncated:
+            break
+    return ScanWorkManifest(
+        scan_id=endpoint_manifest.scan_id,
+        kind=ScanWorkManifestKind.CANDIDATE,
+        target_binding_digest=endpoint_manifest.target_binding_digest,
+        source_action_ids=tuple(source_action_ids),
+        entries=tuple(entries),
+        status="partial" if truncated or endpoint_manifest.status != "complete" else "complete",
+        reason_code=(
+            "candidate_limit_reached" if truncated
+            else "endpoint_manifest_partial" if endpoint_manifest.status != "complete"
+            else None
+        ),
+    )
+
+
+def build_request_manifest(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+    source_action_ids: Sequence[str],
+    requests: Sequence[Mapping[str, Any]],
+    maximum: int = 2_000,
+) -> ScanWorkManifest:
+    """Freeze an admitted saved-request selection without any secret values."""
+    limit = _integer(maximum, name="request maximum", minimum=1, maximum=2_000)
+    selected = list(requests[:limit])
+    truncated = len(requests) > limit
+    return ScanWorkManifest(
+        scan_id=scan_id,
+        kind=ScanWorkManifestKind.REQUEST,
+        target_binding_digest=target_binding_digest,
+        source_action_ids=tuple(source_action_ids),
+        entries=tuple(selected),
+        status="partial" if truncated else "complete",
+        reason_code="request_limit_reached" if truncated else None,
+    )
+
+
+def build_template_manifest(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+    source_action_ids: Sequence[str],
+    templates: Iterable[Mapping[str, Any]],
+    batch_size: int,
+    maximum: int = 20_000,
+) -> ScanWorkManifest:
+    """Freeze every admitted template and its deterministic execution batch."""
+    bounded_batch = _integer(
+        batch_size, name="template batch_size", minimum=1, maximum=5_000,
+    )
+    limit = _integer(maximum, name="template maximum", minimum=1, maximum=20_000)
+    normalized: list[dict[str, Any]] = []
+    for raw in templates:
+        if not isinstance(raw, Mapping):
+            raise ScanWorkManifestError("template selection must contain objects")
+        normalized.append({
+            "template_id": raw.get("template_id"),
+            "template_digest": raw.get("template_digest"),
+            "batch_index": 0,
+            "risk": raw.get("risk"),
+            "tags": list(raw.get("tags") or ()),
+        })
+    normalized.sort(key=lambda item: (str(item["template_id"]), str(item["template_digest"])))
+    truncated = len(normalized) > limit
+    normalized = normalized[:limit]
+    for index, item in enumerate(normalized):
+        item["batch_index"] = index // bounded_batch
+    return ScanWorkManifest(
+        scan_id=scan_id,
+        kind=ScanWorkManifestKind.TEMPLATE,
+        target_binding_digest=target_binding_digest,
+        source_action_ids=tuple(source_action_ids),
+        entries=tuple(normalized),
+        status="partial" if truncated else "complete",
+        reason_code="template_limit_reached" if truncated else None,
+    )
+
+
+def execution_url_for_endpoint(
+    entry: Mapping[str, Any], *, parameter_name: str | None = None,
+) -> str:
+    """Materialize a value-free execution URL from canonical manifest fields."""
+    scheme = str(entry["scheme"])
+    host = str(entry["host"])
+    port = int(entry["port"])
+    authority_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    authority = authority_host if port == default_port else f"{authority_host}:{port}"
+    names = list(entry.get("query_parameter_names") or ())
+    if parameter_name is not None:
+        names = [parameter_name]
+    path = str(entry["canonical_path"])
+    path = path.replace("{int}", "1").replace(
+        "{uuid}", "00000000-0000-4000-8000-000000000000",
+    )
+    query = urllib.parse.urlencode([(name, "1") for name in names])
+    return urllib.parse.urlunsplit((scheme, authority, path, query, ""))

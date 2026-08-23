@@ -26,6 +26,7 @@ from runtime.reservation_store import PostgresBudgetReservationStore
 from runtime.request_collection_store import PostgresRequestCollectionStore
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.action_store import PostgresScanActionStore
+from scan.manifest_store import PostgresScanManifestStore
 
 RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
@@ -964,6 +965,10 @@ async def run_schema_migrations(pool) -> None:
             # allocation before queue handoff. Install its scheduler index under
             # the same startup lock as the shared reservation ledger.
             await PostgresScanActionStore().ensure_schema(conn)
+
+            # Endpoint, candidate, saved-request, and template worklists are
+            # durable content-addressed inputs to the same action scheduler.
+            await PostgresScanManifestStore().ensure_schema(conn)
 
             # Scan and Hunt share one encrypted, target-bound credential system.  Install it
             # under the same startup lock so neither API nor workers can observe profiles
