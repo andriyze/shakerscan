@@ -125,15 +125,25 @@ try:
         NativeScanExecutionError,
         validate_native_scan_execution_payload,
     )
+    from scan.placement_transport import (
+        PlacementTransportError,
+        load_private_placement_bundle,
+    )
 except ImportError:
     try:
         from api.scan.executor import (
             NativeScanExecutionError,
             validate_native_scan_execution_payload,
         )
+        from api.scan.placement_transport import (
+            PlacementTransportError,
+            load_private_placement_bundle,
+        )
     except ImportError:
         NativeScanExecutionError = ValueError
         validate_native_scan_execution_payload = None
+        PlacementTransportError = ValueError
+        load_private_placement_bundle = None
 
 REPORT_SCHEMA_VERSION = "2026-01-28"
 SCANNER_VERSION = published_scanner_version()
@@ -14763,36 +14773,15 @@ def _load_canonical_scan_placements(
     execution: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Load worker-produced capability results bound to this exact execution."""
-    raw = os.environ.get("SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS")
-    if not raw:
-        return {}
-    if execution is None:
-        raise SystemExit(
-            "canonical Scan placements require a validated execution envelope"
-        )
-    if len(raw.encode("utf-8")) > 500_000:
-        raise SystemExit("canonical Scan placements exceed their size limit")
+    if load_private_placement_bundle is None:
+        raise SystemExit("canonical Scan placement transport is unavailable")
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"invalid canonical Scan placements: {exc}") from exc
-    if not isinstance(payload, dict) or set(payload) != {
-        "schema_version", "execution_plan_digest",
-        "target_binding_digest", "capabilities",
-    }:
-        raise SystemExit("canonical Scan placement fields are invalid")
-    if payload.get("schema_version") != "canonical-scan-placements/v1":
-        raise SystemExit("canonical Scan placement schema is invalid")
-    if (
-        payload.get("execution_plan_digest")
-        != execution.get("execution_plan_digest")
-        or payload.get("target_binding_digest")
-        != execution.get("target_binding_digest")
-    ):
-        raise SystemExit("canonical Scan placements do not match this execution")
+        payload = load_private_placement_bundle(execution)
+    except PlacementTransportError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not payload:
+        return {}
     capabilities = payload.get("capabilities")
-    if not isinstance(capabilities, dict):
-        raise SystemExit("canonical Scan placement capabilities are invalid")
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
         "http.request", "http.request.scheme_redirect",

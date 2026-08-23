@@ -171,6 +171,7 @@ jobs:
             tests/test_scan_action_plan.py \
             tests/test_scan_capability_result.py \
             tests/test_observation_manifests.py \
+            tests/test_scan_placement_transport.py \
             tests/test_scan_job_contract.py \
             tests/test_scan_worker_contract.py \
             tests/test_scan_worker_dispatch.py \

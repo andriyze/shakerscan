@@ -165,6 +165,7 @@ from scan.stages import (
 )
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.surface_manifest import build_scan_surface_manifest
+from scan.placement_transport import write_private_placement_bundle
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -3172,7 +3173,10 @@ async def run_scan(
     # Set up checkpoint file for partial result recovery
     checkpoint_file = None
     scan_env = os.environ.copy()
-    scan_env.pop("SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS", None)
+    scan_env.pop("SHAKERSCAN_CANONICAL_PLACEMENTS_FILE", None)
+    scan_env.pop("SHAKERSCAN_CANONICAL_PLACEMENTS_SHA256", None)
+    canonical_placement_bundle = None
+    placement_payload = None
     if native_scan_execution is not None:
         native_payload = native_scan_execution.payload()
         scan_env["SHAKERSCAN_CANONICAL_REPORT_ONLY"] = "true"
@@ -3205,11 +3209,6 @@ async def run_scan(
                     for name, summary in canonical_placed_capabilities.items()
                 },
             }
-            scan_env["SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS"] = json.dumps(
-                placement_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
     if scan_ai_enabled and ai_api_key:
         scan_env["AI_API_KEY"] = ai_api_key
     # Stamp the real deployed commit (published by the API from the live checkout)
@@ -3287,6 +3286,12 @@ async def run_scan(
             if clean:
                 scan_env[env_key] = "\n".join(clean[:2000])
 
+    if placement_payload is not None:
+        canonical_placement_bundle = write_private_placement_bundle(
+            placement_payload,
+        )
+        scan_env.update(canonical_placement_bundle.environment())
+
     # Preflight the scanner entrypoint: a stale/truncated bind mount (the macOS
     # single-file-mount inode-pinning) silently yields no output + exit 0. Fail
     # loudly with a diagnosable error instead of spawning a doomed subprocess.
@@ -3298,6 +3303,8 @@ async def run_scan(
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
+        if canonical_placement_bundle is not None:
+            canonical_placement_bundle.cleanup()
         return _finalize_deterministic_scan_result({
             "target": target,
             "error": _pf_err,
@@ -3317,6 +3324,8 @@ async def run_scan(
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
+        if canonical_placement_bundle is not None:
+            canonical_placement_bundle.cleanup()
         return _finalize_deterministic_scan_result({
             "target": target,
             "error": str(exc),
@@ -3343,6 +3352,8 @@ async def run_scan(
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
+        if canonical_placement_bundle is not None:
+            canonical_placement_bundle.cleanup()
         raise
 
     timeout_reason: str | None = None
@@ -3608,6 +3619,8 @@ async def run_scan(
                 os.unlink(scanner_auth_config_file)
             except OSError:
                 pass
+        if canonical_placement_bundle is not None:
+            canonical_placement_bundle.cleanup()
         raise
     # Scanner subprocess (the memory hog) has exited — free the active-scan slot
     # immediately so a waiting worker can start; the rest of run_scan is light.
@@ -3627,6 +3640,8 @@ async def run_scan(
             os.unlink(scanner_auth_config_file)
         except OSError:
             pass
+    if canonical_placement_bundle is not None:
+        canonical_placement_bundle.cleanup()
 
     stdout_text = b"".join(stdout_chunks).decode(errors="replace") if stdout_chunks else ""
     stderr_text = "\n".join(stderr_lines)

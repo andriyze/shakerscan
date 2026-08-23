@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from api.scan.placement_transport import write_private_placement_bundle
+
 
 _SCANNER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scanner"))
 _added_scanner_dir = False
@@ -28,6 +30,22 @@ from scanner_tools.finding_validator import (
 )
 if _added_scanner_dir:
     sys.path.remove(_SCANNER_DIR)
+
+
+_TEST_PLACEMENT_PAYLOAD_ENV = "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD"
+_load_private_placements = scanner_mod._load_canonical_scan_placements
+
+
+def _load_test_private_placements(execution):
+    """Turn test fixture JSON into the same owner-only file used in production."""
+    raw = os.environ.pop(_TEST_PLACEMENT_PAYLOAD_ENV, "")
+    if raw:
+        bundle = write_private_placement_bundle(json.loads(raw))
+        os.environ.update(bundle.environment())
+    return _load_private_placements(execution)
+
+
+scanner_mod._load_canonical_scan_placements = _load_test_private_placements
 
 
 def _template_placement_summary():
@@ -469,7 +487,7 @@ def test_canonical_authz_verification_is_bound_and_proof_promoted(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -518,7 +536,7 @@ def test_canonical_authz_placement_rejects_unapproved_observation_fields(
     summary = _authz_verification_placement_summary()
     summary["observations"][0]["authorization"] = "Bearer must-not-pass"
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -536,7 +554,7 @@ def test_canonical_sqli_verification_is_bound_and_stays_suspected(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -589,7 +607,7 @@ def test_canonical_xss_verification_is_bound_and_adapted(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -640,7 +658,7 @@ def test_canonical_content_discovery_is_bound_and_adapted(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -674,7 +692,7 @@ def test_canonical_tls_placement_is_bound_to_origin_and_address(monkeypatch):
         },
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -691,7 +709,7 @@ def test_canonical_tls_placement_is_bound_to_origin_and_address(monkeypatch):
     tampered = _tls_placement_summary()
     tampered["observations"][0]["pinned_address"] = "192.0.2.99"
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -714,7 +732,7 @@ def test_canonical_http_baseline_is_bound_and_adapted(monkeypatch):
         },
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -772,7 +790,7 @@ def test_canonical_http_redirect_is_bound_and_adapted(monkeypatch):
         },
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -807,7 +825,7 @@ def test_canonical_http_redirect_rejects_unbound_http_origin(monkeypatch):
         },
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -835,7 +853,7 @@ def test_canonical_security_txt_is_bound_and_adapted(monkeypatch):
         },
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -874,7 +892,7 @@ def test_canonical_security_txt_rejects_non_fixed_path(monkeypatch):
     tampered = _security_txt_placement_summary()
     tampered["observations"][0]["request"]["path"] = "/private"
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -952,7 +970,7 @@ def test_canonical_dns_posture_is_bound_and_adapted(monkeypatch):
         },
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -993,7 +1011,7 @@ def test_canonical_dns_posture_rejects_unbound_addresses(monkeypatch):
     tampered = _dns_placement_summary()
     tampered["observations"][0]["bound_addresses"]["A"] = ["192.0.2.99"]
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": execution["execution_plan_digest"],
@@ -1203,7 +1221,7 @@ def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -1229,7 +1247,7 @@ def test_canonical_web_probe_placement_is_bound_and_adapted(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -1258,7 +1276,7 @@ def test_canonical_template_placement_is_bound_and_adapted_to_candidates(
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             **execution,
@@ -1296,7 +1314,7 @@ def test_canonical_template_placement_rejects_other_authority(monkeypatch):
         "target_binding_digest": "b" * 64,
     }
     monkeypatch.setenv(
-        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        "SHAKERSCAN_TEST_PLACEMENT_PAYLOAD",
         json.dumps({
             "schema_version": "canonical-scan-placements/v1",
             "execution_plan_digest": "d" * 64,
