@@ -22,6 +22,7 @@ from api.scan.work_manifests import (
     build_candidate_manifest,
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
+    build_request_candidate_manifest,
     build_request_manifest,
     build_template_manifest,
     canonical_nuclei_options_for_manifest,
@@ -280,6 +281,53 @@ def test_request_and_template_manifests_are_complete_bounded_and_deterministic()
     assert request.entries[0]["request_ref_id"] == "request-1"
     assert [item["batch_index"] for item in templates.entries] == [0, 0, 1, 1, 2]
     assert len(templates.entries) == 5
+
+
+def test_request_candidate_manifest_authorizes_only_private_state_changing_refs():
+    route = _endpoint_manifest().entries[0]["route_id"]
+    requests = build_request_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        source_action_ids=("inputs.collection_00",),
+        requests=(
+            {
+                "request_ref_id": "safe-read",
+                "route_id": route,
+                "method": "GET",
+                "auth_lane": "primary",
+                "selected_shard": None,
+                "safe_method": True,
+                "body_schema_digest": None,
+            },
+            {
+                "request_ref_id": "create-order",
+                "route_id": "b" * 64,
+                "method": "POST",
+                "auth_lane": "primary",
+                "selected_shard": 3,
+                "safe_method": False,
+                "body_schema_digest": None,
+            },
+        ),
+    )
+
+    candidates = build_request_candidate_manifest(
+        (requests,),
+        source_action_ids=("inputs.collection_00",),
+        maximum=10,
+    )
+
+    assert candidates.content_schema == "request-candidate-manifest/v1"
+    assert len(candidates.entries) == 1
+    entry = candidates.entries[0]
+    assert entry["request_ref_id"] == "create-order"
+    assert entry["method"] == "POST"
+    assert entry["family_hints"] == ("xss", "sqli")
+    encoded = json.dumps(candidates.canonical_dict(), sort_keys=True)
+    assert "safe-read" not in encoded
+    assert "https://" not in encoded
+    assert "body_value" not in encoded
+    assert ScanWorkManifest.from_dict(candidates.canonical_dict()) == candidates
 
 
 def test_canonical_nuclei_pack_freezes_pinned_bundle_filters_and_action_authority():

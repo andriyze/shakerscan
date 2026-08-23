@@ -24,6 +24,7 @@ SCAN_WORK_MANIFEST_REFERENCE_SCHEMA = "scan-work-manifest-reference/v1"
 WORK_MANIFEST_CONTENT_SCHEMAS = MappingProxyType({
     "endpoint": "endpoint-manifest/v2",
     "candidate": "candidate-manifest/v1",
+    "request_candidate": "request-candidate-manifest/v1",
     "request": "request-manifest/v1",
     "template": "template-manifest/v1",
 })
@@ -41,6 +42,7 @@ CANONICAL_NUCLEI_TEMPLATE_TAGS = (
 _MAX_ENTRIES = MappingProxyType({
     "endpoint": 100_000,
     "candidate": 20_000,
+    "request_candidate": 2_000,
     "request": 2_000,
     "template": 20_000,
 })
@@ -60,6 +62,7 @@ class ScanWorkManifestError(ValueError):
 class ScanWorkManifestKind(str, Enum):
     ENDPOINT = "endpoint"
     CANDIDATE = "candidate"
+    REQUEST_CANDIDATE = "request_candidate"
     REQUEST = "request"
     TEMPLATE = "template"
 
@@ -336,6 +339,62 @@ def _request_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _request_candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "candidate_id", "route_id", "request_ref_id", "method",
+        "family_hints", "auth_lane", "selected_shard", "score",
+        "ranking_rationale",
+    }
+    if set(value) != expected:
+        raise ScanWorkManifestError(
+            "request candidate manifest entry fields are invalid"
+        )
+    method = str(value["method"] or "").strip().upper()
+    if not _METHOD_RE.fullmatch(method) or method in {"GET", "HEAD", "OPTIONS"}:
+        raise ScanWorkManifestError(
+            "request candidate requires a state-changing HTTP method"
+        )
+    route = _hex(value["route_id"], name="route_id")
+    request_ref = str(_token(
+        value["request_ref_id"], name="request_ref_id",
+    ))
+    family_hints = _string_list(
+        value["family_hints"], name="family_hints", maximum=2,
+    )
+    if not family_hints or not set(family_hints) <= {"xss", "sqli"}:
+        raise ScanWorkManifestError("request candidate family_hints are invalid")
+    expected_id = _digest({
+        "route_id": route,
+        "request_ref_id": request_ref,
+        "method": method,
+    })
+    if _hex(value["candidate_id"], name="candidate_id") != expected_id:
+        raise ScanWorkManifestError(
+            "request candidate ID does not match its private request authority"
+        )
+    lane = _token(value["auth_lane"], name="auth_lane", optional=True)
+    if lane not in {None, "primary", "secondary", "service", "anonymous"}:
+        raise ScanWorkManifestError("request candidate auth_lane is invalid")
+    return {
+        "candidate_id": expected_id,
+        "route_id": route,
+        "request_ref_id": request_ref,
+        "method": method,
+        "family_hints": list(family_hints),
+        "auth_lane": lane,
+        "selected_shard": _optional_integer(
+            value["selected_shard"], name="selected_shard",
+            minimum=0, maximum=16_383,
+        ),
+        "score": _integer(value["score"], name="score", minimum=0, maximum=100),
+        "ranking_rationale": list(_string_list(
+            value["ranking_rationale"],
+            name="ranking_rationale",
+            maximum=16,
+        )),
+    }
+
+
 def _template_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = {"template_id", "template_digest", "batch_index", "risk", "tags"}
     if set(value) != expected:
@@ -362,6 +421,8 @@ def _entry(kind: ScanWorkManifestKind, value: Mapping[str, Any], *, target_diges
         return _endpoint_entry(value, target_digest=target_digest)
     if kind is ScanWorkManifestKind.CANDIDATE:
         return _candidate_entry(value)
+    if kind is ScanWorkManifestKind.REQUEST_CANDIDATE:
+        return _request_candidate_entry(value)
     if kind is ScanWorkManifestKind.REQUEST:
         return _request_entry(value)
     return _template_entry(value)
@@ -832,6 +893,93 @@ def build_request_manifest(
         entries=tuple(selected),
         status="partial" if truncated else "complete",
         reason_code="request_limit_reached" if truncated else None,
+    )
+
+
+def build_request_candidate_manifest(
+    request_manifests: Sequence[ScanWorkManifest],
+    *,
+    source_action_ids: Sequence[str],
+    maximum: int,
+) -> ScanWorkManifest:
+    """Freeze state-changing exact-request candidates without body values.
+
+    The manifest authorizes only an opaque request reference. The executing
+    worker must resolve and validate the encrypted request, then select bounded
+    JSON/form fields in private memory. A public or redacted URL is deliberately
+    absent from this contract.
+    """
+    if not request_manifests:
+        raise ScanWorkManifestError(
+            "request candidates require at least one request manifest"
+        )
+    first = request_manifests[0]
+    if any(
+        manifest.kind is not ScanWorkManifestKind.REQUEST
+        or manifest.scan_id != first.scan_id
+        or manifest.target_binding_digest != first.target_binding_digest
+        for manifest in request_manifests
+    ):
+        raise ScanWorkManifestError(
+            "request candidate sources must share one Scan target authority"
+        )
+    limit = _integer(
+        maximum, name="request candidate maximum", minimum=1, maximum=2_000,
+    )
+    candidates: dict[str, dict[str, Any]] = {}
+    for manifest in request_manifests:
+        for request in manifest.entries:
+            if bool(request["safe_method"]):
+                continue
+            request_ref = str(request["request_ref_id"])
+            method = str(request["method"])
+            route = str(request["route_id"])
+            candidate_id = _digest({
+                "route_id": route,
+                "request_ref_id": request_ref,
+                "method": method,
+            })
+            score = 76
+            rationale = [
+                "exact_private_request_reference",
+                "state_changing_method",
+                "worker_private_body_required",
+            ]
+            if request["auth_lane"] not in {None, "anonymous"}:
+                score += 12
+                rationale.append("authenticated_lane")
+            candidates[candidate_id] = {
+                "candidate_id": candidate_id,
+                "route_id": route,
+                "request_ref_id": request_ref,
+                "method": method,
+                "family_hints": ["xss", "sqli"],
+                "auth_lane": request["auth_lane"],
+                "selected_shard": request["selected_shard"],
+                "score": min(100, score),
+                "ranking_rationale": rationale,
+            }
+    ranked = sorted(
+        candidates.values(), key=lambda item: (-int(item["score"]), item["candidate_id"]),
+    )
+    truncated = len(ranked) > limit
+    return ScanWorkManifest(
+        scan_id=first.scan_id,
+        kind=ScanWorkManifestKind.REQUEST_CANDIDATE,
+        target_binding_digest=first.target_binding_digest,
+        source_action_ids=tuple(source_action_ids),
+        entries=tuple(ranked[:limit]),
+        status=(
+            "partial"
+            if truncated or any(item.status != "complete" for item in request_manifests)
+            else "complete"
+        ),
+        reason_code=(
+            "request_candidate_limit_reached" if truncated
+            else "request_manifest_partial"
+            if any(item.status != "complete" for item in request_manifests)
+            else None
+        ),
     )
 
 

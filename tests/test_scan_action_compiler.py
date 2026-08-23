@@ -74,6 +74,56 @@ def _request_manifest_ref(manifest_id: str, digest: str, count: int = 1):
     ).canonical_dict()
 
 
+def _request_candidate_manifest_ref(count: int = 1):
+    return ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000090",
+        kind="request_candidate",
+        content_schema="request-candidate-manifest/v1",
+        manifest_digest="9" * 64,
+        entry_count=count,
+        status="complete",
+    ).canonical_dict()
+
+
+def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_authority():
+    compiler = ScanActionPlanCompiler()
+    disabled = compiler.compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("xss", "sqli"), state=False),
+        target_binding=_target(),
+        request_candidate_manifest_ref=_request_candidate_manifest_ref(),
+    )
+    assert not any(
+        action.capability_name in {"xss.request_verify", "sqli.request_verify"}
+        for action in disabled.actions
+    )
+
+    enabled = compiler.compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("xss", "sqli"), state=True),
+        target_binding=_target(),
+        request_candidate_manifest_ref=_request_candidate_manifest_ref(2),
+    )
+    request_actions = [
+        action for action in enabled.actions
+        if action.capability_name in {"xss.request_verify", "sqli.request_verify"}
+    ]
+
+    assert [action.capability_name for action in request_actions] == [
+        "xss.request_verify", "sqli.request_verify",
+    ]
+    assert all(action.requested_budget["http_requests"] == 2 for action in request_actions)
+    assert all(
+        action.requested_budget["state_changing_requests"] == 2
+        for action in request_actions
+    )
+    assert all(
+        action.capability_args["request_candidate_manifest_ref"]
+        == _request_candidate_manifest_ref(2)
+        for action in request_actions
+    )
+
+
 def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families():
     plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,

@@ -510,6 +510,7 @@ class ScanActionPlanCompiler:
         request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
         endpoint_manifest_ref: Mapping[str, Any] | None = None,
         candidate_manifest_ref: Mapping[str, Any] | None = None,
+        request_candidate_manifest_ref: Mapping[str, Any] | None = None,
         template_manifest_ref: Mapping[str, Any] | None = None,
         authority_refs: Mapping[str, Any] | None = None,
         shard_authority: Mapping[str, Any] | None = None,
@@ -601,6 +602,10 @@ class ScanActionPlanCompiler:
         candidate_ref = _work_manifest_reference(
             candidate_manifest_ref, kind=ScanWorkManifestKind.CANDIDATE,
         )
+        request_candidate_ref = _work_manifest_reference(
+            request_candidate_manifest_ref,
+            kind=ScanWorkManifestKind.REQUEST_CANDIDATE,
+        )
         template_ref = _work_manifest_reference(
             template_manifest_ref, kind=ScanWorkManifestKind.TEMPLATE,
         )
@@ -613,6 +618,7 @@ class ScanActionPlanCompiler:
         for name, value in (
             ("endpoint_manifest_ref", endpoint_ref),
             ("candidate_manifest_ref", candidate_ref),
+            ("request_candidate_manifest_ref", request_candidate_ref),
             ("template_manifest_ref", template_ref),
             ("authority_refs", authority),
             ("shard_authority", shard),
@@ -1040,6 +1046,43 @@ class ScanActionPlanCompiler:
                 required="sqli" in explicitly_requested,
                 reserve_dependency_slots=int(authz_will_run),
             )
+        private_request_dependencies = tuple(
+            row.action_id for row in blueprints
+            if row.action_id.startswith("inputs.collection_")
+        )
+        if (
+            scope != "discovery"
+            and policy.allow_state_changing_http
+            and not defer_manifest_actions
+            and request_candidate_ref
+        ):
+            if xss:
+                add_manifest_breadth(
+                    "verify.request_xss",
+                    "verify_candidates",
+                    "xss.request_verify",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    index_name="request_candidate_index",
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required="xss" in explicitly_requested,
+                    reserve_dependency_slots=int(sqli),
+                )
+            if sqli:
+                add_manifest_breadth(
+                    "verify.request_sqli",
+                    "verify_candidates",
+                    "sqli.request_verify",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    index_name="request_candidate_index",
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required="sqli" in explicitly_requested,
+                )
         if authz_will_run and not defer_manifest_actions:
             add(
                 "verify.authz",
@@ -1088,6 +1131,7 @@ class ScanActionPlanCompiler:
             "request_manifest_refs": request_refs,
             "endpoint_manifest_ref": endpoint_ref,
             "candidate_manifest_ref": candidate_ref,
+            "request_candidate_manifest_ref": request_candidate_ref,
             "template_manifest_ref": template_ref,
             "authority_refs": authority,
             "shard_authority": shard,

@@ -259,6 +259,64 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",
         ),
         CapabilitySpec(
+            "xss.request_verify",
+            "Verify reflection in one exact worker-private JSON or form request.",
+            "http", "mutation", _HTTP_TARGETS, "request_mutation.xss", "1",
+            "state_changing_http",
+            {
+                "http_requests": 2,
+                "state_changing_requests": 2,
+                "tool_wall_seconds": 20,
+            },
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "private_request_reference": True,
+            },
+            _schema({
+                "request_candidate_manifest_ref": {"type": "object"},
+                "request_candidate_index": {
+                    "type": "integer", "minimum": 0, "maximum": 1_999,
+                },
+            }, required=(
+                "request_candidate_manifest_ref", "request_candidate_index",
+            )),
+            "request-xss-differential/v1",
+            ("xss_reflection_differential", "tool_receipt"),
+            planner_visible=False,
+            retest_contract="rerun-exact-request-with-xss-differential",
+        ),
+        CapabilitySpec(
+            "sqli.request_verify",
+            "Verify SQL error differentials in one exact worker-private JSON or form request.",
+            "http", "mutation", _HTTP_TARGETS, "request_mutation.sqli", "1",
+            "state_changing_http",
+            {
+                "http_requests": 2,
+                "state_changing_requests": 2,
+                "tool_wall_seconds": 20,
+            },
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "private_request_reference": True,
+                "data_extraction": False,
+                "time_based_techniques": False,
+            },
+            _schema({
+                "request_candidate_manifest_ref": {"type": "object"},
+                "request_candidate_index": {
+                    "type": "integer", "minimum": 0, "maximum": 1_999,
+                },
+            }, required=(
+                "request_candidate_manifest_ref", "request_candidate_index",
+            )),
+            "request-sqli-differential/v1",
+            ("sqli_error_differential", "tool_receipt"),
+            planner_visible=False,
+            retest_contract="rerun-exact-request-with-sqli-differential",
+        ),
+        CapabilitySpec(
             "service.fingerprint", "Bounded connection-based service/version fingerprint.",
             "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
             "network_discovery", {"tcp_ports_attempted": 60, "tool_wall_seconds": 90},
