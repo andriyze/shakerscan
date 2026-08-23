@@ -15773,9 +15773,16 @@ _CANONICAL_FORBIDDEN_BOOLEAN_ARGS = (
     "vuln_injection", "vuln_web", "exposure_client", "exposure_infra",
     "threat_intel", "full", "aggressive", "smart", "standard", "deep",
     "no_early_stop", "thorough_params", "budget_disable_nuclei_early_stop",
+    "auto_auth",
 )
 _CANONICAL_FORBIDDEN_VALUE_ARGS = (
-    "check_family", "oob_callback_url", "budget_profile",
+    "check_family", "oob_callback_url", "budget_profile", "api_token",
+    "auth_cookies", "auth_header", "auth_headers_json",
+    "auth_scenario_json", "auth_config_file", "login_url",
+    "login_username", "login_password", "login_extra_fields",
+    "oauth_client_id", "oauth_client_secret", "oauth_token_url",
+    "oauth_scope", "oauth_username", "oauth_password", "user2_cookies",
+    "user2_header", "user2_login_username", "user2_login_password",
     "budget_max_duration_minutes", "budget_discovery_depth", "budget_max_urls",
     "budget_browser_max_pages", "budget_browser_max_depth",
     "budget_api_probe_limit", "budget_param_discovery_url_limit",
@@ -16165,7 +16172,6 @@ async def cli_main():
     ap.add_argument("--oob-max-payloads", type=int, default=None, dest="oob_max_payloads_deprecated", help=argparse.SUPPRESS)
 
     args = ap.parse_args()
-    _apply_auth_config_file_args(args, args.auth_config_file)
     canonical_scan_execution = _load_canonical_scan_execution(args.canonical_scan)
     canonical_scan_placements = _load_canonical_scan_placements(
         canonical_scan_execution
@@ -16173,6 +16179,8 @@ async def cli_main():
     if canonical_scan_execution is not None:
         _validate_canonical_scan_target(args.target, canonical_scan_execution)
         _reject_canonical_cli_behavior(args)
+    else:
+        _apply_auth_config_file_args(args, args.auth_config_file)
 
     # Handle deprecated --oob-max-payloads alias (only if new flag not explicitly set)
     if args.oob_max_findings is None and args.oob_max_payloads_deprecated is not None:

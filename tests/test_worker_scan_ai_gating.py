@@ -3879,6 +3879,8 @@ def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatc
         "network_discovery": False,
         "subfinder": False,
         "asm_check_family": "sqli",
+        "auth_header": "Bearer worker-only-secret",
+        "login_password": "worker-only-password",
         "_canonical_target_binding": TargetBinding(
             target_id="target-1",
             target_kind="web",
@@ -3897,6 +3899,11 @@ def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatc
     assert "--canonical-scan" in captured["cmd"]
     assert not {"--smart", "--full", "--deep", "--standard", "--quick"} & set(captured["cmd"])
     assert "--active" not in captured["cmd"]
+    assert "--auth-config-file" not in captured["cmd"]
+    assert "worker-only-secret" not in " ".join(captured["cmd"])
+    assert "worker-only-password" not in " ".join(captured["cmd"])
+    assert "worker-only-secret" not in json.dumps(captured["env"])
+    assert "worker-only-password" not in json.dumps(captured["env"])
     assert "--budget-profile" not in captured["cmd"]
     assert not any(item.startswith("--budget-") for item in captured["cmd"])
     execution = validate_native_scan_execution_payload(json.loads(

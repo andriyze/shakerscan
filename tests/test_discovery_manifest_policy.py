@@ -150,6 +150,25 @@ def test_scanner_applies_native_execution_without_a_legacy_preset():
     assert args.oob_callback_url is None
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("auth_header", "Bearer secret"),
+        ("auth_config_file", "/tmp/secret-auth.json"),
+        ("login_password", "secret"),
+        ("oauth_client_secret", "secret"),
+        ("user2_cookies", "session=secret"),
+        ("auto_auth", True),
+    ],
+)
+def test_canonical_scanner_rejects_direct_auth_authority(name, value):
+    args = Namespace()
+    setattr(args, name, value)
+
+    with pytest.raises(SystemExit, match=name.replace("_", "-")):
+        _reject_canonical_cli_behavior(args)
+
+
 def test_canonical_cli_rejects_parallel_behavior_and_budget_selectors():
     with pytest.raises(SystemExit, match="derives behavior and budgets"):
         _reject_canonical_cli_behavior(Namespace(

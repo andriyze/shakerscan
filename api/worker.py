@@ -3115,7 +3115,17 @@ async def run_scan(
         cmd.extend(['--ai-mask-host', ai_mask_host])
 
     # Authentication options
-    scanner_auth_config_file = _write_scanner_auth_config_file(_scanner_auth_config_from_options(options))
+    # Canonical credentials are resolved and consumed only by worker-owned,
+    # target-bound capabilities. The final scan.execute subprocess assembles
+    # placed evidence and must never receive reusable secret material or gain
+    # authority to perform its own login flow.
+    scanner_auth_config_file = (
+        None
+        if native_scan_execution is not None
+        else _write_scanner_auth_config_file(
+            _scanner_auth_config_from_options(options)
+        )
+    )
     if scanner_auth_config_file:
         cmd.extend(['--auth-config-file', scanner_auth_config_file])
 
