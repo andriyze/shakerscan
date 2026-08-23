@@ -55,6 +55,8 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "tests/test_scan_action_compiler.py",
         "tests/test_scan_action_store.py",
         "tests/test_scan_capability_result.py",
+        "tests/test_scan_orchestrator.py",
+        "tests/test_scan_action_resume.py",
         "tests/test_observation_manifests.py",
         "tests/test_scan_placement_transport.py",
         "tests/test_deterministic_scan_execution_adapter.py",
