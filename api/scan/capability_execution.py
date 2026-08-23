@@ -198,15 +198,21 @@ def scan_content_discovery_capability_allocation(
 
 def scan_tls_capability_allocation(
     budget: Mapping[str, Any],
+    *,
+    origin_count: int = 1,
+    address_count: int = 1,
 ) -> dict[str, int] | None:
-    """Reserve the one frozen-address TLS handshake owned by baseline Scan."""
+    """Reserve the complete typed TLS profile for every frozen origin/address pair."""
     tcp_ports = _budget_integer(budget, "max_tcp_ports")
     wall = _budget_integer(budget, "max_tool_wall_seconds")
-    if tcp_ports < 1 or wall < 1:
+    pairs = max(0, int(origin_count)) * max(0, int(address_count))
+    required_tcp = pairs * 4
+    required_wall = pairs * 15
+    if pairs < 1 or tcp_ports < required_tcp or wall < required_wall:
         return None
     return {
-        "tcp_ports_attempted": 1,
-        "tool_wall_seconds": min(15, wall),
+        "tcp_ports_attempted": required_tcp,
+        "tool_wall_seconds": required_wall,
     }
 
 

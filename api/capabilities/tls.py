@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import math
 import ssl
 import time
-from typing import Any
+from typing import Any, Mapping
 import urllib.parse
+
+try:
+    from cryptography import x509
+except ModuleNotFoundError:  # minimal host-side test environments
+    x509 = None
 
 try:
     from runtime.models import TargetBinding
@@ -39,8 +45,9 @@ async def inspect_tls_origin(
     *,
     target: TargetBinding,
     timeout_seconds: int = 10,
+    pinned_address: str | None = None,
 ) -> dict[str, Any]:
-    """Perform one SNI-preserving handshake against one frozen target address."""
+    """Inspect modern protocols, leaf certificate, and trust on one frozen address."""
     normalized_origin = _origin(origin)
     parsed = urllib.parse.urlsplit(normalized_origin or "")
     if normalized_origin is None or parsed.scheme != "https" or not parsed.hostname:
@@ -78,78 +85,403 @@ async def inspect_tls_origin(
             },
         }
 
-    pinned_address = target.allowed_addresses[0]
-    port = parsed.port or 443
-    timeout = max(1, min(15, int(timeout_seconds)))
-    tls_context = ssl.create_default_context()
-    tls_context.check_hostname = False
-    tls_context.verify_mode = ssl.CERT_NONE
-    tls_context.set_alpn_protocols(["h2", "http/1.1"])
-    started = time.perf_counter()
-    writer: asyncio.StreamWriter | None = None
-    try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
-                host=pinned_address,
-                port=port,
-                ssl=tls_context,
-                server_hostname=parsed.hostname,
-            ),
-            timeout=timeout,
-        )
-        tls_object = writer.get_extra_info("ssl_object")
-        if tls_object is None:
-            raise ssl.SSLError("TLS handshake produced no SSL object")
-        certificate = tls_object.getpeercert(binary_form=True) or b""
-        cipher = tls_object.cipher()
-        elapsed = min(
-            timeout,
-            max(1, math.ceil(time.perf_counter() - started)),
-        )
+    selected_address = str(
+        pinned_address or target.allowed_addresses[0]
+    ).strip()
+    if selected_address not in target.allowed_addresses:
         return {
-            "ok": True,
-            "status": "success",
+            "ok": False,
+            "status": "blocked",
+            "error": "scope:TLS address is outside the frozen target binding",
+            "budget_consumed": {
+                "tcp_ports_attempted": 0,
+                "tool_wall_seconds": 0,
+            },
+        }
+    port = parsed.port or 443
+    timeout = max(4, min(15, int(timeout_seconds)))
+    attempt_timeout = max(1, timeout // 4)
+    started = time.perf_counter()
+    attempts = 0
+
+    async def handshake(context: ssl.SSLContext) -> tuple[Any, bytes]:
+        nonlocal attempts
+        attempts += 1
+        writer: asyncio.StreamWriter | None = None
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host=selected_address,
+                    port=port,
+                    ssl=context,
+                    server_hostname=parsed.hostname,
+                ),
+                timeout=attempt_timeout,
+            )
+            tls_object = writer.get_extra_info("ssl_object")
+            if tls_object is None:
+                raise ssl.SSLError("TLS handshake produced no SSL object")
+            return tls_object, tls_object.getpeercert(binary_form=True) or b""
+        finally:
+            if writer is not None:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
+                except (OSError, ssl.SSLError, asyncio.TimeoutError):
+                    pass
+
+    protocol_results: list[dict[str, Any]] = []
+    successful: list[tuple[Any, bytes]] = []
+    for label, version in (
+        ("TLSv1.2", ssl.TLSVersion.TLSv1_2),
+        ("TLSv1.3", ssl.TLSVersion.TLSv1_3),
+    ):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.minimum_version = version
+        context.maximum_version = version
+        context.set_alpn_protocols(["h2", "http/1.1"])
+        try:
+            tls_object, certificate = await handshake(context)
+        except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+            protocol_results.append({
+                "protocol": label,
+                "supported": False,
+                "error_type": type(exc).__name__,
+            })
+        else:
+            cipher = tls_object.cipher()
+            protocol_results.append({
+                "protocol": label,
+                "supported": True,
+                "negotiated_protocol": tls_object.version(),
+                "cipher": cipher[0] if cipher else None,
+                "cipher_bits": cipher[2] if cipher else None,
+                "alpn_protocol": tls_object.selected_alpn_protocol(),
+            })
+            successful.append((tls_object, certificate))
+
+    # If the two supported modern profiles both fail, one default negotiation
+    # distinguishes a reachable legacy-only endpoint from a non-TLS service.
+    if not successful:
+        fallback = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        fallback.check_hostname = False
+        fallback.verify_mode = ssl.CERT_NONE
+        fallback.set_alpn_protocols(["h2", "http/1.1"])
+        try:
+            tls_object, certificate = await handshake(fallback)
+        except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+            protocol_results.append({
+                "protocol": "default_negotiation",
+                "supported": False,
+                "error_type": type(exc).__name__,
+            })
+        else:
+            cipher = tls_object.cipher()
+            protocol_results.append({
+                "protocol": "default_negotiation",
+                "supported": True,
+                "negotiated_protocol": tls_object.version(),
+                "cipher": cipher[0] if cipher else None,
+                "cipher_bits": cipher[2] if cipher else None,
+                "alpn_protocol": tls_object.selected_alpn_protocol(),
+            })
+            successful.append((tls_object, certificate))
+
+    trust = "not_evaluated"
+    trust_error_type: str | None = None
+    if successful:
+        verified_context = ssl.create_default_context()
+        verified_context.check_hostname = True
+        verified_context.verify_mode = ssl.CERT_REQUIRED
+        verified_context.set_alpn_protocols(["h2", "http/1.1"])
+        try:
+            await handshake(verified_context)
+        except ssl.SSLCertVerificationError as exc:
+            trust = "untrusted"
+            trust_error_type = type(exc).__name__
+        except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+            trust_error_type = type(exc).__name__
+        else:
+            trust = "trusted"
+
+    elapsed = min(
+        timeout,
+        max(1, math.ceil(time.perf_counter() - started)),
+    )
+    if not successful:
+        return {
+            "ok": False,
+            "status": "failed",
+            "error": "tls_handshake:no_supported_protocol",
             "observation": {
                 "kind": "tls_protocol",
                 "origin": normalized_origin,
                 "server_hostname": parsed.hostname,
-                "pinned_address": pinned_address,
+                "pinned_address": selected_address,
                 "port": port,
-                "protocol": tls_object.version(),
-                "cipher": cipher[0] if cipher else None,
-                "cipher_protocol": cipher[1] if cipher else None,
-                "cipher_bits": cipher[2] if cipher else None,
-                "alpn_protocol": tls_object.selected_alpn_protocol(),
-                "certificate_sha256": (
-                    hashlib.sha256(certificate).hexdigest()
-                    if certificate else None
-                ),
-                "certificate_bytes": len(certificate),
+                "status": "failed",
+                "protocol_attempts": protocol_results,
                 "certificate_trust": "not_evaluated",
             },
             "budget_consumed": {
-                "tcp_ports_attempted": 1,
+                "tcp_ports_attempted": attempts,
                 "tool_wall_seconds": elapsed,
             },
         }
-    except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
-        elapsed = min(
-            timeout,
-            max(1, math.ceil(time.perf_counter() - started)),
-        )
+
+    tls_object, certificate = successful[0]
+    cipher = tls_object.cipher()
+    certificate_details = _certificate_details(
+        certificate,
+        hostname=str(parsed.hostname),
+        chain_certificates=_certificate_chain(tls_object, certificate),
+    )
+    observation = {
+        "kind": "tls_protocol",
+        "origin": normalized_origin,
+        "server_hostname": parsed.hostname,
+        "pinned_address": selected_address,
+        "port": port,
+        "status": "success",
+        "protocol": tls_object.version(),
+        "supported_protocols": [
+            item["protocol"] for item in protocol_results
+            if item.get("supported") is True
+            and item.get("protocol") != "default_negotiation"
+        ],
+        "protocol_attempts": protocol_results,
+        "cipher": cipher[0] if cipher else None,
+        "cipher_protocol": cipher[1] if cipher else None,
+        "cipher_bits": cipher[2] if cipher else None,
+        "weak_cipher": bool(
+            cipher and (
+                int(cipher[2] or 0) < 128
+                or any(marker in str(cipher[0]).upper() for marker in (
+                    "NULL", "RC4", "3DES", "DES-CBC", "EXPORT",
+                ))
+            )
+        ),
+        "legacy_protocol_negotiated": (
+            str(tls_object.version() or "")
+            not in {"TLSv1.2", "TLSv1.3"}
+        ),
+        "alpn_protocol": tls_object.selected_alpn_protocol(),
+        "certificate_sha256": (
+            hashlib.sha256(certificate).hexdigest() if certificate else None
+        ),
+        "certificate_bytes": len(certificate),
+        "certificate_trust": trust,
+        "certificate_trust_error_type": trust_error_type,
+        **certificate_details,
+    }
+    return {
+        "ok": True,
+        "status": "success",
+        "observation": observation,
+        "budget_consumed": {
+            "tcp_ports_attempted": attempts,
+            "tool_wall_seconds": elapsed,
+        },
+    }
+
+
+def _certificate_chain(tls_object: Any, leaf: bytes) -> tuple[bytes, ...]:
+    """Extract the peer-provided chain when supported, retaining the leaf fallback."""
+    certificates: list[bytes] = []
+    loader = getattr(tls_object, "get_unverified_chain", None)
+    if callable(loader):
+        try:
+            chain = loader()
+        except (OSError, ssl.SSLError, ValueError):
+            chain = ()
+        for item in chain or ():
+            try:
+                raw = item.public_bytes() if hasattr(item, "public_bytes") else item
+            except (TypeError, ValueError):
+                continue
+            if isinstance(raw, str):
+                try:
+                    raw = ssl.PEM_cert_to_DER_cert(raw)
+                except ValueError:
+                    continue
+            elif isinstance(raw, bytes) and raw.startswith(b"-----BEGIN"):
+                try:
+                    raw = ssl.PEM_cert_to_DER_cert(raw.decode("ascii"))
+                except (UnicodeDecodeError, ValueError):
+                    continue
+            if isinstance(raw, bytes) and raw and raw not in certificates:
+                certificates.append(raw)
+    if leaf and leaf not in certificates:
+        certificates.insert(0, leaf)
+    return tuple(certificates)
+
+
+def _certificate_details(
+    certificate: bytes,
+    *,
+    hostname: str,
+    chain_certificates: tuple[bytes, ...] = (),
+) -> dict[str, Any]:
+    """Decode content-free certificate posture when the release dependency exists."""
+    if not certificate or x509 is None:
+        return {
+            "certificate_parse_status": "unavailable",
+            **_certificate_chain_summary(chain_certificates or (certificate,)),
+        }
+    try:
+        parsed = x509.load_der_x509_certificate(certificate)
+    except (TypeError, ValueError):
+        return {
+            "certificate_parse_status": "failed",
+            **_certificate_chain_summary(chain_certificates or (certificate,)),
+        }
+    try:
+        dns_names = tuple(parsed.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName,
+        ).value.get_values_for_type(x509.DNSName))
+    except x509.ExtensionNotFound:
+        dns_names = ()
+    not_before = getattr(parsed, "not_valid_before_utc", None)
+    not_after = getattr(parsed, "not_valid_after_utc", None)
+    if not_before is None:
+        not_before = parsed.not_valid_before.replace(tzinfo=timezone.utc)
+    if not_after is None:
+        not_after = parsed.not_valid_after.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    public_key = parsed.public_key()
+    signature_hash = None
+    try:
+        signature_hash = parsed.signature_hash_algorithm.name
+    except (ValueError, TypeError):
+        pass
+    return {
+        "certificate_parse_status": "parsed",
+        "certificate_subject": parsed.subject.rfc4514_string(),
+        "certificate_issuer": parsed.issuer.rfc4514_string(),
+        "certificate_serial_hex": format(parsed.serial_number, "x"),
+        "certificate_not_before": not_before.isoformat(),
+        "certificate_not_after": not_after.isoformat(),
+        "certificate_expired": now > not_after,
+        "certificate_not_yet_valid": now < not_before,
+        "certificate_days_remaining": math.floor(
+            (not_after - now).total_seconds() / 86_400
+        ),
+        "certificate_expiring_within_30_days": (
+            0 <= (not_after - now).total_seconds() <= 30 * 86_400
+        ),
+        "certificate_dns_names": list(dns_names[:100]),
+        "certificate_hostname_matches": _hostname_matches(
+            hostname, dns_names,
+        ),
+        "certificate_self_signed": parsed.subject == parsed.issuer,
+        "certificate_signature_algorithm": (
+            parsed.signature_algorithm_oid.dotted_string
+        ),
+        "certificate_signature_hash": signature_hash,
+        "certificate_weak_signature": signature_hash in {"md5", "sha1"},
+        "certificate_public_key_type": type(public_key).__name__,
+        "certificate_public_key_bits": getattr(public_key, "key_size", None),
+        "certificate_weak_public_key": bool(
+            getattr(public_key, "key_size", 0)
+            and (
+                (
+                    "RSA" in type(public_key).__name__.upper()
+                    and int(public_key.key_size) < 2_048
+                )
+                or (
+                    "ELLIPTIC" in type(public_key).__name__.upper()
+                    and int(public_key.key_size) < 224
+                )
+            )
+        ),
+        **_certificate_chain_summary(chain_certificates or (certificate,)),
+    }
+
+
+def _certificate_chain_summary(certificates: tuple[bytes, ...]) -> dict[str, Any]:
+    bounded = tuple(item for item in certificates[:20] if item)
+    return {
+        "certificate_chain_sha256": [
+            hashlib.sha256(item).hexdigest() for item in bounded
+        ],
+        "certificate_chain_length": len(bounded),
+        "certificate_chain_status": (
+            "peer_chain" if len(bounded) > 1 else "leaf_only" if bounded else "missing"
+        ),
+    }
+
+
+def _hostname_matches(hostname: str, dns_names: tuple[str, ...]) -> bool | None:
+    if not dns_names:
+        return None
+    normalized = str(hostname or "").lower().rstrip(".")
+    for raw_name in dns_names:
+        name = str(raw_name or "").lower().rstrip(".")
+        if name == normalized:
+            return True
+        if name.startswith("*.") and normalized.endswith(name[1:]) and (
+            normalized.count(".") == name.count(".")
+        ):
+            return True
+    return False
+
+
+async def inspect_tls_binding(
+    *,
+    target: TargetBinding,
+    timeout_seconds_per_target: int = 15,
+) -> dict[str, Any]:
+    """Inspect every frozen HTTPS origin/address pair under one exact action hold."""
+    origins = tuple(sorted(
+        str(item) for item in target.allowed_origins
+        if str(item).lower().startswith("https://")
+    ))
+    addresses = tuple(sorted(target.allowed_addresses))
+    if not origins or not addresses:
         return {
             "ok": False,
-            "status": "failed",
-            "error": f"tls_handshake:{type(exc).__name__}",
+            "status": "not_applicable",
+            "partial": False,
+            "error": "tls binding has no HTTPS origin/address pairs",
+            "errors": [],
+            "observations": [],
             "budget_consumed": {
-                "tcp_ports_attempted": 1,
-                "tool_wall_seconds": elapsed,
+                "tcp_ports_attempted": 0,
+                "tool_wall_seconds": 0,
             },
         }
-    finally:
-        if writer is not None:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (OSError, ssl.SSLError):
-                pass
+    observations: list[Mapping[str, Any]] = []
+    errors: list[str] = []
+    consumed = {"tcp_ports_attempted": 0, "tool_wall_seconds": 0}
+    successes = 0
+    for origin in origins:
+        for address in addresses:
+            result = await inspect_tls_origin(
+                origin,
+                target=target,
+                timeout_seconds=timeout_seconds_per_target,
+                pinned_address=address,
+            )
+            measured = result.get("budget_consumed")
+            if isinstance(measured, Mapping):
+                for name in consumed:
+                    consumed[name] += max(0, int(measured.get(name) or 0))
+            if isinstance(result.get("observation"), Mapping):
+                observations.append(dict(result["observation"]))
+            if result.get("ok"):
+                successes += 1
+            elif result.get("error"):
+                errors.append(str(result["error"])[:200])
+    total = len(origins) * len(addresses)
+    partial = 0 < successes < total
+    return {
+        "ok": successes > 0,
+        "status": "partial" if partial else "success" if successes == total else "failed",
+        "partial": partial,
+        "error": "tls_binding_partial" if partial else errors[0] if errors else None,
+        "errors": errors[:100],
+        "observations": observations,
+        "budget_consumed": consumed,
+    }

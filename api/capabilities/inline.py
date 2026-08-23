@@ -127,10 +127,25 @@ class _MeasuredObservationExecutionAdapter(_InlineAdapter):
             else "failed"
         )
         observation = result.get("observation")
+        observations = (
+            tuple(
+                dict(item) for item in result.get("observations") or ()
+                if isinstance(item, Mapping)
+            )
+            if isinstance(result.get("observations"), (list, tuple))
+            else ()
+        )
+        if isinstance(observation, Mapping):
+            observations = (*observations, dict(observation))
+        errors = tuple(
+            str(item)[:500] for item in result.get("errors") or () if str(item)
+        ) if isinstance(result.get("errors"), (list, tuple)) else ()
+        if result.get("error"):
+            errors = (*errors, str(result["error"])[:500])
         return CapabilityAdapterResult(
             status=status,
-            observations=(dict(observation),) if isinstance(observation, Mapping) else (),
-            errors=(str(result["error"]),) if result.get("error") else (),
+            observations=observations[:10_000],
+            errors=errors[:100],
             actual_budget={
                 str(key): int(value)
                 for key, value in measured.items()

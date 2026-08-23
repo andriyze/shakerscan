@@ -65,6 +65,7 @@ def _findings_for_action(
         "sqli.verify": {"sqli_finding"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
+        "tls.inspect": {"tls_protocol"},
     }.get(result.capability_name, set())
     for raw in observations:
         item = dict(raw)
@@ -161,6 +162,57 @@ def _findings_for_action(
                 "verification_reason": "Cross-principal owner-object replay proof satisfied",
             })
             findings.append(finding)
+        elif kind == "tls_protocol":
+            tls_issues = (
+                (item.get("certificate_expired") is True,
+                 "TLS certificate is expired", "high", "CWE-295"),
+                (item.get("certificate_not_yet_valid") is True,
+                 "TLS certificate is not yet valid", "medium", "CWE-295"),
+                (item.get("certificate_hostname_matches") is False,
+                 "TLS certificate hostname mismatch", "high", "CWE-295"),
+                (item.get("certificate_trust") == "untrusted",
+                 "TLS certificate chain is not trusted", "medium", "CWE-295"),
+                (item.get("legacy_protocol_negotiated") is True,
+                 "Legacy TLS protocol negotiated", "high", "CWE-326"),
+                (item.get("weak_cipher") is True,
+                 "Weak TLS cipher negotiated", "high", "CWE-327"),
+                (item.get("certificate_weak_signature") is True,
+                 "TLS certificate uses a weak signature", "high", "CWE-327"),
+                (item.get("certificate_weak_public_key") is True,
+                 "TLS certificate uses a weak public key", "high", "CWE-326"),
+                (item.get("certificate_expiring_within_30_days") is True,
+                 "TLS certificate expires within 30 days", "low", "CWE-295"),
+            )
+            for present, title, severity, cwe in tls_issues:
+                if not present:
+                    continue
+                finding = _base_finding(
+                    tool="tls.inspect",
+                    title=title,
+                    severity=severity,
+                    cwe=cwe,
+                    url=item.get("origin"),
+                    evidence={
+                        "origin": item.get("origin"),
+                        "pinned_address": item.get("pinned_address"),
+                        "port": item.get("port"),
+                        "protocol": item.get("protocol"),
+                        "cipher": item.get("cipher"),
+                        "certificate_sha256": item.get("certificate_sha256"),
+                        "canonical_capability": "tls.inspect",
+                        "capability_receipt": receipt,
+                    },
+                )
+                finding.update({
+                    "verified": True,
+                    "suspected": False,
+                    "needs_verification": False,
+                    "proof_state": "verified",
+                    "verification_reason": (
+                        "Pinned deterministic TLS posture proof satisfied"
+                    ),
+                })
+                findings.append(finding)
         elif kind == "template_match":
             severity = str(item.get("severity") or "info").strip().lower()
             if severity not in _SEVERITY_WEIGHT:

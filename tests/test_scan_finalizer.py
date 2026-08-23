@@ -135,3 +135,45 @@ def test_finalizer_explains_required_action_degradation():
     row = report["canonical_action_execution"]["actions"][0]
     assert row["status"] == "failed"
     assert row["reason_code"] == "adapter_failed"
+
+
+def test_finalizer_promotes_only_typed_pinned_tls_posture_issues():
+    tls = _action("baseline.tls", 0, capability_name="tls.inspect")
+    final = _action("finalize.report", 1, dependencies=(tls.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(tls, final),
+    )
+    results = _results(plan)
+    results[tls.action_id] = _result_with_observation_count(tls, 1)
+    observations = {
+        tls.action_id: ({
+            "kind": "tls_protocol",
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+            "port": 443,
+            "protocol": "TLSv1.3",
+            "cipher": "TLS_AES_256_GCM_SHA384",
+            "certificate_sha256": "c" * 64,
+            "certificate_expired": True,
+            "certificate_hostname_matches": False,
+            "certificate_trust": "untrusted",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert {item["title"] for item in report["findings"]} == {
+        "TLS certificate is expired",
+        "TLS certificate hostname mismatch",
+        "TLS certificate chain is not trusted",
+    }
+    assert all(item["verified"] is True for item in report["findings"])
+    assert report["verification_summary"]["verified"] == 3

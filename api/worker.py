@@ -82,7 +82,7 @@ from capabilities.inline import (
 )
 from capabilities.scanner import ScannerExecutionAdapter
 from capabilities.scan import DeterministicScanExecutionAdapter
-from capabilities.tls import inspect_tls_origin
+from capabilities.tls import inspect_tls_binding
 from capabilities.replay import ReplayExecutionAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
@@ -11306,7 +11306,7 @@ def _scan_tls_summary_from_stored(
         for item in receipt.get("observations") or []
         if isinstance(item, Mapping)
         and str(item.get("kind") or "") == "tls_protocol"
-    ][:1]
+    ][:4_096]
     return {
         "schema_version": "canonical-scan-tls-inspection-execution/v1",
         "capability_name": "tls.inspect",
@@ -11333,7 +11333,7 @@ async def _execute_scan_tls_capability(
     job_id: str,
     canonical_action: Any | None = None,
 ) -> dict[str, Any]:
-    """Run one canonical TLS handshake outside the report monolith."""
+    """Run the complete typed TLS matrix outside the report monolith."""
     _normalized, admission = prepare_worker_dispatch(options)
     if not admission.canonical or admission.plan is None:
         return _skipped_scan_tls_summary("legacy_scan")
@@ -11345,17 +11345,27 @@ async def _execute_scan_tls_capability(
     if execution.focused_endpoints_only or execution.zero_rediscovery:
         return _skipped_scan_tls_summary("assigned_endpoint_scope")
     target = execution.target_binding
-    execution_target = scan_external_execution_target(
-        target_url, target=target,
+    https_origins = tuple(
+        str(item) for item in target.allowed_origins
+        if str(item).lower().startswith("https://")
     )
-    parsed = urllib.parse.urlsplit(execution_target)
-    origin = urllib.parse.urlunsplit((
-        parsed.scheme, parsed.netloc, "", "", "",
-    ))
-    if parsed.scheme.lower() != "https":
+    if not https_origins:
         return _skipped_scan_tls_summary("non_https")
+    if canonical_action is not None:
+        expected_args = {
+            "origins_ref": "frozen_https_origins",
+            "origin_count": len(https_origins),
+            "addresses_ref": "frozen_addresses",
+            "address_count": len(target.allowed_addresses),
+        }
+        if dict(canonical_action.capability_args) != expected_args:
+            raise ScanCapabilityContractError(
+                "canonical TLS action differs from the frozen target matrix"
+            )
     allocation = scan_tls_capability_allocation(
-        execution.payload()["execution_budget"]
+        execution.payload()["execution_budget"],
+        origin_count=len(https_origins),
+        address_count=len(target.allowed_addresses),
     )
     if allocation is None:
         return _skipped_scan_tls_summary("insufficient_stage_budget")
@@ -11365,15 +11375,19 @@ async def _execute_scan_tls_capability(
         scan_id=scan_id,
         job_id=job_id,
         capability_name="tls.inspect",
-        capability_args={"origin": origin},
+        capability_args={
+            "origins_ref": "frozen_https_origins",
+            "origin_count": len(https_origins),
+            "addresses_ref": "frozen_addresses",
+            "address_count": len(target.allowed_addresses),
+        },
         action_id=(canonical_action.action_id if canonical_action is not None
                    else "deterministic_baseline.tls.inspect"),
         target_binding=target,
         reservation_limits=allocation,
-        inline_operation=lambda: inspect_tls_origin(
-            origin,
+        inline_operation=lambda: inspect_tls_binding(
             target=target,
-            timeout_seconds=int(allocation["tool_wall_seconds"]),
+            timeout_seconds_per_target=15,
         ),
         canonical_action=canonical_action,
     )

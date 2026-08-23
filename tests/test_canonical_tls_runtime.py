@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from api.capabilities.tls import inspect_tls_origin
+from api.capabilities.tls import inspect_tls_binding, inspect_tls_origin
 from api.runtime.models import TargetBinding
 from scanner import scanner as scanner_main
 
@@ -46,7 +46,7 @@ class _Writer:
         return None
 
 
-def test_shared_tls_capability_uses_one_frozen_address_handshake(monkeypatch):
+def test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes(monkeypatch):
     calls = []
     writer = _Writer()
 
@@ -61,17 +61,57 @@ def test_shared_tls_capability_uses_one_frozen_address_handshake(monkeypatch):
         timeout_seconds=15,
     ))
 
-    assert len(calls) == 1
-    assert calls[0]["host"] == "192.0.2.10"
-    assert calls[0]["server_hostname"] == "app.example.test"
+    assert len(calls) == 3
+    assert {call["host"] for call in calls} == {"192.0.2.10"}
+    assert {call["server_hostname"] for call in calls} == {"app.example.test"}
     assert result["status"] == "success"
     assert result["observation"]["protocol"] == "TLSv1.3"
+    assert result["observation"]["supported_protocols"] == [
+        "TLSv1.2", "TLSv1.3",
+    ]
+    assert result["observation"]["certificate_trust"] == "trusted"
     assert result["observation"]["certificate_sha256"]
     assert result["budget_consumed"] == {
-        "tcp_ports_attempted": 1,
+        "tcp_ports_attempted": 3,
         "tool_wall_seconds": 1,
     }
     assert writer.closed is True
+
+
+def test_tls_binding_inspects_every_frozen_origin_and_address(monkeypatch):
+    calls = []
+
+    async def fake_open_connection(**kwargs):
+        calls.append(kwargs)
+        return object(), _Writer()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=(
+            "https://app.example.test",
+            "https://app.example.test:8443",
+        ),
+        allowed_addresses=("192.0.2.10", "192.0.2.11"),
+        allowed_root_domains=("example.test",),
+    )
+
+    result = asyncio.run(inspect_tls_binding(target=target))
+
+    assert result["status"] == "success"
+    assert len(result["observations"]) == 4
+    assert {
+        (item["origin"], item["pinned_address"])
+        for item in result["observations"]
+    } == {
+        (origin, address)
+        for origin in target.allowed_origins
+        for address in target.allowed_addresses
+    }
+    assert len(calls) == 12
+    assert result["budget_consumed"]["tcp_ports_attempted"] == 12
 
 
 def test_shared_tls_capability_blocks_origin_outside_binding(monkeypatch):

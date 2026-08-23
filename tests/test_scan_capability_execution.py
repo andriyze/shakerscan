@@ -323,20 +323,25 @@ def test_scan_process_reserves_only_remaining_report_wall_time():
 def test_tls_capability_owns_tcp_budget_outside_report_process():
     allocation = scan_tls_capability_allocation(_budget())
     assert allocation == {
-        "tcp_ports_attempted": 1,
+        "tcp_ports_attempted": 4,
         "tool_wall_seconds": 15,
     }
     prepared = prepare_scan_inline_capability(
         specification=CAPABILITY_REGISTRY.require("tls.inspect"),
         target=_target(),
-        args={"origin": "https://app.example.test"},
+        args={
+            "origins_ref": "frozen_https_origins",
+            "origin_count": 1,
+            "addresses_ref": "frozen_addresses",
+            "address_count": 1,
+        },
         policy=ScanPolicy(scope_receipt_id="scope-1"),
     )
     prepared = fit_prepared_scan_capability(
         prepared, ledger_limits=scan_budget_ledger_limits(_budget()),
     )
     assert prepared.estimated_budget == {
-        "tcp_ports_attempted": 1,
+        "tcp_ports_attempted": 4,
         "tool_wall_seconds": 15,
     }
     assert {
@@ -347,7 +352,12 @@ def test_tls_capability_owns_tcp_budget_outside_report_process():
         "schema_version": "scan-inline-capability/v1",
         "capability_name": "tls.inspect",
         "target_binding_digest": _target().digest,
-        "input": {"origin": "https://app.example.test"},
+        "input": {
+            "origins_ref": "frozen_https_origins",
+            "origin_count": 1,
+            "addresses_ref": "frozen_addresses",
+            "address_count": 1,
+        },
     }
     assert len(prepared.redacted_execution["input_binding_digest"]) == 64
 

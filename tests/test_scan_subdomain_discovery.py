@@ -1199,9 +1199,14 @@ def test_scan_tls_uses_same_reserve_before_handshake_boundary(monkeypatch):
             admission=admission,
             execution=execution,
             scan_id="00000000-0000-0000-0000-000000000001",
-            job_id="job-1",
-            capability_name="tls.inspect",
-            capability_args={"origin": "https://app.example.test"},
+                job_id="job-1",
+                capability_name="tls.inspect",
+                capability_args={
+                    "origins_ref": "frozen_https_origins",
+                    "origin_count": 1,
+                    "addresses_ref": "frozen_addresses",
+                    "address_count": 1,
+                },
             action_id="deterministic_baseline.tls.inspect",
             target_binding=target,
             reservation_limits={
@@ -1624,7 +1629,7 @@ def _stored_network_capability(
         "authz.verify": ("authz.differential", "authz-differential/v1"),
         "http.request": ("agent.http_request", "http-observation/v1"),
         "dns.inspect": ("scanner.dns", "dns-posture-observation/v1"),
-        "tls.inspect": ("scanner.tls", "tls-observation/v1"),
+        "tls.inspect": ("scanner.tls", "tls-observation/v2"),
         "xss.verify": ("dalfox", "dalfox-typed-v1"),
         "sqli.verify": ("sqlmap", "sqlmap-typed-v1"),
     }[capability_name]
@@ -2090,12 +2095,15 @@ def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch
     call = calls[0]
     assert call["capability_name"] == "tls.inspect"
     assert call["capability_args"] == {
-        "origin": "https://app.example.test",
+        "origins_ref": "frozen_https_origins",
+        "origin_count": 1,
+        "addresses_ref": "frozen_addresses",
+        "address_count": 1,
     }
     assert call["action_id"] == "deterministic_baseline.tls.inspect"
     assert call["target_binding"] == target
     assert call["reservation_limits"] == {
-        "tcp_ports_attempted": 1,
+        "tcp_ports_attempted": 4,
         "tool_wall_seconds": 15,
     }
     assert callable(call["inline_operation"])

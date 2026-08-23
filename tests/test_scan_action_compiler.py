@@ -94,6 +94,16 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
     assert "active.templates" not in by_id
     assert "discover.web_content" not in by_id
     assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 2
+    assert by_id["baseline.tls"].capability_args == {
+        "origins_ref": "frozen_https_origins",
+        "origin_count": 1,
+        "addresses_ref": "frozen_addresses",
+        "address_count": 2,
+    }
+    assert by_id["baseline.tls"].requested_budget == {
+        "tcp_ports_attempted": 8,
+        "tool_wall_seconds": 30,
+    }
     assert plan.actions[-1].action_id == "finalize.report"
     assert set(plan.actions[-1].dependencies) == set(by_id) - {"finalize.report"}
 

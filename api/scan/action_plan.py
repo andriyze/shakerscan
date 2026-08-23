@@ -715,12 +715,29 @@ class ScanActionPlanCompiler:
                     "dns.inspect",
                     {"canonical_host": target_binding.canonical_host},
                 )
-            if any(origin.startswith("https://") for origin in target_binding.allowed_origins):
+            https_origin_count = sum(
+                1 for origin in target_binding.allowed_origins
+                if origin.startswith("https://")
+            )
+            if https_origin_count:
+                if (
+                    https_origin_count > 64
+                    or not target_binding.allowed_addresses
+                    or len(target_binding.allowed_addresses) > 64
+                ):
+                    raise ScanActionPlanError(
+                        "TLS target matrix exceeds the canonical bounded profile"
+                    )
                 add(
                     "baseline.tls",
                     "deterministic_baseline",
                     "tls.inspect",
-                    {"origin_ref": "canonical_https_origin"},
+                    {
+                        "origins_ref": "frozen_https_origins",
+                        "origin_count": https_origin_count,
+                        "addresses_ref": "frozen_addresses",
+                        "address_count": len(target_binding.allowed_addresses),
+                    },
                     required=True,
                 )
         if scope in {"full", "discovery"}:
@@ -827,6 +844,13 @@ class ScanActionPlanCompiler:
                 return override
             specification = self._registry.require(blueprint.capability_name)
             requested = dict(specification.budget_cost)
+            if (
+                blueprint.capability_name == "http.request"
+                and blueprint.action_id == "baseline.http_redirect"
+            ):
+                requested["http_requests"] = 1 + int(
+                    blueprint.capability_args.get("max_redirects") or 0
+                )
             if blueprint.capability_name in {
                 "collections.replay_safe", "collections.replay_active",
             }:
@@ -839,6 +863,15 @@ class ScanActionPlanCompiler:
                         else amount
                         for name, amount in requested.items()
                     }
+            if blueprint.capability_name == "tls.inspect":
+                pair_count = (
+                    int(blueprint.capability_args.get("origin_count") or 0)
+                    * int(blueprint.capability_args.get("address_count") or 0)
+                )
+                requested = {
+                    "tcp_ports_attempted": 4 * pair_count,
+                    "tool_wall_seconds": 15 * pair_count,
+                }
             return requested
 
         def add_manifest_breadth(
@@ -1049,34 +1082,7 @@ class ScanActionPlanCompiler:
                 raise ScanActionPlacementError(
                     f"placement cannot execute capability {blueprint.capability_name}"
                 )
-            requested = override_budgets.get(
-                blueprint.action_id, specification.budget_cost,
-            )
-            if (
-                blueprint.capability_name == "http.request"
-                and blueprint.action_id == "baseline.http_redirect"
-                and blueprint.action_id not in override_budgets
-            ):
-                requested = {
-                    **dict(specification.budget_cost),
-                    "http_requests": 1 + int(
-                        blueprint.capability_args.get("max_redirects") or 0
-                    ),
-                }
-            if (
-                blueprint.capability_name
-                in {"collections.replay_safe", "collections.replay_active"}
-                and blueprint.action_id not in override_budgets
-            ):
-                collection_ref = blueprint.capability_args.get("request_collection_ref")
-                if isinstance(collection_ref, Mapping):
-                    request_limit = int(collection_ref.get("max_requests") or 0)
-                    requested = {
-                        name: min(amount, request_limit)
-                        if name in {"http_requests", "state_changing_requests"}
-                        else amount
-                        for name, amount in specification.budget_cost.items()
-                    }
+            requested = blueprint_budget(blueprint)
             action_bindings = {
                 **global_bindings,
                 "action_id": blueprint.action_id,

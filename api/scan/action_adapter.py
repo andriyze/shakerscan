@@ -28,7 +28,7 @@ try:
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
     from capabilities.scanner import ScannerExecutionAdapter
-    from capabilities.tls import inspect_tls_origin
+    from capabilities.tls import inspect_tls_binding
     from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
     from runtime.capability_registry import CAPABILITY_REGISTRY
     from runtime.models import TargetBinding
@@ -50,7 +50,7 @@ except (ImportError, ModuleNotFoundError):
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
     from ..capabilities.scanner import ScannerExecutionAdapter
-    from ..capabilities.tls import inspect_tls_origin
+    from ..capabilities.tls import inspect_tls_binding
     from ..hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from ..runtime.models import TargetBinding
@@ -421,17 +421,25 @@ class DatabaseNeutralScanActionDispatcher:
         ]
         if not https_origins:
             return self._skip(action, "not_applicable")
-        origin = https_origins[0]
+        expected_args = {
+            "origins_ref": "frozen_https_origins",
+            "origin_count": len(https_origins),
+            "addresses_ref": "frozen_addresses",
+            "address_count": len(self.target.allowed_addresses),
+        }
+        if dict(action.capability_args) != expected_args:
+            raise ScanActionAdapterError(
+                "TLS action differs from the frozen target matrix"
+            )
 
         async def operation() -> Mapping[str, Any]:
-            return await inspect_tls_origin(
-                origin,
+            return await inspect_tls_binding(
                 target=self.target,
-                timeout_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
+                timeout_seconds_per_target=15,
             )
 
         adapter = self._prepared_inline(
-            action, {"origin": origin}, operation, TlsInspectionExecutionAdapter,
+            action, expected_args, operation, TlsInspectionExecutionAdapter,
         )
         return await self._execute_adapter(action, adapter, heartbeat)
 

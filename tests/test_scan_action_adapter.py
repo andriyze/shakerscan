@@ -332,6 +332,89 @@ def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monke
     assert len(captured["ports"]) == 4
 
 
+def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeypatch):
+    target = TargetBinding(
+        target_id=TARGET.target_id,
+        target_kind=TARGET.target_kind,
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=(
+            "https://app.example.test",
+            "https://app.example.test:8443",
+        ),
+        allowed_addresses=("192.0.2.10", "192.0.2.11"),
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    spec = CAPABILITY_REGISTRY.require("tls.inspect")
+    args = {
+        "origins_ref": "frozen_https_origins",
+        "origin_count": 2,
+        "addresses_ref": "frozen_addresses",
+        "address_count": 2,
+    }
+    action = ScanAction(
+        action_id="baseline.tls",
+        stage="deterministic_baseline",
+        ordinal=0,
+        capability_name=spec.name,
+        capability_args=args,
+        target_binding_digest=target.digest,
+        input_binding_digest="e" * 64,
+        requested_budget={
+            "tcp_ports_attempted": 16,
+            "tool_wall_seconds": 60,
+        },
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=(),
+        required=True,
+        supporting=False,
+        output_schema=spec.output_schema,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    async def inspect(*, target, timeout_seconds_per_target):
+        captured["target"] = target
+        captured["timeout"] = timeout_seconds_per_target
+        return {
+            "ok": True,
+            "status": "success",
+            "observations": [{
+                "kind": "tls_protocol",
+                "origin": origin,
+                "pinned_address": address,
+            } for origin in target.allowed_origins
+              for address in target.allowed_addresses],
+            "budget_consumed": {
+                "tcp_ports_attempted": 12,
+                "tool_wall_seconds": 4,
+            },
+        }
+
+    monkeypatch.setattr(action_adapter_module, "inspect_tls_binding", inspect)
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured == {"target": target, "timeout": 15}
+    assert len(receipt.observations) == 4
+    assert receipt.budget_consumed == {
+        "tcp_ports_attempted": 12,
+        "tool_wall_seconds": 4,
+    }
+
+
 def test_database_neutral_active_action_executes_exact_manifest_candidate(monkeypatch):
     scan_id = str(uuid.uuid4())
     endpoint_manifest = build_endpoint_manifest(

@@ -3832,7 +3832,7 @@ def _canonical_tls_placement_result(
         dict(item)
         for item in placed.get("observations") or []
         if isinstance(item, Mapping) and item.get("kind") == "tls_protocol"
-    ][:1]
+    ][:4096]
     observation = observations[0] if observations else {}
     consumed = (
         dict(placed.get("budget_consumed") or {})
@@ -3855,6 +3855,7 @@ def _canonical_tls_placement_result(
         "status": status,
         "canonical_capability": "tls.inspect",
         "capability_receipt": dict(placed.get("receipt") or {}),
+        "inspected_target_count": len(observations),
     }
     if observation.get("pinned_address"):
         base_runtime["pinned_address"] = observation["pinned_address"]
@@ -3879,14 +3880,16 @@ def _canonical_tls_placement_result(
     }
     if status != "success" or not observation:
         return {**skipped, "runtime": base_runtime}
-    endpoint = {
-        "ip": observation.get("pinned_address"),
-        "port": int(observation.get("port") or port),
-        "tlsversion": observation.get("protocol"),
-        "cipher": observation.get("cipher"),
-        "alpn": observation.get("alpn_protocol"),
-        "handshake_completed": True,
-    }
+    endpoints = [{
+        "ip": item.get("pinned_address"),
+        "port": int(item.get("port") or port),
+        "tlsversion": item.get("protocol"),
+        "cipher": item.get("cipher"),
+        "alpn": item.get("alpn_protocol"),
+        "handshake_completed": item.get("status", "success") == "success",
+        "origin": item.get("origin"),
+        "supported_protocols": list(item.get("supported_protocols") or ()),
+    } for item in observations]
     certificate_sha256 = observation.get("certificate_sha256")
     certificate = {
         "fingerprints": (
@@ -3899,7 +3902,7 @@ def _canonical_tls_placement_result(
     }
     return {
         **skipped,
-        "tlsx": {"endpoints": [endpoint], "certificate": certificate},
+        "tlsx": {"endpoints": endpoints, "certificate": certificate},
         "runtime": base_runtime,
     }
 
@@ -15002,7 +15005,7 @@ def _load_canonical_scan_placements(
         ):
             raise SystemExit("canonical tls.inspect placement contract is invalid")
         observations = tls_inspection.get("observations")
-        if not isinstance(observations, list) or len(observations) > 1:
+        if not isinstance(observations, list) or len(observations) > 4096:
             raise SystemExit("canonical tls.inspect observations are invalid")
         binding = execution.get("target_binding") or {}
         allowed_origins = set(binding.get("allowed_origins") or [])
