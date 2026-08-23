@@ -263,6 +263,75 @@ def install_frozen_target_resolver(
     return config
 
 
+_FIXED_BUDGET_MARKER = "_shakerscan_fixed_external_budget_guard"
+_SCAN_EXTERNAL_SCHEMA = "scan-external-capability/v1"
+
+
+def install_fixed_external_budget_guard() -> bool:
+    """Block fixed Scan tools before launch when their full profile was not held.
+
+    Registry-backed external commands have a fixed, conservative wire profile.
+    Clamping that profile during reservation does not alter the argv and therefore
+    cannot safely authorize the process. The guard is intentionally attached at
+    the last adapter boundary before process creation so every current and future
+    Scan caller receives the same fail-closed behavior.
+    """
+    try:
+        from capabilities.scanner import ScannerExecutionAdapter
+        from hunt.capability_executor import CapabilityAdapterResult
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+    current = ScannerExecutionAdapter.execute
+    if getattr(current, _FIXED_BUDGET_MARKER, False):
+        return True
+
+    async def guarded_execute(self: Any, *, heartbeat: Any, cancelled: Any) -> Any:
+        redacted = getattr(self, "_redacted_execution", {})
+        if (
+            isinstance(redacted, Mapping)
+            and redacted.get("schema_version") == _SCAN_EXTERNAL_SCHEMA
+        ):
+            specification = getattr(self, "_specification", None)
+            requested = {
+                str(name): max(0, int(amount))
+                for name, amount in dict(
+                    getattr(self, "_requested_budget", {}) or {}
+                ).items()
+            }
+            expected = {
+                str(name): int(amount)
+                for name, amount in dict(
+                    getattr(specification, "budget_cost", {}) or {}
+                ).items()
+                if int(amount) > 0
+            }
+            shortages = sorted(
+                name for name, amount in expected.items()
+                if requested.get(name, 0) < amount
+            )
+            if shortages:
+                return CapabilityAdapterResult(
+                    status="blocked",
+                    errors=(
+                        "fixed_external_budget_incomplete:"
+                        + ",".join(shortages),
+                    ),
+                    actual_budget={name: 0 for name in requested},
+                    execution_started=False,
+                    parser_version=str(
+                        getattr(specification, "output_schema", None)
+                        or "scanner-output/v1"
+                    ),
+                    redacted_execution=dict(redacted),
+                )
+        return await current(self, heartbeat=heartbeat, cancelled=cancelled)
+
+    setattr(guarded_execute, _FIXED_BUDGET_MARKER, True)
+    ScannerExecutionAdapter.execute = guarded_execute
+    return True
+
+
 def _install_at_interpreter_startup() -> None:
     try:
         install_frozen_target_resolver()
@@ -272,6 +341,12 @@ def _install_at_interpreter_startup() -> None:
         # authority must not fall through to an unpinned scanner process.
         print(f"[frozen-dns] {exc}", file=sys.stderr, flush=True)
         raise SystemExit(78) from exc
+
+    # Only execution runtimes need the adapter guard. Keeping API and utility
+    # interpreters free of this import avoids unnecessary startup dependencies.
+    executable = os.path.basename(str(sys.argv[0] or ""))
+    if executable in {"worker.py", "broker_worker.py", "scanner.py"}:
+        install_fixed_external_budget_guard()
 
 
 _install_at_interpreter_startup()
