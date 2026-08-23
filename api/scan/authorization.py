@@ -15,6 +15,7 @@ except (ImportError, ModuleNotFoundError):
 
 class ActionAuthorityDecision(str, Enum):
     ALLOWED = "allowed"
+    REJECTED_CAPABILITY = "capability_unknown"
     REJECTED_MISSING = "authorization_missing"
     REJECTED_REVOKED = "authorization_revoked"
     REJECTED_EXPIRED = "authorization_expired"
@@ -54,7 +55,7 @@ def _sequence(value: Any) -> tuple[str, ...]:
 def _host_in_scope(host: str, scope_receipt: Any) -> bool:
     normalized = str(host or "").strip().lower().rstrip(".")
     if not normalized:
-        return True
+        return False
     allowed_hosts = {
         item.strip().lower().rstrip(".")
         for item in _sequence(_value(scope_receipt, "allowed_hosts", ()))
@@ -76,16 +77,12 @@ def _host_in_scope(host: str, scope_receipt: Any) -> bool:
     )
 
 
-def _requires_approval(action: Any) -> bool:
+def _requires_approval(action: Any) -> bool | None:
     capability_name = str(_value(action, "capability_name", "") or "").strip()
     try:
         return CAPABILITY_REGISTRY.require(capability_name).requires_active_approval
     except KeyError:
-        # Compatibility for historic active capability spellings while callers
-        # migrate to the canonical registry.
-        return any(token in capability_name for token in (
-            ".active", "verify", "templates", "ports", "fingerprint", "auth.session",
-        ))
+        return None
 
 
 def revalidate_action_authority(
@@ -137,7 +134,10 @@ def revalidate_action_authority(
         ):
             return ActionAuthorityDecision.REJECTED_SCOPE
 
-    if not _requires_approval(action):
+    requires_approval = _requires_approval(action)
+    if requires_approval is None:
+        return ActionAuthorityDecision.REJECTED_CAPABILITY
+    if not requires_approval:
         return ActionAuthorityDecision.ALLOWED
     if approval_receipt is None or not str(approval_receipt_id or "").strip():
         return ActionAuthorityDecision.REJECTED_MISSING

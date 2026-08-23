@@ -28,6 +28,7 @@ _TRAFFIC_DIMENSIONS = frozenset({
 })
 
 _REASON_LABELS = {
+    "capability_unknown": "The action capability is not registered",
     "policy_disabled": "Disabled by scan policy",
     "insufficient_plan_budget": "Not enough admitted scan budget",
     "dependency_failed": "A required earlier action did not complete",

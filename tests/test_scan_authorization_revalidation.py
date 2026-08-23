@@ -80,3 +80,30 @@ def test_scope_host_and_target_cannot_drift_after_admission():
         approval_receipt_id=approval["id"],
         now=now,
     ) is ActionAuthorityDecision.REJECTED_SCOPE
+
+
+def test_empty_canonical_host_is_never_treated_as_in_scope():
+    now, scope, approval, target = _authority()
+    target["canonical_host"] = ""
+    assert revalidate_action_authority(
+        action={"capability_name": "http.request"},
+        target_binding=target,
+        scope_receipt=scope,
+        approval_receipt=approval,
+        scope_receipt_id="scope-1",
+        approval_receipt_id=approval["id"],
+        now=now,
+    ) is ActionAuthorityDecision.REJECTED_SCOPE
+
+
+def test_unknown_capability_is_rejected_instead_of_using_name_heuristics():
+    now, scope, approval, target = _authority()
+    assert revalidate_action_authority(
+        action={"capability_name": "future.passive-looking-capability"},
+        target_binding=target,
+        scope_receipt=scope,
+        approval_receipt=approval,
+        scope_receipt_id="scope-1",
+        approval_receipt_id=approval["id"],
+        now=now,
+    ) is ActionAuthorityDecision.REJECTED_CAPABILITY
