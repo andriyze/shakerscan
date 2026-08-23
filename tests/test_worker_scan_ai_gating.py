@@ -2014,6 +2014,7 @@ class _FakePlanConn:
         self.campaign_id = campaign_id
         self.executions = []
         self.inserted_children = []
+        self.persisted_action_scan_ids = set()
 
     async def fetchrow(self, query, *args):
         if "SELECT target_id, target_url, status FROM scans" in query:
@@ -2021,6 +2022,17 @@ class _FakePlanConn:
                 "target_id": self.target_id,
                 "target_url": "https://example.test",
                 "status": "pending",
+            }
+        if "SET scan_action_plan_json=" in query:
+            self.persisted_action_scan_ids.add(str(args[0]))
+            return {"id": args[0], "scan_action_plan_digest": args[1]}
+        if "INSERT INTO scan_capability_actions" in query:
+            return {
+                "id": uuid.uuid4(),
+                "action_id": args[1],
+                "action_digest": args[8],
+                "ordinal": args[3],
+                "status": args[17],
             }
         return None
 
@@ -2138,7 +2150,7 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
 
     child, persisted, queued = worker._canonical_shard_job(
         parent,
-        child_id="child-scan",
+        child_id="22222222-2222-4222-8222-222222222222",
         child_job_id="child-job",
         child_options=options,
         shard_label="coverage[0]",
@@ -2153,6 +2165,9 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     assert "scan_type" not in persisted
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_browser_actions"] == 0
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_tcp_ports"] == 0
+    action_plan = worker._compile_parallel_child_action_plan(child, persisted)
+    assert [action.action_id for action in action_plan.actions] == ["finalize.report"]
+    assert action_plan.actions[0].input_binding_digest
 
 
 def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch):
@@ -2227,6 +2242,9 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
     assert all(args[9] == "v2" for args in conn.inserted_children)
     assert all(json.loads(args[12])["schema_version"] == "scan-job/v2" for args in conn.inserted_children)
     assert all(len(args[13]) == 64 for args in conn.inserted_children)
+    assert conn.persisted_action_scan_ids == {
+        str(uuid.UUID(str(args[0]))) for args in conn.inserted_children
+    }
 
 
 def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypatch):

@@ -175,6 +175,66 @@ def test_compiler_includes_explicit_network_and_subdomain_dependencies():
     assert by_id["discover.services"].supporting is True
 
 
+def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates():
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000090",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="9" * 64,
+        entry_count=4,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000091",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="8" * 64,
+        entry_count=4,
+        status="complete",
+    ).canonical_dict()
+    credentials = ({
+        "profile_id": "primary-id",
+        "version": 2,
+        "digest": "7" * 64,
+        "lane": "primary",
+    },)
+
+    endpoint = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("xss",), exclude=("recon",)),
+        target_binding=_target(),
+        credential_profile_refs=credentials,
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        shard_authority={"options_digest": "6" * 64},
+        action_scope="endpoint",
+    )
+    endpoint_by_id = {action.action_id: action for action in endpoint.actions}
+    assert set(endpoint_by_id) == {
+        "inputs.auth_primary", "verify.xss", "finalize.report",
+    }
+    assert endpoint_by_id["verify.xss"].dependencies == (
+        "inputs.auth_primary",
+    )
+    assert endpoint_by_id["verify.xss"].capability_args[
+        "candidate_manifest_ref"
+    ] == candidate_ref
+
+    discovery = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("xss",)),
+        target_binding=_target(),
+        credential_profile_refs=credentials,
+        action_scope="discovery",
+        shard_authority={"options_digest": "5" * 64},
+    )
+    discovery_ids = {action.action_id for action in discovery.actions}
+    assert "discover.web_probe" in discovery_ids
+    assert "discover.web_crawl" in discovery_ids
+    assert "baseline.http" not in discovery_ids
+    assert "verify.xss" not in discovery_ids
+
+
 def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
     credentials = credential_profile_action_refs(({
         "profile_id": "profile-1",

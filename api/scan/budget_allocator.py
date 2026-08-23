@@ -55,6 +55,8 @@ def _phase(action: ScanAction) -> int:
 def allocate_scan_action_plan(
     plan: ScanActionPlan,
     budget: ScanBudget,
+    *,
+    assign_residual_to_finalizer: bool = True,
 ) -> ScanBudgetAllocation:
     """Admit the complete worst-case graph before any action may execute.
 
@@ -124,14 +126,15 @@ def allocate_scan_action_plan(
         raise ScanBudgetAllocationError("finalize.report", {"action": 1})
 
     residual = {name: limits[name] - allocated[name] for name in limits}
-    final_budget = dict(finalizer.requested_budget)
-    for name, amount in residual.items():
-        if amount:
-            final_budget[name] = final_budget.get(name, 0) + amount
-            allocated[name] += amount
-    admitted[finalizer.action_id] = replace(
-        finalizer, requested_budget=final_budget, action_digest=None,
-    )
+    if assign_residual_to_finalizer:
+        final_budget = dict(finalizer.requested_budget)
+        for name, amount in residual.items():
+            if amount:
+                final_budget[name] = final_budget.get(name, 0) + amount
+                allocated[name] += amount
+        admitted[finalizer.action_id] = replace(
+            finalizer, requested_budget=final_budget, action_digest=None,
+        )
 
     allocated_plan = ScanActionPlan(
         scan_id=plan.scan_id,

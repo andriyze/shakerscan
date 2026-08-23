@@ -505,10 +505,14 @@ class ScanActionPlanCompiler:
         template_manifest_ref: Mapping[str, Any] | None = None,
         authority_refs: Mapping[str, Any] | None = None,
         shard_authority: Mapping[str, Any] | None = None,
+        action_scope: str = "full",
         available_placement_capabilities: Iterable[str] | None = None,
         placement_backends: Sequence[str] = ("local", "broker"),
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
     ) -> ScanActionPlan:
+        scope = str(action_scope or "").strip().lower()
+        if scope not in {"full", "discovery", "endpoint"}:
+            raise ScanActionPlanError("action_scope is invalid")
         credentials = _reference_list(
             credential_profile_refs,
             name="credential profile",
@@ -625,7 +629,11 @@ class ScanActionPlanCompiler:
 
         for lane in ("primary", "secondary", "service", "ssh"):
             reference = lane_refs.get(lane)
-            if reference is not None and lane in {"primary", "secondary"}:
+            if (
+                scope != "discovery"
+                and reference is not None
+                and lane in {"primary", "secondary"}
+            ):
                 add(
                     f"inputs.auth_{lane}",
                     "resolve_inputs",
@@ -639,57 +647,65 @@ class ScanActionPlanCompiler:
             row.action_id for row in blueprints if row.capability_name == "auth.session.establish"
         )
         primary_dependency = (
-            ("inputs.auth_primary",) if "primary" in lane_refs else ()
+            ("inputs.auth_primary",)
+            if any(row.action_id == "inputs.auth_primary" for row in blueprints)
+            else ()
         )
-        add(
-            "baseline.http",
-            "deterministic_baseline",
-            "http.request",
-            {"method": "GET", "path": "/", "follow_redirects": False, "principal": "primary" if primary_dependency else None},
-            dependencies=primary_dependency,
-            required=True,
-        )
-        add(
-            "baseline.http_redirect",
-            "deterministic_baseline",
-            "http.request",
-            {"method": "GET", "path": "/", "scheme": "http", "follow_redirects": True, "max_redirects": 1},
-            dependencies=("baseline.http",),
-        )
-        add(
-            "baseline.security_txt",
-            "deterministic_baseline",
-            "http.request",
-            {"method": "GET", "path": "/.well-known/security.txt", "follow_redirects": False},
-            dependencies=("baseline.http",),
-        )
-        if target_binding.canonical_host:
+        if scope == "full":
             add(
-                "baseline.dns",
+                "baseline.http",
                 "deterministic_baseline",
-                "dns.inspect",
-                {"canonical_host": target_binding.canonical_host},
-            )
-        if any(origin.startswith("https://") for origin in target_binding.allowed_origins):
-            add(
-                "baseline.tls",
-                "deterministic_baseline",
-                "tls.inspect",
-                {"origin_ref": "canonical_https_origin"},
+                "http.request",
+                {"method": "GET", "path": "/", "follow_redirects": False, "principal": "primary" if primary_dependency else None},
+                dependencies=primary_dependency,
                 required=True,
             )
-        add(
-            "discover.web_probe",
-            "discover_surface",
-            "web.probe",
-            {"target_ref": "canonical_origin", "endpoint_manifest_ref": endpoint_ref or None},
-            dependencies=primary_dependency,
-            required=True,
-            supporting=needs_candidates,
-        )
+            add(
+                "baseline.http_redirect",
+                "deterministic_baseline",
+                "http.request",
+                {"method": "GET", "path": "/", "scheme": "http", "follow_redirects": True, "max_redirects": 1},
+                dependencies=("baseline.http",),
+            )
+            add(
+                "baseline.security_txt",
+                "deterministic_baseline",
+                "http.request",
+                {"method": "GET", "path": "/.well-known/security.txt", "follow_redirects": False},
+                dependencies=("baseline.http",),
+            )
+            if target_binding.canonical_host:
+                add(
+                    "baseline.dns",
+                    "deterministic_baseline",
+                    "dns.inspect",
+                    {"canonical_host": target_binding.canonical_host},
+                )
+            if any(origin.startswith("https://") for origin in target_binding.allowed_origins):
+                add(
+                    "baseline.tls",
+                    "deterministic_baseline",
+                    "tls.inspect",
+                    {"origin_ref": "canonical_https_origin"},
+                    required=True,
+                )
+        if scope in {"full", "discovery"}:
+            add(
+                "discover.web_probe",
+                "discover_surface",
+                "web.probe",
+                {"target_ref": "canonical_origin", "endpoint_manifest_ref": endpoint_ref or None},
+                dependencies=primary_dependency,
+                required=True,
+                supporting=needs_candidates,
+            )
 
         crawl_required = bool(explicitly_requested) and needs_candidates and not endpoint_ref and not candidate_ref
-        if active and (self._family_enabled(execution_plan, "recon") or needs_candidates):
+        if (
+            scope in {"full", "discovery"}
+            and active
+            and (self._family_enabled(execution_plan, "recon") or needs_candidates)
+        ):
             add(
                 "discover.web_crawl",
                 "discover_surface",
@@ -707,7 +723,7 @@ class ScanActionPlanCompiler:
                     {"target_manifest_ref": endpoint_ref or None},
                     dependencies=("discover.web_probe",),
                 )
-        if policy.subdomain_discovery:
+        if scope in {"full", "discovery"} and policy.subdomain_discovery:
             add(
                 "discover.subdomains",
                 "discover_surface",
@@ -716,7 +732,7 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
-        if policy.network_discovery:
+        if scope in {"full", "discovery"} and policy.network_discovery:
             add(
                 "discover.ports",
                 "discover_network",
@@ -734,7 +750,7 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
-        for index, reference in enumerate(collections):
+        for index, reference in enumerate(collections if scope == "full" else ()):
             capability_name = (
                 "collections.replay_active"
                 if reference.get("active") is True and policy.allow_state_changing_http
@@ -754,11 +770,18 @@ class ScanActionPlanCompiler:
             row.action_id for row in blueprints
             if row.stage == "discover_surface" and row.capability_name != "subdomains.discover"
         )
-        candidate_dependencies = tuple(
-            item for item in ("discover.web_probe", "discover.web_crawl")
-            if any(row.action_id == item for row in blueprints)
+        candidate_dependencies = (
+            ()
+            if candidate_ref or (scope == "endpoint" and endpoint_ref)
+            else tuple(
+                item for item in ("discover.web_probe", "discover.web_crawl")
+                if any(row.action_id == item for row in blueprints)
+            )
         )
-        if nuclei:
+        active_dependencies = tuple(dict.fromkeys((
+            *primary_dependency, *candidate_dependencies,
+        )))
+        if scope != "discovery" and nuclei:
             add(
                 "active.templates",
                 "deterministic_active",
@@ -767,34 +790,41 @@ class ScanActionPlanCompiler:
                     "target_manifest_ref": endpoint_ref or "discover.web_crawl",
                     "template_manifest_ref": template_ref or None,
                 },
-                dependencies=candidate_dependencies,
+                dependencies=active_dependencies,
                 required="nuclei" in explicitly_requested,
             )
-        if xss:
+        if scope != "discovery" and xss:
             add(
                 "verify.xss",
                 "verify_candidates",
                 "xss.verify",
                 {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
-                dependencies=candidate_dependencies,
+                dependencies=active_dependencies,
                 required="xss" in explicitly_requested,
             )
-        if sqli:
+        if scope != "discovery" and sqli:
             add(
                 "verify.sqli",
                 "verify_candidates",
                 "sqli.verify",
                 {"candidate_manifest_ref": candidate_ref or "discover.web_crawl"},
-                dependencies=candidate_dependencies,
+                dependencies=active_dependencies,
                 required="sqli" in explicitly_requested,
             )
-        if bola and {"primary", "secondary"} <= set(lane_refs):
+        if (
+            scope != "discovery"
+            and bola
+            and {"primary", "secondary"} <= set(lane_refs)
+        ):
             add(
                 "verify.authz",
                 "verify_candidates",
                 "authz.verify",
                 {"principal_lanes": ["primary", "secondary"], "endpoint_manifest_ref": endpoint_ref or None},
-                dependencies=tuple(dict.fromkeys((*auth_dependencies, *discovery_dependencies))),
+                dependencies=tuple(dict.fromkeys((
+                    *auth_dependencies,
+                    *(() if endpoint_ref else discovery_dependencies),
+                ))),
                 required="bola" in explicitly_requested,
             )
 
@@ -834,6 +864,7 @@ class ScanActionPlanCompiler:
             "template_manifest_ref": template_ref,
             "authority_refs": authority,
             "shard_authority": shard,
+            "action_scope": scope,
         }
         actions: list[ScanAction] = []
         for ordinal, blueprint in enumerate(blueprints):

@@ -259,6 +259,28 @@ def test_placed_discovery_preserves_only_policy_owned_network_tool_budget():
     )
 
 
+def test_placed_web_discovery_preserves_tool_budget_without_network_permission():
+    contract = resolve_scan_contract(budget_profile="balanced")
+    options = contract.option_metadata()
+    options.update({
+        "parallel_discovery": True,
+        "skip_global_checks": True,
+        "network_discovery": False,
+        "subfinder": False,
+        "custom_budget": {
+            "browser_max_pages": 0,
+            "phase4_max_seconds": 0,
+        },
+    })
+
+    budget = derive_scan_shard_budget(options, contract.execution_plan.budget)
+
+    assert budget.max_tcp_ports == 0
+    assert budget.max_tool_wall_seconds == (
+        contract.execution_plan.budget.max_tool_wall_seconds
+    )
+
+
 def test_endpoint_only_shard_preserves_zero_browser_network_and_tool_authority():
     parent = _job()
     options = {

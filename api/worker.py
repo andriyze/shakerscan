@@ -160,8 +160,15 @@ from scan.authorization import (
     ActionAuthorityDecision,
     revalidate_scan_action_authority,
 )
-from scan.action_plan import ScanAction, ScanActionPlan
+from scan.action_plan import (
+    ScanAction,
+    ScanActionPlan,
+    ScanActionPlanCompiler,
+    credential_profile_action_refs,
+    request_collection_action_refs,
+)
 from scan.action_store import PostgresScanActionStore
+from scan.budget_allocator import allocate_scan_action_plan
 from scan.capability_result import CapabilityResultReference
 from scan.execution_backend import (
     ActionLease,
@@ -16371,6 +16378,63 @@ def _canonical_shard_job(
     return child_job, options, queue_payload
 
 
+def _compile_parallel_child_action_plan(
+    child_job: CanonicalScanJob,
+    child_options: Mapping[str, Any],
+) -> ScanActionPlan:
+    """Compile one shard-owned action graph against its immutable sub-budget."""
+    if child_job.shard is None:
+        raise ExecutionScopeError(
+            "parallel child action planning requires shard authority"
+        )
+    if child_job.shard.parallel_discovery:
+        action_scope = "discovery"
+    elif (
+        child_options.get("parallel_backbone") is True
+        or child_options.get("skip_global_checks") is not True
+    ):
+        action_scope = "full"
+    else:
+        action_scope = "endpoint"
+    credential_refs = [
+        dict(item)
+        for item in child_options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping)
+    ]
+    collection_refs = [
+        dict(item)
+        for item in child_options.get("request_collections") or ()
+        if isinstance(item, Mapping)
+    ]
+    endpoint_ref = child_options.get("endpoint_manifest_ref")
+    candidate_ref = child_options.get("candidate_manifest_ref")
+    template_ref = child_options.get("template_manifest_ref")
+    raw_plan = ScanActionPlanCompiler().compile(
+        scan_id=child_job.scan_id,
+        execution_plan=child_job.execution_plan,
+        target_binding=child_job.target,
+        credential_profile_refs=credential_profile_action_refs(credential_refs),
+        request_collection_refs=request_collection_action_refs(collection_refs),
+        endpoint_manifest_ref=(
+            dict(endpoint_ref) if isinstance(endpoint_ref, Mapping) else None
+        ),
+        candidate_manifest_ref=(
+            dict(candidate_ref) if isinstance(candidate_ref, Mapping) else None
+        ),
+        template_manifest_ref=(
+            dict(template_ref) if isinstance(template_ref, Mapping) else None
+        ),
+        shard_authority=child_job.shard.payload(),
+        action_scope=action_scope,
+        action_budgets={"finalize.report": {}},
+    )
+    return allocate_scan_action_plan(
+        raw_plan,
+        child_job.shard.sub_budget,
+        assign_residual_to_finalizer=False,
+    ).plan
+
+
 def _enqueue_parallel_discovery_continuation(
     redis_client,
     *,
@@ -16572,12 +16636,16 @@ async def process_scan_plan_job(job_data: dict):
                 parallel_discovery=True,
                 parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
             )
+            discovery_action_plan = _compile_parallel_child_action_plan(
+                discovery_job, discovery_opts,
+            )
             discovery_generation = 'v2'
             discovery_policy = canonical_parent_job.execution_plan.canonical_dict()['policy']
             discovery_budget = canonical_parent_job.execution_plan.canonical_dict()['budget']
             discovery_job_payload = discovery_job.payload()
             discovery_job_digest = discovery_job.payload_digest
         else:
+            discovery_action_plan = None
             discovery_opts['scan_type'] = 'smart'
             discovery_opts['queue_handoff_confirmed'] = False
             discovery_payload = {
@@ -16644,6 +16712,10 @@ async def process_scan_plan_job(job_data: dict):
                     json.dumps(discovery_job_payload),
                     discovery_job_digest,
                 )
+                if discovery_action_plan is not None:
+                    await PostgresScanActionStore().persist_plan(
+                        conn, plan=discovery_action_plan,
+                    )
         try:
             enqueue_job(r, QUEUE_NAME, discovery_payload)
         except Exception as exc:
@@ -17045,7 +17117,10 @@ async def process_scan_plan_job(job_data: dict):
     parent_options['parallel_planned_request_budget'] = planned_request_budget
     parent_options['parallel_backbone_request_budget'] = backbone_request_budget
     child_jobs: list[
-        tuple[str, str, dict[str, Any], dict[str, Any], CanonicalScanJob | None, int]
+        tuple[
+            str, str, dict[str, Any], dict[str, Any],
+            CanonicalScanJob | None, ScanActionPlan | None, int,
+        ]
     ] = []
     for shard in plan.shards:
         child_id = str(uuid.uuid4())
@@ -17062,8 +17137,12 @@ async def process_scan_plan_job(job_data: dict):
                 shard_count=plan.shard_count,
                 parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
             )
+            child_action_plan = _compile_parallel_child_action_plan(
+                child_job, child_options,
+            )
         else:
             child_job = None
+            child_action_plan = None
             child_options['queue_handoff_confirmed'] = False
             payload = {
                 'type': parallel_scan.SHARD_JOB_TYPE,
@@ -17082,7 +17161,8 @@ async def process_scan_plan_job(job_data: dict):
                 'submitted_at': utc_now_iso(),
             }
         child_jobs.append((
-            child_id, child_job_id, child_options, payload, child_job, shard.index,
+            child_id, child_job_id, child_options, payload, child_job,
+            child_action_plan, shard.index,
         ))
 
     # Publish barrier part 1: make the complete expected child set durable in one
@@ -17104,7 +17184,10 @@ async def process_scan_plan_job(job_data: dict):
                 )
                 r.expire(f"job:{parent_job_id}", 86400)
                 return
-            for child_id, child_job_id, child_options, payload, child_job, shard_index in child_jobs:
+            for (
+                child_id, child_job_id, child_options, payload, child_job,
+                child_action_plan, shard_index,
+            ) in child_jobs:
                 child_plan = child_job.execution_plan.canonical_dict() if child_job else None
                 await conn.execute("""
                     INSERT INTO scans (id, target_id, target_url, job_id, status, options,
@@ -17121,10 +17204,17 @@ async def process_scan_plan_job(job_data: dict):
                      json.dumps(child_plan['budget'] if child_plan else {}),
                      json.dumps(child_job.payload() if child_job else {}),
                      child_job.payload_digest if child_job else None)
+                if child_action_plan is not None:
+                    await PostgresScanActionStore().persist_plan(
+                        conn, plan=child_action_plan,
+                    )
 
     r.set(parallel_scan.shards_remaining_key(parent_id), plan.shard_count, ex=86400)
     enqueue_failures = 0
-    for child_id, child_job_id, child_options, payload, _child_job, _shard_index in child_jobs:
+    for (
+        child_id, child_job_id, child_options, payload, _child_job,
+        _child_action_plan, _shard_index,
+    ) in child_jobs:
         try:
             enqueue_job(r, QUEUE_NAME, payload)
             async with db_pool.acquire() as conn:

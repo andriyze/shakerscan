@@ -327,9 +327,11 @@ def derive_scan_shard_budget(
     resolved = dict(resolved) if isinstance(resolved, Mapping) else {}
     placed_discovery = options.get("parallel_discovery") is True
     placed_network = placed_discovery and options.get("network_discovery") is True
-    placed_tool = placed_discovery and (
-        placed_network or options.get("subfinder") is True
-    )
+    # The V2 discovery shard owns canonical HTTP probe/crawl subprocesses even
+    # when network and subdomain discovery are disabled. Its immutable action
+    # plan therefore needs the parent's bounded tool-wall dimension; endpoint
+    # shards still preserve an explicit zero.
+    placed_tool = placed_discovery
 
     def bounded(
         parent_value: int, *values: Any, scale: int = 1, allow_zero: bool = False,
@@ -657,6 +659,17 @@ class ScanShardBudget:
 
     def payload(self) -> dict[str, int]:
         return {name: getattr(self, name) for name in _BUDGET_KEYS}
+
+    def ledger_limits(self) -> dict[str, int]:
+        """Expose the same reservation dimensions as a standalone Scan budget."""
+        return {
+            "http_requests": self.max_http_requests,
+            "state_changing_requests": self.max_state_changing_requests,
+            "browser_actions": self.max_browser_actions,
+            "tcp_ports_attempted": self.max_tcp_ports,
+            "hosts_attempted": self.max_hosts,
+            "tool_wall_seconds": self.max_tool_wall_seconds,
+        }
 
 
 @dataclass(frozen=True)

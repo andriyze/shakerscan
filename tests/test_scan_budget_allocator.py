@@ -67,6 +67,33 @@ def test_allocator_admits_whole_plan_and_assigns_only_precomputed_residual():
     assert finalizer.requested_budget["http_requests"] > 0
 
 
+def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
+    budget = ScanBudget(300, 100, 50, 10, 10, 30, 1, 0, 10)
+    execution = ScanExecutionPlan(
+        policy=ScanPolicy(active_testing=False),
+        budget_profile="fast",
+        budget=budget,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        action_scope="endpoint",
+        shard_authority={"options_digest": "a" * 64},
+        action_budgets={"finalize.report": {}},
+    )
+
+    allocation = allocate_scan_action_plan(
+        plan, budget, assign_residual_to_finalizer=False,
+    )
+
+    assert allocation.allocated == {
+        name: 0 for name in budget.ledger_limits()
+    }
+    assert allocation.plan.actions[0].action_id == "finalize.report"
+    assert allocation.plan.actions[0].requested_budget == {}
+
+
 def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
     budget = ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25)
     allocation = allocate_scan_action_plan(_compile(budget), budget)
