@@ -1452,6 +1452,140 @@ async def enhanced_url_discovery(
     """
     config = DISCOVERY_CONFIG.get(scan_type, DISCOVERY_CONFIG["standard"])
     budget = budget or {}
+    if budget.get("canonical_receipts_only"):
+        max_urls = int(budget.get("max_urls") or config["max_urls"])
+        target_host = (
+            urllib.parse.urlsplit(url).hostname or ""
+        ).lower().rstrip(".")
+        endpoint_manifest = EndpointManifest()
+        selected: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+
+        def add_candidate(method: Any, candidate: Any, producer: str) -> None:
+            candidate_url = str(candidate or "").strip()
+            parsed = urllib.parse.urlsplit(candidate_url)
+            if (
+                not candidate_url
+                or parsed.scheme.lower() not in {"http", "https"}
+                or (parsed.hostname or "").lower().rstrip(".") != target_host
+            ):
+                return
+            normalized_method = str(method or "GET").upper()[:16]
+            if candidate_url not in seen:
+                seen.add(candidate_url)
+                selected.append((normalized_method, candidate_url, producer))
+            try:
+                endpoint_manifest.add(
+                    producer,
+                    normalize_endpoint(
+                        method=normalized_method,
+                        url=candidate_url,
+                        source=producer,
+                    ),
+                )
+            except ValueError:
+                return
+
+        endpoint_manifest.start_producer("seed")
+        add_candidate("GET", url, "seed")
+        endpoint_manifest.finish_producer("seed")
+        endpoint_manifest.start_producer("katana")
+        for observation in budget.get("canonical_katana_observations") or []:
+            if isinstance(observation, dict):
+                add_candidate(
+                    observation.get("method"), observation.get("url"), "katana",
+                )
+        endpoint_manifest.finish_producer(
+            "katana", reason="canonical_capability_placement",
+        )
+        endpoint_manifest.start_producer("content_discover")
+        for observation in budget.get("canonical_ffuf_observations") or []:
+            if isinstance(observation, dict):
+                add_candidate("GET", observation.get("url"), "content_discover")
+        endpoint_manifest.finish_producer(
+            "content_discover", reason="canonical_capability_placement",
+        )
+
+        def priority(row: tuple[str, str, str]) -> tuple[Any, ...]:
+            parsed = urllib.parse.urlsplit(row[1])
+            path = parsed.path.lower()
+            is_api = any(
+                marker in path
+                for marker in ("/api/", "/rest/", "/graphql", "/v1/", "/v2/")
+            )
+            return (0 if is_api else 1, 0 if parsed.query else 1, row[1])
+
+        selected = sorted(selected, key=priority)[:max_urls]
+        selected_urls = [row[1] for row in selected]
+        selected_url_set = set(selected_urls)
+        endpoint_manifest.start_producer("aggregate")
+        for method, candidate_url, _producer in selected:
+            try:
+                endpoint_manifest.add(
+                    "aggregate",
+                    normalize_endpoint(
+                        method=method,
+                        url=candidate_url,
+                        source="aggregate",
+                    ),
+                )
+            except ValueError:
+                continue
+        endpoint_manifest.finish_producer("aggregate")
+        endpoint_manifest.finalize()
+
+        parameterized_urls = [
+            candidate for candidate in selected_urls
+            if urllib.parse.urlsplit(candidate).query
+        ]
+        discovered_params = {
+            candidate: list(dict.fromkeys(
+                name for name, _value in urllib.parse.parse_qsl(
+                    urllib.parse.urlsplit(candidate).query,
+                    keep_blank_values=True,
+                )
+            ))
+            for candidate in parameterized_urls
+        }
+        api_endpoints = [
+            candidate for candidate in selected_urls
+            if any(
+                marker in urllib.parse.urlsplit(candidate).path.lower()
+                for marker in ("/api/", "/rest/", "/graphql", "/v1/", "/v2/")
+            )
+        ]
+        form_urls = [
+            candidate for candidate in selected_urls
+            if any(
+                marker in urllib.parse.urlsplit(candidate).path.lower()
+                for marker in ("login", "register", "signup", "signin", "contact", "search")
+            )
+        ]
+        return {
+            "all_urls": selected_urls,
+            "parameterized_urls": parameterized_urls,
+            "api_endpoints": api_endpoints,
+            "form_urls": form_urls,
+            "forms": [],
+            "discovered_params": discovered_params,
+            "endpoints_with_params": [
+                {"url": candidate, "params": discovered_params[candidate]}
+                for candidate in parameterized_urls
+            ],
+            "recursive_paths": [],
+            "probed_endpoints": [],
+            "js_bundle_analysis": None,
+            "scan_type": scan_type,
+            "config": {
+                "canonical_receipts_only": True,
+                "max_urls": max_urls,
+                "js_parsing": False,
+            },
+            "spa_catch_all": False,
+            "endpoint_manifest": endpoint_manifest.to_dict(),
+            "canonical_receipts_only": True,
+            "receipt_url_count": len(selected_url_set),
+        }
     depth = int(budget.get("discovery_depth") or config["katana_depth"])
     max_urls = int(budget.get("max_urls") or config["max_urls"])
     use_browser = config["browser_fallback"]

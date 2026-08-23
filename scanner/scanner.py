@@ -5407,6 +5407,7 @@ async def build_report(target: str,
                 )
             effective_discovery_budget["disable_ffuf"] = True
             effective_discovery_budget["disable_recursive_fuzzing"] = True
+            effective_discovery_budget["canonical_receipts_only"] = True
             effective_discovery_budget["canonical_ffuf_observations"] = (
                 _canonical_ffuf_observations(placed_content)
             )
@@ -5452,7 +5453,7 @@ async def build_report(target: str,
                 )
             )
 
-        if auth_session:
+        if auth_session and canonical_scan_execution is None:
             await auth_session.refresh_if_needed()
 
         browser_seed_urls = list(seed_entry_urls)
@@ -5462,7 +5463,16 @@ async def build_report(target: str,
                 seed_entry_urls,
             )
 
-        if zero_rediscovery_scope:
+        if canonical_scan_execution is not None:
+            browser_task = asyncio.create_task(_focused_async_value({
+                "page_urls": [],
+                "api_endpoints": [],
+                "websocket_endpoints": [],
+                "crawl_stats": {"pages_visited": 0, "depth_reached": 0},
+                "skipped": True,
+                "reason": "canonical_capability_not_registered",
+            }))
+        elif zero_rediscovery_scope:
             browser_task = asyncio.create_task(_focused_async_value({
                 "page_urls": [],
                 "api_endpoints": [],
@@ -7409,7 +7419,11 @@ async def build_report(target: str,
     # Enhanced technology fingerprinting
     # Get page content for fingerprinting
     page_content = None
-    if browser_res and browser_res.get("status"):
+    if (
+        canonical_scan_execution is None
+        and browser_res
+        and browser_res.get("status")
+    ):
         content_out, _, _ = await run(["curl", "-sS", "-L", "-k", "--max-time", "10", base_url])
         page_content = content_out[:50000] if content_out else None
 

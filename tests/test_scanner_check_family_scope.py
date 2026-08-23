@@ -1055,6 +1055,29 @@ def test_canonical_report_assembly_skips_unregistered_passive_probes():
     ) == 2
 
 
+def test_canonical_discovery_assembly_uses_receipts_without_browser_or_body_fetch():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index("async def run_legacy_discovery()")
+    end = source.index("recon_phase_task =", start)
+    discovery_block = source[start:end]
+
+    assert 'effective_discovery_budget["canonical_receipts_only"] = True' in discovery_block
+    canonical_browser = discovery_block.index(
+        "if canonical_scan_execution is not None:",
+        discovery_block.index("browser_seed_urls = list(seed_entry_urls)"),
+    )
+    assert canonical_browser < discovery_block.index("browser_fetch(", canonical_browser)
+    assert "if auth_session and canonical_scan_execution is None:" in discovery_block
+
+    tech_start = source.index("# Enhanced technology fingerprinting")
+    tech_end = source.index("tech_fingerprint =", tech_start)
+    tech_block = source[tech_start:tech_end]
+    assert "canonical_scan_execution is None" in tech_block
+    assert tech_block.index("canonical_scan_execution is None") < tech_block.index(
+        'await run(["curl"'
+    )
+
+
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
     execution = {
         "execution_plan_digest": "a" * 64,
