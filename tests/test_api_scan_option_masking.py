@@ -2086,6 +2086,39 @@ def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
         )
 
 
+def test_broker_work_manifest_request_and_action_authority_are_exact():
+    reference = {
+        "schema_version": "scan-work-manifest-reference/v1",
+        "manifest_id": "40000000-0000-4000-8000-000000000001",
+        "kind": "endpoint",
+        "content_schema": "endpoint-manifest/v2",
+        "manifest_digest": "c" * 64,
+        "entry_count": 2,
+        "status": "complete",
+    }
+    body = api_module.BrokerActionWorkManifestRequest(
+        job_lease_token="j" * 40,
+        worker_id="broker:node-1:worker.2",
+        plan_digest="a" * 64,
+        action_id="active.templates",
+        action_digest="b" * 64,
+        manifest_ref=reference,
+    )
+    action = types.SimpleNamespace(capability_args={
+        "target_manifest_ref": reference,
+        "nested_manifest_ref": {**reference, "manifest_digest": "d" * 64},
+    })
+
+    authorized = api_module._broker_action_work_manifest_references(action)
+
+    assert body.manifest_ref == reference
+    assert [item.manifest_digest for item in authorized] == ["c" * 64, "d" * 64]
+    with pytest.raises(Exception):
+        api_module.BrokerActionWorkManifestRequest(
+            **body.model_dump(), injected="not-allowed",
+        )
+
+
 def test_broker_plan_rejects_private_inputs_until_sealed_exchange_exists():
     public_plan = types.SimpleNamespace(actions=(
         types.SimpleNamespace(capability_name="http.request"),

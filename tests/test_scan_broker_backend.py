@@ -18,16 +18,21 @@ from scan.capability_result import (
     CapabilityResultStatus,
 )
 from scan.execution_backend import ActionAlreadyTerminal, ActionLeaseLost
+from scan.work_manifests import build_endpoint_manifest
 
 
-def _plan() -> ScanActionPlan:
+def _plan(*, manifest_ref=None, scan_id=None) -> ScanActionPlan:
     target_digest = "1" * 64
     action = ScanAction(
         action_id="baseline.http",
         stage="baseline",
         ordinal=0,
         capability_name="http.request",
-        capability_args={"method": "HEAD", "path": "/"},
+        capability_args={
+            "method": "HEAD",
+            "path": "/",
+            **({"endpoint_manifest_ref": manifest_ref} if manifest_ref else {}),
+        },
         target_binding_digest=target_digest,
         input_binding_digest="2" * 64,
         requested_budget={"http_requests": 1, "tool_wall_seconds": 5},
@@ -42,10 +47,28 @@ def _plan() -> ScanActionPlan:
         output_schema="http-observation/v1",
     )
     return ScanActionPlan(
-        scan_id=str(uuid.uuid4()),
+        scan_id=str(scan_id or uuid.uuid4()),
         execution_plan_digest="3" * 64,
         target_binding_digest=target_digest,
         actions=(action,),
+    )
+
+
+def _endpoint_manifest(scan_id: str):
+    return build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest="1" * 64,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https", "host": "app.example.test",
+                "port": 443, "normalized_path": "/health", "concrete_path": "/health",
+                "query_keys": [], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_probe",),
     )
 
 
@@ -198,3 +221,58 @@ def test_broker_backend_rejects_substituted_remote_action():
     )
     with pytest.raises(Exception, match="differs"):
         asyncio.run(backend.acquire_action(action))
+
+
+def test_broker_backend_fetches_only_digest_bound_work_manifest():
+    scan_id = str(uuid.uuid4())
+    manifest = _endpoint_manifest(scan_id)
+    plan = _plan(
+        scan_id=scan_id,
+        manifest_ref=manifest.reference().canonical_dict(),
+    )
+    action = plan.actions[0]
+    requested = []
+
+    async def request(_method, path, payload):
+        assert path.endswith("/work-manifest")
+        requested.append(payload["manifest_ref"])
+        return {"manifest": manifest.canonical_dict()}
+
+    backend = BrokerScanExecutionBackend(
+        plan=plan, worker_id="broker:worker", job_lease_token="j" * 32,
+        base_path="/broker/job", request=request,
+    )
+    loaded = asyncio.run(backend.load_work_manifest(
+        action.action_id, manifest.reference(),
+    ))
+
+    assert loaded == manifest
+    assert requested == [manifest.reference().canonical_dict()]
+
+
+def test_broker_backend_rejects_substituted_work_manifest():
+    plan = _plan()
+    expected = _endpoint_manifest(plan.scan_id)
+    replacement = build_endpoint_manifest(
+        scan_id=plan.scan_id,
+        target_binding_digest=plan.target_binding_digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete",
+            "reason": None, "endpoints": [{
+                "method": "GET", "scheme": "https", "host": "app.example.test",
+                "port": 443, "normalized_path": "/admin", "concrete_path": "/admin",
+                "query_keys": [], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_probe",),
+    )
+
+    async def substituted(_method, _path, _payload):
+        return {"manifest": replacement.canonical_dict()}
+
+    backend = BrokerScanExecutionBackend(
+        plan=plan, worker_id="broker:worker", job_lease_token="j" * 32,
+        base_path="/broker/job", request=substituted,
+    )
+    with pytest.raises(Exception, match="differs"):
+        asyncio.run(backend.load_work_manifest("baseline.http", expected.reference()))

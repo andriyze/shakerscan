@@ -25,6 +25,12 @@ from .capability_result import (
     CapabilityResultStatus,
     placement_from_stored_result,
 )
+from .manifest_store import PostgresScanManifestStore, ScanManifestStoreError
+from .work_manifests import (
+    ScanWorkManifest,
+    ScanWorkManifestReference,
+    work_manifest_references_in,
+)
 try:  # Preserve one class identity under api.scan.* host imports.
     from ..runtime.observation_store import PostgresObservationManifestStore
     from ..runtime.receipts import CapabilityReceipt
@@ -192,6 +198,10 @@ class ScanExecutionBackend(Protocol):
     ) -> CapabilityResultReference: ...
 
     async def load_result(self, action_id: str) -> CapabilityResultReference | None: ...
+
+    async def load_work_manifest(
+        self, action_id: str, reference: ScanWorkManifestReference,
+    ) -> ScanWorkManifest: ...
 
     async def cancellation_requested(self) -> bool: ...
 
@@ -614,6 +624,36 @@ class PostgresScanExecutionBackend:
         """Read a result without recursively acquiring the control-plane pool."""
         action = self._require_action(action_id)
         return await self._load_result_with_conn(conn, action)
+
+    async def load_work_manifest(
+        self,
+        action_id: str,
+        reference: ScanWorkManifestReference,
+    ) -> ScanWorkManifest:
+        """Load one exact work manifest frozen into the action authority."""
+        action = self._require_action(action_id)
+        if (
+            not isinstance(reference, ScanWorkManifestReference)
+            or reference not in work_manifest_references_in(action.capability_args)
+        ):
+            raise ScanExecutionBackendError(
+                "work manifest is absent from immutable action authority"
+            )
+        try:
+            async with self._pool.acquire() as conn:
+                manifest = await PostgresScanManifestStore().load(
+                    conn,
+                    manifest_id=reference.manifest_id,
+                    scan_id=self._plan.scan_id,
+                    expected_kind=reference.kind,
+                    expected_digest=reference.manifest_digest,
+                    expected_target_binding_digest=self._plan.target_binding_digest,
+                )
+        except ScanManifestStoreError as exc:
+            raise ScanExecutionBackendError(str(exc)) from exc
+        if manifest is None or manifest.reference() != reference:
+            raise ScanExecutionBackendError("authorized work manifest is unavailable")
+        return manifest
 
     async def cancellation_requested(self) -> bool:
         async with self._pool.acquire() as conn:

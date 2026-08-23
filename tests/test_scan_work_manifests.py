@@ -22,6 +22,7 @@ from api.scan.work_manifests import (
     build_request_manifest,
     build_template_manifest,
     execution_url_for_endpoint,
+    work_manifest_references_in,
 )
 
 
@@ -87,6 +88,24 @@ def test_endpoint_manifest_freezes_complete_value_free_route_contract():
     assert ScanWorkManifestReference.from_dict(
         manifest.reference().canonical_dict()
     ) == manifest.reference()
+
+
+def test_manifest_reference_extraction_accepts_only_canonical_nested_references():
+    reference = _endpoint_manifest().reference()
+
+    extracted = work_manifest_references_in({
+        "target_manifest_ref": reference.canonical_dict(),
+        "duplicate": [reference.canonical_dict()],
+        "lookalike": {**reference.canonical_dict(), "entry_count": 99},
+        "invalid": {"manifest_id": reference.manifest_id},
+    })
+
+    assert extracted == (
+        reference,
+        ScanWorkManifestReference.from_dict({
+            **reference.canonical_dict(), "entry_count": 99,
+        }),
+    )
 
 
 def test_candidate_manifest_covers_every_parameter_and_marks_bounded_truncation():

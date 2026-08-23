@@ -473,6 +473,12 @@ try:
     )
     from runtime.receipts import CapabilityReceipt
     from runtime.observation_store import PostgresObservationManifestStore
+    from scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
+    from scan.work_manifests import (
+        ScanWorkManifestError,
+        ScanWorkManifestReference,
+        work_manifest_references_in,
+    )
     from scan.budget_allocator import (
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
@@ -536,6 +542,12 @@ except ModuleNotFoundError:
     )
     from api.runtime.receipts import CapabilityReceipt
     from api.runtime.observation_store import PostgresObservationManifestStore
+    from api.scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
+    from api.scan.work_manifests import (
+        ScanWorkManifestError,
+        ScanWorkManifestReference,
+        work_manifest_references_in,
+    )
     from api.scan.budget_allocator import (
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
@@ -6398,12 +6410,23 @@ class BrokerActionResultRequest(BrokerActionLeaseRequest):
     receipt: dict[str, Any]
 
 
+class BrokerActionWorkManifestRequest(BrokerActionAuthorityRequest):
+    manifest_ref: dict[str, Any]
+
+
 class BrokerActionCancelStatusRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job_lease_token: str = Field(min_length=32, max_length=256)
     worker_id: str = Field(min_length=1, max_length=200)
     plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _broker_action_work_manifest_references(
+    action: Any,
+) -> tuple[ScanWorkManifestReference, ...]:
+    """Return only canonical manifest references frozen into action arguments."""
+    return work_manifest_references_in(getattr(action, "capability_args", {}))
 
 
 def _configure_scan_plan_job(
@@ -11418,6 +11441,62 @@ async def get_broker_scan_action_observations(
             status_code=409, detail="broker action observation manifest is unavailable",
         )
     return {"observations": [dict(item) for item in observations]}
+
+
+@app.post(
+    "/fleet/broker/nodes/{node_id}/leases/{lease_id}"
+    "/actions/{action_id}/work-manifest"
+)
+async def get_broker_scan_action_work_manifest(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionWorkManifestRequest,
+    request: Request,
+):
+    """Return one exact, value-free work manifest authorized by an action."""
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    try:
+        requested = ScanWorkManifestReference.from_dict(body.manifest_ref)
+    except (ScanWorkManifestError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="broker work manifest reference is invalid",
+        ) from exc
+    async with db_pool.acquire() as conn:
+        _row, plan, _job, action, _backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+        if requested not in _broker_action_work_manifest_references(action):
+            raise HTTPException(
+                status_code=409,
+                detail="broker work manifest is absent from immutable action authority",
+            )
+        try:
+            manifest = await PostgresScanManifestStore().load(
+                conn,
+                manifest_id=requested.manifest_id,
+                scan_id=plan.scan_id,
+                expected_kind=requested.kind,
+                expected_digest=requested.manifest_digest,
+                expected_target_binding_digest=plan.target_binding_digest,
+            )
+        except ScanManifestStoreError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if manifest is None or manifest.reference() != requested:
+        raise HTTPException(
+            status_code=409, detail="broker work manifest is unavailable",
+        )
+    return {"manifest": manifest.canonical_dict()}
 
 
 @app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/cancel-status")

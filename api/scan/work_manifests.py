@@ -372,6 +372,30 @@ class ScanWorkManifestReference:
         return cls(**dict(value))
 
 
+def work_manifest_references_in(value: Any) -> tuple[ScanWorkManifestReference, ...]:
+    """Extract canonical manifest references from immutable action arguments."""
+    references: dict[tuple[str, ...], ScanWorkManifestReference] = {}
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            try:
+                reference = ScanWorkManifestReference.from_dict(item)
+            except (ScanWorkManifestError, TypeError, ValueError):
+                for nested in item.values():
+                    visit(nested)
+            else:
+                key = tuple(
+                    str(part) for part in reference.canonical_dict().values()
+                )
+                references[key] = reference
+        elif isinstance(item, (list, tuple)):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return tuple(references[key] for key in sorted(references))
+
+
 @dataclass(frozen=True)
 class ScanWorkManifest:
     scan_id: str

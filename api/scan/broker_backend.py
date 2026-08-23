@@ -18,6 +18,11 @@ from .execution_backend import (
     ScanExecutionBackendError,
     validate_action_lease,
 )
+from .work_manifests import (
+    ScanWorkManifest,
+    ScanWorkManifestError,
+    ScanWorkManifestReference,
+)
 
 
 BrokerActionRequest = Callable[
@@ -202,6 +207,38 @@ class BrokerScanExecutionBackend:
         if any(not isinstance(item, Mapping) for item in rows):
             raise ScanExecutionBackendError("broker action observation is invalid")
         return tuple(dict(item) for item in rows)
+
+    async def load_work_manifest(
+        self,
+        action_id: str,
+        reference: ScanWorkManifestReference,
+    ) -> ScanWorkManifest:
+        """Fetch one exact public work manifest bound into an action digest."""
+        action = self._action(action_id)
+        if not isinstance(reference, ScanWorkManifestReference):
+            raise ScanExecutionBackendError("broker work manifest reference is invalid")
+        response = await self._request(
+            "POST", self._path(action.action_id, "work-manifest"),
+            {
+                **self._authority(action),
+                "manifest_ref": reference.canonical_dict(),
+            },
+        )
+        if not isinstance(response, Mapping) or set(response) != {"manifest"}:
+            raise ScanExecutionBackendError("broker work manifest response is invalid")
+        try:
+            manifest = ScanWorkManifest.from_dict(response["manifest"])
+        except (ScanWorkManifestError, TypeError, ValueError) as exc:
+            raise ScanExecutionBackendError("broker work manifest is invalid") from exc
+        if (
+            manifest.scan_id != self._plan.scan_id
+            or manifest.target_binding_digest != self._plan.target_binding_digest
+            or manifest.reference() != reference
+        ):
+            raise ScanExecutionBackendError(
+                "broker work manifest differs from immutable action authority"
+            )
+        return manifest
 
     async def cancellation_requested(self) -> bool:
         response = await self._request(

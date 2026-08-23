@@ -83,6 +83,7 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
+from .work_manifests import ScanWorkManifest, ScanWorkManifestReference
 
 
 ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
@@ -94,6 +95,9 @@ class ObservationBackend(Protocol):
     async def load_observations(
         self, action_id: str,
     ) -> tuple[Mapping[str, Any], ...]: ...
+    async def load_work_manifest(
+        self, action_id: str, reference: ScanWorkManifestReference,
+    ) -> ScanWorkManifest: ...
 
 
 class ScanActionAdapterError(RuntimeError):
