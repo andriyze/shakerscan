@@ -143,6 +143,38 @@ class ActionLease:
             "attempt": self.attempt,
         }
 
+    @classmethod
+    def from_remote_payload(cls, value: Mapping[str, Any]) -> "ActionLease":
+        """Rehydrate a database-free lease and verify every authority field."""
+        expected = {
+            "schema_version", "lease_id", "lease_token", "scan_id",
+            "plan_schema_version", "plan_digest", "execution_plan_digest",
+            "target_binding_digest", "action", "backend", "worker_id",
+            "lease_seconds", "attempt",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ScanExecutionBackendError("Scan action lease fields are invalid")
+        if value.get("plan_schema_version") != SCAN_ACTION_PLAN_SCHEMA:
+            raise ScanExecutionBackendError("Scan action lease plan schema is invalid")
+        try:
+            action = ScanAction.from_dict(value["action"])
+        except (ScanExecutionBackendError, ValueError, TypeError) as exc:
+            raise ScanExecutionBackendError("Scan action lease action is invalid") from exc
+        return cls(
+            schema_version=value["schema_version"],
+            lease_id=value["lease_id"],
+            lease_token=value["lease_token"],
+            scan_id=value["scan_id"],
+            plan_digest=value["plan_digest"],
+            execution_plan_digest=value["execution_plan_digest"],
+            target_binding_digest=value["target_binding_digest"],
+            action=action,
+            backend=value["backend"],
+            worker_id=value["worker_id"],
+            lease_seconds=value["lease_seconds"],
+            attempt=value["attempt"],
+        )
+
 
 class ScanExecutionBackend(Protocol):
     """Durable scheduler boundary shared by local and broker placements."""
