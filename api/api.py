@@ -454,6 +454,7 @@ try:
     )
     from scan.executor import build_native_scan_execution
     from scan.action_plan import (
+        ScanActionPlan,
         ScanActionPlanCompiler,
         ScanActionPlanError,
         credential_profile_action_refs,
@@ -488,6 +489,13 @@ try:
     from scan.budget_allocator import (
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
+    )
+    from scan.continuation import (
+        ContinuationBudgetCeiling,
+        ScanContinuationAllocation,
+        ScanContinuationError,
+        build_discovery_continuation_manifests,
+        merge_scan_action_continuation,
     )
     from scan.stage_store import (
         PostgresScanStageCheckpointStore,
@@ -536,6 +544,7 @@ except ModuleNotFoundError:
     )
     from api.scan.executor import build_native_scan_execution
     from api.scan.action_plan import (
+        ScanActionPlan,
         ScanActionPlanCompiler,
         ScanActionPlanError,
         credential_profile_action_refs,
@@ -570,6 +579,13 @@ except ModuleNotFoundError:
     from api.scan.budget_allocator import (
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
+    )
+    from api.scan.continuation import (
+        ContinuationBudgetCeiling,
+        ScanContinuationAllocation,
+        ScanContinuationError,
+        build_discovery_continuation_manifests,
+        merge_scan_action_continuation,
     )
     from api.scan.stage_store import (
         PostgresScanStageCheckpointStore,
@@ -3827,6 +3843,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
 
             canonical_job = None
             scan_action_plan = None
+            scan_continuation_allocation: ScanContinuationAllocation | None = None
             request_work_manifests: tuple[ScanWorkManifest, ...] = ()
             endpoint_work_manifest: ScanWorkManifest | None = None
             candidate_work_manifest: ScanWorkManifest | None = None
@@ -3952,7 +3969,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     ),
                 )
                 try:
-                    scan_action_plan = _compile_allocated_scan_action_plan(
+                    (
+                        scan_action_plan,
+                        scan_continuation_allocation,
+                    ) = _compile_scan_admission_action_authority(
                         scan_id=scan_id,
                         scan_contract=scan_contract,
                         target_binding=target_binding,
@@ -3973,6 +3993,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             if template_work_manifest is not None else None
                         ),
                     )
+                    if scan_continuation_allocation is not None:
+                        scan_options["scan_continuation_allocation_digest"] = (
+                            scan_continuation_allocation.allocation_digest
+                        )
                 except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
                     print(
                         f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}",
@@ -3998,9 +4022,16 @@ async def run_due_schedules(pool: asyncpg.Pool):
                      json.dumps(canonical_job.payload()) if canonical_job else None,
                      canonical_job.payload_digest if canonical_job else None)
                 if scan_action_plan is not None:
-                    await PostgresScanActionStore().persist_plan(
+                    action_store = PostgresScanActionStore()
+                    await action_store.persist_plan(
                         conn, plan=scan_action_plan,
                     )
+                    if scan_continuation_allocation is not None:
+                        await action_store.persist_continuation_allocation(
+                            conn,
+                            allocation=scan_continuation_allocation,
+                            parent_plan=scan_action_plan,
+                        )
                     for manifest in request_work_manifests:
                         await PostgresScanManifestStore().persist(
                             conn, manifest=manifest,
@@ -6553,6 +6584,10 @@ class BrokerActionCancelStatusRequest(BaseModel):
     job_lease_token: str = Field(min_length=32, max_length=256)
     worker_id: str = Field(min_length=1, max_length=200)
     plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BrokerScanContinuationRequest(BrokerActionCancelStatusRequest):
+    allocation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 def _broker_action_work_manifest_references(
@@ -11322,6 +11357,183 @@ async def _revalidate_broker_action_authority(
         )
 
 
+async def _materialize_broker_scan_continuation(
+    conn: Any,
+    *,
+    parent_plan: ScanActionPlan,
+    canonical_job: CanonicalScanJob,
+    options: Mapping[str, Any],
+    allocation: ScanContinuationAllocation,
+    worker_id: str,
+) -> tuple[ScanActionPlan, dict[str, Any]]:
+    """Compile the broker continuation only from control-plane receipts."""
+    backend = PostgresScanExecutionBackend(
+        pool=db_pool,
+        plan=parent_plan,
+        worker_id=worker_id,
+        backend_name="broker",
+        lease_seconds=min(BROKER_LEASE_SECONDS, 3600),
+    )
+    results = {}
+    observations = {}
+    for action in parent_plan.actions:
+        result = await backend.load_result_with_connection(conn, action.action_id)
+        if result is None:
+            raise HTTPException(
+                status_code=409,
+                detail="broker continuation requires every discovery action receipt",
+            )
+        results[action.action_id] = result
+        if result.observation_manifest_ref is None:
+            observations[action.action_id] = ()
+            continue
+        rows = await PostgresObservationManifestStore().load(
+            conn,
+            reference=result.observation_manifest_ref,
+            scan_id=parent_plan.scan_id,
+            action_id=action.action_id,
+        )
+        if rows is None:
+            raise HTTPException(
+                status_code=409,
+                detail="broker continuation observation manifest is unavailable",
+            )
+        observations[action.action_id] = rows
+
+    request_manifests: list[ScanWorkManifest] = []
+    raw_request_refs = options.get("request_manifest_refs")
+    if isinstance(raw_request_refs, Mapping):
+        for raw in raw_request_refs.values():
+            if not isinstance(raw, Mapping):
+                continue
+            try:
+                reference = ScanWorkManifestReference.from_dict(raw)
+            except (ScanWorkManifestError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker continuation request manifest is invalid",
+                ) from exc
+            if reference.kind.value != "request":
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker continuation request manifest kind is invalid",
+                )
+            try:
+                manifest = await PostgresScanManifestStore().load(
+                    conn,
+                    manifest_id=reference.manifest_id,
+                    scan_id=parent_plan.scan_id,
+                    expected_kind=reference.kind,
+                    expected_digest=reference.manifest_digest,
+                    expected_target_binding_digest=parent_plan.target_binding_digest,
+                )
+            except ScanManifestStoreError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if manifest is None or manifest.reference() != reference:
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker continuation request manifest is unavailable",
+                )
+            request_manifests.append(manifest)
+
+    try:
+        endpoints, candidates = build_discovery_continuation_manifests(
+            allocation=allocation,
+            target_url=str(options.get("_continuation_target_url") or "")
+            or canonical_job.target.allowed_origins[0],
+            target=canonical_job.target,
+            options=options,
+            action_results=results,
+            observations=observations,
+            request_manifests=tuple(request_manifests),
+        )
+        credential_refs = [
+            dict(item)
+            for item in options.get("credential_profile_refs") or ()
+            if isinstance(item, Mapping)
+        ]
+        collection_refs = [
+            dict(item)
+            for item in options.get("request_collections") or ()
+            if isinstance(item, Mapping)
+        ]
+        zero_cost_existing_inputs = {
+            f"inputs.auth_{str(item.get('scan_lane') or item.get('lane') or '').lower()}": {}
+            for item in credential_refs
+            if str(item.get("scan_lane") or item.get("lane") or "").lower()
+            in {"primary", "secondary"}
+        }
+        continuation_raw = ScanActionPlanCompiler().compile(
+            scan_id=parent_plan.scan_id,
+            execution_plan=canonical_job.execution_plan,
+            target_binding=canonical_job.target,
+            credential_profile_refs=credential_profile_action_refs(
+                credential_refs
+            ),
+            request_collection_refs=request_collection_action_refs(
+                collection_refs
+            ),
+            request_manifest_refs=(
+                {
+                    str(key): dict(value)
+                    for key, value in raw_request_refs.items()
+                    if isinstance(value, Mapping)
+                }
+                if isinstance(raw_request_refs, Mapping) else None
+            ),
+            endpoint_manifest_ref=endpoints.reference().canonical_dict(),
+            candidate_manifest_ref=candidates.reference().canonical_dict(),
+            template_manifest_ref=(
+                dict(options["template_manifest_ref"])
+                if isinstance(options.get("template_manifest_ref"), Mapping)
+                else None
+            ),
+            action_scope="endpoint",
+            action_budgets=zero_cost_existing_inputs,
+        )
+        continuation_plan = allocate_scan_action_plan(
+            continuation_raw,
+            ContinuationBudgetCeiling(allocation.budget_ceiling),
+        ).plan
+        amended = merge_scan_action_continuation(
+            parent_plan=parent_plan,
+            continuation_plan=continuation_plan,
+            allocation=allocation,
+        )
+    except (
+        ScanActionPlanError,
+        ScanBudgetAllocationError,
+        ScanContinuationError,
+        ScanWorkManifestError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    manifest_store = PostgresScanManifestStore()
+    await manifest_store.persist(conn, manifest=endpoints)
+    await manifest_store.persist(conn, manifest=candidates)
+    await PostgresScanActionStore().amend_plan(
+        conn,
+        parent_plan=parent_plan,
+        amended_plan=amended,
+        allocation=allocation,
+    )
+    continuation_options = {
+        "endpoint_manifest_id": str(endpoints.manifest_id),
+        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        "candidate_manifest_ref": candidates.reference().canonical_dict(),
+        "scan_continuation_plan_digest": amended.plan_digest,
+    }
+    await conn.execute(
+        """
+        UPDATE scans SET options=options || $2::jsonb
+        WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
+        """,
+        uuid.UUID(parent_plan.scan_id),
+        json.dumps(continuation_options),
+    )
+    return amended, continuation_options
+
+
 @app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease")
 async def lease_broker_scan_action(
     node_id: str,
@@ -11630,6 +11842,137 @@ async def get_broker_scan_action_work_manifest(
             status_code=409, detail="broker work manifest is unavailable",
         )
     return {"manifest": manifest.canonical_dict()}
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/continuation")
+async def continue_broker_scan_action_plan(
+    node_id: str,
+    lease_id: str,
+    body: BrokerScanContinuationRequest,
+    request: Request,
+):
+    """Apply the one preallocated discovery-derived Scan continuation."""
+    await _broker_authenticated_node(node_id, request)
+    async with db_pool.acquire() as conn, conn.transaction():
+        lease_row = await _broker_lease_row(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            lease_token=body.job_lease_token,
+        )
+        if str(lease_row.get("status") or "") != "leased":
+            raise HTTPException(
+                status_code=409,
+                detail=f"broker lease is {lease_row['status']}",
+            )
+        if (
+            lease_row.get("lease_expires_at") is None
+            or lease_row["lease_expires_at"] <= utc_now()
+        ):
+            raise HTTPException(status_code=410, detail="broker job lease expired")
+        if body.worker_id != f"broker:{str(lease_row.get('worker_id') or '')}":
+            raise HTTPException(
+                status_code=409,
+                detail="broker continuation worker differs from job lease",
+            )
+        scan_id = str(lease_row.get("scan_id") or "")
+        if not scan_id:
+            raise HTTPException(status_code=409, detail="broker job has no Scan owner")
+        action_store = PostgresScanActionStore()
+        allocation = await action_store.load_continuation_allocation(
+            conn, scan_id=scan_id,
+        )
+        if (
+            allocation is None
+            or allocation.allocation_digest != body.allocation_digest
+            or allocation.parent_plan_digest != body.plan_digest
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="broker continuation allocation authority changed",
+            )
+        current_plan = await action_store.load_plan(conn, scan_id=scan_id)
+        if current_plan is None:
+            raise HTTPException(
+                status_code=409, detail="broker Scan action plan is unavailable",
+            )
+        scan_row = await conn.fetchrow(
+            """
+            SELECT status, target_id, target_url, options, scan_job_payload,
+                   scan_continuation_applied_at
+            FROM scans WHERE id=$1
+            """,
+            uuid.UUID(scan_id),
+        )
+        if not scan_row or str(scan_row.get("status") or "") in {
+            "cancelled", "cancelling",
+        }:
+            raise HTTPException(status_code=409, detail="broker Scan is cancelled")
+        raw_job = parse_json_field(scan_row.get("scan_job_payload")) or {}
+        try:
+            canonical_job = CanonicalScanJob.from_payload(raw_job)
+        except CanonicalScanJobError as exc:
+            raise HTTPException(
+                status_code=409, detail="broker Scan job authority is invalid",
+            ) from exc
+        if (
+            canonical_job.scan_id != allocation.scan_id
+            or canonical_job.execution_plan.digest
+            != allocation.execution_plan_digest
+            or canonical_job.target.digest != allocation.target_binding_digest
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="broker continuation job authority changed",
+            )
+        options = parse_json_field(scan_row.get("options")) or {}
+        options["_continuation_target_url"] = str(scan_row.get("target_url") or "")
+        if current_plan.plan_digest == allocation.parent_plan_digest:
+            target_active = await conn.fetchval(
+                "SELECT is_active FROM targets WHERE id=$1",
+                uuid.UUID(str(canonical_job.target.target_id)),
+            )
+            if target_active is not True:
+                raise HTTPException(
+                    status_code=409, detail="broker Scan target is inactive",
+                )
+            amended, continuation_options = (
+                await _materialize_broker_scan_continuation(
+                    conn,
+                    parent_plan=current_plan,
+                    canonical_job=canonical_job,
+                    options=options,
+                    allocation=allocation,
+                    worker_id=body.worker_id,
+                )
+            )
+        else:
+            if (
+                scan_row.get("scan_continuation_applied_at") is None
+                or tuple(
+                    action.action_id
+                    for action in current_plan.actions[:len(allocation.parent_action_ids)]
+                ) != allocation.parent_action_ids
+                or current_plan.actions[-1].action_id != "finalize.report"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker Scan plan changed outside continuation authority",
+                )
+            amended = current_plan
+            continuation_options = {
+                key: options[key]
+                for key in (
+                    "endpoint_manifest_id", "endpoint_manifest_ref",
+                    "candidate_manifest_ref", "scan_continuation_plan_digest",
+                )
+                if key in options
+            }
+    return {
+        "plan": amended.canonical_dict(),
+        "options": continuation_options,
+        "allocation_digest": allocation.allocation_digest,
+    }
 
 
 @app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/cancel-status")
@@ -29013,6 +29356,106 @@ def _compile_allocated_scan_action_plan(
     ).plan
 
 
+def _compile_scan_admission_action_authority(
+    *,
+    scan_id: str,
+    scan_contract: ResolvedScanContract,
+    target_binding: TargetBinding,
+    credential_refs: Sequence[Mapping[str, Any]] = (),
+    request_collection_refs: Sequence[Mapping[str, Any]] = (),
+    request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
+    endpoint_manifest_ref: Mapping[str, Any] | None = None,
+    candidate_manifest_ref: Mapping[str, Any] | None = None,
+    template_manifest_ref: Mapping[str, Any] | None = None,
+) -> tuple[ScanActionPlan, ScanContinuationAllocation | None]:
+    """Compile admission traffic and freeze all residual active-test authority."""
+    if not scan_contract.policy.active_testing:
+        return (
+            _compile_allocated_scan_action_plan(
+                scan_id=scan_id,
+                scan_contract=scan_contract,
+                target_binding=target_binding,
+                credential_refs=credential_refs,
+                request_collection_refs=request_collection_refs,
+                request_manifest_refs=request_manifest_refs,
+                endpoint_manifest_ref=endpoint_manifest_ref,
+                candidate_manifest_ref=candidate_manifest_ref,
+                template_manifest_ref=template_manifest_ref,
+            ),
+            None,
+        )
+
+    raw_parent = ScanActionPlanCompiler().compile(
+        scan_id=scan_id,
+        execution_plan=scan_contract.execution_plan,
+        target_binding=target_binding,
+        credential_profile_refs=credential_profile_action_refs(credential_refs),
+        request_collection_refs=request_collection_action_refs(
+            request_collection_refs
+        ),
+        request_manifest_refs=request_manifest_refs,
+        endpoint_manifest_ref=endpoint_manifest_ref,
+        candidate_manifest_ref=candidate_manifest_ref,
+        template_manifest_ref=template_manifest_ref,
+        defer_manifest_actions=True,
+        include_finalizer=False,
+    )
+    parent_allocation = allocate_scan_action_plan(
+        raw_parent,
+        scan_contract.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+    )
+    required_by_family = {
+        "nuclei": "templates.scan",
+        "xss": "xss.verify",
+        "sqli": "sqli.verify",
+        "bola": "authz.verify",
+    }
+    required_capabilities = tuple(
+        required_by_family[family]
+        for family in scan_contract.policy.include_families
+        if family in required_by_family
+        and family not in set(scan_contract.policy.exclude_families)
+    )
+    required_holds = (*required_capabilities, "scan.execute")
+    remaining = dict(parent_allocation.residual_scan_execute_budget)
+    for capability_name in required_holds:
+        specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        shortages = {
+            name: amount - remaining.get(name, 0)
+            for name, amount in specification.budget_cost.items()
+            if amount > remaining.get(name, 0)
+        }
+        if shortages:
+            raise ScanBudgetAllocationError(capability_name, shortages)
+        for name, amount in specification.budget_cost.items():
+            remaining[name] = remaining.get(name, 0) - amount
+
+    parent_plan = parent_allocation.plan
+    continuation = ScanContinuationAllocation(
+        scan_id=scan_id,
+        parent_plan_digest=str(parent_plan.plan_digest),
+        execution_plan_digest=parent_plan.execution_plan_digest,
+        target_binding_digest=parent_plan.target_binding_digest,
+        parent_action_ids=tuple(
+            action.action_id for action in parent_plan.actions
+        ),
+        budget_ceiling=parent_allocation.residual_scan_execute_budget,
+        max_endpoint_entries=scan_contract.budget.max_endpoints,
+        max_candidate_entries=max(
+            1,
+            min(
+                20_000,
+                scan_contract.budget.max_http_requests,
+                scan_contract.budget.max_endpoints * 64,
+            ),
+        ),
+        required_capabilities=required_capabilities,
+    )
+    return parent_plan, continuation
+
+
 def _compile_scan_admission_surface_work_manifests(
     *,
     scan_id: str,
@@ -29503,7 +29946,10 @@ async def submit_scan(request: ScanRequest):
             endpoint_manifest_id=str(endpoint_work_manifest.manifest_id),
         )
         try:
-            scan_action_plan = _compile_allocated_scan_action_plan(
+            (
+                scan_action_plan,
+                scan_continuation_allocation,
+            ) = _compile_scan_admission_action_authority(
                 scan_id=scan_id,
                 scan_contract=scan_contract,
                 target_binding=target_binding,
@@ -29520,6 +29966,10 @@ async def submit_scan(request: ScanRequest):
                     if template_work_manifest is not None else None
                 ),
             )
+            if scan_continuation_allocation is not None:
+                options_payload["scan_continuation_allocation_digest"] = (
+                    scan_continuation_allocation.allocation_digest
+                )
         except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         canonical_job_payload = canonical_job.payload()
@@ -29545,9 +29995,16 @@ async def submit_scan(request: ScanRequest):
                  json.dumps(options_payload.get("resolved_scan_budget") or {}),
                  json.dumps({"status": "pending", "reasons": []}),
                  json.dumps(canonical_job_payload), canonical_job.payload_digest)
-            await PostgresScanActionStore().persist_plan(
+            action_store = PostgresScanActionStore()
+            await action_store.persist_plan(
                 conn, plan=scan_action_plan,
             )
+            if scan_continuation_allocation is not None:
+                await action_store.persist_continuation_allocation(
+                    conn,
+                    allocation=scan_continuation_allocation,
+                    parent_plan=scan_action_plan,
+                )
             for manifest in request_work_manifests:
                 await PostgresScanManifestStore().persist(
                     conn, manifest=manifest,

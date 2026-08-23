@@ -379,6 +379,42 @@ def test_manifest_breadth_is_capped_by_fixed_profile_resource_ceiling():
     )
 
 
+def test_explicit_verifier_remains_visible_when_candidate_manifest_is_empty():
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000094",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="5" * 64,
+        entry_count=1,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000095",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="4" * 64,
+        entry_count=0,
+        status="complete",
+    ).canonical_dict()
+
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("xss",), exclude=("recon",)),
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        action_scope="endpoint",
+    )
+    verifier = next(
+        action for action in plan.actions
+        if action.capability_name == "xss.verify"
+    )
+
+    assert verifier.required is True
+    assert verifier.capability_args["candidate_index"] == 0
+    assert verifier.capability_args["candidate_manifest_ref"] == candidate_ref
+
+
 def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
     credentials = credential_profile_action_refs(({
         "profile_id": "profile-1",

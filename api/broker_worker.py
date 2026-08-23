@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
 from runtime.models import ScanPolicy, TargetBinding
@@ -571,6 +571,85 @@ async def _execute_broker_action_plan(
         backend=backend,
         executor=executor,
     ).run(plan)
+    if not any(action.action_id == "finalize.report" for action in plan.actions):
+        if any(
+            result.status.value == "cancelled"
+            for result in orchestration.action_results.values()
+        ):
+            raise BrokerWorkerError("broker Scan was cancelled during discovery")
+        allocation_digest = str(
+            options.get("scan_continuation_allocation_digest") or ""
+        ).strip()
+        if len(allocation_digest) != 64:
+            raise BrokerWorkerError(
+                "active broker Scan has no continuation allocation"
+            )
+        response = await request(
+            "POST",
+            f"{base_path}/continuation",
+            {
+                "job_lease_token": lease_token,
+                "worker_id": worker_id,
+                "plan_digest": plan.plan_digest,
+                "allocation_digest": allocation_digest,
+            },
+        )
+        if not isinstance(response, Mapping) or not isinstance(
+            response.get("plan"), Mapping,
+        ):
+            raise BrokerWorkerError(
+                "broker continuation returned no immutable action plan"
+            )
+        try:
+            plan = ScanActionPlan.from_dict(response["plan"])
+        except (TypeError, ValueError) as exc:
+            raise BrokerWorkerError(
+                "broker continuation action plan is invalid"
+            ) from exc
+        if (
+            plan.scan_id != scan_id
+            or plan.actions[-1].action_id != "finalize.report"
+            or str(response.get("allocation_digest") or "")
+            != allocation_digest
+        ):
+            raise BrokerWorkerError(
+                "broker continuation changed Scan authority"
+            )
+        continuation_options = response.get("options")
+        if isinstance(continuation_options, Mapping):
+            options.update(dict(continuation_options))
+        backend = BrokerScanExecutionBackend(
+            plan=plan,
+            worker_id=worker_id,
+            job_lease_token=lease_token,
+            base_path=base_path,
+            request=request,
+        )
+        dispatcher = DatabaseNeutralScanActionDispatcher(
+            target_url=str(job.get("target") or ""),
+            options=options,
+            target=target,
+            policy=policy,
+            scan_id=scan_id,
+            job_id=str(job.get("job_id") or ""),
+            worker_id=worker_id,
+            plan=plan,
+            backend=backend,
+            process_runner=_execute_agent_scanner_process,
+            cancelled=lambda: _scan_cancel_requested(scan_id),
+        )
+        executor = ReceiptScanActionExecutor(
+            scan_id=scan_id,
+            target_id=target.target_id,
+            worker_id=worker_id,
+            dispatcher=dispatcher,
+            scope_receipt_id=target.scope_receipt_id,
+            approval_receipt_id=dispatcher.policy.approval_receipt_id,
+        )
+        orchestration = await ScanOrchestrator(
+            backend=backend,
+            executor=executor,
+        ).run(plan)
     final = orchestration.action_results.get("finalize.report")
     if final is None or final.observation_manifest_ref is None:
         raise BrokerWorkerError("broker Scan finalizer produced no report")

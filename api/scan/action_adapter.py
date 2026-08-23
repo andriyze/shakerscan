@@ -230,6 +230,8 @@ class DatabaseNeutralScanActionDispatcher:
         )
         if manifest is None:
             return None
+        if not manifest.entries:
+            return None
         try:
             return execution_url_for_manifest_endpoint(
                 manifest, action.capability_args.get("endpoint_index"),
@@ -242,6 +244,8 @@ class DatabaseNeutralScanActionDispatcher:
             action, "candidate_manifest_ref", ScanWorkManifestKind.CANDIDATE,
         )
         if candidates is None:
+            return None
+        if not candidates.entries:
             return None
         endpoints = await self._work_manifest(
             action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
@@ -505,12 +509,20 @@ class DatabaseNeutralScanActionDispatcher:
         tool = tool_by_capability[action.capability_name]
         execution_target = self.target_url
         if action.capability_name == "templates.scan":
-            execution_target = (
-                await self._manifest_endpoint(action) or execution_target
-            )
+            manifest_endpoint = await self._manifest_endpoint(action)
+            if (
+                isinstance(action.capability_args.get("target_manifest_ref"), Mapping)
+                and manifest_endpoint is None
+            ):
+                return self._skip(action, "not_applicable")
+            execution_target = manifest_endpoint or execution_target
         if action.capability_name in {"xss.verify", "sqli.verify"}:
             manifest_candidate = await self._manifest_candidate(action)
-            if manifest_candidate is not None:
+            if isinstance(
+                action.capability_args.get("candidate_manifest_ref"), Mapping,
+            ):
+                if manifest_candidate is None:
+                    return self._skip(action, "not_applicable")
                 execution_target = manifest_candidate
             else:
                 crawl = await self._observations("discover.web_crawl")

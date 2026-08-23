@@ -170,6 +170,13 @@ from scan.action_plan import (
 )
 from scan.action_store import PostgresScanActionStore
 from scan.budget_allocator import allocate_scan_action_plan
+from scan.continuation import (
+    ContinuationBudgetCeiling,
+    ScanContinuationAllocation,
+    ScanContinuationError,
+    build_discovery_continuation_manifests,
+    merge_scan_action_continuation,
+)
 from scan.manifest_store import PostgresScanManifestStore
 from scan.work_manifests import (
     ScanWorkManifest,
@@ -13380,6 +13387,8 @@ class _CanonicalLocalScanDispatcher:
         )
         if manifest is None:
             return None
+        if not manifest.entries:
+            return None
         try:
             return execution_url_for_manifest_endpoint(
                 manifest, action.capability_args.get("endpoint_index"),
@@ -13394,6 +13403,8 @@ class _CanonicalLocalScanDispatcher:
             action, "candidate_manifest_ref", ScanWorkManifestKind.CANDIDATE,
         )
         if candidate_manifest is not None:
+            if not candidate_manifest.entries:
+                return None
             endpoint_manifest = await self._work_manifest(
                 action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
             )
@@ -13565,6 +13576,13 @@ class _CanonicalLocalScanDispatcher:
             return await self._network_action(action, lease)
         elif action.capability_name == "templates.scan":
             execution_target = await self._manifest_endpoint(action)
+            if (
+                isinstance(action.capability_args.get("target_manifest_ref"), Mapping)
+                and execution_target is None
+            ):
+                return self._synthetic_receipt(
+                    action, lease, status="skipped", reason="not_applicable",
+                )
             template_manifest = await self._work_manifest(
                 action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,
             )
@@ -13615,6 +13633,153 @@ class _CanonicalLocalScanDispatcher:
             )
         await heartbeat()
         return await self._receipt_from_summary(action, lease, summary)
+
+
+async def _load_scan_continuation_request_manifests(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+    options: Mapping[str, Any],
+) -> tuple[ScanWorkManifest, ...]:
+    raw_refs = options.get("request_manifest_refs")
+    if not isinstance(raw_refs, Mapping):
+        return ()
+    references: list[ScanWorkManifestReference] = []
+    for raw in raw_refs.values():
+        if not isinstance(raw, Mapping):
+            continue
+        reference = ScanWorkManifestReference.from_dict(raw)
+        if reference.kind is not ScanWorkManifestKind.REQUEST:
+            raise ScanCapabilityContractError(
+                "continuation request manifest has the wrong kind"
+            )
+        references.append(reference)
+    manifests: list[ScanWorkManifest] = []
+    async with db_pool.acquire() as conn:
+        store = PostgresScanManifestStore()
+        for reference in references:
+            manifest = await store.load(
+                conn,
+                manifest_id=reference.manifest_id,
+                scan_id=scan_id,
+                expected_kind=reference.kind,
+                expected_digest=reference.manifest_digest,
+                expected_target_binding_digest=target_binding_digest,
+            )
+            if manifest is None or manifest.reference() != reference:
+                raise ScanCapabilityContractError(
+                    "continuation request manifest is unavailable"
+                )
+            manifests.append(manifest)
+    return tuple(manifests)
+
+
+async def _materialize_local_scan_continuation(
+    *,
+    parent_plan: ScanActionPlan,
+    allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference],
+    dispatcher: _CanonicalLocalScanDispatcher,
+) -> ScanActionPlan:
+    observations = {
+        action.action_id: await dispatcher._observations(action.action_id)
+        for action in parent_plan.actions
+    }
+    request_manifests = await _load_scan_continuation_request_manifests(
+        scan_id=dispatcher.scan_id,
+        target_binding_digest=dispatcher.target.digest,
+        options=dispatcher.options,
+    )
+    endpoints, candidates = build_discovery_continuation_manifests(
+        allocation=allocation,
+        target_url=dispatcher.target_url,
+        target=dispatcher.target,
+        options=dispatcher.options,
+        action_results=parent_results,
+        observations=observations,
+        request_manifests=request_manifests,
+    )
+    credential_refs = [
+        dict(item)
+        for item in dispatcher.options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping)
+    ]
+    collection_refs = [
+        dict(item)
+        for item in dispatcher.options.get("request_collections") or ()
+        if isinstance(item, Mapping)
+    ]
+    request_refs = dispatcher.options.get("request_manifest_refs")
+    template_ref = dispatcher.options.get("template_manifest_ref")
+    zero_cost_existing_inputs = {
+        f"inputs.auth_{str(item.get('scan_lane') or item.get('lane') or '').lower()}": {}
+        for item in credential_refs
+        if str(item.get("scan_lane") or item.get("lane") or "").lower()
+        in {"primary", "secondary"}
+    }
+    continuation_raw = ScanActionPlanCompiler().compile(
+        scan_id=dispatcher.scan_id,
+        execution_plan=dispatcher.execution.execution_plan,
+        target_binding=dispatcher.target,
+        credential_profile_refs=credential_profile_action_refs(credential_refs),
+        request_collection_refs=request_collection_action_refs(collection_refs),
+        request_manifest_refs=(
+            {
+                str(key): dict(value)
+                for key, value in request_refs.items()
+                if isinstance(value, Mapping)
+            }
+            if isinstance(request_refs, Mapping) else None
+        ),
+        endpoint_manifest_ref=endpoints.reference().canonical_dict(),
+        candidate_manifest_ref=candidates.reference().canonical_dict(),
+        template_manifest_ref=(
+            dict(template_ref) if isinstance(template_ref, Mapping) else None
+        ),
+        action_scope="endpoint",
+        action_budgets=zero_cost_existing_inputs,
+    )
+    continuation_plan = allocate_scan_action_plan(
+        continuation_raw,
+        ContinuationBudgetCeiling(allocation.budget_ceiling),
+    ).plan
+    amended = merge_scan_action_continuation(
+        parent_plan=parent_plan,
+        continuation_plan=continuation_plan,
+        allocation=allocation,
+    )
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            manifest_store = PostgresScanManifestStore()
+            await manifest_store.persist(conn, manifest=endpoints)
+            await manifest_store.persist(conn, manifest=candidates)
+            await PostgresScanActionStore().amend_plan(
+                conn,
+                parent_plan=parent_plan,
+                amended_plan=amended,
+                allocation=allocation,
+            )
+            await conn.execute(
+                """
+                UPDATE scans
+                SET options=options || $2::jsonb
+                WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
+                """,
+                uuid.UUID(dispatcher.scan_id),
+                json.dumps({
+                    "endpoint_manifest_id": str(endpoints.manifest_id),
+                    "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+                    "candidate_manifest_ref": candidates.reference().canonical_dict(),
+                    "scan_continuation_plan_digest": amended.plan_digest,
+                }),
+            )
+    dispatcher.options.update({
+        "endpoint_manifest_id": str(endpoints.manifest_id),
+        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
+        "candidate_manifest_ref": candidates.reference().canonical_dict(),
+        "scan_continuation_plan_digest": amended.plan_digest,
+    })
+    return amended
 
 
 async def _execute_reserved_deterministic_scan(
@@ -13673,6 +13838,50 @@ async def _execute_reserved_deterministic_scan(
     orchestration = await ScanOrchestrator(
         backend=backend, executor=executor,
     ).run(plan)
+    if not any(action.action_id == "finalize.report" for action in plan.actions):
+        if any(
+            result.status.value == "cancelled"
+            for result in orchestration.action_results.values()
+        ):
+            raise ValueError("Cancelled by user")
+        async with db_pool.acquire() as conn:
+            continuation_allocation = (
+                await action_store.load_continuation_allocation(
+                    conn, scan_id=scan_id,
+                )
+            )
+        if continuation_allocation is None:
+            raise ScanCapabilityContractError(
+                "active Scan has no upfront continuation allocation"
+            )
+        try:
+            plan = await _materialize_local_scan_continuation(
+                parent_plan=plan,
+                allocation=continuation_allocation,
+                parent_results=orchestration.action_results,
+                dispatcher=dispatcher,
+            )
+        except ScanContinuationError as exc:
+            raise ScanCapabilityContractError(str(exc)) from exc
+        backend = PostgresScanExecutionBackend(
+            pool=db_pool,
+            plan=plan,
+            worker_id=worker_id,
+            backend_name="local",
+        )
+        dispatcher.plan = plan
+        dispatcher.backend = backend
+        executor = ReceiptScanActionExecutor(
+            scan_id=scan_id,
+            target_id=execution.target_binding.target_id,
+            worker_id=worker_id,
+            dispatcher=dispatcher,
+            scope_receipt_id=execution.target_binding.scope_receipt_id,
+            approval_receipt_id=admission.plan.policy.approval_receipt_id,
+        )
+        orchestration = await ScanOrchestrator(
+            backend=backend, executor=executor,
+        ).run(plan)
     final_result = orchestration.action_results.get("finalize.report")
     if final_result is not None and final_result.status.value == "cancelled":
         raise ValueError("Cancelled by user")

@@ -165,6 +165,132 @@ def test_broker_scan_requires_complete_immutable_action_plan():
         broker_worker._broker_scan_action_plan(job, changed)
 
 
+def test_broker_action_plan_requests_and_executes_control_plane_continuation(monkeypatch):
+    job, lease, parent = _canonical_broker_action_lease()
+    job.update({
+        "target": "https://app.example.test",
+        "job_id": "job-continuation",
+    })
+    job["options"].update({
+        "scan_continuation_allocation_digest": "d" * 64,
+        "scan_execution_plan": {
+            "policy": {
+                "active_testing": True,
+                "allow_state_changing_http": False,
+                "network_discovery": False,
+                "subdomain_discovery": False,
+                "include_families": ["xss"],
+                "exclude_families": [],
+                "scope_receipt_id": "scope-1",
+                "approval_receipt_id": None,
+            },
+        },
+    })
+    finalizer = ScanAction(
+        action_id="finalize.report",
+        stage="finalize_evidence",
+        ordinal=1,
+        capability_name="scan.execute",
+        capability_args={"report_only": True},
+        target_binding_digest=parent.target_binding_digest,
+        input_binding_digest="e" * 64,
+        requested_budget={"tool_wall_seconds": 1},
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": {},
+            "adapter_name": "scanner.report",
+            "adapter_version": "1",
+        },
+        dependencies=(parent.actions[0].action_id,),
+        required=True,
+        supporting=False,
+        output_schema="scan-report/v1",
+    )
+    amended = ScanActionPlan(
+        scan_id=parent.scan_id,
+        execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest,
+        actions=(*parent.actions, finalizer),
+    )
+    calls = []
+
+    def fake_api_request(_state, method, path, payload, **_kwargs):
+        calls.append((method, path, payload))
+        return {
+            "plan": amended.canonical_dict(),
+            "options": {"candidate_manifest_ref": {"kind": "candidate"}},
+            "allocation_digest": "d" * 64,
+        }
+
+    class Backend:
+        def __init__(self, **kwargs):
+            self.plan = kwargs["plan"]
+
+        async def load_observations(self, action_id):
+            assert action_id == "finalize.report"
+            return ({"kind": "scan_report", "report": {"result": {}}},)
+
+    class Dispatcher:
+        def __init__(self, **kwargs):
+            self.policy = kwargs["policy"]
+
+    class Executor:
+        def __init__(self, **_kwargs):
+            pass
+
+    runs = []
+
+    class Orchestrator:
+        def __init__(self, **kwargs):
+            self.backend = kwargs["backend"]
+
+        async def run(self, plan):
+            runs.append(plan.plan_digest)
+            if plan.plan_digest == parent.plan_digest:
+                return types.SimpleNamespace(
+                    action_results={
+                        parent.actions[0].action_id: types.SimpleNamespace(
+                            status=types.SimpleNamespace(value="success"),
+                        ),
+                    },
+                    status_matrix={parent.actions[0].action_id: "success"},
+                )
+            return types.SimpleNamespace(
+                action_results={
+                    "finalize.report": types.SimpleNamespace(
+                        status=types.SimpleNamespace(value="success"),
+                        observation_manifest_ref=object(),
+                    ),
+                },
+                status_matrix={"finalize.report": "success"},
+            )
+
+    monkeypatch.setattr(broker_worker, "api_request", fake_api_request)
+    monkeypatch.setattr(broker_worker, "BrokerScanExecutionBackend", Backend)
+    monkeypatch.setattr(
+        broker_worker, "DatabaseNeutralScanActionDispatcher", Dispatcher,
+    )
+    monkeypatch.setattr(broker_worker, "ReceiptScanActionExecutor", Executor)
+    monkeypatch.setattr(broker_worker, "ScanOrchestrator", Orchestrator)
+
+    report = asyncio.run(broker_worker._execute_broker_action_plan(
+        {"node_id": NODE_ID},
+        {"lease_id": "lease-1", "lease_token": "token-1"},
+        job,
+        plan=parent,
+        worker_id="broker:node-1:container-a",
+    ))
+
+    assert runs == [parent.plan_digest, amended.plan_digest]
+    assert calls[0][0] == "POST"
+    assert calls[0][1].endswith("/continuation")
+    assert calls[0][2]["plan_digest"] == parent.plan_digest
+    assert report["canonical_action_execution"]["status_matrix"] == {
+        "finalize.report": "success",
+    }
+
+
 def test_broker_state_requires_owner_only_https_but_not_data_store_credentials(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({

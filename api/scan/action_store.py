@@ -173,6 +173,7 @@ WHERE id=$1
   AND scan_action_plan_digest=$2
   AND scan_continuation_allocation_digest=$3
   AND scan_continuation_applied_at IS NULL
+  AND status NOT IN ('cancelled','cancelling')
 RETURNING id, scan_action_plan_digest
 """
 

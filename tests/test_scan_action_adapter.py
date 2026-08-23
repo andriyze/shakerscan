@@ -510,6 +510,58 @@ def test_database_neutral_active_action_executes_exact_manifest_candidate(monkey
     assert captured["registered_target"] == "https://app.example.test"
 
 
+def test_database_neutral_required_verifier_skips_an_empty_bound_manifest():
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/", "concrete_path": "/",
+                "query_keys": [], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.web_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.xss", "xss.verify", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "candidate_index": 0,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        }),
+        policy=ScanPolicy(active_testing=True),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+
+
 def test_database_neutral_nuclei_uses_only_digest_checked_template_pack(monkeypatch):
     scan_id = str(uuid.uuid4())
     template_manifest = build_canonical_nuclei_template_manifest(

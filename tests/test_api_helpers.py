@@ -20112,6 +20112,63 @@ def test_admission_surface_work_manifests_freeze_known_routes_and_auth_lanes():
     )
 
 
+def test_active_scan_admission_freezes_discovery_then_residual_continuation():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+
+    target = TargetBinding(
+        target_id="target-two-phase",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"active_testing": True, "include_families": ["xss"]},
+    )
+
+    parent, continuation = api_module._compile_scan_admission_action_authority(
+        scan_id="35333333-3333-4333-8333-333333333333",
+        scan_contract=contract,
+        target_binding=target,
+    )
+
+    assert continuation is not None
+    assert continuation.parent_plan_digest == parent.plan_digest
+    assert continuation.required_capabilities == ("xss.verify",)
+    assert "finalize.report" not in {
+        action.action_id for action in parent.actions
+    }
+    assert not any(
+        action.capability_name == "xss.verify" for action in parent.actions
+    )
+
+
+def test_passive_scan_admission_needs_no_continuation():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+
+    target = TargetBinding(
+        target_id="target-passive",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+
+    plan, continuation = api_module._compile_scan_admission_action_authority(
+        scan_id="36333333-3333-4333-8333-333333333333",
+        scan_contract=resolve_scan_contract(budget_profile="balanced"),
+        target_binding=target,
+    )
+
+    assert continuation is None
+    assert plan.actions[-1].action_id == "finalize.report"
+
+
 def test_parallel_recovery_requeues_canonical_continuation_without_private_options(monkeypatch):
     from runtime.models import TargetBinding
     from scan.contracts import resolve_scan_contract

@@ -672,6 +672,7 @@ def build_endpoint_manifest(
         base["auth_lane"] = auth_lanes.get(base["route_id"], auth_lane)
         base["request_ref_ids"] = list(request_refs.get(base["route_id"], ()))
         entries.append(base)
+    entries.sort(key=lambda item: item["route_id"])
     if excluded_sensitive_paths:
         status = "partial" if status != "cancelled" else status
         exclusion_reason = (

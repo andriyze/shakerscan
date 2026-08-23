@@ -16,6 +16,17 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
 
 from .action_plan import ScanAction, ScanActionPlan, ScanActionPlanError
+from .capability_result import CapabilityResultReference
+from .surface_manifest import build_scan_surface_manifest
+from .work_manifests import (
+    ScanWorkManifest,
+    build_candidate_manifest,
+    build_endpoint_manifest,
+)
+try:
+    from runtime.models import TargetBinding
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.models import TargetBinding
 
 
 SCAN_CONTINUATION_ALLOCATION_SCHEMA = "scan-continuation-allocation/v1"
@@ -260,10 +271,113 @@ def merge_scan_action_continuation(
         raise ScanContinuationError(str(exc)) from exc
 
 
+def build_discovery_continuation_manifests(
+    *,
+    allocation: ScanContinuationAllocation,
+    target_url: str,
+    target: TargetBinding,
+    options: Mapping[str, Any],
+    action_results: Mapping[str, CapabilityResultReference],
+    observations: Mapping[str, tuple[Mapping[str, Any], ...]],
+    request_manifests: tuple[ScanWorkManifest, ...] = (),
+) -> tuple[ScanWorkManifest, ScanWorkManifest]:
+    """Normalize terminal discovery receipts into exact continuation manifests."""
+    if (
+        target.digest != allocation.target_binding_digest
+        or set(action_results) != set(allocation.parent_action_ids)
+    ):
+        raise ScanContinuationError(
+            "discovery receipts differ from continuation target authority"
+        )
+
+    def summary(action_ids: tuple[str, ...]) -> dict[str, Any]:
+        rows = [
+            action_results[action_id]
+            for action_id in action_ids if action_id in action_results
+        ]
+        combined = [
+            dict(item)
+            for action_id in action_ids
+            for item in observations.get(action_id, ())
+        ]
+        statuses = {row.status.value for row in rows}
+        if "cancelled" in statuses:
+            status = "cancelled"
+        elif statuses & {"failed", "blocked", "timed_out"}:
+            status = "failed"
+        elif "partial" in statuses:
+            status = "partial"
+        elif rows and statuses <= {"success", "skipped"}:
+            status = "success"
+        else:
+            status = "skipped"
+        reasons = sorted({
+            row.reason_code.value
+            for row in rows if row.reason_code is not None
+        })
+        return {
+            "status": status,
+            "reason": ";".join(reasons)[:200] or None,
+            "observations": combined,
+        }
+
+    collection_ids = tuple(sorted(
+        action_id for action_id in action_results
+        if action_id.startswith("inputs.collection_")
+    ))
+    surface = build_scan_surface_manifest(
+        target_url=target_url,
+        target=target,
+        options=options,
+        collection_replay=summary(collection_ids),
+        subdomains=summary(("discover.subdomains",)),
+        probe=summary(("discover.web_probe",)),
+        crawl=summary(("discover.web_crawl",)),
+        content=summary(("discover.web_content",)),
+        max_endpoints=allocation.max_endpoint_entries,
+    )
+    request_refs_by_route: dict[str, list[str]] = {}
+    auth_lane_by_route: dict[str, str] = {}
+    for manifest in request_manifests:
+        for entry in manifest.entries:
+            route = str(entry.get("route_id") or "")
+            request_ref = str(entry.get("request_ref_id") or "")
+            if not route or not request_ref:
+                continue
+            request_refs_by_route.setdefault(route, []).append(request_ref)
+            lane = str(entry.get("auth_lane") or "anonymous")
+            if lane != "anonymous":
+                auth_lane_by_route[route] = lane
+    source_action_ids = tuple(
+        action_id for action_id in allocation.parent_action_ids
+        if action_id.startswith("discover.")
+        or action_id.startswith("inputs.collection_")
+    ) or (allocation.parent_action_ids[0],)
+    endpoints = build_endpoint_manifest(
+        scan_id=allocation.scan_id,
+        target_binding_digest=target.digest,
+        surface_manifest=surface,
+        source_action_ids=source_action_ids,
+        auth_lane="anonymous",
+        request_ref_ids_by_route={
+            route: tuple(dict.fromkeys(values))
+            for route, values in request_refs_by_route.items()
+        },
+        auth_lane_by_route=auth_lane_by_route,
+    )
+    candidates = build_candidate_manifest(
+        endpoints,
+        source_action_ids=source_action_ids,
+        maximum=allocation.max_candidate_entries,
+    )
+    return endpoints, candidates
+
+
 __all__ = [
     "ContinuationBudgetCeiling",
     "SCAN_CONTINUATION_ALLOCATION_SCHEMA",
     "ScanContinuationAllocation",
     "ScanContinuationError",
+    "build_discovery_continuation_manifests",
     "merge_scan_action_continuation",
 ]

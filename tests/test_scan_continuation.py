@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from api.runtime.models import TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
@@ -7,6 +9,7 @@ from api.scan.continuation import (
     ContinuationBudgetCeiling,
     ScanContinuationAllocation,
     ScanContinuationError,
+    build_discovery_continuation_manifests,
     merge_scan_action_continuation,
 )
 from api.scan.contracts import resolve_scan_contract
@@ -171,3 +174,50 @@ def test_continuation_cannot_exceed_its_upfront_budget_ceiling():
         assert "upfront allocation" in str(exc)
     else:
         raise AssertionError("over-budget continuation was accepted")
+
+
+def test_discovery_receipts_compile_reproducible_endpoint_and_candidate_work():
+    parent, _continuation, allocation = _plans()
+    results = {
+        action.action_id: SimpleNamespace(
+            status=SimpleNamespace(value="success"),
+            reason_code=None,
+        )
+        for action in parent.actions
+    }
+    crawl = (
+        {
+            "kind": "discovered_route",
+            "method": "GET",
+            "url": "https://app.example.test/items?id=7",
+        },
+        {
+            "kind": "discovered_route",
+            "method": "GET",
+            "url": "https://app.example.test/search?q=hello",
+        },
+    )
+
+    first = build_discovery_continuation_manifests(
+        allocation=allocation,
+        target_url="https://app.example.test",
+        target=_target(),
+        options={},
+        action_results=results,
+        observations={"discover.web_crawl": crawl},
+    )
+    second = build_discovery_continuation_manifests(
+        allocation=allocation,
+        target_url="https://app.example.test",
+        target=_target(),
+        options={},
+        action_results=results,
+        observations={"discover.web_crawl": tuple(reversed(crawl))},
+    )
+
+    assert {item["canonical_path"] for item in first[0].entries} >= {
+        "/", "/items", "/search",
+    }
+    assert {item["parameter_name"] for item in first[1].entries} == {"id", "q"}
+    assert first[0].manifest_digest == second[0].manifest_digest
+    assert first[1].manifest_digest == second[1].manifest_digest

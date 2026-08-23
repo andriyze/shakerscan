@@ -2134,9 +2134,20 @@ def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
         action_digest="b" * 64,
     )
     assert authority.action_id == "baseline.http"
+    continuation = api_module.BrokerScanContinuationRequest(
+        job_lease_token="j" * 40,
+        worker_id="broker:node-1:worker.2",
+        plan_digest="a" * 64,
+        allocation_digest="c" * 64,
+    )
+    assert continuation.allocation_digest == "c" * 64
     with pytest.raises(Exception):
         api_module.BrokerActionAuthorityRequest(
             **authority.model_dump(), injected="not-allowed",
+        )
+    with pytest.raises(Exception):
+        api_module.BrokerScanContinuationRequest(
+            **continuation.model_dump(), injected="not-allowed",
         )
 
 

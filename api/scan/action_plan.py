@@ -909,6 +909,15 @@ class ScanActionPlanCompiler:
                 return
             entry_count = int(manifest_ref.get("entry_count") or 0)
             if entry_count < 1:
+                if required:
+                    add(
+                        base_action_id,
+                        stage,
+                        capability_name,
+                        {**dict(capability_args), index_name: 0},
+                        dependencies=dependencies,
+                        required=True,
+                    )
                 return
             specification = self._registry.require(capability_name)
             limits = execution_plan.budget.ledger_limits()

@@ -2205,11 +2205,125 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
     endpoint, candidates = manifests
     assert options["endpoint_manifest_ref"] == endpoint.reference().canonical_dict()
     assert options["candidate_manifest_ref"] == candidates.reference().canonical_dict()
-    assert endpoint.entries[-1]["query_parameter_names"] == ("account",)
+    parameterized = next(
+        item for item in endpoint.entries if item["query_parameter_names"]
+    )
+    assert parameterized["query_parameter_names"] == ("account",)
     assert candidates.entries[0]["parameter_name"] == "account"
     assert "must-not-persist" not in json.dumps([
         endpoint.canonical_dict(), candidates.canonical_dict(),
     ])
+
+
+def test_local_continuation_compiles_discovery_receipts_into_appended_actions(monkeypatch):
+    from runtime.models import TargetBinding
+    from scan.action_plan import ScanActionPlanCompiler
+    from scan.budget_allocator import allocate_scan_action_plan
+    from scan.continuation import ScanContinuationAllocation
+    from scan.contracts import resolve_scan_contract
+
+    scan_id = "45454545-4545-4545-8545-454545454545"
+    target = TargetBinding(
+        target_id="target-continuation",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"active_testing": True, "include_families": ["xss"]},
+    )
+    raw_parent = ScanActionPlanCompiler().compile(
+        scan_id=scan_id,
+        execution_plan=contract.execution_plan,
+        target_binding=target,
+        defer_manifest_actions=True,
+        include_finalizer=False,
+    )
+    admitted = allocate_scan_action_plan(
+        raw_parent,
+        contract.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+    )
+    parent = admitted.plan
+    allocation = ScanContinuationAllocation(
+        scan_id=scan_id,
+        parent_plan_digest=parent.plan_digest,
+        execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest,
+        parent_action_ids=tuple(action.action_id for action in parent.actions),
+        budget_ceiling=admitted.residual_scan_execute_budget,
+        max_endpoint_entries=contract.budget.max_endpoints,
+        max_candidate_entries=contract.budget.max_http_requests,
+        required_capabilities=("xss.verify",),
+    )
+    results = {
+        action.action_id: types.SimpleNamespace(
+            status=types.SimpleNamespace(value="success"),
+            reason_code=None,
+        )
+        for action in parent.actions
+    }
+
+    class Dispatcher:
+        def __init__(self):
+            self.scan_id = scan_id
+            self.target_url = "https://example.test"
+            self.options = {}
+            self.execution = types.SimpleNamespace(
+                execution_plan=contract.execution_plan,
+            )
+
+        @property
+        def target(self):
+            return target
+
+        async def _observations(self, action_id):
+            if action_id == "discover.web_crawl":
+                return ({
+                    "kind": "discovered_route",
+                    "method": "GET",
+                    "url": "https://example.test/search?q=hello",
+                },)
+            return ()
+
+    persisted = []
+    amended = []
+
+    class ManifestStore:
+        async def persist(self, _conn, *, manifest):
+            persisted.append(manifest)
+
+    class ActionStore:
+        async def amend_plan(self, _conn, **kwargs):
+            amended.append(kwargs)
+
+    conn = _FakePlanConn(scan_id, uuid.uuid4(), uuid.uuid4())
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "PostgresScanManifestStore", ManifestStore)
+    monkeypatch.setattr(worker, "PostgresScanActionStore", ActionStore)
+
+    continued = asyncio.run(worker._materialize_local_scan_continuation(
+        parent_plan=parent,
+        allocation=allocation,
+        parent_results=results,
+        dispatcher=Dispatcher(),
+    ))
+
+    assert [manifest.kind.value for manifest in persisted] == [
+        "endpoint", "candidate",
+    ]
+    assert amended[0]["parent_plan"] == parent
+    assert amended[0]["amended_plan"] == continued
+    assert continued.actions[:len(parent.actions)] == parent.actions
+    assert continued.actions[-1].action_id == "finalize.report"
+    assert any(
+        action.capability_name == "xss.verify"
+        for action in continued.actions
+    )
 
 
 def test_active_parallel_child_freezes_the_same_nuclei_template_pack():
