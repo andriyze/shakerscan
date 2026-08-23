@@ -28,6 +28,7 @@ from scan.capability_execution import (
     scan_template_capability_allocation,
     scan_tls_capability_allocation,
     scan_content_discovery_capability_allocation,
+    scan_dns_posture_capability_allocation,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     scan_xss_verification_capability_allocation,
@@ -375,6 +376,13 @@ def test_tls_capability_owns_tcp_budget_outside_report_process():
 def test_http_baseline_has_bounded_redirect_hold_and_redacted_path():
     assert scan_http_baseline_capability_allocation(_budget()) == {
         "http_requests": 4,
+        "tool_wall_seconds": 15,
+    }
+
+
+def test_dns_posture_has_fixed_host_and_wall_hold():
+    assert scan_dns_posture_capability_allocation(_budget()) == {
+        "hosts_attempted": 4,
         "tool_wall_seconds": 15,
     }
     prepared = prepare_scan_inline_capability(

@@ -92,8 +92,8 @@ class HttpRequestExecutionAdapter(_InlineAdapter):
         )
 
 
-class TlsInspectionExecutionAdapter(_InlineAdapter):
-    """Normalize one frozen-address TLS handshake."""
+class _MeasuredObservationExecutionAdapter(_InlineAdapter):
+    """Normalize one inline operation with explicit budget and observation."""
 
     async def execute(
         self,
@@ -109,9 +109,17 @@ class TlsInspectionExecutionAdapter(_InlineAdapter):
             if isinstance(result.get("budget_consumed"), Mapping)
             else {}
         )
-        execution_started = int(measured.get("tcp_ports_attempted") or 0) > 0
-        status_value = str(result.get("status") or "")
+        execution_started = any(
+            int(measured.get(dimension) or 0) > 0
+            for dimension in (
+                "http_requests", "tcp_ports_attempted", "hosts_attempted",
+            )
+        )
+        status_value = str(result.get("status") or "").lower()
         status = (
+            "partial"
+            if status_value == "partial" or result.get("partial")
+            else
             "success"
             if result.get("ok") or status_value == "success"
             else "blocked"
@@ -131,6 +139,14 @@ class TlsInspectionExecutionAdapter(_InlineAdapter):
             parser_version=self._specification.output_schema,
             redacted_execution=dict(self._redacted_execution),
         )
+
+
+class TlsInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize one frozen-address TLS handshake."""
+
+
+class DnsInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize one fixed-plan, target-name-bound DNS inspection."""
 
 
 class ControlPlaneExecutionAdapter(_InlineAdapter):

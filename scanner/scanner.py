@@ -4972,12 +4972,31 @@ async def build_report(target: str,
         print(f"[scanner] Started background auth refresh (every 15 min)", file=sys.stderr)
 
     # parallel tasks (infra)
-    dns_task    = asyncio.create_task(resolve_dns(host))
-    if focused_scope.skip_posture():
+    canonical_dns_posture = None
+    if canonical_scan_execution is not None:
+        canonical_dns_posture = _canonical_dns_placement_result(
+            (
+                canonical_scan_placements.get("dns.inspect")
+                if isinstance(canonical_scan_placements, dict) else None
+            ),
+            host=host,
+        )
+        dns_task = asyncio.create_task(_focused_async_value(
+            canonical_dns_posture["dns"]
+        ))
+        dmarc_task = asyncio.create_task(_focused_async_value(
+            canonical_dns_posture["dmarc"]
+        ))
+        dnssec_task = asyncio.create_task(_focused_async_value(
+            canonical_dns_posture["dnssec"]
+        ))
+    elif focused_scope.skip_posture():
+        dns_task = asyncio.create_task(resolve_dns(host))
         print("[smart] Focused manual active scope: skipping DNS/email hardening probes", file=sys.stderr)
         dmarc_task  = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(DMARC_SHAPE)))
         dnssec_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(DNSSEC_SHAPE)))
     else:
+        dns_task    = asyncio.create_task(resolve_dns(host))
         dmarc_task  = asyncio.create_task(fetch_dmarc(host))
         dnssec_task = asyncio.create_task(check_dnssec(host))
     canonical_tls_task = None
@@ -5107,7 +5126,17 @@ async def build_report(target: str,
         sec_txt_task= asyncio.create_task(fetch_security_txt(base_url))
 
     # Email/DNS security extras (best-effort)
-    if focused_scope.skip_posture():
+    if canonical_dns_posture is not None:
+        caa_task = asyncio.create_task(_focused_async_value(
+            canonical_dns_posture["caa"]
+        ))
+        mta_task = asyncio.create_task(_focused_async_value(
+            canonical_dns_posture["mta_sts"]
+        ))
+        tlsrpt_task = asyncio.create_task(_focused_async_value(
+            canonical_dns_posture["tls_rpt"]
+        ))
+    elif focused_scope.skip_posture():
         mta_shape = dict({"record": None, "policy_present": False, "policy_sample": None})
         mta_shape["policy_url"] = f"https://{host}/.well-known/mta-sts.txt"
         caa_task    = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CAA_SHAPE)))
@@ -14484,6 +14513,139 @@ def _validate_canonical_http_placement(
     return summary
 
 
+_CANONICAL_DNS_LABELS = {
+    "host_cname", "host_mx", "host_txt", "host_caa", "host_dnskey",
+    "dmarc", "tls_rpt", "mta_sts",
+}
+
+
+def _validate_canonical_dns_placement(
+    summary: Any,
+    execution: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(summary, dict) or set(summary) != {
+        "schema_version", "capability_name", "enabled", "status", "reason",
+        "observations", "observation_count", "partial", "timed_out",
+        "errors", "budget_consumed", "receipt", "durable_budget_settled",
+        "idempotent_redelivery",
+    }:
+        raise SystemExit("canonical dns.inspect placement is malformed")
+    if (
+        summary.get("schema_version")
+        != "canonical-scan-dns-inspection-execution/v1"
+        or summary.get("capability_name") != "dns.inspect"
+        or not isinstance(summary.get("enabled"), bool)
+        or summary.get("status") not in {
+            "success", "partial", "failed", "blocked", "cancelled", "skipped",
+        }
+    ):
+        raise SystemExit("canonical dns.inspect placement contract is invalid")
+    observations = summary.get("observations")
+    if not isinstance(observations, list) or len(observations) > 1:
+        raise SystemExit("canonical dns.inspect observations are invalid")
+    binding = execution.get("target_binding") or {}
+    canonical_host = str(binding.get("canonical_host") or "").lower().rstrip(".")
+    allowed_addresses = set(binding.get("allowed_addresses") or [])
+    expected_names = {
+        "host_cname": canonical_host,
+        "host_mx": canonical_host,
+        "host_txt": canonical_host,
+        "host_caa": canonical_host,
+        "host_dnskey": canonical_host,
+        "dmarc": f"_dmarc.{canonical_host}",
+        "tls_rpt": f"_smtp._tls.{canonical_host}",
+        "mta_sts": f"_mta-sts.{canonical_host}",
+    }
+    for item in observations:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {
+                "kind", "canonical_host", "bound_addresses", "query_names",
+                "records", "authenticated_queries", "query_count", "errors",
+            }
+            or item.get("kind") != "dns_posture"
+            or item.get("canonical_host") != canonical_host
+            or item.get("query_names") != expected_names
+            or item.get("query_count") != len(_CANONICAL_DNS_LABELS)
+            or not isinstance(item.get("records"), dict)
+            or set(item["records"]) != _CANONICAL_DNS_LABELS
+            or any(
+                not isinstance(values, list) or len(values) > 50
+                for values in item["records"].values()
+            )
+            or not isinstance(item.get("bound_addresses"), dict)
+            or set(item["bound_addresses"]) != {"A", "AAAA"}
+            or any(
+                not isinstance(values, list) or len(values) > 50
+                for values in item["bound_addresses"].values()
+            )
+            or set(
+                item["bound_addresses"]["A"]
+                + item["bound_addresses"]["AAAA"]
+            ) - allowed_addresses
+            or not isinstance(item.get("authenticated_queries"), list)
+            or set(item["authenticated_queries"]) - _CANONICAL_DNS_LABELS
+            or not isinstance(item.get("errors"), list)
+            or len(item["errors"]) > 20
+            or any(
+                not isinstance(error, str) or len(error) > 200
+                for error in item["errors"]
+            )
+        ):
+            raise SystemExit("canonical dns.inspect observation contract is invalid")
+        records = item["records"]
+        if (
+            any(
+                not isinstance(value, str) or len(value) > 1_000
+                for value in records["host_cname"]
+            )
+            or any(
+                not isinstance(value, str) or len(value) > 2_000
+                for label in ("host_txt", "dmarc", "tls_rpt", "mta_sts")
+                for value in records[label]
+            )
+            or any(
+                not isinstance(value, dict)
+                or set(value) != {"priority", "host"}
+                or not isinstance(value.get("priority"), int)
+                or not 0 <= value.get("priority") <= 65535
+                or not isinstance(value.get("host"), str)
+                or len(value.get("host")) > 253
+                for value in records["host_mx"]
+            )
+            or any(
+                not isinstance(value, dict)
+                or set(value) != {"flags", "tag", "value"}
+                or not isinstance(value.get("flags"), int)
+                or not 0 <= value.get("flags") <= 255
+                or not isinstance(value.get("tag"), str)
+                or len(value.get("tag")) > 100
+                or not isinstance(value.get("value"), str)
+                or len(value.get("value")) > 1_000
+                for value in records["host_caa"]
+            )
+            or any(
+                not isinstance(value, dict)
+                or set(value) != {"flags", "protocol", "algorithm"}
+                or any(
+                    not isinstance(value.get(field), int)
+                    for field in ("flags", "protocol", "algorithm")
+                )
+                for value in records["host_dnskey"]
+            )
+        ):
+            raise SystemExit("canonical dns.inspect record contract is invalid")
+    if summary.get("observation_count") != len(observations):
+        raise SystemExit("canonical dns.inspect observation count is invalid")
+    if not isinstance(summary.get("receipt"), dict):
+        raise SystemExit("canonical dns.inspect receipt reference is invalid")
+    if summary.get("enabled") and summary.get("status") != "skipped":
+        receipt_hash = str(summary["receipt"].get("receipt_hash") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+            raise SystemExit("canonical dns.inspect receipt is missing")
+    return summary
+
+
 def _load_canonical_scan_placements(
     execution: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -14521,7 +14683,8 @@ def _load_canonical_scan_placements(
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
         "http.request", "http.request.scheme_redirect",
-        "http.request.security_txt", "tls.inspect", "xss.verify", "sqli.verify",
+        "http.request.security_txt", "dns.inspect", "tls.inspect",
+        "xss.verify", "sqli.verify",
     }
     if unknown:
         raise SystemExit(
@@ -14712,6 +14875,11 @@ def _load_canonical_scan_placements(
                     "contract is invalid"
                 )
         result["http.request.security_txt"] = validated_security_txt
+    dns_inspection = capabilities.get("dns.inspect")
+    if dns_inspection is not None:
+        result["dns.inspect"] = _validate_canonical_dns_placement(
+            dns_inspection, execution,
+        )
     tls_inspection = capabilities.get("tls.inspect")
     if tls_inspection is not None:
         if not isinstance(tls_inspection, dict) or set(tls_inspection) != {
@@ -15179,6 +15347,107 @@ def _canonical_pre_scan_validation(
         "recommendation": connectivity["recommendation"],
         "validation_attempts": 0,
         "validation_source": "canonical_capability_receipts",
+    }
+
+
+def _canonical_dns_placement_result(
+    summary: Any,
+    *,
+    host: str,
+) -> dict[str, Any]:
+    """Adapt one typed DNS posture receipt into existing report sections."""
+    observation = None
+    if isinstance(summary, Mapping):
+        observation = next((
+            item for item in summary.get("observations") or []
+            if isinstance(item, Mapping) and item.get("kind") == "dns_posture"
+        ), None)
+    if not isinstance(observation, Mapping):
+        reason = str(
+            summary.get("reason") or summary.get("status") or "missing"
+        ) if isinstance(summary, Mapping) else "missing"
+        return {
+            "dns": {"A": [], "AAAA": [], "CNAME": None, "MX": [], "TXT": []},
+            "dmarc": {**DMARC_SHAPE, "skipped": True, "reason": reason},
+            "dnssec": {**DNSSEC_SHAPE, "skipped": True, "reason": reason},
+            "caa": {**CAA_SHAPE, "skipped": True, "reason": reason},
+            "mta_sts": {
+                "record": None,
+                "policy_url": f"https://mta-sts.{host}/.well-known/mta-sts.txt",
+                "policy_present": False,
+                "policy_sample": None,
+                "skipped": True,
+                "reason": reason,
+            },
+            "tls_rpt": {**TLSRPT_SHAPE, "skipped": True, "reason": reason},
+        }
+    records = observation.get("records") or {}
+    addresses = observation.get("bound_addresses") or {}
+    host_txt = [str(value) for value in records.get("host_txt") or []]
+    dmarc_record = next((
+        str(value) for value in records.get("dmarc") or []
+        if str(value).lower().startswith("v=dmarc1")
+    ), None)
+    dmarc_fields: dict[str, str] = {}
+    if dmarc_record:
+        for name in ("p", "sp", "adkim", "aspf", "pct", "rua", "ruf", "fo"):
+            match = re.search(
+                rf"\b{name}\s*=\s*([^;,\s]+)", dmarc_record, re.I,
+            )
+            if match:
+                dmarc_fields[name] = match.group(1)
+    dnskeys = records.get("host_dnskey") or []
+    authenticated = set(observation.get("authenticated_queries") or [])
+    dnssec_status = (
+        "secure" if dnskeys and "host_dnskey" in authenticated
+        else "insecure" if not dnskeys else "unknown"
+    )
+    tls_rpt_record = next((
+        str(value) for value in records.get("tls_rpt") or []
+        if str(value).lower().startswith("v=tlsrptv1")
+    ), None)
+    rua = None
+    if tls_rpt_record:
+        match = re.search(r"rua=mailto:([^;\s,]+)", tls_rpt_record, re.I)
+        rua = match.group(1) if match else None
+    mta_sts_record = next((
+        str(value) for value in records.get("mta_sts") or []
+        if str(value).lower().startswith("v=stsv1")
+    ), None)
+    return {
+        "dns": {
+            "A": list(addresses.get("A") or []),
+            "AAAA": list(addresses.get("AAAA") or []),
+            "CNAME": next(iter(records.get("host_cname") or []), None),
+            "MX": list(records.get("host_mx") or []),
+            "TXT": host_txt,
+            "canonical_capability": "dns.inspect",
+            "capability_receipt": dict(summary.get("receipt") or {}),
+        },
+        "dmarc": {"record": dmarc_record, "fields": dmarc_fields},
+        "dnssec": {
+            "status": dnssec_status,
+            "algorithm": (
+                str(dnskeys[0].get("algorithm"))
+                if dnskeys and isinstance(dnskeys[0], Mapping) else None
+            ),
+        },
+        "caa": {
+            "records": [
+                f"{value['flags']} {value['tag']} {value['value']}"
+                for value in records.get("host_caa") or []
+                if isinstance(value, Mapping)
+            ],
+        },
+        "mta_sts": {
+            "record": mta_sts_record,
+            "policy_url": f"https://mta-sts.{host}/.well-known/mta-sts.txt",
+            "policy_present": False,
+            "policy_sample": None,
+            "skipped": True,
+            "reason": "mta_sts_policy_origin_not_bound",
+        },
+        "tls_rpt": {"record": tls_rpt_record, "rua": rua},
     }
 
 

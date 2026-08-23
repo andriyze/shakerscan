@@ -67,7 +67,9 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.http import execute_bound_http_request
+from capabilities.dns import inspect_dns_posture
 from capabilities.inline import (
+    DnsInspectionExecutionAdapter,
     HttpRequestExecutionAdapter,
     TlsInspectionExecutionAdapter,
 )
@@ -124,6 +126,7 @@ from scan.capability_execution import (
     prepare_scan_external_capability,
     prepare_scan_inline_capability,
     scan_content_discovery_capability_allocation,
+    scan_dns_posture_capability_allocation,
     scan_http_baseline_capability_allocation,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
@@ -9914,7 +9917,9 @@ async def _execute_reserved_scan_capability(
         raise ScanCapabilityContractError(
             "deterministic Scan runner requires scan.execute"
         )
-    if internal_inline and capability_name not in {"http.request", "tls.inspect"}:
+    if internal_inline and capability_name not in {
+        "dns.inspect", "http.request", "tls.inspect",
+    }:
         raise ScanCapabilityContractError(
             "unsupported inline Scan capability adapter"
         )
@@ -10242,6 +10247,8 @@ async def _execute_reserved_scan_capability(
         inline_adapter = (
             HttpRequestExecutionAdapter
             if capability_name == "http.request"
+            else DnsInspectionExecutionAdapter
+            if capability_name == "dns.inspect"
             else TlsInspectionExecutionAdapter
         )
         executable_adapter = inline_adapter(
@@ -10445,6 +10452,25 @@ def _skipped_scan_tls_summary(reason: str) -> dict[str, Any]:
     return {
         "schema_version": "canonical-scan-tls-inspection-execution/v1",
         "capability_name": "tls.inspect",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def _skipped_scan_dns_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-dns-inspection-execution/v1",
+        "capability_name": "dns.inspect",
         "enabled": False,
         "status": "skipped",
         "reason": str(reason)[:200],
@@ -10874,6 +10900,88 @@ async def _execute_scan_security_txt_capability(
         ),
     )
     return _scan_security_txt_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
+
+
+def _scan_dns_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and str(item.get("kind") or "") == "dns_posture"
+    ][:1]
+    return {
+        "schema_version": "canonical-scan-dns-inspection-execution/v1",
+        "capability_name": "dns.inspect",
+        "enabled": True,
+        "status": status,
+        "reason": None,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+async def _execute_scan_dns_capability(
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run the fixed DNS posture plan outside the report monolith."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_dns_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    if execution.discovery_manifest_only:
+        return _skipped_scan_dns_summary("discovery_manifest_only")
+    if execution.skip_global_checks:
+        return _skipped_scan_dns_summary("global_checks_skipped")
+    if execution.focused_endpoints_only or execution.zero_rediscovery:
+        return _skipped_scan_dns_summary("assigned_endpoint_scope")
+    allocation = scan_dns_posture_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_dns_summary("insufficient_stage_budget")
+    target = execution.target_binding
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="dns.inspect",
+        capability_args={},
+        action_id="deterministic_baseline.dns.inspect",
+        target_binding=target,
+        reservation_limits=allocation,
+        inline_operation=lambda: inspect_dns_posture(
+            target,
+            timeout_seconds=int(allocation["tool_wall_seconds"]),
+        ),
+    )
+    return _scan_dns_summary_from_stored(
         stored,
         idempotent_redelivery=idempotent_redelivery,
     )
@@ -11995,6 +12103,9 @@ async def _execute_reserved_deterministic_scan(
         security_txt = await _execute_scan_security_txt_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
+        dns = await _execute_scan_dns_capability(
+            normalized, scan_id=scan_id, job_id=job_id,
+        )
         tls = await _execute_scan_tls_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
@@ -12006,6 +12117,7 @@ async def _execute_reserved_deterministic_scan(
                 "http.request": http_baseline,
                 "http.request.scheme_redirect": http_redirect,
                 "http.request.security_txt": security_txt,
+                "dns.inspect": dns,
                 "tls.inspect": tls,
                 "templates.scan": template,
             },
@@ -12101,6 +12213,8 @@ async def _execute_reserved_deterministic_scan(
             "http.request.security_txt": baseline.get(
                 "http.request.security_txt"
             ) or _skipped_scan_security_txt_summary("stage_disabled"),
+            "dns.inspect": baseline.get("dns.inspect")
+            or _skipped_scan_dns_summary("stage_disabled"),
             "tls.inspect": baseline.get("tls.inspect")
             or _skipped_scan_tls_summary("stage_disabled"),
             "templates.scan": baseline.get("templates.scan")

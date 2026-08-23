@@ -334,6 +334,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     async def skip_security_txt(*_args, **_kwargs):
         return worker._skipped_scan_security_txt_summary("test_isolation")
 
+    async def skip_dns(*_args, **_kwargs):
+        return worker._skipped_scan_dns_summary("test_isolation")
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
@@ -353,6 +356,7 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         "_execute_scan_security_txt_capability",
         skip_security_txt,
     )
+    monkeypatch.setattr(worker, "_execute_scan_dns_capability", skip_dns)
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
@@ -1157,6 +1161,7 @@ def _stored_network_capability(
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
         "http.request": ("agent.http_request", "http-observation/v1"),
+        "dns.inspect": ("scanner.dns", "dns-posture-observation/v1"),
         "tls.inspect": ("scanner.tls", "tls-observation/v1"),
         "xss.verify": ("dalfox", "dalfox-typed-v1"),
         "sqli.verify": ("sqlmap", "sqlmap-typed-v1"),
@@ -1889,6 +1894,53 @@ def test_security_txt_receipt_keeps_only_bounded_public_policy(monkeypatch):
     assert result["response"]["body_sample"] == ""
     assert result["response"]["selected_json"] == {}
     assert result["response"]["selected_headers"] == {}
+
+
+def test_dns_posture_stage_uses_registered_inline_capability(monkeypatch):
+    _plan, target, options = _authority(enabled=True, network=False)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "dns.inspect",
+            observations=[{
+                "kind": "dns_posture",
+                "canonical_host": "app.example.test",
+                "bound_addresses": {"A": ["192.0.2.10"], "AAAA": []},
+                "query_names": {},
+                "records": {},
+                "authenticated_queries": [],
+                "query_count": 8,
+                "errors": [],
+            }],
+            amounts={"hosts_attempted": 4, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_dns_capability(
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "dns.inspect"
+    assert call["capability_args"] == {}
+    assert call["action_id"] == "deterministic_baseline.dns.inspect"
+    assert call["target_binding"] == target
+    assert call["reservation_limits"] == {
+        "hosts_attempted": 4,
+        "tool_wall_seconds": 15,
+    }
+    assert callable(call["inline_operation"])
+    assert summary["schema_version"] == (
+        "canonical-scan-dns-inspection-execution/v1"
+    )
+    assert summary["status"] == "success"
 
 
 def test_http_baseline_receipt_redacts_paths_queries_and_bodies(monkeypatch):

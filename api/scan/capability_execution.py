@@ -151,6 +151,20 @@ def scan_http_baseline_capability_allocation(
     }
 
 
+def scan_dns_posture_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve four bound DNS names and the fixed query-plan wall time."""
+    hosts = _budget_integer(budget, "max_endpoints")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if hosts < 4 or wall < 1:
+        return None
+    return {
+        "hosts_attempted": 4,
+        "tool_wall_seconds": min(15, wall),
+    }
+
+
 def scan_web_crawl_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:

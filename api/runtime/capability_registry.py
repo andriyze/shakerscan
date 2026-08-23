@@ -282,6 +282,20 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "tls-observation/v1", ("tls_protocol_observation",),
         ),
         CapabilitySpec(
+            "dns.inspect", "Inspect bounded DNS and mail-policy records for the frozen host.",
+            "internal", "passive", _HTTP_TARGETS, "scanner.dns", "1", None,
+            {"hosts_attempted": 4, "tool_wall_seconds": 15},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "query_names_derived_from_binding": True,
+            },
+            _schema(),
+            "dns-posture-observation/v1",
+            ("dns_posture_observation", "tool_receipt"),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "browser.navigate",
             "Open one target-bound page while blocking cross-origin and state-changing requests.",
             "browser", "passive", _HTTP_TARGETS, "playwright", "1", None,

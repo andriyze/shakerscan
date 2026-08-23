@@ -298,6 +298,60 @@ def _security_txt_placement_summary():
     }
 
 
+def _dns_placement_summary():
+    host = "app.example.test"
+    labels = {
+        "host_cname": host,
+        "host_mx": host,
+        "host_txt": host,
+        "host_caa": host,
+        "host_dnskey": host,
+        "dmarc": f"_dmarc.{host}",
+        "tls_rpt": f"_smtp._tls.{host}",
+        "mta_sts": f"_mta-sts.{host}",
+    }
+    return {
+        "schema_version": "canonical-scan-dns-inspection-execution/v1",
+        "capability_name": "dns.inspect",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "dns_posture",
+            "canonical_host": host,
+            "bound_addresses": {"A": ["192.0.2.10"], "AAAA": []},
+            "query_names": labels,
+            "records": {
+                "host_cname": [],
+                "host_mx": [{"priority": 10, "host": "mail.example.test"}],
+                "host_txt": ["v=spf1 -all"],
+                "host_caa": [{
+                    "flags": 0, "tag": "issue", "value": "ca.test",
+                }],
+                "host_dnskey": [{
+                    "flags": 257, "protocol": 3, "algorithm": 13,
+                }],
+                "dmarc": ["v=DMARC1; p=reject; rua=mailto:d@example.test"],
+                "tls_rpt": [
+                    "v=TLSRPTv1; rua=mailto:tls@example.test",
+                ],
+                "mta_sts": ["v=STSv1; id=20260822"],
+            },
+            "authenticated_queries": ["host_dnskey"],
+            "query_count": 8,
+            "errors": [],
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"hosts_attempted": 4, "tool_wall_seconds": 1},
+        "receipt": {"receipt_hash": "2" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
 def _xss_verification_placement_summary():
     return {
         "schema_version": "canonical-scan-xss-verification-execution/v1",
@@ -768,6 +822,71 @@ def test_canonical_pre_scan_fails_closed_without_settled_reachability():
     ]
 
 
+def test_canonical_dns_posture_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {"dns.inspect": _dns_placement_summary()},
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    result = scanner_mod._canonical_dns_placement_result(
+        placements["dns.inspect"], host="app.example.test",
+    )
+
+    assert result["dns"]["A"] == ["192.0.2.10"]
+    assert result["dns"]["MX"] == [{
+        "priority": 10, "host": "mail.example.test",
+    }]
+    assert result["dns"]["canonical_capability"] == "dns.inspect"
+    assert result["dmarc"]["fields"]["p"] == "reject"
+    assert result["dnssec"] == {"status": "secure", "algorithm": "13"}
+    assert result["caa"]["records"] == ["0 issue ca.test"]
+    assert result["tls_rpt"]["rua"] == "tls@example.test"
+    assert result["mta_sts"]["record"] == "v=STSv1; id=20260822"
+    assert result["mta_sts"]["policy_present"] is False
+    assert result["mta_sts"]["reason"] == "mta_sts_policy_origin_not_bound"
+
+
+def test_canonical_dns_posture_rejects_unbound_addresses(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    tampered = _dns_placement_summary()
+    tampered["observations"][0]["bound_addresses"]["A"] = ["192.0.2.99"]
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {"dns.inspect": tampered},
+        }),
+    )
+
+    with pytest.raises(SystemExit, match="observation contract"):
+        scanner_mod._load_canonical_scan_placements(execution)
+
+
 def test_canonical_report_assembly_never_repeats_base_header_request():
     source = inspect.getsource(scanner_mod.build_report)
     start = source.index("if canonical_scan_execution is not None:", source.index(
@@ -841,6 +960,49 @@ def test_canonical_report_assembly_reuses_pre_scan_evidence():
         "_canonical_pre_scan_validation(", "",
     )
     assert "await pre_scan_validation(target)" in preflight_block[legacy_start:]
+
+
+def test_canonical_report_assembly_uses_placed_dns_posture():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index("# parallel tasks (infra)")
+    end = source.index("# New: IP Reputation", start)
+    infra_block = source[start:end]
+    canonical_start = infra_block.index(
+        "if canonical_scan_execution is not None:"
+    )
+    focused_start = infra_block.index(
+        "elif focused_scope.skip_posture():", canonical_start,
+    )
+    canonical_block = infra_block[canonical_start:focused_start]
+
+    assert "_canonical_dns_placement_result(" in canonical_block
+    assert "resolve_dns(" not in canonical_block
+    assert "fetch_dmarc(" not in canonical_block
+    assert "check_dnssec(" not in canonical_block
+    assert "fetch_caa(" not in canonical_block
+    assert "fetch_mta_sts(" not in canonical_block
+    assert "fetch_tls_rpt(" not in canonical_block
+
+    extras_start = infra_block.index("# Email/DNS security extras")
+    extras_block = infra_block[extras_start:]
+    extras_canonical = extras_block.index(
+        "if canonical_dns_posture is not None:"
+    )
+    extras_focused = extras_block.index(
+        "elif focused_scope.skip_posture():", extras_canonical,
+    )
+    extras_legacy = extras_block.index("\n    else:", extras_focused)
+    placed_block = extras_block[extras_canonical:extras_focused]
+
+    assert 'canonical_dns_posture["caa"]' in placed_block
+    assert 'canonical_dns_posture["mta_sts"]' in placed_block
+    assert 'canonical_dns_posture["tls_rpt"]' in placed_block
+    assert "fetch_caa(" not in placed_block
+    assert "fetch_mta_sts(" not in placed_block
+    assert "fetch_tls_rpt(" not in placed_block
+    assert "fetch_caa(host)" in extras_block[extras_legacy:]
+    assert "fetch_mta_sts(host)" in extras_block[extras_legacy:]
+    assert "fetch_tls_rpt(host)" in extras_block[extras_legacy:]
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
