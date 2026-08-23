@@ -526,6 +526,7 @@ try:
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
+    from capabilities.http import execute_bound_http_request
     from capabilities.tls import inspect_tls_origin
     from hunt.contracts import HuntBudget, capability_manifest, resolve_hunt_policy
     from hunt.start_contract import (
@@ -561,6 +562,7 @@ except ModuleNotFoundError:
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
+    from api.capabilities.http import execute_bound_http_request
     from api.capabilities.tls import inspect_tls_origin
     from api.hunt.contracts import HuntBudget, capability_manifest, resolve_hunt_policy
     from api.hunt.start_contract import (
@@ -34278,8 +34280,6 @@ async def _agent_tool_http_request(
     trusted_collection_headers: Optional[Mapping[str, Any]] = None,
     record_receipt: bool = True,
 ) -> dict[str, Any]:
-    import httpx  # container-local; api.py has no top-level httpx dependency
-
     method = agent_tools.coerce_method(args.get("method"))
     path = agent_tools.validate_same_origin_path(args.get("path"))
     if agent_tools.is_write_method(method) and not allow_write:
@@ -34297,42 +34297,27 @@ async def _agent_tool_http_request(
             "error": "follow_redirects is only permitted for read methods (GET/HEAD/OPTIONS); "
             "a redirect chain must not replay a state-changing request.",
         }
-    headers = agent_tools.filter_request_headers(args.get("headers"))
-    # Imported collection values are decrypted server-side and never pass through planner text.
-    # Permit their auth/cookie headers while retaining hop-by-hop, host, size, and control guards.
-    for raw_name, raw_value in dict(trusted_collection_headers or {}).items():
-        name, value = str(raw_name).strip(), str(raw_value)
-        lower = name.lower()
-        if (
-            not name or lower in {"host", "content-length", "connection", "transfer-encoding"}
-            or not name.isascii() or not value.isascii()
-            or len(name) > 120 or len(value.encode("utf-8")) > 8_192
-            or any(ord(character) < 32 or ord(character) == 127 for character in name + value)
-        ):
-            continue
-        headers[name] = value
     slot = agent_tools.normalize_principal_slot(args.get("as_principal"))
-    query = args.get("query") if isinstance(args.get("query"), dict) else None
-    json_body = args.get("json_body") if isinstance(args.get("json_body"), dict) else None
-    form_body = args.get("form_body") if isinstance(args.get("form_body"), dict) else None
-
     try:
         request_origin = _resolve_hunt_origin(
             target_url,
             [target_url],
             args.get("origin"),
         )
-        url = _provision_same_origin_url(request_origin, path)
         frozen_addresses = list(authorized_addresses or [])[:16]
         if not frozen_addresses:
             raise agent_tools.AgentToolError("hunt has no frozen target resolution set")
-        pinned_address = agent_tools.validate_pinned_scanner_address(
-            frozen_addresses[0], frozen_addresses,
+        parsed_origin = urllib.parse.urlsplit(request_origin)
+        bound_target = TargetBinding(
+            target_id=str(target_uuid),
+            target_kind="web",
+            canonical_host=parsed_origin.hostname,
+            allowed_origins=(request_origin,),
+            allowed_addresses=tuple(frozen_addresses),
         )
-        pinned_url, sni_hostname, host_header = agent_tools._pinned_scanner_url(url, pinned_address)
     except HTTPException as exc:
         return {"ok": False, "error": f"scope: {exc.detail}"}
-    except agent_tools.AgentToolError as exc:
+    except (agent_tools.AgentToolError, ValueError) as exc:
         return {"ok": False, "error": f"scope: {exc}"}
 
     auth_headers: dict[str, Any] = {}
@@ -34348,94 +34333,46 @@ async def _agent_tool_http_request(
             principal_identity = ctx.get("identity_fingerprint")
         except WorkflowContractError as exc:
             return {"ok": False, "error": f"principal '{slot}' unavailable: {exc}"}
-
-    request_view = {
+    started_at = datetime.now(timezone.utc)
+    operation_args = dict(args)
+    operation_args.update({
+        "method": method,
+        "path": path,
+        "follow_redirects": follow_redirects,
+        "origin": request_origin,
+    })
+    raw_result = await execute_bound_http_request(
+        request_origin,
+        operation_args,
+        target=bound_target,
+        allow_write=allow_write,
+        trusted_headers={
+            **dict(trusted_collection_headers or {}),
+            **dict(auth_headers),
+        },
+        cookies=cookies,
+        principal_slot=slot,
+        timeout_seconds=_AGENT_TOOL_HTTP_TIMEOUT_SECONDS,
+    )
+    request_view = dict(raw_result.get("request") or {
         "method": method,
         "origin": request_origin,
         "path": path,
-        "query_keys": sorted(query or {}),
         "as_principal": slot,
-        "body_kind": "json" if json_body is not None else "form" if form_body is not None else None,
-        "pinned_address": pinned_address,
         "follow_redirects": follow_redirects,
-    }
-    started_at = datetime.now(timezone.utc)
-    started = time.perf_counter()
-    status_label = "success"
-    summary: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
-    redirect_chain: list[dict[str, Any]] = []
-    hops_followed = 0
-    try:
-        timeout = httpx.Timeout(_AGENT_TOOL_HTTP_TIMEOUT_SECONDS)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
-            # Bounded same-origin redirect following (opt-in). Each hop re-validates the
-            # Location against the STRICT same-origin rule (scheme+host+port) BEFORE the
-            # request is built, and 301/302/303 rewrite the hop to a bodyless GET.
-            current_url = url
-            current_method = method
-            current_query = query
-            current_json_body = json_body
-            current_form_body = form_body
-            while True:
-                pinned_url, sni_hostname, host_header = agent_tools._pinned_scanner_url(current_url, pinned_address)
-                request = client.build_request(
-                    current_method, pinned_url, params=current_query,
-                    headers={**headers, **auth_headers, "Host": host_header}, cookies=cookies,
-                    json=current_json_body if current_json_body is not None else None,
-                    data=current_form_body if current_form_body is not None else None,
-                )
-                request.extensions["sni_hostname"] = sni_hostname
-                response = await client.send(request, stream=True)
-                chunks: list[bytes] = []
-                received = 0
-                try:
-                    async for chunk in response.aiter_bytes():
-                        remaining = MAX_BODY_BYTES + 1 - received
-                        if remaining <= 0:
-                            break
-                        chunks.append(chunk[:remaining])
-                        received += min(len(chunk), remaining)
-                        if received > MAX_BODY_BYTES:
-                            break
-                finally:
-                    await response.aclose()
-                if not follow_redirects or response.status_code not in REDIRECT_STATUSES:
-                    break
-                location = str(response.headers.get("location") or "").strip()
-                if not location:
-                    break
-                if hops_followed >= MAX_REDIRECT_HOPS:
-                    redirect_chain.append({
-                        "status": response.status_code, "location": location[:500],
-                        "followed": False, "stopped": "max_hops",
-                    })
-                    break
-                next_url = validate_next_hop(current_url, location)
-                if next_url is None:
-                    redirect_chain.append({
-                        "status": response.status_code, "location": location[:500],
-                        "followed": False, "stopped": "cross_origin",
-                    })
-                    break
-                redirect_chain.append({
-                    "status": response.status_code, "location": location[:500], "followed": True,
-                })
-                current_method = rewrite_method_for_redirect(current_method, response.status_code)
-                # The redirect Location fully specifies the next URL (path+query); the
-                # original query/body are dropped per the method rewrite.
-                current_query = None
-                current_json_body = None
-                current_form_body = None
-                current_url = next_url
-                hops_followed += 1
-            body = b"".join(chunks)
-            summary = response_summary(response, body, elapsed_ms=round((time.perf_counter() - started) * 1000))
-    except (httpx.InvalidURL, httpx.HTTPError, UnicodeError, ValueError) as exc:
-        status_label = "failed"
-        error = type(exc).__name__
-
+    })
+    summary = (
+        dict(raw_result.get("response") or {})
+        if isinstance(raw_result.get("response"), Mapping) else None
+    )
+    error = str(raw_result.get("error") or "").strip() or None
+    status_label = "failed" if error else "success"
     safe_summary = _redact_agent_payload(summary) if summary else None
+    redirect_chain = (
+        list(raw_result.get("redirect_chain") or [])
+        if isinstance(raw_result.get("redirect_chain"), list) else []
+    )
+    hops_followed = max(0, int(raw_result.get("hops_followed") or 0))
     finished_at = datetime.now(timezone.utc)
     receipt_id = None
     if record_receipt:
@@ -34473,7 +34410,12 @@ async def _agent_tool_http_request(
             receipt_id = None
 
     if error:
-        return {"ok": False, "error": f"request_error:{error}", "request": request_view, "receipt_id": receipt_id}
+        return {
+            "ok": False,
+            "error": error,
+            "request": request_view,
+            "receipt_id": receipt_id,
+        }
     result_payload: dict[str, Any] = {
         "ok": True, "request": request_view, "response": safe_summary,
         "receipt_id": receipt_id, "provenance": "tool",

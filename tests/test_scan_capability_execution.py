@@ -21,6 +21,7 @@ from scan.capability_execution import (
     scan_budget_ledger_limits,
     scan_capability_action_digest,
     scan_external_execution_target,
+    scan_http_baseline_capability_allocation,
     scan_network_capability_allocation,
     scan_parameterized_execution_candidates,
     scan_sqli_verification_capability_allocation,
@@ -348,12 +349,17 @@ def test_tls_capability_owns_tcp_budget_outside_report_process():
         "tcp_ports_attempted": 1,
         "tool_wall_seconds": 15,
     }
-    assert prepared.redacted_execution == {
+    assert {
+        key: value
+        for key, value in prepared.redacted_execution.items()
+        if key != "input_binding_digest"
+    } == {
         "schema_version": "scan-inline-capability/v1",
         "capability_name": "tls.inspect",
         "target_binding_digest": _target().digest,
         "input": {"origin": "https://app.example.test"},
     }
+    assert len(prepared.redacted_execution["input_binding_digest"]) == 64
 
     _report_prepared, runtime = prepare_scan_process_capability(
         execution_plan_digest="a" * 64,
@@ -364,6 +370,33 @@ def test_tls_capability_owns_tcp_budget_outside_report_process():
         allow_state_changing_http=False,
     )
     assert runtime["tcp_ports_attempted"] == 0
+
+
+def test_http_baseline_has_bounded_redirect_hold_and_redacted_path():
+    assert scan_http_baseline_capability_allocation(_budget()) == {
+        "http_requests": 4,
+        "tool_wall_seconds": 15,
+    }
+    prepared = prepare_scan_inline_capability(
+        specification=CAPABILITY_REGISTRY.require("http.request"),
+        target=_target(),
+        args={
+            "method": "HEAD",
+            "path": "/reset/secret-value-123456789012345678901234?q=token",
+            "follow_redirects": True,
+        },
+        policy=ScanPolicy(scope_receipt_id="scope-1"),
+    )
+    assert prepared.estimated_budget == {
+        "http_requests": 4,
+        "tool_wall_seconds": 15,
+    }
+    assert prepared.redacted_execution["input"] == {
+        "method": "HEAD",
+        "path": "/reset/<redacted>?<redacted-query>",
+        "follow_redirects": True,
+    }
+    assert len(prepared.redacted_execution["input_binding_digest"]) == 64
 
 
 def test_scan_process_requests_missing_mandatory_capacity_to_fail_closed():

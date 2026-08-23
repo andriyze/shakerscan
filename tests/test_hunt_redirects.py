@@ -97,6 +97,12 @@ import api as api_module  # noqa: E402
 API_SOURCE = open(
     os.path.join(os.path.dirname(__file__), "..", "api", "api.py"), encoding="utf-8"
 ).read()
+HTTP_CAPABILITY_SOURCE = open(
+    os.path.join(
+        os.path.dirname(__file__), "..", "api", "capabilities", "http.py"
+    ),
+    encoding="utf-8",
+).read()
 
 
 def _run_http_request(monkeypatch, handler, args, *, allow_write=False):
@@ -126,7 +132,7 @@ def _run_http_request(monkeypatch, handler, args, *, allow_write=False):
 def _executor_source() -> str:
     start = API_SOURCE.index("async def _agent_tool_http_request(")
     end = API_SOURCE.index("async def _agent_tool_query_kb(")
-    return API_SOURCE[start:end]
+    return API_SOURCE[start:end] + HTTP_CAPABILITY_SOURCE
 
 
 def _apply_reply_source() -> str:
@@ -226,7 +232,7 @@ def test_executor_enforces_same_origin_per_hop_with_bounded_cap():
     assert "hops_followed >= MAX_REDIRECT_HOPS" in executor
     assert 'follow_redirects=False' in executor  # httpx never follows on its own
     # method rewrite + body/query drop for the semantic hop
-    assert "current_method = rewrite_method_for_redirect(current_method, response.status_code)" in executor
+    assert "current_method = rewrite_method_for_redirect(" in executor
     assert "current_query = None" in executor
     assert "current_json_body = None" in executor
     # a rejected hop stops the chain and records the terminal status

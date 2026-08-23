@@ -328,6 +328,9 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
     async def skip_tls(*_args, **_kwargs):
         return worker._skipped_scan_tls_summary("test_isolation")
 
+    async def skip_http_baseline(*_args, **_kwargs):
+        return worker._skipped_scan_http_baseline_summary("test_isolation")
+
     monkeypatch.setattr(worker, "db_pool", _Pool(connection))
     monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
     monkeypatch.setattr(worker, "run_scan", fake_run_scan)
@@ -337,6 +340,11 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         skip_web_probe,
     )
     monkeypatch.setattr(worker, "_execute_scan_tls_capability", skip_tls)
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_http_baseline_capability",
+        skip_http_baseline,
+    )
     monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
     monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
 
@@ -838,6 +846,79 @@ def test_scan_tls_uses_same_reserve_before_handshake_boundary(monkeypatch):
     assert redelivery is False
 
 
+def test_scan_http_uses_same_reserve_before_request_boundary(monkeypatch):
+    plan, target, options = _authority(enabled=False, network=False)
+    connection = _Connection(plan)
+    events = []
+    store = _ReservationStore(events)
+    _normalized, admission = worker.prepare_worker_dispatch(options)
+    execution = worker.build_native_scan_execution(plan, options)
+
+    async def request():
+        events.append(("traffic", store.current.record.status))
+        return {
+            "ok": True,
+            "request": {
+                "method": "HEAD",
+                "origin": "https://app.example.test",
+                "path": "/",
+                "pinned_address": "192.0.2.10",
+                "follow_redirects": True,
+            },
+            "response": {
+                "status": 200,
+                "selected_headers": {"server": "nginx"},
+            },
+            "redirect_chain": [{
+                "status": 302,
+                "location": "/home",
+                "followed": True,
+            }],
+            "hops_followed": 1,
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    stored, redelivery = asyncio.run(
+        worker._execute_reserved_scan_capability(
+            admission=admission,
+            execution=execution,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            capability_name="http.request",
+            capability_args={
+                "method": "HEAD",
+                "path": "/",
+                "follow_redirects": True,
+            },
+            action_id="deterministic_baseline.http.request",
+            target_binding=target,
+            reservation_limits={
+                "http_requests": 4,
+                "tool_wall_seconds": 15,
+            },
+            inline_operation=request,
+        )
+    )
+
+    assert events[:3] == [
+        ("create", "requested"),
+        ("transition", "reserved"),
+        ("transition", "running"),
+    ]
+    assert ("traffic", "running") in events
+    assert events[-1] == ("terminal", "committed")
+    assert stored.record.actual == {
+        "http_requests": 2,
+        "tool_wall_seconds": 1,
+    }
+    assert stored.receipt["observations"][0]["kind"] == "http_observation"
+    assert redelivery is False
+
+
 def test_external_scan_tool_reserves_before_process_and_settles_typed_output(
     monkeypatch,
 ):
@@ -1067,6 +1148,7 @@ def _stored_network_capability(
         "web.probe": ("httpx", "httpx-typed-v1"),
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
+        "http.request": ("agent.http_request", "http-observation/v1"),
         "tls.inspect": ("scanner.tls", "tls-observation/v1"),
         "xss.verify": ("dalfox", "dalfox-typed-v1"),
         "sqli.verify": ("sqlmap", "sqlmap-typed-v1"),
@@ -1540,6 +1622,114 @@ def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch
     assert summary["status"] == "success"
     assert summary["observations"][0]["kind"] == "tls_protocol"
     assert summary["durable_budget_settled"] is True
+
+
+def test_http_baseline_stage_uses_registered_inline_capability(monkeypatch):
+    _plan, target, options = _authority(enabled=True, network=False)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "http.request",
+            observations=[{
+                "kind": "http_observation",
+                "request": {
+                    "method": "HEAD",
+                    "origin": "https://app.example.test",
+                    "path": "/",
+                    "pinned_address": "192.0.2.10",
+                },
+                "response": {
+                    "status": 200,
+                    "selected_headers": {"server": "nginx"},
+                },
+                "redirect_chain": [],
+            }],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    summary = asyncio.run(worker._execute_scan_http_baseline_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+    ))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["capability_name"] == "http.request"
+    assert call["capability_args"] == {
+        "method": "HEAD",
+        "path": "/",
+        "follow_redirects": True,
+    }
+    assert call["action_id"] == "deterministic_baseline.http.request"
+    assert call["target_binding"] == target
+    assert call["reservation_limits"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 15,
+    }
+    assert callable(call["inline_operation"])
+    assert summary["status"] == "success"
+    assert summary["observations"][0]["kind"] == "http_observation"
+
+
+def test_http_baseline_receipt_redacts_paths_queries_and_bodies(monkeypatch):
+    _plan, target, _options = _authority(enabled=True, network=False)
+
+    async def raw_operation(*_args, **_kwargs):
+        return {
+            "ok": True,
+            "request": {
+                "method": "HEAD",
+                "origin": "https://app.example.test",
+                "path": "/reset/secret-value-123456789012345678901234?q=token",
+                "pinned_address": "192.0.2.10",
+            },
+            "response": {
+                "status": 302,
+                "body_sample": "private response body",
+                "selected_json": {"token": "private"},
+                "selected_headers": {
+                    "server": "nginx",
+                    "authorization": "Bearer private",
+                },
+                "final_url": (
+                    "https://app.example.test/reset/"
+                    "secret-value-123456789012345678901234?q=token"
+                ),
+                "location": "/reset/token/opaque-secret-value-1234567890?q=x",
+            },
+            "redirect_chain": [{
+                "status": 302,
+                "location": "/reset/token/opaque-secret-value-1234567890?q=x",
+                "followed": True,
+            }],
+            "hops_followed": 1,
+        }
+
+    monkeypatch.setattr(worker, "execute_bound_http_request", raw_operation)
+    result = asyncio.run(worker._run_scan_http_baseline_operation(
+        origin="https://app.example.test",
+        capability_args={
+            "method": "HEAD", "path": "/", "follow_redirects": True,
+        },
+        target=target,
+        timeout_seconds=15,
+    ))
+
+    assert result["request"]["path"] == (
+        "/reset/<redacted>?q=%3Credacted%3E"
+    )
+    assert result["response"]["body_sample"] == ""
+    assert result["response"]["selected_json"] == {}
+    assert result["response"]["selected_headers"] == {"server": "nginx"}
+    assert "secret-value" not in result["response"]["final_url"]
+    assert "opaque-secret" not in result["redirect_chain"][0]["location"]
 
 
 def test_network_policy_runs_two_registry_actions_with_partitioned_budget(

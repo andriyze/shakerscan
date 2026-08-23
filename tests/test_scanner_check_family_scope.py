@@ -164,6 +164,54 @@ def _tls_placement_summary():
     }
 
 
+def _http_baseline_placement_summary():
+    return {
+        "schema_version": "canonical-scan-http-baseline-execution/v1",
+        "capability_name": "http.request",
+        "enabled": True,
+        "status": "success",
+        "reason": None,
+        "observations": [{
+            "kind": "http_observation",
+            "request": {
+                "method": "HEAD",
+                "origin": "https://app.example.test",
+                "path": "/",
+                "pinned_address": "192.0.2.10",
+                "follow_redirects": True,
+            },
+            "response": {
+                "status": 200,
+                "http_version": "HTTP/2",
+                "final_url": "https://app.example.test/home",
+                "selected_headers": {
+                    "server": "nginx",
+                    "strict-transport-security": "max-age=31536000",
+                    "alt-svc": 'h3=":443"',
+                },
+                "set_cookie_metadata": [{
+                    "secure": True,
+                    "httponly": True,
+                    "samesite": "lax",
+                }],
+            },
+            "redirect_chain": [{
+                "status": 302,
+                "location": "/home",
+                "followed": True,
+            }],
+        }],
+        "observation_count": 1,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {"http_requests": 2, "tool_wall_seconds": 1},
+        "receipt": {"receipt_hash": "5" * 64},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
 def _xss_verification_placement_summary():
     return {
         "schema_version": "canonical-scan-xss-verification-execution/v1",
@@ -394,6 +442,63 @@ def test_canonical_tls_placement_is_bound_to_origin_and_address(monkeypatch):
     )
     with pytest.raises(SystemExit, match="observation contract"):
         scanner_mod._load_canonical_scan_placements(execution)
+
+
+def test_canonical_http_baseline_is_bound_and_adapted(monkeypatch):
+    execution = {
+        "execution_plan_digest": "a" * 64,
+        "target_binding_digest": "b" * 64,
+        "target_binding": {
+            "canonical_host": "app.example.test",
+            "allowed_origins": ["https://app.example.test"],
+            "allowed_addresses": ["192.0.2.10"],
+        },
+    }
+    monkeypatch.setenv(
+        "SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS",
+        json.dumps({
+            "schema_version": "canonical-scan-placements/v1",
+            "execution_plan_digest": execution["execution_plan_digest"],
+            "target_binding_digest": execution["target_binding_digest"],
+            "capabilities": {
+                "http.request": _http_baseline_placement_summary(),
+            },
+        }),
+    )
+
+    placements = scanner_mod._load_canonical_scan_placements(execution)
+    result = scanner_mod._canonical_http_baseline_result(
+        placements["http.request"],
+        base_url="https://app.example.test",
+    )
+
+    assert result["status"] == "HTTP/2 200"
+    assert result["headers"]["server"] == ["nginx"]
+    assert result["headers"]["set-cookie"] == [
+        "redacted=1; Secure; HttpOnly; SameSite=Lax",
+    ]
+    assert result["redirect_chain"] == [
+        "https://app.example.test/home",
+    ]
+    assert result["remote_ip"] == "192.0.2.10"
+    assert result["advertises_h3"] is True
+
+
+def test_canonical_report_assembly_never_repeats_base_header_request():
+    source = inspect.getsource(scanner_mod.build_report)
+    start = source.index("if canonical_scan_execution is not None:", source.index(
+        "canonical_tls_task = None"
+    ))
+    head = source.index("head_task", start)
+    redirect = source.index("http_redirect_task", head)
+    baseline_block = source[head:redirect]
+
+    assert "_canonical_http_baseline_result(" in baseline_block
+    assert "else:" in baseline_block
+    assert "curl_headers(base_url)" in baseline_block
+    assert baseline_block.index("_canonical_http_baseline_result(") < (
+        baseline_block.index("else:")
+    ) < baseline_block.index("curl_headers(base_url)")
 
 
 def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):

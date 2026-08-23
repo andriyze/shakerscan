@@ -137,6 +137,20 @@ def scan_web_probe_capability_allocation(
     }
 
 
+def scan_http_baseline_capability_allocation(
+    budget: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Reserve one read-only base request and its bounded redirect chain."""
+    http = _budget_integer(budget, "max_http_requests")
+    wall = _budget_integer(budget, "max_tool_wall_seconds")
+    if http < 4 or wall < 1:
+        return None
+    return {
+        "http_requests": 4,
+        "tool_wall_seconds": min(15, wall),
+    }
+
+
 def scan_web_crawl_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:
@@ -506,6 +520,12 @@ def prepare_scan_external_capability(
             f"{specification.name} requires active testing approval"
         )
     normalized = _normalize_external_capability_args(specification, args)
+    if specification.name == "http.request":
+        unsupported = set(normalized) - {"method", "path", "follow_redirects"}
+        if unsupported:
+            raise ScanCapabilityContractError(
+                "Scan http.request accepts only method, path, and follow_redirects"
+            )
     estimated = {
         str(name): int(amount)
         for name, amount in dict(specification.budget_cost).items()
@@ -541,9 +561,9 @@ def prepare_scan_inline_capability(
     policy: ScanPolicy,
 ) -> PreparedExecution:
     """Prepare one registry-owned internal action under immutable Scan authority."""
-    if specification.execution_kind != "internal":
+    if specification.execution_kind not in {"internal", "http"}:
         raise ScanCapabilityContractError(
-            f"{specification.name} is not an internal Scan capability"
+            f"{specification.name} is not an inline Scan capability"
         )
     if target.target_kind not in specification.target_kinds:
         raise ScanCapabilityContractError(
@@ -561,15 +581,35 @@ def prepare_scan_inline_capability(
         for name, amount in dict(specification.budget_cost).items()
         if int(amount) > 0
     }
+    if specification.name == "http.request" and normalized.get(
+        "follow_redirects"
+    ) is True:
+        # Initial request plus the shared executor's fixed three-hop ceiling.
+        estimated["http_requests"] = 4
     if not estimated:
         raise ScanCapabilityContractError(
             f"{specification.name} has no reservable budget"
         )
+    redacted_input = dict(normalized)
+    if specification.name == "http.request" and isinstance(
+        redacted_input.get("path"), str,
+    ):
+        path_value = str(redacted_input["path"])
+        parsed_path = urllib.parse.urlsplit(path_value)
+        redacted_input["path"] = urllib.parse.urlunsplit((
+            "", "", redact_path(parsed_path.path or "/"),
+            "<redacted-query>" if parsed_path.query else "", "",
+        ))
     redacted = {
         "schema_version": "scan-inline-capability/v1",
         "capability_name": specification.name,
         "target_binding_digest": target.digest,
-        "input": normalized,
+        "input": redacted_input,
+        "input_binding_digest": PreparedExecution.digest_input({
+            "capability_name": specification.name,
+            "target_binding_digest": target.digest,
+            "input": normalized,
+        }),
     }
     return PreparedExecution(
         capability_name=specification.name,

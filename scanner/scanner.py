@@ -5018,7 +5018,18 @@ async def build_report(target: str,
         nmap_task   = asyncio.create_task(nmap_ciphers(host, port))
         testssl_task= asyncio.create_task(testssl(host, port))
         sslyze_task = asyncio.create_task(sslyze_scan(host, port))
-    head_task   = asyncio.create_task(curl_headers(base_url))
+    if canonical_scan_execution is not None:
+        head_task = asyncio.create_task(_focused_async_value(
+            _canonical_http_baseline_result(
+                (
+                    canonical_scan_placements.get("http.request")
+                    if isinstance(canonical_scan_placements, dict) else None
+                ),
+                base_url=base_url,
+            )
+        ))
+    else:
+        head_task = asyncio.create_task(curl_headers(base_url))
     # Check HTTP->HTTPS redirect explicitly when scanning HTTPS
     http_redirect_task = None
     if scheme == "https" and not focused_manual_active_scope:
@@ -14271,7 +14282,7 @@ def _load_canonical_scan_placements(
         raise SystemExit("canonical Scan placement capabilities are invalid")
     unknown = set(capabilities) - {
         "web.probe", "web.crawl", "web.content_discover", "templates.scan",
-        "tls.inspect", "xss.verify", "sqli.verify",
+        "http.request", "tls.inspect", "xss.verify", "sqli.verify",
     }
     if unknown:
         raise SystemExit(
@@ -14404,6 +14415,97 @@ def _load_canonical_scan_placements(
                     "canonical web.content_discover receipt is missing"
                 )
         result["web.content_discover"] = content
+    http_baseline = capabilities.get("http.request")
+    if http_baseline is not None:
+        if not isinstance(http_baseline, dict) or set(http_baseline) != {
+            "schema_version", "capability_name", "enabled", "status", "reason",
+            "observations", "observation_count", "partial", "timed_out",
+            "errors", "budget_consumed", "receipt", "durable_budget_settled",
+            "idempotent_redelivery",
+        }:
+            raise SystemExit("canonical http.request placement is malformed")
+        if (
+            http_baseline.get("schema_version")
+            != "canonical-scan-http-baseline-execution/v1"
+            or http_baseline.get("capability_name") != "http.request"
+            or not isinstance(http_baseline.get("enabled"), bool)
+            or http_baseline.get("status") not in {
+                "success", "partial", "failed", "blocked", "cancelled", "skipped",
+            }
+        ):
+            raise SystemExit("canonical http.request placement contract is invalid")
+        observations = http_baseline.get("observations")
+        if not isinstance(observations, list) or len(observations) > 1:
+            raise SystemExit("canonical http.request observations are invalid")
+        binding = execution.get("target_binding") or {}
+        allowed_origins = set(binding.get("allowed_origins") or [])
+        allowed_addresses = set(binding.get("allowed_addresses") or [])
+        allowed_header_names = {
+            "strict-transport-security", "content-security-policy",
+            "x-frame-options", "x-content-type-options", "referrer-policy",
+            "permissions-policy", "feature-policy", "x-xss-protection",
+            "cross-origin-embedder-policy", "cross-origin-opener-policy",
+            "cross-origin-resource-policy", "server", "x-powered-by", "via",
+            "alt-svc", "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "access-control-allow-methods", "access-control-allow-headers",
+            "cf-ray", "cf-cache-status", "x-amz-request-id", "x-vercel-id",
+        }
+        for item in observations:
+            request = item.get("request") if isinstance(item, dict) else None
+            response = item.get("response") if isinstance(item, dict) else None
+            selected_headers = (
+                response.get("selected_headers")
+                if isinstance(response, dict) else None
+            )
+            cookie_metadata = (
+                response.get("set_cookie_metadata")
+                if isinstance(response, dict) else None
+            )
+            if (
+                not isinstance(item, dict)
+                or set(item) != {
+                    "kind", "request", "response", "redirect_chain",
+                }
+                or item.get("kind") != "http_observation"
+                or not isinstance(request, dict)
+                or set(request) - {
+                    "method", "origin", "path", "query_keys", "as_principal",
+                    "body_kind", "pinned_address", "follow_redirects",
+                }
+                or request.get("method") != "HEAD"
+                or request.get("origin") not in allowed_origins
+                or request.get("pinned_address") not in allowed_addresses
+                or not str(request.get("path") or "").startswith("/")
+                or not isinstance(response, dict)
+                or not isinstance(selected_headers, dict)
+                or set(selected_headers) - allowed_header_names
+                or response.get("body_sample") not in (None, "")
+                or response.get("selected_json") not in (None, {})
+                or not isinstance(cookie_metadata, (list, type(None)))
+                or any(
+                    not isinstance(cookie, dict)
+                    or set(cookie) != {"secure", "httponly", "samesite"}
+                    or not isinstance(cookie.get("secure"), bool)
+                    or not isinstance(cookie.get("httponly"), bool)
+                    or cookie.get("samesite") not in {None, "strict", "lax", "none"}
+                    for cookie in cookie_metadata or []
+                )
+                or not isinstance(item.get("redirect_chain"), list)
+                or len(item.get("redirect_chain")) > 4
+            ):
+                raise SystemExit(
+                    "canonical http.request observation contract is invalid"
+                )
+        if http_baseline.get("observation_count") != len(observations):
+            raise SystemExit("canonical http.request observation count is invalid")
+        if not isinstance(http_baseline.get("receipt"), dict):
+            raise SystemExit("canonical http.request receipt reference is invalid")
+        if http_baseline.get("enabled") and http_baseline.get("status") != "skipped":
+            receipt_hash = str(http_baseline["receipt"].get("receipt_hash") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                raise SystemExit("canonical http.request receipt is missing")
+        result["http.request"] = http_baseline
     tls_inspection = capabilities.get("tls.inspect")
     if tls_inspection is not None:
         if not isinstance(tls_inspection, dict) or set(tls_inspection) != {
@@ -14606,6 +14708,84 @@ def _canonical_httpx_rows(summary: Any) -> list[dict[str, Any]]:
         and item.get("kind") == "http_fingerprint"
         and item.get("url")
     ][:50]
+
+
+def _canonical_http_baseline_result(
+    summary: Any,
+    *,
+    base_url: str,
+) -> dict[str, Any]:
+    """Adapt one placed header observation into the existing report shape."""
+    placed = dict(summary) if isinstance(summary, Mapping) else {}
+    observations = [
+        dict(item)
+        for item in placed.get("observations") or []
+        if isinstance(item, Mapping) and item.get("kind") == "http_observation"
+    ][:1]
+    if not observations:
+        return {
+            "status": None,
+            "headers": {},
+            "request_url": base_url,
+            "final_url": base_url,
+            "redirect_chain": [],
+            "remote_ip": None,
+            "raw": "",
+            "advertises_h3": False,
+            "canonical_capability": "http.request",
+            "canonical_status": str(placed.get("status") or "missing"),
+        }
+    observation = observations[0]
+    request = dict(observation.get("request") or {})
+    response = dict(observation.get("response") or {})
+    selected = dict(response.get("selected_headers") or {})
+    headers = {
+        str(name).lower(): [str(value)]
+        for name, value in selected.items()
+        if str(name).strip() and value not in (None, "")
+    }
+    for cookie in response.get("set_cookie_metadata") or []:
+        if not isinstance(cookie, Mapping):
+            continue
+        flags = ["redacted=1"]
+        if cookie.get("secure"):
+            flags.append("Secure")
+        if cookie.get("httponly"):
+            flags.append("HttpOnly")
+        if cookie.get("samesite") in {"strict", "lax", "none"}:
+            flags.append(f"SameSite={str(cookie['samesite']).title()}")
+        headers.setdefault("set-cookie", []).append("; ".join(flags))
+    status_code = response.get("status")
+    http_version = str(response.get("http_version") or "HTTP/1.1")
+    if not http_version.upper().startswith("HTTP/"):
+        http_version = "HTTP/1.1"
+    status = (
+        f"{http_version} {int(status_code)}"
+        if isinstance(status_code, int) else None
+    )
+    redirect_urls: list[str] = []
+    current = base_url
+    for item in observation.get("redirect_chain") or []:
+        if not isinstance(item, Mapping) or not item.get("location"):
+            continue
+        current = urllib.parse.urljoin(current, str(item["location"]))
+        redirect_urls.append(current)
+    final_url = str(response.get("final_url") or current or base_url)
+    if final_url != base_url and final_url not in redirect_urls:
+        redirect_urls.append(final_url)
+    alt_svc = ",".join(headers.get("alt-svc", []))
+    return {
+        "status": status,
+        "headers": headers,
+        "request_url": base_url,
+        "final_url": final_url,
+        "redirect_chain": redirect_urls,
+        "remote_ip": request.get("pinned_address"),
+        "raw": "",
+        "advertises_h3": "h3=" in alt_svc.lower(),
+        "canonical_capability": "http.request",
+        "capability_receipt": dict(placed.get("receipt") or {}),
+    }
 
 
 def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:

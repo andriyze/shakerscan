@@ -66,7 +66,11 @@ from capabilities.network import (
     network_capability_adapter,
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
-from capabilities.inline import TlsInspectionExecutionAdapter
+from capabilities.http import execute_bound_http_request
+from capabilities.inline import (
+    HttpRequestExecutionAdapter,
+    TlsInspectionExecutionAdapter,
+)
 from capabilities.scanner import ScannerExecutionAdapter
 from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.tls import inspect_tls_origin
@@ -120,6 +124,7 @@ from scan.capability_execution import (
     prepare_scan_external_capability,
     prepare_scan_inline_capability,
     scan_content_discovery_capability_allocation,
+    scan_http_baseline_capability_allocation,
     scan_budget_ledger_limits,
     scan_capability_action_digest,
     scan_external_execution_target,
@@ -202,6 +207,7 @@ try:
     )
     from scanner_tools import device_advisories
     from scanner_tools.common import run_streaming
+    from scanner_tools.url_redaction import redact_url
 except ModuleNotFoundError:
     from scanner.scanner_tools.attempt_telemetry import (
         endpoint_attempt_schema_from_report,
@@ -218,6 +224,7 @@ except ModuleNotFoundError:
     )
     from scanner.scanner_tools import device_advisories
     from scanner.scanner_tools.common import run_streaming
+    from scanner.scanner_tools.url_redaction import redact_url
 from evidence_storage import serialize_evidence_content, store_evidence_content
 from artifact_storage import (
     ArtifactStorageError,
@@ -9907,7 +9914,7 @@ async def _execute_reserved_scan_capability(
         raise ScanCapabilityContractError(
             "deterministic Scan runner requires scan.execute"
         )
-    if internal_inline and capability_name != "tls.inspect":
+    if internal_inline and capability_name not in {"http.request", "tls.inspect"}:
         raise ScanCapabilityContractError(
             "unsupported inline Scan capability adapter"
         )
@@ -10232,7 +10239,12 @@ async def _execute_reserved_scan_capability(
             raise ScanCapabilityContractError(
                 "inline Scan capability operation is unavailable"
             )
-        executable_adapter = TlsInspectionExecutionAdapter(
+        inline_adapter = (
+            HttpRequestExecutionAdapter
+            if capability_name == "http.request"
+            else TlsInspectionExecutionAdapter
+        )
+        executable_adapter = inline_adapter(
             specification=specification,
             operation=inline_operation,
             requested_budget=persisted.record.requested,
@@ -10446,6 +10458,206 @@ def _skipped_scan_tls_summary(reason: str) -> dict[str, Any]:
         "durable_budget_settled": True,
         "idempotent_redelivery": False,
     }
+
+
+_SCAN_BASELINE_RESPONSE_HEADERS = [
+    "strict-transport-security",
+    "content-security-policy",
+    "x-frame-options",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+    "feature-policy",
+    "x-xss-protection",
+    "cross-origin-embedder-policy",
+    "cross-origin-opener-policy",
+    "cross-origin-resource-policy",
+    "server",
+    "x-powered-by",
+    "via",
+    "alt-svc",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "cf-ray",
+    "cf-cache-status",
+    "x-amz-request-id",
+    "x-vercel-id",
+]
+
+
+def _skipped_scan_http_baseline_summary(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "canonical-scan-http-baseline-execution/v1",
+        "capability_name": "http.request",
+        "enabled": False,
+        "status": "skipped",
+        "reason": str(reason)[:200],
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "budget_consumed": {},
+        "receipt": {},
+        "durable_budget_settled": True,
+        "idempotent_redelivery": False,
+    }
+
+
+def _scan_http_baseline_summary_from_stored(
+    stored: Any,
+    *,
+    idempotent_redelivery: bool,
+) -> dict[str, Any]:
+    receipt = dict(stored.receipt or {})
+    receipt_status = str(receipt.get("status") or "failed").strip().lower()
+    status = {
+        "succeeded": "success",
+        "success": "success",
+        "partial": "partial",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }.get(receipt_status, "failed")
+    observations = [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and str(item.get("kind") or "") == "http_observation"
+    ][:1]
+    return {
+        "schema_version": "canonical-scan-http-baseline-execution/v1",
+        "capability_name": "http.request",
+        "enabled": True,
+        "status": status,
+        "reason": None,
+        "observations": observations,
+        "observation_count": len(observations),
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": list(receipt.get("errors") or [])[:20],
+        "budget_consumed": dict(stored.record.actual),
+        "receipt": _scan_capability_receipt_reference(receipt),
+        "durable_budget_settled": bool(stored.record.terminal),
+        "idempotent_redelivery": bool(idempotent_redelivery),
+    }
+
+
+async def _run_scan_http_baseline_operation(
+    *,
+    origin: str,
+    capability_args: Mapping[str, Any],
+    target: TargetBinding,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Execute the shared adapter and retain only public header evidence."""
+    result = dict(await execute_bound_http_request(
+        origin,
+        capability_args,
+        target=target,
+        allow_write=False,
+        selected_headers=_SCAN_BASELINE_RESPONSE_HEADERS,
+        timeout_seconds=timeout_seconds,
+    ))
+    request = (
+        dict(result.get("request") or {})
+        if isinstance(result.get("request"), Mapping) else {}
+    )
+    if request.get("path"):
+        request["path"] = redact_url(str(request["path"]))
+    result["request"] = request
+    response = (
+        dict(result.get("response") or {})
+        if isinstance(result.get("response"), Mapping) else {}
+    )
+    selected = (
+        dict(response.get("selected_headers") or {})
+        if isinstance(response.get("selected_headers"), Mapping) else {}
+    )
+    response["selected_headers"] = {
+        str(name).lower()[:120]: redact_text(str(value))[:2_000]
+        for name, value in selected.items()
+        if str(name).lower() in _SCAN_BASELINE_RESPONSE_HEADERS
+    }
+    response["body_sample"] = ""
+    response["selected_json"] = {}
+    if response.get("final_url"):
+        response["final_url"] = redact_url(str(response["final_url"]))
+    if response.get("location"):
+        response["location"] = redact_url(str(response["location"]))
+    result["response"] = response
+    chain = []
+    for item in result.get("redirect_chain") or []:
+        if not isinstance(item, Mapping):
+            continue
+        row = dict(item)
+        if row.get("location"):
+            row["location"] = redact_url(str(row["location"]))
+        chain.append(row)
+    if "redirect_chain" in result:
+        result["redirect_chain"] = chain
+    return result
+
+
+async def _execute_scan_http_baseline_capability(
+    target_url: str,
+    options: Mapping[str, Any],
+    *,
+    scan_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Run the public base-header request outside the report monolith."""
+    _normalized, admission = prepare_worker_dispatch(options)
+    if not admission.canonical or admission.plan is None:
+        return _skipped_scan_http_baseline_summary("legacy_scan")
+    execution = build_native_scan_execution(admission.plan, options)
+    if execution.discovery_manifest_only:
+        return _skipped_scan_http_baseline_summary("discovery_manifest_only")
+    allocation = scan_http_baseline_capability_allocation(
+        execution.payload()["execution_budget"]
+    )
+    if allocation is None:
+        return _skipped_scan_http_baseline_summary(
+            "insufficient_stage_budget"
+        )
+    target = execution.target_binding
+    execution_target = scan_external_execution_target(
+        target_url, target=target,
+    )
+    parsed = urllib.parse.urlsplit(execution_target)
+    origin = urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, "", "", "",
+    ))
+    path = urllib.parse.urlunsplit((
+        "", "", parsed.path or "/", parsed.query, "",
+    ))
+    capability_args = {
+        "method": "HEAD",
+        "path": path,
+        "follow_redirects": True,
+    }
+    stored, idempotent_redelivery = await _execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id=scan_id,
+        job_id=job_id,
+        capability_name="http.request",
+        capability_args=capability_args,
+        action_id="deterministic_baseline.http.request",
+        target_binding=target,
+        reservation_limits=allocation,
+        inline_operation=lambda: _run_scan_http_baseline_operation(
+            origin=origin,
+            capability_args=capability_args,
+            target=target,
+            timeout_seconds=int(allocation["tool_wall_seconds"]),
+        ),
+    )
+    return _scan_http_baseline_summary_from_stored(
+        stored,
+        idempotent_redelivery=idempotent_redelivery,
+    )
 
 
 def _scan_tls_summary_from_stored(
@@ -11555,6 +11767,9 @@ async def _execute_reserved_deterministic_scan(
     async def deterministic_baseline_stage(
         _context: ScanStageContext,
     ) -> ScanStageRunResult:
+        http_baseline = await _execute_scan_http_baseline_capability(
+            target, normalized, scan_id=scan_id, job_id=job_id,
+        )
         tls = await _execute_scan_tls_capability(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
@@ -11562,8 +11777,14 @@ async def _execute_reserved_deterministic_scan(
             target, normalized, scan_id=scan_id, job_id=job_id,
         )
         return stage_capabilities(
-            {"tls.inspect": tls, "templates.scan": template},
-            capability_names=("tls.inspect", "templates.scan"),
+            {
+                "http.request": http_baseline,
+                "tls.inspect": tls,
+                "templates.scan": template,
+            },
+            capability_names=(
+                "http.request", "tls.inspect", "templates.scan",
+            ),
         )
 
     async def deterministic_active_stage(
@@ -11645,6 +11866,8 @@ async def _execute_reserved_deterministic_scan(
             or _skipped_scan_web_crawl_summary("stage_disabled"),
             "web.content_discover": surface.get("web.content_discover")
             or _skipped_scan_content_discovery_summary("stage_disabled"),
+            "http.request": baseline.get("http.request")
+            or _skipped_scan_http_baseline_summary("stage_disabled"),
             "tls.inspect": baseline.get("tls.inspect")
             or _skipped_scan_tls_summary("stage_disabled"),
             "templates.scan": baseline.get("templates.scan")
