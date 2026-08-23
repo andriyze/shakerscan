@@ -17,6 +17,7 @@ from http_experiment import (
     validate_next_hop,
 )
 from runtime.models import TargetBinding
+from runtime.target_bound_socket import FrozenTargetSocketFactory
 
 
 @dataclass(frozen=True, repr=False)
@@ -187,9 +188,15 @@ async def execute_bound_http_request(
             "error": "scope: HTTP target has no frozen address",
         }
     try:
-        pinned_address = agent_tools.validate_pinned_scanner_address(
-            target.allowed_addresses[0], list(target.allowed_addresses),
+        socket_factory = FrozenTargetSocketFactory(
+            hostname=target.canonical_host,
+            port=(
+                urllib.parse.urlsplit(request_origin).port
+                or (443 if request_origin.startswith("https://") else 80)
+            ),
+            frozen_addresses=target.allowed_addresses,
         )
+        pinned_address = socket_factory.addresses[0]
     except agent_tools.AgentToolError as exc:
         return {"ok": False, "error": f"scope: {exc}"}
 

@@ -12,6 +12,7 @@ import urllib.parse
 import aiohttp
 
 from .models import TargetBinding
+from .target_bound_socket import FrozenTargetSocketFactory
 from .request_replay_executor import (
     MAX_REPLAY_RESPONSE_BODY_BYTES,
     ReplayExecutionError,
@@ -25,11 +26,11 @@ except ModuleNotFoundError:  # package import when scanner is installed as a pac
 
 
 class _FrozenAddressResolver(aiohttp.abc.AbstractResolver):
-    """Resolve one exact hostname to one server-authorized address."""
+    """Expose every admitted address without consulting DNS."""
 
-    def __init__(self, *, hostname: str, address: str) -> None:
-        self.hostname = str(hostname or "").strip().lower().rstrip(".")
-        self.address = str(ipaddress.ip_address(str(address or "").strip()))
+    def __init__(self, *, factory: FrozenTargetSocketFactory) -> None:
+        self.factory = factory
+        self.hostname = factory.hostname
 
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_UNSPEC,
@@ -37,24 +38,29 @@ class _FrozenAddressResolver(aiohttp.abc.AbstractResolver):
         normalized = str(host or "").strip().lower().rstrip(".")
         if normalized != self.hostname:
             raise OSError("replay resolver refused an unbound hostname")
-        address = ipaddress.ip_address(self.address)
-        resolved_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-        if family not in {socket.AF_UNSPEC, resolved_family}:
+        records = []
+        for endpoint in self.factory.endpoints():
+            if family not in {socket.AF_UNSPEC, endpoint.family}:
+                continue
+            records.append({
+                "hostname": self.hostname,
+                "host": endpoint.address,
+                "port": int(port),
+                "family": endpoint.family,
+                "proto": socket.IPPROTO_TCP,
+                "flags": 0,
+            })
+        if not records:
             raise OSError("replay resolver address family mismatch")
-        return [{
-            "hostname": self.hostname,
-            "host": self.address,
-            "port": int(port),
-            "family": resolved_family,
-            "proto": 0,
-            "flags": 0,
-        }]
+        return records
 
     async def close(self) -> None:
         return None
 
 
-def _pinned_address(request: ReplayRequest, target: TargetBinding) -> tuple[str, str]:
+def _pinned_factory(
+    request: ReplayRequest, target: TargetBinding,
+) -> FrozenTargetSocketFactory:
     parsed = urllib.parse.urlsplit(request.url)
     hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
     if not hostname:
@@ -69,8 +75,12 @@ def _pinned_address(request: ReplayRequest, target: TargetBinding) -> tuple[str,
     if literal is not None:
         if literal not in allowed:
             raise ReplayExecutionError("replay IP literal is outside the frozen address set")
-        return hostname, literal
-    return hostname, allowed[0]
+        allowed = (literal,)
+    return FrozenTargetSocketFactory(
+        hostname=hostname,
+        port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+        frozen_addresses=allowed,
+    )
 
 
 def _insecure_tls_context() -> ssl.SSLContext:
@@ -94,8 +104,9 @@ class PinnedAiohttpReplayTransport:
     ) -> ReplayTransportResult:
         if follow_redirects:
             raise ReplayExecutionError("exact replay transport cannot follow redirects")
-        hostname, address = _pinned_address(request, target)
-        resolver = _FrozenAddressResolver(hostname=hostname, address=address)
+        factory = _pinned_factory(request, target)
+        address = factory.addresses[0]
+        resolver = _FrozenAddressResolver(factory=factory)
         connector = aiohttp.TCPConnector(
             resolver=resolver,
             use_dns_cache=False,
@@ -161,4 +172,3 @@ class PinnedAiohttpReplayTransport:
                 error_code="timeout" if timed_out else "transport_error",
                 timed_out=timed_out,
             )
-

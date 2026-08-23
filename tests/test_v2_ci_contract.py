@@ -59,6 +59,7 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "tests/test_scan_action_resume.py",
         "tests/test_worker_action_executor.py",
         "tests/test_scan_authorization_revalidation.py",
+        "tests/test_scan_dns_rebinding.py",
         "tests/test_scan_finalizer.py",
         "tests/test_scan_work_manifests.py",
         "tests/test_observation_manifests.py",
