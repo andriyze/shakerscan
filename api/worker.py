@@ -9909,6 +9909,7 @@ async def _execute_reserved_scan_capability(
     scanner_process_runner: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
     scanner_result_holder: dict[str, Any] | None = None,
     inline_operation: Callable[[], Awaitable[Mapping[str, Any]]] | None = None,
+    canonical_action: Any | None = None,
 ) -> tuple[Any, bool]:
     """Reserve, execute, and reconcile one target-bound Scan capability."""
     try:
@@ -9939,6 +9940,17 @@ async def _execute_reserved_scan_capability(
         raise ScanCapabilityContractError(
             "Scan capability target must be an exact-address subset of its binding"
         )
+    if canonical_action is not None:
+        if (
+            str(getattr(canonical_action, "action_id", "")) != action_id
+            or str(getattr(canonical_action, "capability_name", ""))
+            != capability_name
+            or str(getattr(canonical_action, "target_binding_digest", ""))
+            != target.digest
+        ):
+            raise ScanCapabilityContractError(
+                "canonical Scan action differs from capability dispatch authority"
+            )
     policy = admission.plan.policy
     deterministic_process = scan_runner is not None
     external_process = (
@@ -9998,6 +10010,8 @@ async def _execute_reserved_scan_capability(
         allow_zero=execution.shard_authority is not None,
     )
     request_limits = dict(limits)
+    if canonical_action is not None:
+        reservation_limits = dict(canonical_action.requested_budget)
     if reservation_limits is not None:
         for raw_name, raw_amount in reservation_limits.items():
             name = str(raw_name or "").strip()
@@ -10110,6 +10124,22 @@ async def _execute_reserved_scan_capability(
                 prepared=prepared,
             )
             requested_budget = dict(prepared.estimated_budget)
+            if canonical_action is not None:
+                expected_adapter = str(
+                    canonical_action.placement.get("adapter_name") or ""
+                )
+                expected_version = str(
+                    canonical_action.placement.get("adapter_version") or ""
+                )
+                if (
+                    prepared.adapter_name != expected_adapter
+                    or prepared.adapter_version != expected_version
+                    or requested_budget != dict(canonical_action.requested_budget)
+                ):
+                    raise ScanCapabilityContractError(
+                        "prepared capability differs from canonical Scan action"
+                    )
+                action_digest = str(canonical_action.action_digest)
             lease_seconds = max(
                 90,
                 min(
@@ -10559,6 +10589,7 @@ async def _execute_scan_auth_session_capability(
     job_id: str,
     private_session_holder: dict[str, Any],
     lane: str = "primary",
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Establish one interactive identity lane under Scan authority."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -10590,13 +10621,17 @@ async def _execute_scan_auth_session_capability(
         job_id=job_id,
         capability_name="auth.session.establish",
         capability_args=credential.capability_args(),
-        action_id=f"resolve_inputs.auth.session.establish.{lane}",
+        action_id=(
+            canonical_action.action_id if canonical_action is not None
+            else f"resolve_inputs.auth.session.establish.{lane}"
+        ),
         target_binding=target,
         reservation_limits={
             "http_requests": request_limit,
             "tool_wall_seconds": 30,
         },
         inline_operation=establish_session,
+        canonical_action=canonical_action,
     )
     session = private_session_holder.get("session")
     private_available = bool(
@@ -10921,6 +10956,7 @@ async def _execute_scan_http_baseline_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run the public base-header request outside the report monolith."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -10961,7 +10997,8 @@ async def _execute_scan_http_baseline_capability(
         job_id=job_id,
         capability_name="http.request",
         capability_args=capability_args,
-        action_id="deterministic_baseline.http.request",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_baseline.http.request"),
         target_binding=target,
         reservation_limits=allocation,
         inline_operation=lambda: _run_scan_http_baseline_operation(
@@ -10974,6 +11011,7 @@ async def _execute_scan_http_baseline_capability(
                 "primary" if principal.authenticated else "anonymous"
             ),
         ),
+        canonical_action=canonical_action,
     )
     return _scan_http_baseline_summary_from_stored(
         stored,
@@ -10987,6 +11025,7 @@ async def _execute_scan_http_redirect_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Probe HTTP downgrade posture only when that origin is explicitly bound."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11027,7 +11066,8 @@ async def _execute_scan_http_redirect_capability(
         job_id=job_id,
         capability_name="http.request",
         capability_args=capability_args,
-        action_id="deterministic_baseline.http_redirect",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_baseline.http_redirect"),
         target_binding=target,
         reservation_limits=allocation,
         inline_operation=lambda: _run_scan_http_baseline_operation(
@@ -11037,6 +11077,7 @@ async def _execute_scan_http_redirect_capability(
             timeout_seconds=int(allocation["tool_wall_seconds"]),
             allow_bound_origin_redirects=True,
         ),
+        canonical_action=canonical_action,
     )
     return _scan_http_redirect_summary_from_stored(
         stored,
@@ -11050,6 +11091,7 @@ async def _execute_scan_security_txt_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run the fixed RFC 9116 request outside the report monolith."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11081,7 +11123,8 @@ async def _execute_scan_security_txt_capability(
         job_id=job_id,
         capability_name="http.request",
         capability_args=capability_args,
-        action_id="deterministic_baseline.security_txt",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_baseline.security_txt"),
         target_binding=target,
         reservation_limits=allocation,
         inline_operation=lambda: _run_scan_security_txt_operation(
@@ -11090,6 +11133,7 @@ async def _execute_scan_security_txt_capability(
             target=target,
             timeout_seconds=int(allocation["tool_wall_seconds"]),
         ),
+        canonical_action=canonical_action,
     )
     return _scan_security_txt_summary_from_stored(
         stored,
@@ -11140,6 +11184,7 @@ async def _execute_scan_dns_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run the fixed DNS posture plan outside the report monolith."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11165,13 +11210,15 @@ async def _execute_scan_dns_capability(
         job_id=job_id,
         capability_name="dns.inspect",
         capability_args={},
-        action_id="deterministic_baseline.dns.inspect",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_baseline.dns.inspect"),
         target_binding=target,
         reservation_limits=allocation,
         inline_operation=lambda: inspect_dns_posture(
             target,
             timeout_seconds=int(allocation["tool_wall_seconds"]),
         ),
+        canonical_action=canonical_action,
     )
     return _scan_dns_summary_from_stored(
         stored,
@@ -11223,6 +11270,7 @@ async def _execute_scan_tls_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run one canonical TLS handshake outside the report monolith."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11257,7 +11305,8 @@ async def _execute_scan_tls_capability(
         job_id=job_id,
         capability_name="tls.inspect",
         capability_args={"origin": origin},
-        action_id="deterministic_baseline.tls.inspect",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_baseline.tls.inspect"),
         target_binding=target,
         reservation_limits=allocation,
         inline_operation=lambda: inspect_tls_origin(
@@ -11265,6 +11314,7 @@ async def _execute_scan_tls_capability(
             target=target,
             timeout_seconds=int(allocation["tool_wall_seconds"]),
         ),
+        canonical_action=canonical_action,
     )
     return _scan_tls_summary_from_stored(
         stored,
@@ -11373,6 +11423,7 @@ async def _execute_scan_web_probe_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run the canonical passive HTTP fingerprint outside the monolith."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11420,7 +11471,8 @@ async def _execute_scan_web_probe_capability(
         job_id=job_id,
         capability_name="web.probe",
         capability_args=principal.capability_args(),
-        action_id="deterministic_recon.web.probe",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_recon.web.probe"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
@@ -11437,6 +11489,7 @@ async def _execute_scan_web_probe_capability(
             "oob_interactsh_token": None,
         },
         scanner_process_runner=_execute_agent_scanner_process,
+        canonical_action=canonical_action,
     )
     return _scan_web_probe_summary_from_stored(
         stored,
@@ -11507,6 +11560,7 @@ async def _execute_scan_web_crawl_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run canonical Katana once under active Scan authority."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11556,7 +11610,8 @@ async def _execute_scan_web_crawl_capability(
         job_id=job_id,
         capability_name="web.crawl",
         capability_args=principal.capability_args(),
-        action_id="deterministic_recon.web.crawl",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_recon.web.crawl"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
@@ -11573,6 +11628,7 @@ async def _execute_scan_web_crawl_capability(
             "oob_interactsh_token": None,
         },
         scanner_process_runner=_execute_agent_scanner_process,
+        canonical_action=canonical_action,
     )
     return _scan_web_crawl_summary_from_stored(
         stored,
@@ -11643,6 +11699,7 @@ async def _execute_scan_content_discovery_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run canonical FFUF once with a bundled fixed wordlist."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11698,7 +11755,8 @@ async def _execute_scan_content_discovery_capability(
         capability_args={
             "wordlist": "common", **principal.capability_args(),
         },
-        action_id="deterministic_recon.web.content_discover",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_recon.web.content_discover"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
@@ -11715,6 +11773,7 @@ async def _execute_scan_content_discovery_capability(
             "oob_interactsh_token": None,
         },
         scanner_process_runner=_execute_agent_scanner_process,
+        canonical_action=canonical_action,
     )
     return _scan_content_discovery_summary_from_stored(
         stored,
@@ -11790,6 +11849,7 @@ async def _execute_scan_xss_verification_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run one candidate-bound Dalfox proof contract under Scan authority."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -11850,7 +11910,8 @@ async def _execute_scan_xss_verification_capability(
         capability_args={
             "severity": "high", **principal.capability_args(),
         },
-        action_id=f"deterministic_verify.xss.{candidate_digest}",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else f"deterministic_verify.xss.{candidate_digest}"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
@@ -11867,6 +11928,7 @@ async def _execute_scan_xss_verification_capability(
             "oob_interactsh_token": None,
         },
         scanner_process_runner=_execute_agent_scanner_process,
+        canonical_action=canonical_action,
     )
     return _scan_xss_verification_summary_from_stored(
         stored,
@@ -11979,6 +12041,7 @@ async def _execute_scan_authz_verification_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run one proof-gated read-only BOLA differential under Scan authority."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -12050,7 +12113,8 @@ async def _execute_scan_authz_verification_capability(
             "route_inventory_digest": route_digest,
             "route_count": len(routes),
         },
-        action_id="verify_candidates.authz.verify",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "verify_candidates.authz.verify"),
         target_binding=target,
         reservation_limits={
             "http_requests": 4,
@@ -12059,6 +12123,7 @@ async def _execute_scan_authz_verification_capability(
             ),
         },
         inline_operation=verify,
+        canonical_action=canonical_action,
     )
     return _scan_authz_verification_summary_from_stored(
         stored,
@@ -12193,6 +12258,7 @@ async def _execute_scan_sqli_verification_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run one candidate-bound SQLMap contract under Scan authority."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -12251,7 +12317,8 @@ async def _execute_scan_sqli_verification_capability(
         job_id=job_id,
         capability_name="sqli.verify",
         capability_args=principal.capability_args(),
-        action_id=f"deterministic_verify.sqli.{candidate_digest}",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else f"deterministic_verify.sqli.{candidate_digest}"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
@@ -12268,6 +12335,7 @@ async def _execute_scan_sqli_verification_capability(
             "oob_interactsh_token": None,
         },
         scanner_process_runner=_execute_agent_scanner_process,
+        canonical_action=canonical_action,
     )
     return _scan_sqli_verification_summary_from_stored(
         stored,
@@ -12282,6 +12350,7 @@ async def _execute_scan_template_capability(
     *,
     scan_id: str,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run canonical Nuclei once, outside the compatibility scanner process."""
     _normalized, admission = prepare_worker_dispatch(options)
@@ -12335,7 +12404,8 @@ async def _execute_scan_template_capability(
         job_id=job_id,
         capability_name="templates.scan",
         capability_args=principal.capability_args(),
-        action_id="deterministic_baseline.templates.scan",
+        action_id=(canonical_action.action_id if canonical_action is not None
+                   else "deterministic_baseline.templates.scan"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
@@ -12354,6 +12424,7 @@ async def _execute_scan_template_capability(
             "oob_interactsh_token": None,
         },
         scanner_process_runner=_execute_agent_scanner_process,
+        canonical_action=canonical_action,
     )
     return _scan_template_summary_from_stored(
         stored,
@@ -13012,6 +13083,7 @@ async def _execute_scan_subdomain_discovery(
     scan_id: str,
     *,
     job_id: str,
+    canonical_action: Any | None = None,
 ) -> dict[str, Any]:
     """Run policy-enabled Scan subdomain discovery through the canonical executor."""
     try:
@@ -13063,7 +13135,9 @@ async def _execute_scan_subdomain_discovery(
             job_id=job_id,
             capability_name="subdomains.discover",
             capability_args={"root_domain": root_domain},
-            action_id="discover_surface.subdomains",
+            action_id=(canonical_action.action_id if canonical_action is not None
+                       else "discover_surface.subdomains"),
+            canonical_action=canonical_action,
         )
     )
     return _scan_subdomain_summary_from_stored(

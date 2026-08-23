@@ -22,6 +22,7 @@ from runtime.budget_reservations import DurableBudgetReservation
 from runtime.capability_settlement import terminalize_capability_reservation
 from runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from runtime.reservation_store import StoredBudgetReservation
+from scan.action_plan import ScanAction
 from scan.execution import ScanExecutionPlan
 from scanner_tools.request_replay import ReplayAuthorization, build_replay_plan
 
@@ -1298,6 +1299,104 @@ def test_scan_http_uses_same_reserve_before_request_boundary(monkeypatch):
     }
     assert stored.receipt["observations"][0]["kind"] == "http_observation"
     assert redelivery is False
+
+
+def test_scan_capability_dispatch_is_bound_to_exact_canonical_action(monkeypatch):
+    plan, target, options = _authority(enabled=False, network=False)
+    connection = _Connection(plan)
+    events = []
+    store = _ReservationStore(events)
+    _normalized, admission = worker.prepare_worker_dispatch(options)
+    execution = worker.build_native_scan_execution(plan, options)
+    action = ScanAction(
+        action_id="baseline.http",
+        stage="deterministic_baseline",
+        ordinal=0,
+        capability_name="http.request",
+        capability_args={
+            "method": "GET", "path": "/", "follow_redirects": False,
+        },
+        target_binding_digest=target.digest,
+        input_binding_digest="a" * 64,
+        requested_budget={"http_requests": 1, "tool_wall_seconds": 15},
+        placement={
+            "eligible_backends": ["local", "broker"],
+            "adapter_name": "agent.http_request",
+            "adapter_version": "1",
+        },
+        dependencies=(),
+        required=True,
+        supporting=False,
+        output_schema="http-observation/v1",
+    )
+
+    async def request():
+        return {
+            "ok": True,
+            "request": {
+                "method": "GET",
+                "origin": "https://app.example.test",
+                "path": "/",
+                "pinned_address": "192.0.2.10",
+                "follow_redirects": False,
+            },
+            "response": {"status": 200, "selected_headers": {}},
+            "redirect_chain": [],
+            "hops_followed": 0,
+        }
+
+    monkeypatch.setattr(worker, "db_pool", _Pool(connection))
+    monkeypatch.setattr(worker, "PostgresBudgetReservationStore", lambda: store)
+    monkeypatch.setattr(worker, "_worker_runtime_identity", lambda: "worker:test")
+    monkeypatch.setattr(worker, "_scan_cancel_requested", lambda _scan_id: False)
+
+    stored, redelivery = asyncio.run(worker._execute_reserved_scan_capability(
+        admission=admission,
+        execution=execution,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+        capability_name="http.request",
+        capability_args=action.capability_args,
+        action_id=action.action_id,
+        target_binding=target,
+        reservation_limits={"http_requests": 999, "tool_wall_seconds": 999},
+        inline_operation=request,
+        canonical_action=action,
+    ))
+
+    assert redelivery is False
+    assert dict(stored.record.requested) == dict(action.requested_budget)
+    assert stored.action_digest == action.action_digest
+    assert stored.receipt["input_digest"] == action.action_digest
+
+
+def test_scan_capability_rejects_substituted_canonical_action_before_traffic():
+    plan, target, options = _authority(enabled=False, network=False)
+    _normalized, admission = worker.prepare_worker_dispatch(options)
+    execution = worker.build_native_scan_execution(plan, options)
+    substituted = SimpleNamespace(
+        action_id="another.action",
+        capability_name="http.request",
+        target_binding_digest=target.digest,
+    )
+
+    with pytest.raises(
+        worker.ScanCapabilityContractError,
+        match="canonical Scan action differs",
+    ):
+        asyncio.run(worker._execute_reserved_scan_capability(
+            admission=admission,
+            execution=execution,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            job_id="job-1",
+            capability_name="http.request",
+            capability_args={"method": "GET", "path": "/"},
+            action_id="baseline.http",
+            target_binding=target,
+            reservation_limits={"http_requests": 1, "tool_wall_seconds": 15},
+            inline_operation=lambda: asyncio.sleep(0),
+            canonical_action=substituted,
+        ))
 
 
 def test_fixed_external_scan_tool_rejects_incomplete_reservation_before_process(
