@@ -349,6 +349,10 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         runtime_options, *, private_session_holder, **_kwargs,
     ):
         nonlocal session_calls
+        if _kwargs["lane"] == "secondary":
+            return worker._skipped_scan_auth_session_summary(
+                "no_interactive_secondary"
+            )
         session_calls += 1
         assert runtime_options["login_password"] == login_secret
         private_session_holder["session"] = SimpleNamespace(
@@ -1927,6 +1931,86 @@ def test_interactive_session_never_executes_without_credential_approval(monkeypa
     assert summary["status"] == "blocked"
     assert summary["reason"] == "credential_approval_missing"
     assert summary["durable_budget_settled"] is False
+
+
+def test_secondary_form_session_uses_its_own_reserved_action(monkeypatch):
+    _plan, _target, options = _authority(
+        enabled=True, network=False, approval=True,
+    )
+    options = {
+        **options,
+        "login_url": "/owner/login",
+        "user2_login_url": "/attacker/login",
+        "user2_login_username": "attacker",
+        "user2_login_password": "worker-private-secondary-password",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-2",
+            "profile_version": 4,
+            "auth_kind": "form_login",
+            "principal_slot": "secondary",
+            "scan_lane": "secondary",
+        }],
+    }
+    session = SimpleNamespace(
+        established=True,
+        headers=lambda: {"Cookie": "session=worker-private-secondary"},
+        execution_result=lambda: {
+            "ok": True,
+            "status": "success",
+            "observation": {
+                "kind": "credential_session",
+                "lane": "secondary",
+                "auth_kind": "form_login",
+                "status": "established",
+                "endpoint_path": "/attacker/login",
+                "header_names": ["Cookie"],
+                "cookie_names": ["session"],
+                "secret_values_visible": False,
+            },
+            "budget_consumed": {
+                "http_requests": 2,
+                "tool_wall_seconds": 1,
+            },
+        },
+    )
+    calls = []
+
+    async def establish(credential, *, target):
+        assert target.canonical_host == "app.example.test"
+        assert credential.lane == "secondary"
+        assert credential.endpoint_url == "/attacker/login"
+        return session
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        operation_result = await kwargs["inline_operation"]()
+        return _stored_network_capability(
+            "auth.session.establish",
+            observations=[operation_result["observation"]],
+            amounts={"http_requests": 2, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "establish_target_bound_http_session", establish,
+    )
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    holder = {}
+    summary = asyncio.run(worker._execute_scan_auth_session_capability(
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+        private_session_holder=holder,
+        lane="secondary",
+    ))
+
+    assert calls[0]["action_id"] == (
+        "resolve_inputs.auth.session.establish.secondary"
+    )
+    assert calls[0]["capability_args"]["lane"] == "secondary"
+    assert holder["session"] is session
+    assert summary["status"] == "success"
 
 
 def test_placed_http_tools_bind_primary_credentials_without_public_secrets(

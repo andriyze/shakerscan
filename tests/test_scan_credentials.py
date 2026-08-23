@@ -140,8 +140,45 @@ def test_scan_worker_binding_preserves_custom_headers_and_form_login():
     assert options == {
         "user2_login_username": "operator",
         "user2_login_password": "password",
-        "login_url": "/login",
+        "user2_login_url": "/login",
     }
+
+
+def test_scan_worker_binding_keeps_primary_and_secondary_login_endpoints_distinct():
+    primary = SimpleNamespace(
+        profile=SimpleNamespace(auth_kind="form_login"),
+        interactive_http=lambda: SimpleNamespace(
+            username="owner",
+            secret="owner-password",
+            endpoint_url="/owner/login",
+            client_id=None,
+            scopes=(),
+        ),
+    )
+    secondary = SimpleNamespace(
+        profile=SimpleNamespace(auth_kind="form_login"),
+        interactive_http=lambda: SimpleNamespace(
+            username="attacker",
+            secret="attacker-password",
+            endpoint_url="/attacker/login",
+            client_id=None,
+            scopes=(),
+        ),
+    )
+
+    options = bind_resolved_scan_credential({}, primary, scan_lane="primary")
+    options = bind_resolved_scan_credential(
+        options, secondary, scan_lane="secondary",
+    )
+    secondary_credential = resolve_scan_interactive_credential(
+        options, lane="secondary",
+    )
+
+    assert options["login_url"] == "/owner/login"
+    assert options["user2_login_url"] == "/attacker/login"
+    assert secondary_credential is not None
+    assert secondary_credential.public_endpoint_path == "/attacker/login"
+    assert secondary_credential.capability_args()["lane"] == "secondary"
 
 
 def test_scan_immediate_primary_principal_is_secret_free_and_digest_bound():

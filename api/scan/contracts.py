@@ -43,7 +43,7 @@ SCAN_AUTHENTICATION_KEYS = frozenset({
     "login_url", "login_username", "login_password", "login_extra_fields", "auto_auth",
     "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
     "oauth_username", "oauth_password", "user2_cookies", "user2_header",
-    "user2_login_username", "user2_login_password",
+    "user2_login_url", "user2_login_username", "user2_login_password",
 })
 
 

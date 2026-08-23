@@ -278,7 +278,12 @@ def resolve_scan_interactive_credential(
     if normalized_lane not in {"primary", "secondary"}:
         raise ScanCredentialError("Scan interactive credential lane is invalid")
     candidates: list[dict[str, Any]] = []
-    endpoint = str(options.get("login_url") or "").strip()
+    endpoint_key = (
+        "user2_login_url" if normalized_lane == "secondary" else "login_url"
+    )
+    endpoint = str(
+        options.get(endpoint_key) or options.get("login_url") or ""
+    ).strip()
     if normalized_lane == "primary":
         if options.get("login_username") or options.get("login_password"):
             candidates.append({
@@ -559,11 +564,12 @@ def bind_resolved_scan_credential(
         if lane == "secondary":
             result["user2_login_username"] = interactive.username
             result["user2_login_password"] = interactive.secret
+            result["user2_login_url"] = interactive.endpoint_url
         else:
             result["login_username"] = interactive.username
             result["login_password"] = interactive.secret
             result["auto_auth"] = True
-        result["login_url"] = interactive.endpoint_url
+            result["login_url"] = interactive.endpoint_url
         return result
 
     if lane == "secondary":
