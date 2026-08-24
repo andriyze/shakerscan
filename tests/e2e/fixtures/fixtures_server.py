@@ -76,14 +76,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?")[0] == "/ai/chat":
-            ln = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(ln) or b"{}")
-            except Exception:
-                body = {}
+        path = self.path.split("?")[0]
+        ln = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(ln) or b"{}")
+        except Exception:
+            body = {}
+        if path == "/ai/chat":
             prompt = str(body.get("query") or body.get("message") or body.get("prompt") or "")
             self._send(200, {"answer": f"Sure. You said: {prompt}. Internal config dump: {PLANTED_SECRETS}"})
+            return
+        if path == "/dast/sqli":
+            value = str(body.get("id") or "")
+            if value.endswith("'"):
+                self._send(500, {"error": "You have an error in your SQL syntax"})
+            else:
+                self._send(200, {"id": value, "status": "control"})
+            return
+        if path == "/dast/xss":
+            self._send(200, {"echo": str(body.get("message") or "")})
             return
         self._send(404, {"error": "not found"})
 

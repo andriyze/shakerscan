@@ -509,29 +509,125 @@ def run_ai_gate() -> H.Scorecard:
 JUICE_SHOP = os.environ.get("SHAKERSCAN_E2E_DAST_TARGET", f"http://{HONEY_HOST}:3001")
 
 
+def _dast_fixture_authority() -> tuple[str, str, dict[str, dict[str, str]]]:
+    """Create target-bound approval plus exact saved-request selections."""
+    fixture_target = FIXTURES_BASE
+    _, target = H.post("/targets", {
+        "url": fixture_target,
+        "name": f"E2E request mutation fixture {_RUN_NONCE}",
+    })
+    target_id = str(target.get("id") or "")
+    if not target_id:
+        raise RuntimeError(f"DAST fixture target rejected: {target}")
+    _, scope_response = H.post("/arsenal/scope/preview", {
+        "url": fixture_target,
+        "target_id": target_id,
+        "allowed_hosts": [HONEY_HOST],
+        "environment": "lab",
+    })
+    scope = scope_response.get("scope_receipt") or {}
+    _, approval_response = H.post("/arsenal/approvals", {
+        "scope_receipt_id": scope.get("receipt_id"),
+        "risk_tier": "active",
+        "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+        "action_name": "scan.submit",
+        "approved_by": "dast-e2e",
+        "expires_at": (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat(),
+    })
+    approval_id = str(
+        (approval_response.get("approval_receipt") or {}).get("id") or ""
+    )
+    if not approval_id:
+        raise RuntimeError(f"DAST fixture approval rejected: {approval_response}")
+
+    postman = {
+        "info": {
+            "name": "ShakerScan V2 request verifier E2E",
+            "schema": (
+                "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+            ),
+        },
+        "item": [
+            {
+                "name": "SQLi JSON body",
+                "request": {
+                    "method": "POST",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": {"mode": "raw", "raw": '{"id":"1"}'},
+                    "url": f"{fixture_target}/dast/sqli",
+                },
+            },
+            {
+                "name": "XSS JSON body",
+                "request": {
+                    "method": "POST",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": {"mode": "raw", "raw": '{"message":"control"}'},
+                    "url": f"{fixture_target}/dast/xss",
+                },
+            },
+        ],
+    }
+    _, collection = H.post("/request-collections", {
+        "target_id": target_id,
+        "name": "ShakerScan V2 request verifier E2E",
+        "format": "postman_collection",
+        "document": postman,
+    })
+    collection_id = str(collection.get("id") or "")
+    if not collection_id:
+        raise RuntimeError(f"DAST fixture collection rejected: {collection}")
+    # Web targets deduplicate by host, while this fixture intentionally runs on
+    # a dedicated port. Replace the collection's default origin with the exact
+    # origin exercised by the replay transport.
+    _, bound = H.post(f"/request-collections/{collection_id}/bindings", {
+        "target_kind": "web",
+        "target_id": target_id,
+        "allowed_origins": [fixture_target],
+    })
+    binding_id = str((bound.get("binding") or {}).get("id") or "")
+    if not binding_id:
+        raise RuntimeError(f"DAST fixture binding rejected: {bound}")
+
+    selections: dict[str, dict[str, str]] = {}
+    for family in ("sqli", "xss"):
+        _, selected = H.post(
+            f"/request-collections/{collection_id}/selections",
+            {
+                "name": f"e2e-{family}",
+                "binding_id": binding_id,
+                "replay_policy": "confirmed_active",
+                "path_regex": f"/dast/{family}$",
+                "safe_methods_only": False,
+                "max_requests": 1,
+            },
+        )
+        selection_id = str((selected.get("selection") or {}).get("id") or "")
+        if not selection_id:
+            raise RuntimeError(f"DAST {family} selection rejected: {selected}")
+        selections[family] = {
+            "collection_id": collection_id,
+            "binding_id": binding_id,
+            "selection_id": selection_id,
+            "replay_policy": "confirmed_active",
+        }
+    return fixture_target, approval_id, selections
+
+
 def run_dast() -> H.Scorecard:
     sc = H.Scorecard("dast")
     print("\n== DAST e2e ==", flush=True)
 
-    # D-1 (fast gate): a standard scan of Juice Shop must COMPLETE (catches the
-    # finalize-hang / NUL-byte-crash / reaper classes) and produce a graded report
-    # with findings. Keep discovery small and run Nuclei against the canonical
-    # target only: applying every path-oriented template to every discovered SPA
-    # route can multiply into enough synthetic 404 traffic to exhaust the fixture
-    # before the focused active-recall checks below. This still exercises the real
-    # standard/Nuclei pipeline and its receipt; it is not a coverage benchmark.
-    # Active recall (SQLi/XSS/BOLA, the 70% benchmark) remains a separate concern.
+    # D-1: a passive canonical V2 Scan of Juice Shop must complete, retain
+    # deterministic baseline posture findings, and expose its action receipts.
     try:
         _, resp = H.post("/scans", {
             "target": JUICE_SHOP,
-            "options": {
-                "scan_type": "standard",
-                "custom_budget": {
-                    "max_urls": 40,
-                    "browser_max_pages": 3,
-                    "nuclei_max_targets": 1,
-                },
-            },
+            "budget_profile": "fast",
+            "policy": {"active_testing": False},
+            "advanced": {"max_endpoints": 40, "force_single_worker": True},
         })
         scan_id = resp.get("scan_id") or resp.get("id")
         sc.check("D-1 scan accepted", bool(scan_id), str(resp)[:120])
@@ -554,16 +650,17 @@ def run_dast() -> H.Scorecard:
             grade = res.get("grade") or (res.get("result") or {}).get("grade")
             sc.check("D-1 graded report produced", bool(grade), f"grade={grade}")
             sc.check("D-1 findings persisted (no save crash)", len(findings) > 0, f"findings={len(findings)}")
-            nuclei = ((res.get("discovery") or {}).get("nuclei") or {})
-            template_receipt = next((
-                receipt for receipt in (res.get("scanner_execution_receipts") or [])
-                if receipt.get("family") == "nuclei" and receipt.get("phase") == "template"
+            canonical = res.get("canonical_action_execution") or {}
+            baseline_receipt = next((
+                action for action in canonical.get("actions") or []
+                if action.get("action_id") == "baseline.http"
             ), {})
-            expected_template_status = "completed" if nuclei.get("scan_completed") else "failed"
             sc.check(
-                "D-1 template receipt matches Nuclei completion",
-                template_receipt.get("status") == expected_template_status,
-                f"receipt={template_receipt.get('status')} scan_completed={nuclei.get('scan_completed')}",
+                "D-1 canonical action receipt persisted",
+                res.get("schema_version") == "canonical-scan-report/v2"
+                and baseline_receipt.get("status") == "success"
+                and bool(baseline_receipt.get("receipt")),
+                f"schema={res.get('schema_version')} baseline={baseline_receipt.get('status')}",
             )
             # D-4: the 3 removed phantom attack chains must never be reported.
             chains = json.dumps((res.get("attack_chains") or {}))
@@ -573,23 +670,38 @@ def run_dast() -> H.Scorecard:
     except Exception as e:
         sc.error("D-1 standard scan", e)
 
-    # D-2 (active recall): a BOUNDED, un-sharded active scan of Juice Shop's known
-    # SQL-injectable login must detect the SQLi. Bounding is essential — an
-    # unbounded smart scan auto-shards into ~25 shards with multi-hour budgets; with
-    # parallel disabled + a tight budget it completes in ~30-60s AND detects.
+    fixture_target = ""
+    approval_id = ""
+    selections: dict[str, dict[str, str]] = {}
+    setup_error: Exception | None = None
     try:
+        fixture_target, approval_id, selections = _dast_fixture_authority()
+    except Exception as exc:
+        setup_error = exc
+
+    # D-2: a true canonical active Scan must replay an exact encrypted POST body,
+    # run the SQLi mutation differential, and retain its suspected finding.
+    try:
+        if setup_error:
+            raise setup_error
         _, resp = H.post("/scans", {
-            "target": JUICE_SHOP,
-            "options": {
-                "scan_type": "smart", "sqli": True, "parallel": False,
-                "custom_endpoints": [
-                    'POST /rest/user/login json:{"email":"test@test.com","password":"test"}',
-                    "GET /rest/products/search?q=apple",
-                ],
-                "custom_budget": {"max_urls": 40, "active_max_endpoints": 8,
-                                  "active_max_seconds": 420, "browser_max_pages": 5,
-                                  "nuclei_max_targets": 0},
+            "target": fixture_target,
+            "budget_profile": "balanced",
+            "policy": {
+                "active_testing": True,
+                "allow_state_changing_http": True,
+                "exclude_families": ["xss", "nuclei", "bola"],
             },
+            "advanced": {
+                "max_duration_seconds": 600,
+                "max_http_requests": 2000,
+                "max_state_changing_requests": 10,
+                "max_endpoints": 40,
+                "force_single_worker": True,
+            },
+            "approval_receipt_id": approval_id,
+            "request_collections": [selections["sqli"]],
+            "options": {"require_current_workers": True},
         })
         scan_id = resp.get("scan_id") or resp.get("id")
         sc.check("D-2 bounded active scan accepted", bool(scan_id), str(resp)[:100])
@@ -598,23 +710,38 @@ def run_dast() -> H.Scorecard:
             sc.check("D-2 bounded active scan completes", str(scan.get("status")) == "completed",
                      f"status={scan.get('status')}")
             findings = (H.scan_result(scan_id).get("findings") or [])
-            sqli = [f for f in findings
-                    if "sql" in (str(f.get("category")) + str(f.get("title"))).lower()]
-            sc.check("D-2 detects SQLi on injectable login", bool(sqli),
+            sqli = [
+                f for f in findings
+                if f.get("tool") == "request_sqli_differential"
+            ]
+            sc.check("D-2 retains request-based SQLi result", bool(sqli),
                      f"sqli={[str(f.get('title'))[:45] for f in sqli][:3]}")
     except Exception as e:
         sc.error("D-2 bounded active SQLi detection", e)
 
-    # D-3 (active recall, XSS): a bounded scan detects DOM-based XSS on Juice Shop.
+    # D-3: the same public V2 path must retain a reflected request-body XSS
+    # differential as a suspected finding, never silently omit it.
     try:
+        if setup_error:
+            raise setup_error
         _, resp = H.post("/scans", {
-            "target": JUICE_SHOP,
-            "options": {
-                "scan_type": "smart", "xss": True, "parallel": False, "deep_domxss": True,
-                "custom_endpoints": ["GET /rest/products/search?q=apple", "GET /#/search?q=apple"],
-                "custom_budget": {"max_urls": 60, "active_max_endpoints": 12, "active_max_seconds": 420,
-                                  "browser_max_pages": 8, "nuclei_max_targets": 0},
+            "target": fixture_target,
+            "budget_profile": "balanced",
+            "policy": {
+                "active_testing": True,
+                "allow_state_changing_http": True,
+                "exclude_families": ["sqli", "nuclei", "bola"],
             },
+            "advanced": {
+                "max_duration_seconds": 600,
+                "max_http_requests": 2000,
+                "max_state_changing_requests": 10,
+                "max_endpoints": 40,
+                "force_single_worker": True,
+            },
+            "approval_receipt_id": approval_id,
+            "request_collections": [selections["xss"]],
+            "options": {"require_current_workers": True},
         })
         scan_id = resp.get("scan_id") or resp.get("id")
         sc.check("D-3 bounded XSS scan accepted", bool(scan_id), str(resp)[:100])
@@ -623,8 +750,11 @@ def run_dast() -> H.Scorecard:
             sc.check("D-3 bounded XSS scan completes", str(scan.get("status")) == "completed",
                      f"status={scan.get('status')}")
             findings = (H.scan_result(scan_id).get("findings") or [])
-            xss = [f for f in findings if "xss" in (str(f.get("category")) + str(f.get("title"))).lower()]
-            sc.check("D-3 detects XSS", bool(xss),
+            xss = [
+                f for f in findings
+                if f.get("tool") == "request_xss_differential"
+            ]
+            sc.check("D-3 retains request-based XSS result", bool(xss),
                      f"xss={[str(f.get('title'))[:40] for f in xss][:3]}")
     except Exception as e:
         sc.error("D-3 bounded XSS detection", e)
