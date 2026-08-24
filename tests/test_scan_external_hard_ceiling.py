@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *_args, **_kwargs: None))
@@ -49,3 +51,85 @@ def test_broker_external_process_uses_lease_cancel_file_without_redis(monkeypatc
 
     assert result["status"] == "failed"
     assert str(result["error"]).startswith("contract:")
+
+
+@pytest.mark.parametrize(
+    ("tool", "reservation", "options", "runtime", "method"),
+    [
+        ("httpx", {"http_requests": 1, "tool_wall_seconds": 10}, {}, {}, "exact_request_count"),
+        ("katana", {"http_requests": 3, "tool_wall_seconds": 2}, {}, {}, "rate_time_upper_bound"),
+        (
+            "ffuf", {"http_requests": 3, "tool_wall_seconds": 10}, {},
+            {"ffuf_wordlist": "/tmp/bounded.txt", "ffuf_word_count": 3},
+            "exact_wordlist",
+        ),
+        (
+            "nuclei", {"http_requests": 7, "tool_wall_seconds": 30},
+            {
+                "template_ids": agent_tools._CANONICAL_PASSIVE_NUCLEI_IDS,
+                "template_request_cost_upper_bound": (
+                    agent_tools.canonical_passive_nuclei_request_upper_bound()
+                ),
+            }, {}, "reviewed_template_allowlist",
+        ),
+        ("dalfox", {"http_requests": 11, "tool_wall_seconds": 10}, {}, {}, "rate_time_upper_bound"),
+        (
+            "sqlmap", {"http_requests": 21, "tool_wall_seconds": 20}, {},
+            {"sqlmap_output_dir": "/tmp/shakerscan-wire-sqlmap"},
+            "rate_time_upper_bound",
+        ),
+        ("nmap", {"tcp_ports_attempted": 1, "tool_wall_seconds": 10}, {}, {}, "exact_port_set"),
+        ("naabu", {"tcp_ports_attempted": 200, "tool_wall_seconds": 10}, {}, {}, "port_retry_upper_bound"),
+    ],
+)
+def test_every_external_adapter_has_a_prelaunch_wire_proof(
+    tool, reservation, options, runtime, method,
+):
+    plan = agent_tools.build_enforced_scanner_plan(
+        tool,
+        "http://app.example.test:8080/",
+        options,
+        reserved_budget=reservation,
+        pinned_address="192.0.2.10",
+        pinned_proxy_url=(
+            None if tool in {"nmap", "naabu"}
+            else "socks5://127.0.0.1:41000"
+        ),
+        runtime_paths=runtime,
+    )
+
+    assert plan.budget_proof["method"] == method
+    assert plan.budget_proof["upper_bound"] == plan.hard_budget_dict
+    assert all(
+        amount <= reservation[name]
+        for name, amount in plan.hard_budget_dict.items()
+    )
+    assert plan.timeout_ms <= reservation["tool_wall_seconds"] * 1_000
+
+
+@pytest.mark.parametrize(
+    ("tool", "reservation"),
+    [
+        ("httpx", {"tool_wall_seconds": 10}),
+        ("katana", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("nuclei", {"tool_wall_seconds": 10}),
+        ("dalfox", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("sqlmap", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("nmap", {"tool_wall_seconds": 10}),
+        ("naabu", {"tcp_ports_attempted": 199, "tool_wall_seconds": 10}),
+    ],
+)
+def test_external_adapter_refuses_to_start_below_provable_minimum(tool, reservation):
+    with pytest.raises(agent_tools.AgentToolError):
+        agent_tools.build_enforced_scanner_plan(
+            tool,
+            "http://app.example.test:8080/",
+            {},
+            reserved_budget=reservation,
+            pinned_address="192.0.2.10",
+            pinned_proxy_url=(
+                None if tool in {"nmap", "naabu"}
+                else "socks5://127.0.0.1:41000"
+            ),
+            runtime_paths={"sqlmap_output_dir": "/tmp/sqlmap"},
+        )

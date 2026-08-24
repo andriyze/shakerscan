@@ -61,6 +61,7 @@ PLANTED_TOKENS = ("PLANTEDpw1234", "sk_live_PLANTEDkeyAAAAAAAAAAAA", "PLANTEDcs5
 
 _TRAFFIC_LOCK = threading.Lock()
 _TRAFFIC: list[dict] = []
+_CONNECTIONS = 0
 _PARITY_CONTROL = "shakerscan-parity-fixture-v1"
 
 
@@ -98,9 +99,16 @@ def parity_traffic() -> list[dict]:
         return [dict(item) for item in _TRAFFIC]
 
 
+def parity_connections() -> int:
+    with _TRAFFIC_LOCK:
+        return int(_CONNECTIONS)
+
+
 def reset_parity_traffic() -> None:
+    global _CONNECTIONS
     with _TRAFFIC_LOCK:
         _TRAFFIC.clear()
+        _CONNECTIONS = 0
 
 
 class _Dangerous:
@@ -190,7 +198,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if self.headers.get("X-Parity-Control") != _PARITY_CONTROL:
                 self._send(403, {"error": "forbidden"})
                 return
-            self._send(200, {"traffic": parity_traffic()})
+            # This control request has already opened one connection. Exclude
+            # it so the receipt describes target traffic only.
+            self._send(200, {
+                "traffic": parity_traffic(),
+                "connections": max(0, parity_connections() - 1),
+            })
             return
         _record_traffic(self, "GET")
         if p == "/":
@@ -288,7 +301,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class _ParityHTTPServer(http.server.ThreadingHTTPServer):
+    def get_request(self):
+        global _CONNECTIONS
+        request = super().get_request()
+        with _TRAFFIC_LOCK:
+            _CONNECTIONS += 1
+        return request
+
+
 def start(port: int) -> http.server.ThreadingHTTPServer:
-    srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), _Handler)
+    srv = _ParityHTTPServer(("0.0.0.0", port), _Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv

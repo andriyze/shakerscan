@@ -3,7 +3,7 @@ PY ?= python3
 UV ?= uv
 UVX ?= uvx
 
-.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-api-overlay test \
+.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-scan-parity e2e-wire e2e-api-overlay test \
 	release-gates dependency-lock dependency-audit installer-smoke installed-stack-smoke upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
@@ -46,6 +46,14 @@ e2e-ai-gate:
 
 e2e-dast:
 	$(PY) tests/e2e/run_e2e.py --area dast
+
+## Real local/outbound-broker/parallel semantic parity. Requires a ready Linux broker node.
+e2e-scan-parity:
+	$(PY) tests/e2e/run_scan_parity.py $(SCAN_PARITY_ARGS)
+
+## Run every external adapter from the exact worker image against a counting target.
+e2e-wire:
+	$(PY) tests/e2e/run_external_wire_acceptance.py $(WIRE_ACCEPT_ARGS)
 
 ## Prove the API is a thin derivative of the exact scanner runtime image.
 e2e-api-overlay:

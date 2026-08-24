@@ -56,6 +56,7 @@ def test_parity_fixture_exposes_deterministic_discovery_and_exact_request_surfac
         assert any(item["principal"] == "attacker" for item in traffic)
         assert all("authorization" not in item for item in traffic)
         assert all("body" not in item for item in traffic)
+        assert fixtures_server.parity_connections() >= 1
     finally:
         server.shutdown()
         server.server_close()
