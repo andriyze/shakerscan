@@ -26,6 +26,10 @@ class ActionAuthorityDecision(str, Enum):
 def _value(source: Any, name: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
         return source.get(name, default)
+    try:
+        return source[name]
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass
     return getattr(source, name, default)
 
 

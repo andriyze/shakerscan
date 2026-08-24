@@ -7,6 +7,17 @@ from api.scan.authorization import (
     revalidate_action_authority,
 )
 
+
+class _DatabaseRecord:
+    """Minimal asyncpg.Record-shaped authority row (not a Mapping)."""
+
+    def __init__(self, values):
+        self._values = dict(values)
+
+    def __getitem__(self, name):
+        return self._values[name]
+
+
 def test_privileged_action_dispatch_requires_fresh_scope_and_approval_authority():
     decision = revalidate_action_authority(
         action={"capability_name": "web.active.xss"},
@@ -49,6 +60,20 @@ def test_fresh_target_bound_approval_allows_active_canonical_action():
         target_binding=target,
         scope_receipt=scope,
         approval_receipt=approval,
+        scope_receipt_id="scope-1",
+        approval_receipt_id=approval["id"],
+        now=now,
+    ) is ActionAuthorityDecision.ALLOWED
+
+
+def test_database_record_authority_rows_are_read_at_runtime():
+    now, scope, approval, target = _authority()
+
+    assert revalidate_action_authority(
+        action={"capability_name": "xss.verify"},
+        target_binding=target,
+        scope_receipt=_DatabaseRecord(scope),
+        approval_receipt=_DatabaseRecord(approval),
         scope_receipt_id="scope-1",
         approval_receipt_id=approval["id"],
         now=now,
