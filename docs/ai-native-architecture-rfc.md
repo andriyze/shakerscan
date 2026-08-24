@@ -2,6 +2,8 @@
 
 The normative deterministic-Scan traffic classification is recorded in
 [ADR 0001: Scan traffic risk classes](decisions/0001-scan-traffic-risk-classes.md).
+The immutable post-discovery planning model is recorded in
+[ADR 0002: Bounded Scan continuation amendments](decisions/0002-bounded-scan-continuation-amendments.md).
 
 **Status:** implemented; legacy web/device Hunt engines quarantined for migration reads and cancellation
 **Plan date:** 2026-08-19
