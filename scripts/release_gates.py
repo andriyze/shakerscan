@@ -106,6 +106,25 @@ GATES: dict[str, tuple[str, ...]] = {
         "tests/test_benchmark_rescore.py::test_verified_bola_gate_rejects_unvalidated_principals",
         "tests/test_benchmark_rescore.py::test_scorecard_blocks_bola_followup_until_second_principal_observed",
     ),
+    "test:v2-fault-injection": (
+        "tests/test_scan_fault_injection.py",
+        "tests/test_scan_action_resume.py",
+    ),
+    "test:v2-security-invariants": (
+        "tests/test_scan_security_invariants.py",
+        "tests/test_scan_action_plan.py",
+        "tests/test_scan_job_contract.py",
+        "tests/test_scan_authorization_revalidation.py",
+        "tests/test_scan_target_transport_gate.py",
+        "tests/test_external_process_budget.py",
+        "tests/test_scan_finalizer.py",
+    ),
+    "test:v2-detection-parity": (
+        "tests/test_scan_detection_parity.py",
+        "tests/test_scan_local_broker_parity.py",
+        "tests/test_scan_explanation.py",
+        "tests/test_scan_work_manifests.py",
+    ),
 }
 
 

@@ -177,6 +177,9 @@ jobs:
             tests/test_scan_action_store.py \
             tests/test_scan_capability_result.py \
             tests/test_scan_orchestrator.py \
+            tests/test_scan_fault_injection.py \
+            tests/test_scan_detection_parity.py \
+            tests/test_scan_security_invariants.py \
             tests/test_worker_action_executor.py \
             tests/test_scan_authorization_revalidation.py \
             tests/test_scan_finalizer.py \

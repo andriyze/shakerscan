@@ -22,6 +22,9 @@ EXPECTED_GATES = {
     "test:scanner-registry-coverage",
     "test:scanner-bounds",
     "test:scanner-auth-quality",
+    "test:v2-fault-injection",
+    "test:v2-security-invariants",
+    "test:v2-detection-parity",
 }
 
 
