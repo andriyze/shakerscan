@@ -101,10 +101,16 @@ except (ImportError, ModuleNotFoundError):
 
 try:
     from scanner_tools.common import run_streaming
-    from scanner_tools.request_replay import bind_replay_credential_headers
+    from scanner_tools.request_replay import (
+        ReplayPlan,
+        bind_replay_credential_headers,
+    )
 except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.common import run_streaming
-    from scanner.scanner_tools.request_replay import bind_replay_credential_headers
+    from scanner.scanner_tools.request_replay import (
+        ReplayPlan,
+        bind_replay_credential_headers,
+    )
 
 from .action_plan import ScanAction, ScanActionPlan
 from .capability_execution import (
@@ -133,6 +139,9 @@ from .work_manifests import (
 
 ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
 Cancelled = Callable[[], bool]
+PrivateReplayPlanLoader = Callable[
+    [ScanAction, Mapping[str, Any]], Awaitable[ReplayPlan | None]
+]
 
 
 class ObservationBackend(Protocol):
@@ -167,6 +176,7 @@ class DatabaseNeutralScanActionDispatcher:
         process_runner: ScannerProcessRunner,
         cancelled: Cancelled,
         private_inputs: BrokerPrivateScanInputs | None = None,
+        private_replay_plan_loader: PrivateReplayPlanLoader | None = None,
     ) -> None:
         if not isinstance(plan, ScanActionPlan) or target.digest != plan.target_binding_digest:
             raise ScanActionAdapterError("action dispatcher authority is inconsistent")
@@ -191,6 +201,7 @@ class DatabaseNeutralScanActionDispatcher:
         self.backend = backend
         self.process_runner = process_runner
         self.cancelled = cancelled
+        self._private_replay_plan_loader = private_replay_plan_loader
         self._private_replay_plans = dict(
             private_inputs.replay_plans if private_inputs is not None else {}
         )
@@ -198,6 +209,17 @@ class DatabaseNeutralScanActionDispatcher:
         # action actually succeeds.  Preloading them would let a dependent
         # verifier run after a failed or skipped collection action.
         self._private_requests: dict[str, Any] = {}
+
+    async def _private_replay_plan(
+        self, action: ScanAction,
+    ) -> ReplayPlan | None:
+        plan = self._private_replay_plans.get(action.action_id)
+        if plan is not None or self._private_replay_plan_loader is None:
+            return plan
+        plan = await self._private_replay_plan_loader(action, self.options)
+        if plan is not None:
+            self._private_replay_plans[action.action_id] = plan
+        return plan
 
     def _receipt(
         self,
@@ -300,7 +322,7 @@ class DatabaseNeutralScanActionDispatcher:
                 self.options, lane=lane,
             ).authenticated
         if action.action_id.startswith("inputs.collection_"):
-            plan = self._private_replay_plans.get(action.action_id)
+            plan = await self._private_replay_plan(action)
             if plan is None:
                 return False
             principal = resolve_scan_http_principal(
@@ -674,7 +696,7 @@ class DatabaseNeutralScanActionDispatcher:
     async def _collection_replay(
         self, action: ScanAction, heartbeat: ActionHeartbeat,
     ) -> CapabilityReceipt:
-        plan = self._private_replay_plans.get(action.action_id)
+        plan = await self._private_replay_plan(action)
         if plan is None:
             return self._skip(action, "private_request_unavailable")
         if any(

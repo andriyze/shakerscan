@@ -116,6 +116,7 @@ class Backend:
 
 def _dispatcher(
     plan, backend, *, target=TARGET, policy=None, private_inputs=None,
+    private_replay_plan_loader=None,
 ):
     async def process_runner(*_args, **_kwargs):
         raise AssertionError("process runner must not be used")
@@ -133,6 +134,7 @@ def _dispatcher(
         process_runner=process_runner,
         cancelled=lambda: False,
         private_inputs=private_inputs,
+        private_replay_plan_loader=private_replay_plan_loader,
     )
 
 
@@ -339,6 +341,69 @@ def test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(mon
     ))
     assert resumed_mutation.status == "success"
     assert len(sent) == 2
+
+
+def test_database_neutral_dispatcher_lazily_loads_local_private_replay(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    replay_plan = build_replay_plan(
+        [{
+            "id": "local-private-request",
+            "method": "GET",
+            "url": "https://app.example.test/api/items",
+            "headers": {},
+            "body": None,
+            "body_mode": "none",
+            "auth_type": "none",
+            "has_sensitive_material": False,
+        }],
+        allowed_origins=TARGET.allowed_origins,
+        default_origin=TARGET.allowed_origins[0],
+        authorization=ReplayAuthorization(),
+    )
+    collection = _action(
+        "inputs.collection_00", "collections.replay_safe", 0,
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+    loaded = []
+
+    async def loader(action, options):
+        loaded.append((action.action_id, dict(options)))
+        return replay_plan
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=b'{"ok":true}',
+                elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module,
+        "PinnedAiohttpReplayTransport",
+        Transport,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(),
+        private_replay_plan_loader=loader,
+    )
+
+    receipt = asyncio.run(dispatcher(
+        collection, _lease(plan, collection), _noop,
+    ))
+
+    assert receipt.status == "success"
+    assert receipt.budget_consumed["http_requests"] == 1
+    assert loaded == [(collection.action_id, {})]
 
 
 def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():

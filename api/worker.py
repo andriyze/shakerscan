@@ -14146,6 +14146,44 @@ async def _execute_reserved_deterministic_scan(
         worker_id=worker_id,
         backend_name="local",
     )
+
+    async def load_private_replay_plan(
+        action: ScanAction, runtime_options: Mapping[str, Any],
+    ) -> Any | None:
+        raw_reference = action.capability_args.get("request_manifest_ref")
+        if not isinstance(raw_reference, Mapping):
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} has no request manifest"
+            )
+        try:
+            reference = ScanWorkManifestReference.from_dict(raw_reference)
+        except ScanWorkManifestError as exc:
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} has an invalid request manifest"
+            ) from exc
+        if reference.kind is not ScanWorkManifestKind.REQUEST:
+            raise ScanCapabilityContractError(
+                f"Scan action {action.action_id} has the wrong request manifest kind"
+            )
+        manifest = await backend.load_work_manifest(action.action_id, reference)
+        loaded: dict[str, Any] = {}
+        summary = await _execute_scan_request_collections(
+            runtime_options,
+            scan_id,
+            job_id=job_id,
+            runtime_request_grant=runtime_request_grant,
+            trusted_primary_headers=resolve_scan_http_principal(
+                runtime_options, lane="primary",
+            ).headers(),
+            canonical_action=action,
+            canonical_request_manifest=manifest,
+            private_replay_plan_holder=loaded,
+            restore_only=True,
+        )
+        if summary.get("status") not in {"success", "restored"}:
+            return None
+        return loaded.get(action.action_id)
+
     dispatcher = DatabaseNeutralScanActionDispatcher(
         target_url=target,
         options=normalized,
@@ -14158,6 +14196,7 @@ async def _execute_reserved_deterministic_scan(
         backend=backend,
         process_runner=_execute_agent_scanner_process,
         cancelled=lambda: _scan_cancel_requested(scan_id),
+        private_replay_plan_loader=load_private_replay_plan,
     )
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
@@ -14899,6 +14938,7 @@ async def _execute_scan_request_collections(
     canonical_action: Any | None = None,
     canonical_request_manifest: ScanWorkManifest | None = None,
     private_request_holder: dict[str, Any] | None = None,
+    private_replay_plan_holder: dict[str, Any] | None = None,
     restore_only: bool = False,
 ) -> dict[str, Any]:
     """Execute saved Scan selections through the canonical exact replay executor."""
@@ -15303,6 +15343,22 @@ async def _execute_scan_request_collections(
                 options=persisted_options,
                 trusted_primary_headers=trusted_primary_headers,
             )
+        if private_replay_plan_holder is not None:
+            if canonical_action is None:
+                raise ScanCollectionReplayContractError(
+                    "private replay plan loading requires canonical action authority"
+                )
+            previous_plan = private_replay_plan_holder.get(
+                canonical_action.action_id
+            )
+            if (
+                previous_plan is not None
+                and previous_plan.input_digest != plan.input_digest
+            ):
+                raise ScanCollectionReplayContractError(
+                    "private replay plan changed during canonical loading"
+                )
+            private_replay_plan_holder[canonical_action.action_id] = plan
         if private_request_holder is not None:
             for private_request in plan.requests:
                 existing = private_request_holder.get(private_request.request_id)
