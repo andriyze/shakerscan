@@ -68,15 +68,16 @@ Return a `custom_endpoints` block in the exact ShakerScan format:
 ]
 ```
 
-Also include a ready scan payload:
+Also include a ready deterministic Scan payload. Route seeds do not change execution authority:
 
 ```bash
 curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://example.com",
+    "budget_profile": "balanced",
+    "policy": {"active_testing": false},
     "options": {
-      "scan_type": "smart",
       "custom_endpoints": [
         "GET /api/users?id=1"
       ]

@@ -78,7 +78,7 @@ Always return:
    - API and spec candidates
    - confidence and rationale
 2. A `custom_list` block that can be saved as a path list for ffuf or a similar tool.
-3. A `custom_endpoints` block when the discovered paths are good candidates for ShakerScan smart scans.
+3. A `custom_endpoints` block when the discovered paths are good deterministic Scan seeds.
 4. One ready `curl` example for ShakerScan and one ready `ffuf` example.
 
 ## Rules

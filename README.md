@@ -479,8 +479,8 @@ scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
 backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
 scan <target> [options]       Submit the deterministic DAST Scan
-scan-full <target>            Compatibility alias for `scan --type full`
-scan-smart <target>           Compatibility alias for `scan --type smart`
+scan-full <target>            Deprecated: thorough + active compatibility translation
+scan-smart <target>           Deprecated: thorough + active compatibility translation
 doctor | install-deps         Diagnose or install local prerequisites
 env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
@@ -495,8 +495,9 @@ shell                         Open a shell in the scanner container
 
 Run `shakerscan` or `./scanner.sh` without arguments for current options and examples. `reset` is
 destructive. Run `shakerscan scan --help` for the canonical `--budget-profile` and
-`--active-testing` controls. `--type` and explicit execution/sharding flags remain compatibility and
-advanced-debug inputs during migration.
+`--active-testing` controls. The old `--type`, `scan-full`, and `scan-smart` inputs emit structured
+deprecation warnings, translate at the request boundary, and sunset on 2026-12-31; they never select
+a second engine. Explicit execution/sharding flags remain advanced placement inputs.
 
 ## REST API
 

@@ -80,7 +80,7 @@ Always return:
    - libraries and framework versions
    - secrets or sensitive metadata
    - confidence and gaps
-2. A machine-usable `custom_endpoints` block for ShakerScan smart scans.
+2. A machine-usable `custom_endpoints` block for deterministic Scan route seeding.
 3. A ready `curl` example for `/scans` using those `custom_endpoints`.
 4. If the output contains path-like strings suitable for directory or file fuzzing, include a short `custom_list` block for the content-discovery skill.
 

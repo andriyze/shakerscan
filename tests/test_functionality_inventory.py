@@ -26,8 +26,8 @@ def test_generated_capability_inventory_is_current():
 def test_functionality_reference_covers_every_product_surface():
     text = DOC.read_text(encoding="utf-8")
     required = (
-        "## 3. DAST",
-        "## 9. Scaling DAST",
+        "## 3. DAST — one Scan, policy, and budgets",
+        "## 9. Scaling DAST: parallel scanning and Continuous ASM",
         "## 10. Attack-surface management",
         "## 11. AI red teaming",
         "Evidence instances and exports",
@@ -38,12 +38,12 @@ def test_functionality_reference_covers_every_product_surface():
         "### Public REST Operations",
         "### Check-Family Registry",
         "### Command Arsenal",
-        "### Scanner CLI Flags",
+        "### Internal Compatibility Scanner Flags",
         "### Wrapper Commands, Make Targets, And Release Gates",
         "### Runtime Environment-Key Inventory",
         "### UI Pages",
         "### Skills, Slash Commands, And Subagents",
-        "### Scanner Module Inventory",
+        "### Internal Compatibility Scanner Module Inventory",
         "### Durable Storage Inventory",
     )
     assert [item for item in required if item not in text] == []

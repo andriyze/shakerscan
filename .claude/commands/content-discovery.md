@@ -15,6 +15,6 @@ Build a high-signal route and file discovery plan for a target using ShakerScan 
 5. Return:
    - a concise markdown report
    - a `custom_list` block for ffuf or similar tooling
-   - a `custom_endpoints` block for ShakerScan smart scans when applicable
+   - a `custom_endpoints` block for deterministic Scan route seeding when applicable
    - one ready `ffuf` example and one ready ShakerScan `curl`
 6. Keep the markdown checklist from the skill updated. Do not move on until every checklist item is complete.

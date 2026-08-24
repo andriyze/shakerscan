@@ -1,104 +1,67 @@
-# Scan a target
+# Submit the deterministic Scan
 
-Run a security scan on the specified target.
+Submit ShakerScan's single deterministic Web/API security workflow. Resource profiles are hard
+ceilings; active testing is an explicit permission, not a scan type.
 
 **Usage**: `/scan <target_url>`
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls and
+`UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote host, use the URLs
+printed by `./scanner.sh status`.
 
-1. First check if the scanner is running:
+1. Check scanner and worker health:
+
    ```bash
    curl -s "$API_BASE/health"
+   curl -s "$API_BASE/workers"
    ```
-   If not running, ask user if they want to start it with `./scanner.sh start`
 
-2. Submit a **quick** scan (default):
+   If the scanner is not running, ask whether to start it with `./scanner.sh start`. Do not measure
+   scan quality on a build-stale fleet.
+
+2. Choose `fast`, `balanced`, or `thorough` ceilings. Passive `balanced` is the default:
+
    ```bash
    curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
-     -d '{"target": "$ARGUMENTS", "options": {"scan_type": "quick"}}'
+     -d '{
+       "target": "$ARGUMENTS",
+       "budget_profile": "balanced",
+       "policy": {"active_testing": false}
+     }'
    ```
 
-3. Extract the `scan_id` from response
+3. Before enabling `active_testing`, confirm the user owns or is explicitly authorized to test the
+   exact target. State-changing HTTP, network discovery, and encrypted credential profiles also
+   require the matching target-bound approval receipt. Never put raw credentials in the request:
 
-4. Report the scan ID and UI link, then STOP:
+   ```bash
+   curl -X POST "$API_BASE/scans" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "target": "https://example.com",
+       "budget_profile": "thorough",
+       "policy": {
+         "active_testing": true,
+         "include_families": ["xss", "sqli"]
+       },
+       "approval_receipt_id": "TARGET_BOUND_APPROVAL_UUID"
+     }'
    ```
+
+   Read `GET /scan/contracts` for the server-advertised family vocabulary and advanced ceiling
+   bounds. Known endpoints belong in `options.custom_endpoints`; saved traffic and authentication
+   are referenced by opaque collection/profile IDs.
+
+4. Report the returned scan ID and UI link, then stop:
+
+   ```text
    Scan submitted: {scan_id}
    View progress: ${UI_BASE}/scans/{scan_id}
    ```
 
-**Important**: Do NOT poll or wait for completion - scans can take minutes to hours. Users can check results via UI or ask later.
-
-5. When user asks for results later, fetch and report the rich data:
-
-   The API returns a `result` object with detailed scan data:
-   - `result.http.csp_evaluation` - CSP grade, score, issues, directives
-   - `result.http.security_headers` - HSTS, X-Frame-Options, Referrer-Policy, etc.
-   - `result.tls.certificate` - subject, issuer, days_remaining, key_size, key_algo
-   - `result.discovery.tech.items` - detected technologies with versions and confidence
-   - `result.dns` - A, AAAA, MX, SPF, DMARC, DNSSEC records
-
-6. Format output like the example below
-
-## Scan Types
-
-| Type | Option | Time | Description |
-|------|--------|------|-------------|
-| quick | `"scan_type": "quick"` | 1-2 min | DNS, TLS, headers (default) |
-| standard | `"scan_type": "standard"` | 5-10 min | + Nuclei, JS deps |
-| deep | `"scan_type": "deep"` | 30-60 min | + port scan, discovery |
-| full | `"scan_type": "full"` | 1-2 hrs | + active XSS/SQLi |
-| aggressive | `"scan_type": "aggressive"` | 2+ hrs | maximum coverage |
-| smart | `"scan_type": "smart"` | Variable | adaptive discovery, active XSS/SQLi, verification, and attack chains |
-
-**Note**: `full`, `aggressive`, and `smart` require explicit user permission (active testing).
-
-## Example Output
-
-```
-Scanning https://example.com...
-
-✓ Scan completed in 1m 23s
-
-┌─────────────────────────────────────┐
-│  Grade: C    Score: 72/100          │
-└─────────────────────────────────────┘
-
-📋 SUMMARY
-├─ TLS: Let's Encrypt R3, expires in 45 days, RSA 4096-bit
-├─ CSP: Grade D (64/100) - 3 issues
-├─ HSTS: ✓  X-Frame-Options: ✓  Referrer-Policy: ✓
-└─ Tech: React 18, Django, Python
-
-⚠️  CSP Issues:
-  • script-src allows 'unsafe-inline'
-  • script-src allows 'unsafe-eval'
-
-🔍 Findings (12 total):
-  • 0 Critical, 0 High, 3 Medium, 4 Low, 5 Info
-
-Top Issues:
-1. [Medium] CSP: script-src allows 'unsafe-inline'
-2. [Medium] CSP: script-src allows 'unsafe-eval'
-3. [Low] OCSP stapling not detected
-
-📊 View full report: ${UI_BASE}/scans/{scan_id}
-```
-
-## Data Extraction
-
-```bash
-# Get CSP details
-curl -s "$API_BASE/scans/{id}" | jq '.result.http.csp_evaluation'
-
-# Get security headers
-curl -s "$API_BASE/scans/{id}" | jq '.result.http.security_headers'
-
-# Get TLS cert info
-curl -s "$API_BASE/scans/{id}" | jq '.result.tls.certificate'
-
-# Get tech stack
-curl -s "$API_BASE/scans/{id}" | jq '.result.discovery.tech.items'
-```
+Do not poll or wait for completion. When the user asks later, read `/scans/{id}` and
+`/scans/{id}/result`. Treat suspected candidates separately from deterministic verified findings,
+and report coverage/budget gaps rather than implying that unattempted checks passed.

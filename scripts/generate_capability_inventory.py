@@ -341,6 +341,9 @@ def render() -> str:
     pages = ui_pages()
     skill_rows = skills()
     slash = markdown_surfaces(ROOT / ".claude" / "commands", "command")
+    deprecated_slash_names = {"scan-full", "scan-smart"}
+    canonical_slash = [row for row in slash if row["name"] not in deprecated_slash_names]
+    compatibility_slash = [row for row in slash if row["name"] in deprecated_slash_names]
     subagents = markdown_surfaces(ROOT / ".claude" / "agents", "agent")
     modules = scanner_modules()
     tables = durable_tables()
@@ -360,16 +363,17 @@ def render() -> str:
             ["Command Arsenal commands", len(commands), "`api/command_arsenal.py`"],
             ["Tool adapters", len(adapters), "`api/command_arsenal.py`"],
             ["Local-agent adapters", len(agents), "`api/command_arsenal.py`"],
-            ["Scanner CLI flags", len(flags), "`scanner/scanner.py`"],
+            ["Internal compatibility scanner flags", len(flags), "`scanner/scanner.py`"],
             ["Canonical scanner wrapper commands", len(wrapper_commands), "`scanner.sh`"],
             ["Deprecated wrapper aliases", len(compatibility_wrapper_commands), "`scanner.sh`"],
             ["Make targets", len(make), "`Makefile`"],
             ["Release gates", len(gates), "`scripts/release_gates.py`"],
             ["Runtime environment keys", len(env), "Python sources + Compose manifests"],
-            ["Scanner modules", len(modules), "`scanner/scanner_tools/`"],
+            ["Internal compatibility scanner modules", len(modules), "`scanner/scanner_tools/`"],
             ["UI pages", len(pages), "`ui/src/app/`"],
             ["Skills", len(skill_rows), "`skills/`"],
-            ["Slash commands", len(slash), "`.claude/commands/`"],
+            ["Canonical slash commands", len(canonical_slash), "`.claude/commands/`"],
+            ["Deprecated Scan-name slash shims", len(compatibility_slash), "`.claude/commands/`"],
             ["Specialized subagents", len(subagents), "`.claude/agents/`"],
             ["Durable tables", len(tables), "`db/init.sql` + migrations"],
         ]),
@@ -404,7 +408,12 @@ def render() -> str:
             for row in agents
         ]),
         "",
-        "### Scanner CLI Flags",
+        "### Internal Compatibility Scanner Flags",
+        "",
+        "These parser flags inventory the private compatibility scanner surface. They are not the",
+        "public Scan contract, must not receive secrets directly from V2 clients, and cannot grant",
+        "execution authority. Public clients use `GET /scan/contracts` plus `/scans` policy, budget,",
+        "opaque profile, and collection-reference fields.",
         "",
         *table(["Flag", "Choices", "Purpose"], [
             [code(row["flag"]), ", ".join(map(str, row["choices"] or ())) or "-", row["help"]]
@@ -434,11 +443,19 @@ def render() -> str:
         "",
         *table(["Skill", "Purpose", "Source"], [[code(row["name"]), row["description"], code(row["source"])] for row in skill_rows]),
         "",
-        *table(["Slash command", "Title", "Purpose", "Source"], [[code('/' + row["name"]), row["title"], row["description"], code(row["source"])] for row in slash]),
+        *table(["Canonical slash command", "Title", "Purpose", "Source"], [[code('/' + row["name"]), row["title"], row["description"], code(row["source"])] for row in canonical_slash]),
+        "",
+        "Deprecated Scan-name shims (sunset 2026-12-31):",
+        "",
+        *table(["Compatibility slash command", "Title", "Purpose", "Source"], [[code('/' + row["name"]), row["title"], row["description"], code(row["source"])] for row in compatibility_slash]),
         "",
         *table(["Subagent", "Model", "Purpose", "Source"], [[code(row["name"]), row["model"] or "unspecified", row["description"], code(row["source"])] for row in subagents]),
         "",
-        "### Scanner Module Inventory",
+        "### Internal Compatibility Scanner Module Inventory",
+        "",
+        "Implementation modules below are inventory only. The immutable action graph and canonical",
+        "capability registry define execution authority; module presence does not advertise a public",
+        "Scan feature or a second orchestration engine.",
         "",
         ", ".join(code(name) for name in modules),
         "",

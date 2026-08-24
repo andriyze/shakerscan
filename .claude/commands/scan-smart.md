@@ -1,157 +1,35 @@
-# Smart Adaptive Scan
+# Deprecated Smart command compatibility
 
-Run an intelligent adaptive security scan that adjusts based on findings.
+`/scan-smart` is a temporary compatibility shim. It does not select an adaptive scanner engine.
+It translates to the deterministic Scan with `thorough` ceilings and active-testing permission.
+Sunset: **2026-12-31**. Adaptive strategy belongs to `/deep-hunt` (Hunt), not Scan.
 
-**Usage**: `/scan-smart <target_url> [options]`
+**Usage**: `/scan-smart <target_url>`
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+1. Confirm that the user owns or is explicitly authorized to actively test the exact target.
+2. Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` and
+   `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}`, or the URLs printed by
+   `./scanner.sh status`.
+3. Submit the canonical translation:
 
-1. **IMPORTANT**: First ask user for confirmation:
-   "This will run a SMART scan which includes active vulnerability testing (XSS, SQLi probes). Do you have permission to test this target? (yes/no)"
-
-2. Only proceed if user confirms with "yes"
-
-3. Check if scanner is running:
-   ```bash
-   curl -s "$API_BASE/health"
-   ```
-
-4. If the user asks for pre-scan route seeding, JS route analysis, or custom endpoint coverage, run these helpers before the scan and feed their output into the payload:
-   - `/js-analyze <target>` to build `custom_endpoints` from JS bundles and captured APIs
-   - `/content-discovery <target>` to expand with `custom_list`, route seeds, and additional `custom_endpoints`
-
-   Either or both can be used; if both, run `/js-analyze` first so content-discovery can build on its output.
-
-   Example:
    ```bash
    curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
+     -H "X-ShakerScan-CLI-Compatibility: scan-smart" \
      -d '{
-       "target": "https://example.com",
-       "options": {
-         "scan_type": "smart",
-         "custom_endpoints": [
-           "GET /api/users?id=1",
-           "POST /graphql json:{\"query\":\"query Health { health }\"}"
-         ]
-       }
+       "target": "$ARGUMENTS",
+       "budget_profile": "thorough",
+       "policy": {"active_testing": true}
      }'
    ```
 
-5. Submit **smart** scan:
-   ```bash
-   curl -X POST "$API_BASE/scans" \
-     -H "Content-Type: application/json" \
-     -d '{"target": "$ARGUMENTS", "options": {"scan_type": "smart"}}'
-   ```
+   Optional route seeds go in `options.custom_endpoints`; encrypted authentication and saved
+   request collections are referenced only by opaque IDs. Never send raw tokens, cookies, or
+   planner-supplied command arguments.
 
-6. Report scan ID and UI link, then STOP:
-   ```
-   Smart scan submitted: {scan_id}
-   View progress: ${UI_BASE}/scans/{scan_id}
-   ```
+4. Report the scan ID and `${UI_BASE}/scans/{scan_id}`, then stop. Do not poll.
 
-**Important**: Do NOT poll or wait - smart scans adapt dynamically and can take variable time.
-
-## What Smart Scan Does
-
-- **Staged Nuclei scanning** (4 waves based on tech + signals)
-- **Early stopping** when high-confidence findings detected
-- **DBMS fingerprinting** (SQLite, MySQL, PostgreSQL, MSSQL, Oracle)
-- **Context-aware XSS** (detects reflection context)
-- **DOM XSS static analysis** (source-to-sink flow detection)
-- **Adaptive rate limiting** (backs off on 429/503)
-- **Attack chain analysis** (correlates findings into exploitable paths)
-
-## Common Options
-
-### With Authentication
-```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_header": "Bearer eyJhbGciOiJIUzI1NiIs..."
-    }
-  }'
-```
-
-### Dual Auth for BOLA/IDOR Testing
-```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_header": "Bearer user1_token",
-      "user2_header": "Bearer user2_token"
-    }
-  }'
-```
-
-### Focused SQLi-only
-```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "sqli": true,
-      "auth_header": "Bearer token"
-    }
-  }'
-```
-
-### Focused XSS-only
-```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "xss": true
-    }
-  }'
-```
-
-### Thorough Mode (No Early Stop)
-```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "no_early_stop": true,
-      "thorough_params": true
-    }
-  }'
-```
-
-## Authentication Options
-
-| Option | Description |
-|--------|-------------|
-| `auth_header` | Authorization header (e.g., "Bearer token") |
-| `auth_cookies` | Session cookies (e.g., "session=abc; token=xyz") |
-| `auth_headers_json` | Custom headers as JSON object |
-| `user2_header` | Second user auth for BOLA testing |
-| `user2_cookies` | Second user cookies for BOLA testing |
-
-## Tuning Options
-
-| Option | Description |
-|--------|-------------|
-| `xss` | Run only XSS checks |
-| `sqli` | Run only SQLi checks |
-| `no_early_stop` | Disable yield-based early stopping; this increases coverage but does not guarantee every vulnerability is found |
-| `thorough_params` | Test more parameters (100×10 vs 50×5) |
-| `deep_domxss` | Deep DOM XSS analysis |
-| `custom_endpoints` | Array of specific endpoints to test |
+The compatibility name is telemetry only: it must never enter the queued job, immutable plan, or
+report as execution authority.

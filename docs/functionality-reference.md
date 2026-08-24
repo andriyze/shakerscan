@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-08-15
+**Reconciled:** 2026-08-24
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -22,8 +22,8 @@ product's functionality end to end.
 
 1. [What ShakerScan is](#1-what-shakerscan-is)
 2. [System architecture](#2-system-architecture)
-3. [DAST — scan types and coverage budgets](#3-dast--scan-types-and-coverage-budgets)
-4. [DAST — the scan pipeline (phases)](#4-dast--the-scan-pipeline-phases)
+3. [DAST — one Scan, policy, and budgets](#3-dast--one-scan-policy-and-budgets)
+4. [DAST — immutable action plans and continuation](#4-dast--immutable-action-plans-and-continuation)
 5. [DAST — discovery and reconnaissance](#5-dast--discovery-and-reconnaissance)
 6. [DAST — vulnerability checks](#6-dast--vulnerability-checks)
 7. [DAST — authentication support](#7-dast--authentication-support)
@@ -61,6 +61,12 @@ It covers two complementary pillars:
   and RAG/MCP boundary failures. A separate **Model Intake** capability statically vets model
   artifacts before deployment.
 
+The runtime boundary is simpler than the feature catalog: **Scan** is the one deterministic DAST
+workflow; **Hunt** is the one adaptive AI-directed investigation workflow. Hunt may choose among
+server-advertised semantic capabilities, but ShakerScan—not model output—owns target scope,
+approval, credential custody, budgets, placement, execution, evidence, recovery, and proof
+promotion.
+
 Both pillars write into one shared findings store and one exposure graph, so DAST and AI results are
 triaged, filtered, and reported through the same workflow.
 
@@ -72,35 +78,33 @@ device-owned Web/API children without creating Web targets or changing ordinary 
 
 ## 2. System architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Web UI (:3000)  — Next.js dashboard                           │
-└──────────────────────────────────────────────────────────────┘
-                              │
-┌──────────────────────────────────────────────────────────────┐
-│  API server (:8080) — FastAPI + asyncpg + Redis                │
-│  background loops: stale_scan_checker, schedule_runner,        │
-│  asm_dispatcher                                                │
-└──────────────────────────────────────────────────────────────┘
-        │ Redis Stream enqueue / consumer lease   ▲ findings, scans
-        ▼                                          │ (dedup at DB)
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Worker 1    │  │  Worker 2    │  │  Worker N    │  (1–20, leased Stream loop)
-│  → scanner   │  │  → scanner   │  │  → scanner   │  subprocess per job
-└──────────────┘  └──────────────┘  └──────────────┘
-        │                 │                 │
-        ▼                 ▼                 ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  PostgreSQL  │  │    Redis     │  │  Artifacts   │
-│ (persistent) │  │ queue/leases │  │ local or S3  │
-└──────────────┘  └──────────────┘  └──────────────┘
+```text
+UI / CLI / agent
+        │  one Scan request: target + policy + budget + opaque references
+        ▼
+API admission
+        │  freezes target, scope, approvals, inputs, execution-plan digest
+        ▼
+immutable root action plan ── bounded continuation amendment after discovery
+        │
+        ▼
+shared action orchestrator
+        ├── local worker backend
+        ├── outbound-only broker backend
+        └── partitioned parallel child authority
+        │
+        ▼
+semantic capability adapters ── receipts / observations / budget settlement
+        │
+        ▼
+offline deterministic finalizer ── findings / coverage / grade reliability
 ```
 
 **Components**
 
-- **API server** (`api/api.py`): FastAPI app over an asyncpg PostgreSQL pool and Redis. Serves the
-  full REST surface (scans, findings, targets, AI Gate, model intake, sessions, ASM, schedules,
-  workers, exposure graph). Its lifespan starts six background asyncio loops:
+- **API server** (`api/api.py`): admits the canonical request, freezes target and input authority,
+  compiles and persists the content-addressed action plan, and serves the full product REST surface.
+  Its background loops maintain schedules, ASM, retention, and Model Intake workflows.
   - `stale_scan_checker` — fails scans stuck beyond `MAX_SCAN_DURATION`.
   - `schedule_runner` — fires due recurring schedules and recomputes their next run.
   - `asm_dispatcher` — for each ASM-enabled target, picks **one** safe next action (recon vs. test
@@ -108,107 +112,103 @@ device-owned Web/API children without creating Web targets or changing ordinary 
   - `research_autopilot_runner` — advances bounded compatibility research episodes.
   - `scan_artifact_retention_runner` — enforces configured scan-artifact retention.
   - `model_intake_automatic_review_runner` — advances durable automatic Model Intake reviews.
-- **Workers** (`api/worker.py`): each worker is a stateless process leasing Redis Stream messages
-  from the scan, retest, broker-ingest, and qualified placement queues, processing one job to completion and spawning
-  the scanner as a subprocess. Job types: `scan` (standard), `scan_plan`/`scan_shard`/`scan_merge`
-  (parallel), `discovery` (subdomains), `finding_retest` (verification), and `exploit_batch` (ASM).
-- **Scanner engine** (`scanner/scanner.py` → `build_report()`): the DAST orchestrator. Runs the scan
-  phases, invokes the 70+ specialized modules in `scanner/scanner_tools/`, and emits the result JSON.
+- **Canonical Scan runtime** (`api/scan/`): the action compiler, allocator, durable action store,
+  shared orchestrator, local/broker execution backends, continuation amendment, private manifest
+  transport, and pure finalizer. This is the V2 execution authority.
+- **Workers** (`api/worker.py`, `api/broker_worker.py`): lease only admitted jobs/actions. They resolve
+  secrets late, revalidate scope and approval immediately before privileged work, reserve typed
+  budget, execute one registered capability adapter, and settle a content-safe receipt.
+- **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
+  implementations behind registered adapters. Its historical phase waterfall and mode flags are not
+  V2 orchestration authority and must not be used to add a new Scan engine.
 - **PostgreSQL** (`db/init.sql`): durable storage for scans, findings, targets, schedules, AI
   targets/credentials/principals, scan campaigns, the ASM endpoint inventory, attempt ledger, and
   discovery runs. Findings are de-duplicated at the DB with `UNIQUE(target_id, fingerprint)`, which
   makes concurrent writes from many workers against one target race-safe.
-- **Redis**: job queue plus coordination keys (barrier counters, rate-token buckets, endpoint leases,
-  cancel flags, circuit breakers).
+- **Redis**: delivery and coordination, never durable Scan authority. Canonical plan, action, receipt,
+  observation, and budget state remains in PostgreSQL/object storage and survives redelivery.
 - **Session manager** (`api/session_manager.py`): headless Playwright browser sessions for
   interactive AI security testing.
 - **Gungnir worker** (`api/gungnir_worker.py`): Certificate Transparency log monitor.
 
-**Worker scaling.** Workers are identical Docker replicas scaled 1–20 through the Docker socket
-(`POST /workers`, `./scanner.sh scale N`). `N workers = N parallel scans`. Each worker uses roughly
-1–2 CPU cores and 2–4 GB RAM during active scans.
+**Worker scaling.** Placement changes where an immutable action executes, not what it means. Local,
+broker, and parallel execution consume the same action schema, capability registry, budget ledger,
+proof contracts, and finalizer. A broker worker does not receive PostgreSQL or Redis credentials.
 
 ---
 
-## 3. DAST — scan types and coverage budgets
+## 3. DAST — one Scan, policy, and budgets
 
-Two orthogonal dials control DAST:
+V2 has exactly one deterministic engine: `scan`. Three independent inputs shape a run:
 
-- **Scan type** controls **what** runs (which modules/phases are enabled).
-- **Coverage budget** controls **how hard** it runs (depth/time/limits).
+- **Policy** grants permission: passive-only versus active testing, state-changing HTTP, network or
+  subdomain discovery, and family include/exclude constraints.
+- **Budget profile** selects hard ceilings: `fast`, `balanced`, or `thorough`.
+- **Opaque references** select exact-target credential profiles and request-collection selections.
 
-### Scan types
+The typed budget covers duration, HTTP requests, state-changing requests, endpoints, hosts, browser
+actions, TCP attempts, tool wall time, and workers. A custom value may only lower the selected
+profile. `max_state_changing_requests=0` is an explicit deny ceiling. Every action reserves its
+multi-dimensional hold before execution and reconciles consumed, released, or uncertain authority
+afterward; unused profile capacity remains visibly unallocated.
 
-Validated set (`scanner/constants.py` `SCAN_BUDGET_DEFAULTS`): `quick`, `standard`, `deep`, `full`,
-`aggressive`, `smart`.
+The server-generated `GET /scan/contracts` manifest is the public vocabulary for the UI and CLI.
+The canonical action compiler currently implements `recon`, `nuclei`, `xss`, `sqli`, and `bola`.
+An unsupported registry family is rejected rather than accepted as a successful no-op. Explicit
+XSS, SQLi, or BOLA inclusion requires active permission; BOLA additionally requires two distinct
+credential profiles whose scopes allow `authz.verify`.
 
-| Type | Typical time | What it does |
-|------|--------------|--------------|
-| **quick** | 1–2 min | DNS, TLS cert, HTTP headers, basic tech detection |
-| **standard** | 5–10 min | + Nuclei (safe), cookies, CORS, JS deps (no port scan by default) |
-| **deep** | 30–60 min | + full Nuclei, top-1000 port scan, JS secrets |
-| **full** | 1–2 hrs | + active XSS/SQLi, WebSocket, auth/session/file-upload/redirect/CSRF/API tests |
-| **aggressive** | 2+ hrs | + aggressive exploits, full 65535-port scan, threat intel, extended fuzzing |
-| **smart** | variable | Adaptive: staged Nuclei, DBMS-aware SQLi, context-aware XSS, attack chains, early stop |
+### Deprecated compatibility inputs
 
-`full`, `aggressive`, and `smart` include active probing and must only be run against authorized
-targets. `full` advanced probes (SSRF/command injection) only run with a non-safe exploit level and
-parameterized endpoints.
-
-### Coverage budgets
-
-Profiles: `fast`, `balanced` (default), `thorough`, `exhaustive`. Scan type controls which modules
-run; the budget controls their depth/time. Prefer `budget_profile` over switching scan types when you
-just want more or less depth.
-
-`custom_budget` overrides individual knobs, capped at generous `SCAN_BUDGET_CEILINGS` (e.g.
-`active_max_endpoints` up to 10000, `max_urls` up to 100000, `active_max_seconds` up to 24h). Common
-knobs: `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`,
-`active_max_endpoints`, `active_params_per_endpoint`, `smart_bola_max_endpoints`, `dom_xss_max_files`,
-`sqli_extract_max`, `oob_max_findings`, `active_worklist_max`, `request_max`,
-`param_discovery_url_limit`, `param_discovery_max_params`, and `phase4_max_seconds`.
-
-The **smart** scan applies its own adaptive budget matrix (`SMART_SCAN_BUDGETS`) and supports
-`no_early_stop` + `thorough_params` shortcuts. See
-[`docs/SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) for the current operator policy. Superseded
-phase-by-phase implementation notes remain available in Git history and are not a current
-source-location map.
+Historical `quick`, `standard`, `deep`, `full`, `aggressive`, and `smart` names are request-boundary
+translations only. They never become an execution identity, plan field, worker mode, or queue
+authority. The compatibility bridge translates them once to a V2 budget/policy request, emits a
+deprecation receipt, and sunsets on **2026-12-31**. New UI, API, CLI, skills, and agent flows must use
+`scan` with explicit policy and budget fields.
 
 ---
 
-## 4. DAST — the scan pipeline (phases)
+## 4. DAST — immutable action plans and continuation
 
-`build_report()` runs as a phased waterfall. Tasks within a phase run concurrently (async I/O), but
-phases have hard barriers because downstream stages depend on discovery output and early signals.
+Admission creates a content-addressed `scan-action-plan/v1` DAG. Every action records its semantic
+capability, dependencies, target/input digests, requested budget, placement requirements, output
+schema, and required/supporting classification. Capability arguments cannot carry secret fields,
+shell commands, or planner-supplied argv.
 
-1. **Baseline infrastructure** — DNS (A/AAAA/MX/SPF/DMARC/DKIM/DNSSEC/CAA), TLS/cert analysis,
-   HTTP security headers, HTTP/2-3 support, `security.txt`, virtual-host enumeration, tech
-   fingerprinting, WAF detection, optional light port scan.
-2. **Discovery** (hard barrier — produces the work-list) — crawl + content discovery + browser
-   capture + JS analysis + API endpoint discovery. Everything downstream needs the harvested
-   `crawl_urls` / endpoint work-list.
-3. **Nuclei** — template-based vulnerability scanning. In smart mode this is **staged into four
-   waves** (~60s/120s/300s/480s budgets) with yield-driven early stopping; signals from early waves
-   steer later active testing.
-4. **Passive checks** — cookies, CORS, security posture, info disclosure.
-5. **Client-side checks** — JS dependency/secret scanning, DOM-XSS static analysis.
-6. **Infrastructure-leak checks** — exposed files, backups, CI/CD config, cloud buckets, default
-   creds, directory listing.
-7. **Active web checks (Phase 4)** — file upload, open redirect, host-header injection, CSRF,
-   business logic, WebSocket, generic API security sweep.
-8. **Smart active checks (Phase 5)** — context-aware XSS and DBMS-aware SQLi over prioritized
-   endpoint slices; BOLA/IDOR multi-user comparison.
-9. **Verification phase** — high/critical findings get browser proofs, SQLi timing analysis, OOB
-   callbacks, and BOLA differential-auth confirmation.
-10. **Attack-chain + AI correlation** — runs once over the full finding set.
-11. **Report assembly** — coverage merge, score/grade, result JSON.
+The root plan closes deterministic prerequisites in this order:
+
+1. restore or establish any selected authenticated session;
+2. run bounded HTTP/DNS/TLS baseline actions;
+3. probe, crawl, discover content, and optionally discover subdomains/services;
+4. consume exact saved request selections through safe or confirmed-active replay capabilities;
+5. run the reviewed passive template pack;
+6. run policy-enabled deterministic XSS, SQLi, template, and cross-principal verifiers;
+7. finalize from persisted receipts and observations without target network authority.
+
+Discovery can reveal work that did not exist at admission. V2 handles that through one bounded
+two-phase continuation, not a mutable plan: the root plan pre-commits a continuation allocation
+ceiling; discovery produces content-addressed endpoint/candidate/request/template manifests; the
+server appends a second digest-bound plan revision whose parent digest, family set, target,
+credentials, collections, approvals, and total budget cannot expand. Duplicate authority and more
+than 512 total actions fail closed.
+
+The durable amendment chain stores root, parent, continuation, discovery-result, allocation, work-
+manifest, and revision digests. Completed terminal actions are reused after a restart. Cancellation
+remains distinct and never launches continuation. Safe partial receipts remain available after a
+timeout, while uncertain reservations stay visibly uncertain rather than being silently released.
 
 ---
 
 ## 5. DAST — discovery and reconnaissance
 
-The scanner's `scanner_tools/` directory holds 70+ specialized modules. Key discovery/recon
-capabilities:
+The canonical graph uses `web.probe`, `web.crawl`, `web.content_discover`, `subdomains.discover`,
+`ports.discover`, and `service.fingerprint`. All targets receive the bounded web probe; the `recon`
+family controls additional crawl/content breadth, and network/subdomain actions require their
+separate policy permission. Output is normalized into one content-addressed endpoint manifest.
+
+The compatibility `scanner_tools/` directory supplies migrated adapter implementations and richer
+observations behind those registered capabilities. Its module inventory does not imply that every
+module is enabled in every V2 plan. Available discovery/recon implementations include:
 
 **DNS & domain** (`discovery.py`, `dns_enhanced.py`): A/AAAA/MX/TXT/NS/SOA/CAA records; SPF/DMARC/DKIM
 enumeration; DNSSEC validation; zone-transfer attempts; virtual-host enumeration.
@@ -235,8 +235,8 @@ directives.
 
 **WAF detection**: response-pattern fingerprinting of the protecting WAF product.
 
-**Port scanning** (`nmap.py`): top-N ports (light scan in smart mode) up to full 65535-port scans in
-aggressive mode, with service/version detection.
+**Port scanning** (`nmap.py`): bounded TCP discovery and service/version detection under explicit
+network permission and the plan's TCP/host/tool-time ceilings.
 
 **Subdomain enumeration**: `subfinder` (passive), `gungnir` (CT logs), and crt.sh — see
 [§10](#10-attack-surface-management-discovery-ct-monitoring-schedules).
@@ -253,13 +253,22 @@ typosquatting/lookalike-domain generation and resolution; WHOIS/RDAP domain age,
 analysis; certificate-transparency posture; ASN/hosting-provider/prefix/geography/multihoming facts;
 HIBP/GitHub-oriented breach and credential-leak checks; and third-party resource/vendor risk.
 
-Discovery toggles available in scan `options`: `json_link_following`, `options_method_discovery`,
-`grpc_discovery`, plus `custom_endpoints`, `custom_wordlist`, `custom_sqli_payloads`, and
-`custom_xss_payloads` for extension.
+Known endpoints and exact request selections can seed discovery. Saved selections remain target-
+bound and content-addressed; `discovery_only` contributes safe route facts without replay,
+`safe_reads` executes only read-only requests, and `confirmed_active` requires active permission,
+state-changing authority, and a target-bound approval receipt. Arbitrary custom payload/shell input
+is not part of the canonical Scan contract.
 
 ---
 
 ## 6. DAST — vulnerability checks
+
+V2 exposes only checks backed by a registered semantic capability and deterministic output/evidence
+contract. The current Scan family surface is intentionally narrower than the historical module
+inventory: passive reviewed templates plus bounded XSS, SQLi, and two-principal BOLA verification.
+The modules below describe available detector implementations; modules not yet wired to the
+canonical action graph remain compatibility/internal implementation surface, not advertised Scan
+coverage.
 
 ### Active injection
 
@@ -303,7 +312,7 @@ Race conditions (`race_condition_tests.py`) for checkout, coupons, balance, vote
 
 ### Template & infra
 
-Nuclei template checks (`nuclei.py`, wave-staged in smart mode); infrastructure-leak checks
+Nuclei template checks (`nuclei.py`, with a reviewed read-only passive pack); infrastructure-leak checks
 (`infrastructure_checks.py`) for CI/CD config, cloud buckets, registries, k8s/terraform artifacts;
 critical checks (`critical_checks.py`) for default creds, directory listing, and verbose error pages.
 
@@ -315,8 +324,9 @@ backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage e
 OpenAPI schemas can be supplied explicitly or discovered and exercised through Schemathesis. The
 scanner records schema/test errors as evidence rather than treating process exit as proof.
 
-**Focused active filters** are available in `options`: `xss: true` runs only XSS active checks;
-`sqli: true` runs only SQLi.
+Canonical focus uses `policy.include_families` / `policy.exclude_families`. The old `xss: true` and
+`sqli: true` booleans are compatibility inputs only and must not be added to new UI, CLI, skill, or
+agent flows.
 
 For OWASP-mapped coverage and intentional gaps, see [`docs/owasp-coverage-matrix.md`](owasp-coverage-matrix.md).
 
@@ -324,17 +334,24 @@ For OWASP-mapped coverage and intentional gaps, see [`docs/owasp-coverage-matrix
 
 ## 7. DAST — authentication support
 
-Auth is propagated to the Playwright crawl, Nuclei, Dalfox, SQLmap, and custom checks; long scans
-re-authenticate when sessions expire (`auth_session.py`, `form_login.py`, `oauth_auth.py`).
+Authentication is resolved late per action. A credential is never globally inherited by every tool:
+the worker checks the profile's semantic `allowed_capabilities` against the exact capability about
+to execute. Static identities can authorize capabilities such as `http.request`, `web.crawl`,
+`templates.scan`, `collections.replay_safe`, `xss.verify`, `sqli.verify`, or `authz.verify`.
+Interactive form/OAuth profiles must additionally authorize `auth.session.establish`.
 
 Canonical Scan submission accepts up to two `credential_profile_ids`, bound to the exact Web/API
-target. Profiles hold bearer tokens, cookies, custom headers, basic auth, or interactive login/OAuth
-material in the encrypted credential store. `primary`/`service` selects the first identity and
-`secondary` selects the differential identity. Profiles may explicitly allow `scan.execute`.
+target. Profiles hold authorization headers, bearer tokens, API-key headers, cookies, custom
+headers, basic auth, or interactive form/OAuth material in the encrypted credential store.
+`primary`/`service` selects the first identity and `secondary` selects the differential identity.
+`scan.execute` is accepted only as a deprecated compatibility scope; new profiles should use
+semantic capability names. Query-parameter credentials are not admitted to generic Scan because
+they require exact request-replay authority.
 
-OAuth 2.0/OIDC (client-credentials and auth-code grants, refresh handling, optional TOTP) is
-supported. The scanner tracks `auth_state` per request (`anonymous` / `user1` / `user2`) so coverage
-is counted separately per identity.
+Worker-private form login, OAuth client credentials, and OAuth password exchange are supported.
+Sealed private session checkpoints preserve resumability without plaintext secrets at rest. Session
+headers remain bound to the profile version, action, target, and lane; a resumed action must
+re-establish or restore that exact authority.
 
 Principal and benchmark receipts distinguish configured contexts, redacted identity fingerprints,
 server-observed accepted authentication, family attempts, and cross-principal proof. A verified
@@ -351,9 +368,16 @@ explicitly deprecated raw-auth migration bridge and sunsets on 31 December 2026.
 
 ## 8. DAST — scoring, attack chains, coverage, and reports
 
-**Scoring & grading** (`scanner/grading.py`): findings are scored on a CVSS-style scale by
-vulnerability type with context modifiers (auth/payment/admin endpoints raise severity; static/dev
-endpoints lower it) and exploit-maturity bonuses. The scan returns:
+`scan.finalize` is an offline-only semantic capability. It receives zero target-traffic authority and
+builds the report exclusively from the immutable plan/revision chain, terminal action results,
+receipts, observation manifests, and private-work manifest references. The same evidence bundle can
+be rebuilt with `scanner.sh report-rebuild` while outbound sockets are disabled; mismatched plan,
+result, revision, or observation digests fail closed.
+
+**Scoring & grading** (`scanner/grading.py`): evidence-backed findings are scored on a CVSS-style
+scale with context and exploit-maturity modifiers. AI notes and suspected candidates cannot promote
+a finding to verified. Required failed/blocked/partial actions and active verifiers with candidates
+but zero attempts make the grade provisional. The scan returns:
 
 - `score`: 0–100 (higher is better)
 - `grade`: A / B / C / D / F
@@ -372,9 +396,11 @@ business impact. The nine implemented chain types (`CHAIN_TEMPLATES`) are
 `weak_jwt_to_impersonation`, `xxe_to_data_exfil`, and `deserialization_to_rce`.
 Partial chains can be surfaced with `include_partial_attack_chains: true`.
 
-**Coverage tracking** (`coverage_tracker.py`, `completion_status.py`): `result.smart_coverage` reports
-endpoints/parameters/templates discovered vs tested, by method and parameter location, plus discovery
-sources and auth states tested.
+**Coverage tracking**: `/scans/{id}/actions`, `/capabilities`, and `/coverage` expose the plan digest,
+revision/continuation digests, stage timeline, per-action placement/status/reason, observation count,
+required versus optional gaps, and allocated/reserved/consumed/released/uncertain/unallocated budget.
+Legacy detector coverage fields may remain in historical results, but they are not the V2 execution
+authority.
 
 **Compliance mapping** (`compliance_mapper.py`): OWASP Top 10, CWE, PCI DSS, SOC 2, HIPAA, GDPR, CIS
 Controls, control evidence requirements, business impact, remediation priority, and a GRC evidence
@@ -382,7 +408,7 @@ matrix. These are evidence mappings, not certification claims.
 
 **Rich result object** (`result.*`): `http.csp_evaluation`, `http.security_headers`,
 `tls.certificate`, `tls.ocsp`, `dns`, `discovery.tech.items`, `discovery.browser_api_endpoints`,
-`discovery.browser_crawl`, `discovery.waf_detection`, `attack_chains`, `smart_coverage`, and — when AI
+`discovery.browser_crawl`, `discovery.waf_detection`, `attack_chains`, canonical action execution, and — when AI
 is enabled — `ai_correlations` and `ai_logs.summary.cross_finding_correlations`. SARIF 2.1 output,
 fingerprinted baselines, known-finding suppression, and severity-count quality gates are available
 through the scanner CLI; the UI offers PDF export.
@@ -397,37 +423,33 @@ over time."
 
 ### Parallel scanning
 
-One logical scan can fan out across the worker fleet via a durable **parent → placed discovery →
-fan-out barrier → shard → merge** model on the Redis queue (`api/parallel_scan.py`, worker job types
-`scan_plan`/`scan_shard`/`scan_merge`). Discovery is an ordinary placed job, so a broker-only target
-is never probed accidentally from the control plane. The complete child set is committed before any
-queue handoff and merge is blocked until that exact set is terminal. Findings dedupe automatically at
-the DB; attack-chain/AI correlation runs once at merge.
+Parallelism partitions immutable action authority; it does not invoke a second orchestration engine.
+The parent first commits a canonical discovery/root plan, then partitions content-addressed endpoint,
+candidate, template, credential, and exact-request manifests into child action plans. Every child is
+bound to the parent execution-plan/target/plan digests and receives only its assigned request IDs and
+aggregate budget share. The parent aggregate reservation is authoritative, so children cannot each
+spend the full profile ceiling.
 
-Strategies (`options.shard_strategy`):
+The same shared orchestrator executes local, broker, and parallel actions. Outbound-only broker
+workers receive lease-scoped sealed private inputs and have no PostgreSQL/Redis credentials. Secrets
+are decrypted only by the executing child after target, profile version, approval, capability, and
+lease validation. Redelivery reuses terminal actions; duplicate completion is fenced by lease and
+result digests.
 
-| Strategy | Behavior |
-|----------|----------|
-| `auto` | scope when ≥2 `custom_endpoints` are present; otherwise coverage for Smart/Full/Aggressive active scans |
-| `scope` | partition `custom_endpoints` across shards — genuine speed-up for APIs |
-| `family` | broad + deeper SQLi-focused + XSS-focused shards (capped at 3) — more depth |
-| `coverage` | discover once, harvest a bounded endpoint worklist, partition it across auto-sized shards, and run a complete capability-preserving backbone concurrently (UI: **Full Coverage**) |
-| `coverage_family` | advanced: coverage × broad/SQLi/XSS lanes; explicit focused requests such as BOLA/Auth stay single-family |
+Placement and partition choices remain policy data:
 
-Full Coverage uses **self-contained endpoint shards**. Each queue payload carries its own immutable
-endpoint slice, so local and outbound-only broker workers execute the same contract without control-
-plane database access. `coverage_allocation=dynamic` is accepted for compatibility but resolves to
-this broker-safe mode. Endpoint shards run in zero-rediscovery mode while the concurrent backbone
-retains browser, DOM-XSS, posture, and global Smart-scan capabilities. `coverage_per_shard_cap`
-controls slice size. Discovery runs as a separately placed, durable, three-minute passive job; a
-failed discovery fails the parent rather than silently fanning out empty endpoint shards.
+| Choice | V2 meaning |
+|---|---|
+| `auto` | Server selects a compatible placement/partition within `max_workers` |
+| `scope` | Partition an immutable known-endpoint/request manifest |
+| `family` | Partition supported family action authority without changing capability semantics |
+| `coverage` | Discover once, then partition the bounded canonical endpoint manifest |
+| `coverage_family` | Cross the bounded endpoint and supported-family partitions |
 
-The parent appears as one row on the Scans page; discovery and shard rows are hidden unless internal
-rows are explicitly requested. Parent progress is stage-based and monotonic. A failed, cancelled, or
-partial shard produces `technical_outcome: INCOMPLETE`, an unreliable grade marker, and a deployment
-decision that requires review. The merged report retains per-shard node/worker identity, timing,
-skipped-check context, and scanner execution receipts. Worklist caps and incomplete assignments stay
-visible; Full Coverage does not claim that every possible application endpoint was discovered.
+The parent is the user-visible Scan. Child/discovery rows are internal unless explicitly requested.
+Any missing, failed, cancelled, or uncertain required child makes the merged coverage incomplete and
+the grade unreliable. The report retains per-action backend/worker/attempt/receipt provenance and
+never claims that undiscovered endpoints were tested.
 
 Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
@@ -599,12 +621,17 @@ UPnP and DNS-SD metadata, refuse to follow cross-host descriptor locations, and 
 
 ## 11. AI red teaming
 
-The AI side has four capabilities:
+The AI side has five capabilities:
 
-1. **AI Gate** — probe-driven runtime testing of chat, RAG, agent, MCP, and widget surfaces.
-2. **Model Intake** — static artifact and supply-chain vetting before deployment.
-3. **AI Security Sessions** — interactive browser/session testing with separate user contexts.
-4. **AI-assisted analysis** — correlation, explanation, and retest planning for DAST findings.
+1. **Hunt** — the shared adaptive investigation runtime for Web, API, network, and device targets.
+   The current coding-agent session owns strategy; the server advertises semantic capabilities and
+   enforces every call's scope, approval, risk, typed budget, placement, credentials, evidence, and
+   deterministic proof contract. Device Hunt is a target-kind/policy-filtered use of this runtime,
+   not a target-specific planning engine. Historical Deep Hunt/device-agent URLs redirect to Hunt.
+2. **AI Gate** — probe-driven runtime testing of chat, RAG, agent, MCP, and widget surfaces.
+3. **Model Intake** — static artifact and supply-chain vetting before deployment.
+4. **AI Security Sessions** — interactive browser/session testing with separate user contexts.
+5. **AI-assisted analysis** — correlation, explanation, and retest planning for DAST findings.
 
 **Design principle.** AI may help judge, correlate, and explain, but verified security decisions must
 be backed by deterministic, cryptographic, parser-backed, protocol-backed, or replay-backed evidence.
@@ -814,8 +841,8 @@ exploitation blocks any downgrade.
 ### 11.5 AI Operations Router
 
 `POST /ai/ops/route` maps natural-language DAST/ASM requests to concrete API calls with **dry-run
-defaults**. It recognizes unqualified scans (Quick by default), all six exact DAST scan types,
-"run full coverage", "keep this target covered" (enable ASM with a safe preset), "what is still
+defaults**. It recognizes the deterministic Scan plus dated legacy-name compatibility translations,
+"run parallel coverage", "keep this target covered" (enable ASM with a safe preset), "what is still
 untested?" (ASM gaps), "spend more budget on APIs", and focused SQLi/XSS/BOLA requests. Active,
 state-changing, or budget-increasing intents stay dry-run unless
 `execute=true` and the explicit confirmations are all present. Standard installs enable the server
@@ -858,8 +885,8 @@ The target APIs return `origins` ordered by recent DAST use. Hunt binds the targ
 origins at creation; capability calls cannot replace that destination. Model Intake subjects retain exact artifact/revision identity in the Model Intake evidence model;
 they do not appear in the normal web-target inventory.
 
-Natural-language routing treats an unqualified “scan” as DAST, named scan types as compatibility
-budget/policy mappings, “Deep Hunt” as Hunt, “verify this finding” as deterministic retest/verification, and manual
+Natural-language routing treats an unqualified “scan” as the deterministic Scan, historical mode
+names as compatibility budget/policy mappings, “Deep Hunt” as Hunt, “verify this finding” as deterministic retest/verification, and manual
 browser work as Interactive Testing. See [`product-model.md`](product-model.md).
 
 ### 11.7 Test scenario catalog and Honey demo
@@ -1320,20 +1347,20 @@ clear (`/`), and ASM inventory prune (`/asm`).
 
 ### Scanner CLI
 
-`scanner/scanner.py` supports direct quick/standard/deep/full/aggressive/smart execution, focused
-XSS/SQLi/family modes, public-only collection, explicit endpoints/files/OpenAPI schemas, browser and
-discovery controls, complete/threat-intel/exposure bundles, one- and two-user auth, OAuth and login
-flows, custom dictionaries, OOB callbacks, coverage budgets, compliance output, SARIF, baselines,
-quality gates, subdomain and Nuclei-only modes, tool health checks, and internal zero-rediscovery/
-focused-child execution. Every current flag and help string is generated in §17.
+`scanner.sh scan` is the canonical client. It submits `scan-start/v2`, loads the server contract,
+accepts budget/policy/family/credential/collection/placement/advanced-ceiling inputs, supports
+automation-safe `--json`, and never accepts raw reusable secrets. It prints the Scan ID and UI link
+and exits without polling. `scan-full`, `scan-smart`, and `scan --type ...` are warning-emitting
+translations only; they sunset on 2026-12-31 and their legacy name is sent only in a telemetry header,
+never in the payload or queue.
 
-`scanner.sh` is the operational wrapper for service lifecycle, health/doctor checks, scaling, logs,
-builds, dependency installation, direct scan submission, agent/MCP launch, bounded host-side Codex
-research-episode driving, Gungnir, environment
-inspection, and container shells. The Make targets provide stable end-to-end and release-gate entry
-points. Their complete current command names, release-gate names, and every explicit runtime
-environment key referenced by Python or Compose are generated in §17; values are intentionally
-never read into documentation.
+`scanner/scanner.py` and its large flag inventory are compatibility/internal detector implementation
+surface. They remain generated in §17 so maintainers can audit migration risk, but users and agents
+must not treat those flags as separate V2 engines or trusted capability input.
+
+The remaining `scanner.sh` commands operate service lifecycle, status/doctor, scaling, logs, builds,
+offline report rebuild, agent/MCP launch, Fleet, Model Intake runner, Gungnir, environment inspection,
+backup, and containers. §17 separates canonical wrapper commands from deprecated aliases.
 
 ### Skills, slash commands, and specialized agents
 
@@ -1352,9 +1379,11 @@ never read into documentation.
 - `review-skills`: audits skills, commands, and subagents for broken references, unsafe prompts, and
   missing gates or output contracts.
 
-The slash-command layer provides scan, smart/full scan, AI Gate, interactive session, finding list/
+The slash-command layer provides canonical Scan, Hunt, AI Gate, interactive session, finding list/
 save, subdomain, worker, status, JS analysis, content discovery, bounded research, and skill-review
-workflows. Three specialized Claude subagents back JS analysis, content discovery, and skill review.
+workflows. Historical smart/full command files are compatibility shims that translate to explicit
+Scan policy/budget input and carry the same 2026-12-31 sunset. Three specialized Claude subagents
+back JS analysis, content discovery, and skill review.
 The product also
 catalogs Codex, Claude Code, OpenCode, and Hermes local-agent capabilities. The Codex research runner
 can submit one schema-constrained decision at a time, but only the API policy controller can dispatch
@@ -1382,16 +1411,17 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
-| Scanner CLI flags | 161 | `scanner/scanner.py` |
+| Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
 | Canonical scanner wrapper commands | 27 | `scanner.sh` |
 | Deprecated wrapper aliases | 2 | `scanner.sh` |
 | Make targets | 16 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 354 | Python sources + Compose manifests |
-| Scanner modules | 118 | `scanner/scanner_tools/` |
+| Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
-| Slash commands | 15 | `.claude/commands/` |
+| Canonical slash commands | 13 | `.claude/commands/` |
+| Deprecated Scan-name slash shims | 2 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
 | Durable tables | 94 | `db/init.sql` + migrations |
 
@@ -1897,7 +1927,12 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `hermes` | Hermes | False | True | True | 64000 | 16000 |
 | `opencode` | OpenCode | True | True | True | 120000 | 32000 |
 
-### Scanner CLI Flags
+### Internal Compatibility Scanner Flags
+
+These parser flags inventory the private compatibility scanner surface. They are not the
+public Scan contract, must not receive secrets directly from V2 clients, and cannot grant
+execution authority. Public clients use `GET /scan/contracts` plus `/scans` policy, budget,
+opaque profile, and collection-reference fields.
 
 | Flag | Choices | Purpose |
 |---|---|---|
@@ -2491,7 +2526,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `review-skills` | Review ShakerScan skills, commands, and subagents for broken references, invalid Claude Code configuration, prompt anti-patterns, missing hard gates, missing outputs, and weak operational guidance. Use when asked to audit, review, or quality-check the skill system itself. | `skills/review-skills/SKILL.md` |
 | `shakerscan` | Operate ShakerScan. Route deterministic assessment to one budgeted Scan, adaptive investigation of web or device targets to Hunt, and manual browser work to Interactive Testing; also manage targets, Continuous ASM, findings, AI Gate, Model Intake, evidence, schedules, workers, and fleets. | `skills/shakerscan/SKILL.md` |
 
-| Slash command | Title | Purpose | Source |
+| Canonical slash command | Title | Purpose | Source |
 |---|---|---|---|
 | `/ai-gate` | AI Gate | Create/list AI Gate targets and queue AI safety scans. | `.claude/commands/ai-gate.md` |
 | `/ai-security-session` | Interactive Testing | Drive an authorized Interactive Testing browser workflow with the compatibility-named `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
@@ -2502,12 +2537,17 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/research` | Hunt compatibility command | Use the `research-agent` skill. | `.claude/commands/research.md` |
 | `/review-skills` | Review Skills | Review all ShakerScan skills, commands, and agents for prompt bugs and quality gaps. | `.claude/commands/review-skills.md` |
 | `/save-finding` | Save Finding | Save an evidence-backed finding from authorized manual or interactive testing. | `.claude/commands/save-finding.md` |
-| `/scan-full` | Full Security Assessment | Run a comprehensive security assessment with the Full profile, including authorized active | `.claude/commands/scan-full.md` |
-| `/scan-smart` | Smart Adaptive Scan | Run an intelligent adaptive security scan that adjusts based on findings. | `.claude/commands/scan-smart.md` |
-| `/scan` | Scan a target | Run a security scan on the specified target. | `.claude/commands/scan.md` |
+| `/scan` | Submit the deterministic Scan | Submit ShakerScan's single deterministic Web/API security workflow. Resource profiles are hard | `.claude/commands/scan.md` |
 | `/status` | Scanner Status | Check the status of ShakerScan. | `.claude/commands/status.md` |
 | `/subdomains` | Subdomain Discovery | Discover subdomains for a domain using CT logs and passive sources. | `.claude/commands/subdomains.md` |
 | `/workers` | Worker Management | View and scale scanner workers. | `.claude/commands/workers.md` |
+
+Deprecated Scan-name shims (sunset 2026-12-31):
+
+| Compatibility slash command | Title | Purpose | Source |
+|---|---|---|---|
+| `/scan-full` | Deprecated Full command compatibility | `/scan-full` is a temporary compatibility shim. It does not select a separate engine. It translates | `.claude/commands/scan-full.md` |
+| `/scan-smart` | Deprecated Smart command compatibility | `/scan-smart` is a temporary compatibility shim. It does not select an adaptive scanner engine. | `.claude/commands/scan-smart.md` |
 
 | Subagent | Model | Purpose | Source |
 |---|---|---|---|
@@ -2515,7 +2555,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `js-analysis-agent` | sonnet | Use this agent for JavaScript bundle analysis, frontend route discovery, browser-captured API review, library/version review, source-map hints, and ShakerScan custom_endpoints generation. | `.claude/agents/js-analysis-agent.md` |
 | `skills-reviewer` | opus | Use PROACTIVELY to review ShakerScan skills, commands, and agents for prompt bugs, bad gates, invalid frontmatter, broken references, or weak output contracts. | `.claude/agents/skills-reviewer.md` |
 
-### Scanner Module Inventory
+### Internal Compatibility Scanner Module Inventory
+
+Implementation modules below are inventory only. The immutable action graph and canonical
+capability registry define execution authority; module presence does not advertise a public
+Scan feature or a second orchestration engine.
 
 `access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
@@ -2628,7 +2672,9 @@ Only key names and declaring sources are documented; secret values are never rea
 |-------|----------|
 | Agent-facing API how-to (request bodies, examples) | [`CLAUDE.md`](../CLAUDE.md) · [`AGENTS.md`](../AGENTS.md) |
 | Getting started, install, product tour | [`README.md`](../README.md) |
-| Smart scan budgets, SLOs, release gates | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
+| AI-native V2 architecture and trust boundary | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) |
+| Scan execution/action/revision schemas | [`execution.py`](../api/scan/execution.py) · [`action_plan.py`](../api/scan/action_plan.py) · [`continuation.py`](../api/scan/continuation.py) |
+| Historical Smart-mode compatibility policy | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |

@@ -70,9 +70,9 @@ Repeat for any specialized skills you want globally.
 
 Project-local Claude Code entry points live under `.claude/`:
 
-- Commands: scan, full/smart scan, status, findings, workers, subdomains, AI Gate, Interactive
-  Testing, manual findings, JS analysis, content discovery, Deep Hunt, compatibility research,
-  and skill review
+- Commands: canonical deterministic Scan, status, findings, workers, subdomains, AI Gate,
+  Interactive Testing, manual findings, JS analysis, content discovery, Hunt, compatibility
+  research, and skill review. The full/smart names are dated request-boundary shims, not engines.
 - Specialized agents: JS analysis, content discovery, and skill-system review
 
 The commands delegate to the same skills and API safety rules. They are conveniences, not separate

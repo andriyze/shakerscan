@@ -1,123 +1,31 @@
-# Full Security Assessment
+# Deprecated Full command compatibility
 
-Run a comprehensive security assessment with the Full profile, including authorized active
-XSS/SQLi. Actual coverage depends on discovered surface, authentication, target behavior, configured
-options, budgets, prerequisites, and tool availability.
+`/scan-full` is a temporary compatibility shim. It does not select a separate engine. It translates
+to the deterministic Scan with `thorough` ceilings and active-testing permission. Sunset:
+**2026-12-31**. Prefer `/scan` with explicit policy and budget.
 
 **Usage**: `/scan-full <target_url>`
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+1. Confirm that the user owns or is explicitly authorized to actively test the exact target.
+2. Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` and
+   `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}`, or the URLs printed by
+   `./scanner.sh status`.
+3. Submit the canonical translation:
 
-1. **IMPORTANT**: First ask user for confirmation:
-   "This will run a FULL security assessment including active vulnerability testing (XSS, SQLi probes). This may trigger security alerts on the target. Do you have permission to test this target? (yes/no)"
-
-2. Only proceed if user confirms with "yes"
-
-3. Check if scanner is running:
-   ```bash
-   curl -s "$API_BASE/health"
-   ```
-
-4. Submit **full** assessment:
    ```bash
    curl -X POST "$API_BASE/scans" \
      -H "Content-Type: application/json" \
-     -d '{"target": "$ARGUMENTS", "options": {"scan_type": "full"}}'
+     -H "X-ShakerScan-CLI-Compatibility: scan-full" \
+     -d '{
+       "target": "$ARGUMENTS",
+       "budget_profile": "thorough",
+       "policy": {"active_testing": true}
+     }'
    ```
 
-5. Report scan ID and UI link, then STOP:
-   ```
-   Full assessment submitted: {scan_id}
-   Expected duration: 1-2 hours
-   View progress: ${UI_BASE}/scans/{scan_id}
-   ```
+4. Report the scan ID and `${UI_BASE}/scans/{scan_id}`, then stop. Do not poll.
 
-**Important**: Do NOT poll or wait for completion - full scans take 1-2 hours. Users can check results via UI or ask later.
-
-6. When user asks for results later, provide a comprehensive report
-
-## What Full Scan Can Include
-
-Full enables the following eligible families in addition to Deep coverage. A family may still be
-blocked, skipped, partial, or unattempted when its prerequisites or budget are unavailable:
-- Active XSS testing (dalfox)
-- Active SQLi testing (sqlmap)
-- WebSocket security testing
-- CSRF vulnerability testing
-- IDOR/BOLA testing
-- File upload vulnerability testing
-- Open redirect testing
-- Host header injection testing
-- Business logic vulnerability detection
-- API security testing (mass assignment, BFLA)
-- Session management testing
-- Rate limiting testing
-- 2FA bypass testing
-- Password reset vulnerability testing
-- Default credentials testing
-
-## Report Format
-
-```
-✓ Full assessment completed in 1h 23m
-
-┌─────────────────────────────────────┐
-│  Grade: B    Score: 82/100          │
-└─────────────────────────────────────┘
-
-🔒 TLS/SSL
-├─ Certificate: example.com (Let's Encrypt R3)
-├─ Expires: 45 days remaining
-├─ Key: RSA 4096-bit
-└─ OCSP Stapling: Enabled
-
-🛡️  Security Headers
-├─ HSTS: ✓ (max-age=31536000, includeSubDomains)
-├─ CSP: Grade D (64/100)
-│   ⚠️  script-src allows 'unsafe-inline'
-│   ⚠️  script-src allows 'unsafe-eval'
-├─ X-Frame-Options: ✓ SAMEORIGIN
-├─ Referrer-Policy: ✓ no-referrer
-└─ Permissions-Policy: ✓ Set
-
-🔧 Technology Stack
-├─ React 18 (confirmed)
-├─ Django (likely)
-└─ Python (implied)
-
-🌐 API Endpoints Discovered: 3
-├─ POST /api/send
-├─ GET /rest/v1/users (auth)
-└─ GET /rest/v1/data (auth)
-
-🔍 Findings Summary
-├─ 🔴 0 Critical
-├─ 🟠 1 High
-├─ 🟡 5 Medium
-├─ 🔵 8 Low
-└─ ⚪ 12 Info
-
-📋 Critical & High Findings:
-1. [High] SQL Injection in /api/search (CWE-89)
-   Parameter: query
-   Payload: ' OR 1=1--
-
-📊 Full report: ${UI_BASE}/scans/{id}
-```
-
-## Alternative: Aggressive Scan
-
-For maximum coverage (2+ hours), use aggressive mode:
-```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{"target": "https://example.com", "options": {"scan_type": "aggressive"}}'
-```
-
-Aggressive adds:
-- Full port scan (65535 ports)
-- Aggressive exploit level
-- Threat intelligence checks
-- Extended fuzzing and discovery
+The compatibility name is telemetry only: it must never enter the queued job, immutable plan, or
+report as execution authority.

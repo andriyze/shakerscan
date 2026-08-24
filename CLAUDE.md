@@ -16,7 +16,8 @@ shakerscan agent claude
 
 Project-local commands under `.claude/commands/` cover:
 
-- `/scan`, `/scan-full`, and `/scan-smart`
+- `/scan` for the canonical deterministic workflow; `/scan-full` and `/scan-smart` are dated
+  compatibility shims only
 - `/status`, `/workers`, `/subdomains`, and `/findings`
 - `/ai-gate`, `/ai-security-session`, `/deep-hunt`, and `/save-finding`
 - `/js-analyze` and `/content-discovery`

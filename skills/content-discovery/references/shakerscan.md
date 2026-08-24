@@ -39,7 +39,7 @@ curl -s "$API_BASE/scans/{scan_id}/result" | jq '{
 - `POST /discovery?root_domain=example.com`
   Subdomain discovery.
 - `POST /scans`
-  Use `custom_endpoints` to steer smart scans toward content-discovery output.
+  Use `options.custom_endpoints` to seed the deterministic Scan without changing its authority.
 - `GET /scans/{id}/result`
   Preferred source of existing discovery data.
 
@@ -86,8 +86,9 @@ curl -X POST "$API_BASE/scans" \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://example.com",
+    "budget_profile": "balanced",
+    "policy": {"active_testing": false},
     "options": {
-      "scan_type": "smart",
       "custom_endpoints": [
         "GET /swagger.json"
       ]

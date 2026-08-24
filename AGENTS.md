@@ -120,7 +120,7 @@ When users ask about security scanning, you should:
 
 **DAST-quality / benchmarking notes:**
 - **Never measure on a build-stale fleet.** Check `GET /workers` `build_current` (fingerprint-authoritative) and restart workers before validation scans. Scans stamp `expected_build_fingerprint_at_submit`/`stale_worker_count_at_submit`; pass `require_current_workers: true` to fail-closed on a stale fleet.
-- **For repeatable DAST-quality scorecards use a single Smart scan.** Full Coverage now preserves that complete Smart backbone while adding separately bounded endpoint shards, but it is a broader compound workload rather than the stable one-scan benchmark contract.
+- **For repeatable DAST-quality scorecards use one deterministic Scan with the benchmark's fixed V2 policy and budget.** Parallel coverage adds separately bounded partitions and is a broader compound workload, not a separate scanner identity.
 - **Benchmark scorecards:** `python3 scripts/benchmark_targets.py <juice_shop|crapi|honey> --auth` (submits, polls, scores verified-vs-suspected, coverage, gates). Fixtures in `tests/fixtures/benchmarks/*.yaml`. Score an existing scan with `--scan-id`. A verified-BOLA gate also requires a persisted distinct-principal receipt and successful owner/attacker responses; a finding label alone cannot pass it.
 - **Agent-safe benchmark submission:** use `python3 scripts/benchmark_targets.py <target> --auth --submit-only` to require a current fleet, mint required principals, queue exactly one scan, print a content-free receipt, and exit. Report the scan ID/UI link and stop; score it on a later request with `--scan-id`.
 - **Model Intake validation:** use `make e2e-model-intake` for the real public-model path. It enables the bounded Nex-N2-mini Hugging Face shard check and verifies that a capped partial download is reported as `known_unverified_truncated`, never as a false hash mismatch. Use `make e2e-model-intake-fixture` only when external network access is intentionally unavailable.
@@ -202,7 +202,7 @@ curl -X POST http://localhost:8080/scans/batch \
   -H "Content-Type: application/json" \
   -d '{
     "targets": ["https://a.example.com", "https://b.example.com"],
-    "options": {"scan_type": "quick"}
+    "options": {"budget_profile": "fast", "policy": {"active_testing": false}}
   }'
 ```
 
@@ -356,7 +356,7 @@ curl http://localhost:8080/targets/{target_id}
 # Update target
 curl -X PATCH http://localhost:8080/targets/{target_id} \
   -H "Content-Type: application/json" \
-  -d '{"name": "Staging", "scan_options": {"scan_type": "standard"}}'
+  -d '{"name": "Staging", "scan_options": {"budget_profile": "balanced", "policy": {"active_testing": false}}}'
 
 # Deactivate target (soft delete)
 curl -X DELETE http://localhost:8080/targets/{target_id}
@@ -364,7 +364,7 @@ curl -X DELETE http://localhost:8080/targets/{target_id}
 # Start scan for a specific target
 curl -X POST http://localhost:8080/targets/{target_id}/scan \
   -H "Content-Type: application/json" \
-  -d '{"options": {"scan_type": "quick"}}'
+  -d '{"options": {"budget_profile": "fast", "policy": {"active_testing": false}}}'
 ```
 
 **Grouped Targets Query Parameters:**
@@ -517,8 +517,8 @@ The older Deep Hunt material below documents compatibility routes only; do not u
 
 Natural-language routing is strict:
 
-- `scan`, `quick scan`, `standard scan`, `deep scan`, `full scan`, `aggressive scan`, and
-  `smart scan` are Web DAST.
+- `scan` is the deterministic Web/API workflow. Historical mode names are request-boundary
+  compatibility translations only; they never select another engine.
 - `deep hunt`, `autonomous hunt`, and `investigate autonomously` are the keyless `/agent/hunt/*`
   workflow below. Never translate Deep Hunt into `/research/campaigns/launch`.
 - `verify this finding` uses the bounded finding verifier/retest.
@@ -907,7 +907,7 @@ curl -X POST http://localhost:8080/schedules \
     "schedule_kind": "normal_scan",
     "frequency": "daily",
     "time_of_day": "02:00",
-    "scan_type": "standard"
+    "budget_profile": "balanced"
   }'
 
 # Create a recurring Continuous ASM coverage wave
@@ -1025,7 +1025,8 @@ with a 31 December 2026 sunset. Agents must not use it for new work.
 
 ### Attack Chain Analysis
 
-Smart scans correlate findings into attack chains - multi-step vulnerability combinations:
+The offline deterministic finalizer may correlate compatible evidence-backed findings into
+multi-step attack chains. A chain is report synthesis, not new network execution:
 
 **Chain Types:**
 | Chain | Findings Required | Business Impact |
@@ -1073,9 +1074,10 @@ Smart scans correlate findings into attack chains - multi-step vulnerability com
 - Partial chains have downgraded severity (critical→high, high→medium)
 - Use `include_partial_attack_chains: true` for analyst reports
 
-### Smart Coverage Metrics
+### Scan Coverage Metrics
 
-The `result.smart_coverage` field tracks scan coverage:
+`GET /scans/{id}/coverage` is the canonical action/capability coverage view. The historical
+`result.smart_coverage` projection remains readable during migration:
 
 ```json
 {
@@ -1095,229 +1097,56 @@ Low coverage may indicate rate limiting or incomplete discovery.
 - `coverage > 0.8`: Excellent coverage
 
 **Workflow for authenticated scanning:**
-1. Create account on target app (or use existing test account)
-2. Login and capture the auth token/cookies
-3. Pass credentials to scanner via API options
-4. Scanner uses credentials for all authenticated requests
+1. Create or select an exact-target encrypted credential profile.
+2. Confirm its semantic capability scope and expiry.
+3. Pass only the opaque profile ID with a target-bound approval receipt.
+4. The worker resolves the secret after action authorization and never returns it.
 
-### Advanced Scan Options
+### Advanced Scan Controls
 
-Additional options for fine-tuning scan behavior:
+Read `GET /scan/contracts` before presenting advanced controls. The server advertises the canonical
+family vocabulary and the allowed range for every lower ceiling; clients must not maintain a
+divergent copy.
+
+Known endpoints may seed discovery, but they do not expand scope or execution authority:
 
 ```bash
-# Enable JSON link following (discovers API endpoints from responses)
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.com",
+    "budget_profile": "thorough",
+    "policy": {
+      "active_testing": true,
+      "include_families": ["xss", "sqli"]
+    },
+    "approval_receipt_id": "TARGET_BOUND_APPROVAL_UUID",
     "options": {
-      "scan_type": "smart",
-      "json_link_following": true
-    }
-  }'
-
-# Enable HTTP OPTIONS method discovery
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "options_method_discovery": true
-    }
-  }'
-
-# Enable gRPC reflection discovery
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://grpc.example.com",
-    "options": {
-      "scan_type": "smart",
-      "grpc_discovery": true
-    }
-  }'
-
-# Specify custom endpoints to test
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
       "custom_endpoints": [
         "GET /api/v1/users?id=1&name=test",
-        "POST /api/v1/login json:{\"username\":\"test\",\"password\":\"test\"}",
-        "POST /api/v1/search form:query=test&limit=10",
-        "/graphql"
+        "POST /api/v1/search json:{\"query\":\"test\"}"
       ]
     }
   }'
 ```
 
-**Custom Endpoint Format:**
-Each endpoint string follows the format: `[METHOD] /path [params]`
-- **METHOD** (optional): GET, POST, PUT, PATCH, DELETE (default: GET)
-- **params** (optional but recommended): Parameters to test for injection
-  - Query params: `?key=value` or `query:key=value`
-  - JSON body: `json:{"key":"value"}`
-  - Form body: `form:key=value&key2=value2`
-  - Simple params: `param1 param2 param3`
+Family selection controls eligible capability families. `fast`, `balanced`, and `thorough`
+select hard multidimensional ceilings. Optional `advanced` values may only lower the selected
+profile ceiling; zero is meaningful where the server contract advertises it (for example, to grant
+no mutation authority). Every action reserves its typed budget before execution and reconciles
+actual use afterward.
 
-**Important**: Endpoints without parameters will only be crawled, not tested for SQLi/XSS. Always include parameters you want tested.
+Encrypted credential profiles and saved request collections are supplied only by opaque IDs.
+The worker resolves private material after target, action-capability, approval, version, and expiry
+validation. Inline bearer tokens, cookies, passwords, client secrets, arbitrary headers, shell
+commands, and planner-supplied argv are not canonical Scan inputs.
 
-**Advanced Options:**
-| Option | Description |
-|--------|-------------|
-| `json_link_following` | Follow links in JSON API responses (HATEOAS, pagination) |
-| `options_method_discovery` | Use HTTP OPTIONS to discover allowed methods |
-| `grpc_discovery` | Use gRPC reflection to discover services |
-| `custom_endpoints` | Array of endpoints with params to test (see format above) |
-| `focus_rules_json` | JSON array of rules to include only specific endpoint scope |
-| `avoid_rules_json` | JSON array of rules to exclude endpoint scope |
-| `verified_findings_only` | Keep only findings that have exploit verification evidence |
-| `budget_profile` | Coverage budget profile: `fast`, `balanced`, `thorough`, or `exhaustive` |
-| `custom_budget` | Advanced budget overrides such as `max_urls`, `browser_max_pages`, `api_probe_limit`, `nuclei_max_targets`, `active_max_seconds`, `active_max_endpoints`, and `active_params_per_endpoint` |
-| `no_early_stop` | Disable early stopping in smart scan (continue even after finding many vulns) |
-| `thorough_params` | Legacy shortcut for deeper smart active checks; when no budget is specified it promotes the scan to the `thorough` budget |
-| `include_partial_attack_chains` | Include incomplete attack chains in human-readable report (analyst mode) |
-| `deep_domxss` | Enable deep DOM XSS analysis (more thorough but slower) |
-| `oob_callback_url` | Out-of-band callback URL for blind SQLi/SSRF detection |
+### Deprecated Scan-name compatibility
 
-**Performance/Safety Limits:**
-| Option | Description | Default |
-|--------|-------------|---------|
-| `smart_bola_max_endpoints` | Max endpoints for BOLA testing | 80 |
-| `dom_xss_max_files` | Max JS files for DOM XSS analysis | 20 |
-| `sqli_extract_max` | Max SQLi findings for data extraction | 3 |
-| `oob_max_findings` | Max findings for OOB SQLi test | 3 |
-
-Defaults are sourced from `scanner/constants.py` via `SMART_SCAN_BUDGETS` and `SCAN_BUDGET_DEFAULTS`.
-
-### Smart Scan Tuning
-
-For thorough penetration testing, you can disable early stopping and increase parameter coverage:
-
-```bash
-# Thorough smart scan (disable early stopping, test more params)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "no_early_stop": true,
-      "thorough_params": true
-    }
-  }'
-```
-
-Preferred depth control is `budget_profile`; scan type controls which modules run and budget controls how much depth/time they receive:
-
-```bash
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "budget_profile": "thorough",
-      "custom_budget": {
-        "max_urls": 2500,
-        "browser_max_pages": 100,
-        "active_max_endpoints": 150,
-        "active_params_per_endpoint": 12
-      }
-    }
-  }'
-```
-
-By default, smart scan:
-- **Stops early** when 3+ critical or 5+ high severity findings are found
-- **Uses the `balanced` budget** unless `budget_profile` or `custom_budget` is provided
-
-With `no_early_stop` and `thorough_params`:
-- **Continues scanning** after high-severity findings instead of stopping at the normal threshold;
-  this increases coverage but does not guarantee that every vulnerability will be found
-- **Promotes to the `thorough` budget** when no explicit budget is provided, increasing discovery, browser, nuclei, and active-test coverage
-
-## Scan Types Explained
-
-Scan type controls **what** ShakerScan tests. `budget_profile` controls **how hard** it tests. Keep the scan type stable when you want the same modules, then adjust budget between `fast`, `balanced`, `thorough`, and `exhaustive`.
-
-| Type | API Option | Time | What It Does |
-|------|------------|------|--------------|
-| **quick** | `"scan_type": "quick"` | 1-2 min | DNS, TLS cert, HTTP headers, basic tech detection |
-| **standard** | `"scan_type": "standard"` | 5-10 min | + Nuclei (safe), cookies, CORS, JS dependencies (no port scan by default) |
-| **deep** | `"scan_type": "deep"` | 30-60 min | + Full Nuclei, top-ports scan (1000), JS secrets |
-| **full** | `"scan_type": "full"` | 1-2 hrs | + Broad active XSS/SQLi and WebSocket testing |
-| **aggressive** | `"scan_type": "aggressive"` | 2+ hrs | + Aggressive exploits, extended ports, threat intel |
-| **smart** | `"scan_type": "smart"` | Variable | Adaptive: staged templates, DBMS-aware SQLi, context-aware XSS |
-
-### Scan Type Details
-
-**quick** - Fast passive recon:
-- DNS records (A, AAAA, MX, SPF, DMARC, DNSSEC)
-- TLS certificate analysis
-- HTTP security headers
-- Basic technology fingerprinting
-
-**standard** - Balanced assessment:
-- Everything in quick
-- Nuclei vulnerability scan (safe templates)
-- Cookie security analysis
-- CORS misconfiguration checks
-- JS dependency vulnerability scanning
-- No port scan by default (enable gRPC discovery or use deep/full/aggressive)
-
-**deep** - Thorough passive scan:
-- Everything in standard
-- Full Nuclei template scan
-- Port scanning (top 1000 ports)
-- Deep directory/file discovery (opt-in via `--deep-discovery`, enabled in aggressive)
-- JS secret scanning
-- Enhanced DNS checks
-
-**full** - Complete active assessment:
-- Everything in deep
-- Active XSS testing (dalfox)
-- Active SQLi testing (sqlmap)
-- WebSocket security testing
-- Auth/session vulnerability tests
-- File upload, open redirect, CSRF tests
-- API security testing
-- Advanced probes (SSRF/command injection) only run with non-safe exploit level and parameterized endpoints
-
-**aggressive** - Maximum coverage:
-- Everything in full
-- Aggressive exploit level
-- Full port scan (65535 ports)
-- Threat intelligence checks
-- Extended fuzzing and discovery
-
-**smart** - Adaptive intelligent scan:
-- Staged Nuclei template scanning (4 waves based on tech + signals)
-  - Wave 1: Critical CVEs + tech-specific (~60s budget)
-  - Wave 2: Signal-based expansion (~120s budget)
-  - Wave 3: Injection-focused (~300s budget, conditional)
-  - Wave 4: Deep scan (~480s budget, conditional)
-  - Yield-based budget adjustment (high-yield waves extend next budget)
-- Early stopping when confidence-weighted score >= 12 (3+ critical or 5+ high findings)
-- Verification phase for high-severity findings (browser proofs, timing analysis)
-- DBMS fingerprinting (SQLite, MySQL, PostgreSQL, MSSQL, Oracle)
-- DBMS-specific SQLi payloads with data extraction chaining
-- Context-aware XSS (detects reflection context: in_script, in_attribute, etc.)
-- DOM XSS static analysis (source-to-sink flow detection)
-- Recursive directory discovery (adapts depth based on findings)
-- Light port scan (top 33) for service hints and gRPC discovery
-- Post-nuclei discovery refinement based on signals
-- Authenticated Playwright crawl (multi-page) with API capture
-- Adaptive rate limiting (backs off on 429/503, speeds up on success)
-- JS bundle analysis for hidden endpoints
-- Auth-aware tool routing (Nuclei/Dalfox use discovered endpoints + auth headers)
-- Synthetic endpoints only generated when API hints exist (or `--thorough-params`)
-- Attack chain analysis (correlates findings into exploitable attack paths)
-- Coverage tracking (endpoint/parameter/template metrics)
+The historical names `quick`, `standard`, `deep`, `full`, `aggressive`, and `smart` are
+accepted only as dated request-boundary translations during migration. They map to a V2 budget and
+active-testing policy, emit deprecation telemetry, and sunset on **2026-12-31**. They never enter the
+queued job, immutable action plan, continuation revision, or report as engine authority.
 
 ## Response Interpretation
 
@@ -1376,7 +1205,7 @@ When AI is enabled, the report also includes `ai_correlations` (cross-finding co
 
 **User**: "Scan my site example.com"
 1. Check if scanner running
-2. Submit quick scan
+2. Submit the deterministic Scan with `fast` ceilings and passive policy
 3. Report scan ID and UI link - done (don't poll/wait)
 
 **User**: "Show me critical vulnerabilities"
@@ -1385,7 +1214,7 @@ When AI is enabled, the report also includes `ai_correlations` (cross-finding co
 
 **User**: "Do a full security audit of example.com"
 1. **Ask permission** for active testing first
-2. If approved, submit with `"scan_type": "full"`
+2. If approved, submit the deterministic Scan with `thorough` ceilings and active-testing policy
 3. Report scan ID and UI link - done (don't poll/wait)
 
 **User**: "Find subdomains for example.com"
@@ -1417,8 +1246,8 @@ Interactive security testing sessions enable collaborative manual penetration te
 4. AI executes tests and reports findings immediately
 5. Validated findings are saved to the database
 
-**Recommended Workflow**: When the user has authorized active testing and a Smart scan would add
-useful context, run it first; otherwise bootstrap from an existing scan or use the interactive
+**Recommended Workflow**: When the user has authorized active testing and a deterministic Scan would
+add useful context, run it first; otherwise bootstrap from an existing scan or use the interactive
 session directly. After submitting any scan, report its ID and UI link and stop.
 
 ### Bootstrapping from Scan Data
@@ -1546,10 +1375,13 @@ Same-origin is enforced by default for navigation and endpoint tests (SSRF prote
 
 Users can also use the CLI directly:
 ```bash
-# Basic scans
-./scanner.sh scan https://example.com       # Quick scan
-./scanner.sh scan-full https://example.com --confirm-active  # Full assessment
-./scanner.sh scan-smart https://example.com --confirm-active # Smart adaptive scan
+# Canonical deterministic Scan
+./scanner.sh scan https://example.com --budget-profile balanced
+./scanner.sh scan https://example.com --budget-profile thorough --active-testing --confirm-active
+
+# Deprecated compatibility shims (sunset 2026-12-31)
+./scanner.sh scan-full https://example.com --confirm-active
+./scanner.sh scan-smart https://example.com --confirm-active
 
 # Management
 ./scanner.sh status                          # Check status
@@ -1560,7 +1392,8 @@ Users can also use the CLI directly:
 ./scanner.sh gungnir status                  # CT monitor status
 ```
 
-For authenticated scans, focused XSS/SQLi-only checks, budget profiles/custom budgets, and advanced smart tuning (`budget_profile`, `custom_budget`, `no_early_stop`, `thorough_params`, `custom_endpoints`, etc.), use the REST API `POST /scans` options.
+For authenticated scans, family selection, saved request collections, lower custom ceilings, and
+known endpoints, use the canonical CLI flags or `POST /scans` policy/profile/reference fields.
 
 ## Files Structure
 
