@@ -31333,15 +31333,21 @@ async def list_scans(
 
 
 _PUBLIC_SCAN_ACTIONS_SQL = """
-    SELECT action_id, stage, ordinal, capability_name, adapter_name,
-           adapter_version, output_schema, action_digest, requested_budget,
-           placement_json, dependencies_json, required, supporting, status,
-           reason_code, reservation_id, receipt_id, receipt_hash,
-           observation_manifest_id, result_digest, result_json, receipt_json,
-           backend_name, worker_id, attempt, started_at, finished_at
-      FROM scan_capability_actions
-     WHERE scan_id=$1
-     ORDER BY ordinal
+    SELECT a.action_id, a.stage, a.ordinal, a.capability_name, a.adapter_name,
+           a.adapter_version, a.output_schema, a.action_digest, a.requested_budget,
+           a.placement_json, a.dependencies_json, a.required, a.supporting, a.status,
+           a.reason_code, a.reservation_id, a.receipt_id, a.receipt_hash,
+           a.observation_manifest_id, a.result_digest, a.result_json, a.receipt_json,
+           a.backend_name, a.worker_id, a.attempt, a.started_at, a.finished_at,
+           r.status AS reservation_status,
+           r.hold_applied AS reservation_hold_applied,
+           r.requested_json AS reservation_requested,
+           r.actual_json AS reservation_actual,
+           r.execution_uncertain
+      FROM scan_capability_actions a
+      LEFT JOIN budget_reservations r ON r.id=a.reservation_id
+     WHERE a.scan_id=$1
+     ORDER BY a.ordinal
 """
 
 
@@ -31360,6 +31366,7 @@ def _public_scan_execution_explanation(
         plan_revision=(
             plan_revision.canonical_dict() if plan_revision is not None else None
         ),
+        plan_budget_limits=_json_object(scan.get("budget_json")),
     )
 
 
@@ -31372,7 +31379,7 @@ async def _load_public_scan_execution_explanation(
     except (TypeError, ValueError, AttributeError) as exc:
         raise HTTPException(status_code=404, detail="Scan not found") from exc
     scan = await conn.fetchrow(
-        """SELECT id, status, result, scan_action_plan_json,
+        """SELECT id, status, result, budget_json, scan_action_plan_json,
                   scan_action_plan_digest, scan_action_plan_schema
              FROM scans WHERE id=$1""",
         parsed_scan_id,

@@ -1177,6 +1177,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const matrix = coverage?.capability_coverage || {}
   const reliability = coverage?.grade_reliability || {}
   const parity = explanation?.transport_parity || {}
+  const budget = explanation?.budget || {}
   const completed = Number(matrix.completed || 0)
   const total = Number(matrix.total || Math.max(0, actions.length - 1))
   const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) > 0
@@ -1219,6 +1220,26 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
         </div>
       )}
 
+      <div className="mt-4 grid gap-2 text-[11px] text-gray-500 md:grid-cols-2">
+        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+          <span className="text-gray-400">Plan limit:</span> {formatExecutionBudget(budget.limit)}
+        </div>
+        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+          <span className="text-gray-400">Allocated:</span> {formatExecutionBudget(budget.allocated)}
+        </div>
+        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+          <span className="text-gray-400">Used:</span> {formatExecutionBudget(budget.consumed)}
+        </div>
+        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+          <span className="text-gray-400">Unused:</span> {formatExecutionBudget(budget.unallocated)}
+        </div>
+        {formatExecutionBudget(budget.uncertain) !== 'None' && (
+          <div className="rounded border border-amber-500/25 bg-amber-500/10 p-2 text-amber-200 md:col-span-2">
+            Uncertain after interrupted execution: {formatExecutionBudget(budget.uncertain)}
+          </div>
+        )}
+      </div>
+
       <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
         {stages.map((stage: any) => (
           <div key={String(stage.stage)} className="min-w-36 rounded border border-gray-800 bg-gray-950/50 p-2">
@@ -1240,6 +1261,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
         <div className="divide-y divide-gray-800 border-t border-gray-800">
           {actions.map((action: any) => {
             const placement = action?.placement || {}
+            const allocated = action?.budget?.allocated || {}
             const reserved = action?.budget?.reserved || {}
             const consumed = action?.budget?.consumed || {}
             const observationCount = Number(action?.observation?.count || 0)
@@ -1259,6 +1281,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
                     {placement.worker_id ? ` · ${String(placement.worker_id)}` : ''}
                   </div>
                   <div>Evidence observations: {observationCount.toLocaleString()}</div>
+                  <div className="break-words">Allocated: {formatExecutionBudget(allocated)}</div>
                   <div className="break-words">Reserved: {formatExecutionBudget(reserved)}</div>
                   <div className="break-words">Used: {formatExecutionBudget(consumed)}</div>
                 </div>

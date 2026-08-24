@@ -127,6 +127,10 @@ def test_execution_explanation_is_content_safe_and_explicit():
         scan_status="running",
         plan_payload=_plan(),
         action_rows=_rows(),
+        plan_budget_limits={
+            "max_http_requests": 20,
+            "max_tool_wall_seconds": 60,
+        },
     )
 
     assert explanation["schema_version"] == "scan-execution-explanation/v1"
@@ -141,6 +145,20 @@ def test_execution_explanation_is_content_safe_and_explicit():
         "attempt": 1,
     }
     assert action["budget"]["consumed"]["http_requests"] == 2
+    assert action["budget"]["allocated"]["http_requests"] == 4
+    assert action["budget"]["released"] == {
+        "http_requests": 2,
+        "tool_wall_seconds": 6,
+    }
+    assert explanation["budget"] == {
+        "limit": {"http_requests": 20, "tool_wall_seconds": 60},
+        "allocated": {"http_requests": 12, "tool_wall_seconds": 30},
+        "reserved": {"http_requests": 4, "tool_wall_seconds": 10},
+        "consumed": {"http_requests": 2, "tool_wall_seconds": 4},
+        "released": {"http_requests": 2, "tool_wall_seconds": 6},
+        "uncertain": {},
+        "unallocated": {"http_requests": 8, "tool_wall_seconds": 30},
+    }
     assert action["output_schema"] == "http-observation/v1"
     assert action["observation"]["count"] == 1
     assert action["receipt"]["provenance"]["source_revision"] == "revision-1"
@@ -149,6 +167,35 @@ def test_execution_explanation_is_content_safe_and_explicit():
     assert "still-never-public" not in serialized
     assert "/private/never-public.json" not in serialized
     assert '"capability_args"' not in serialized
+
+
+def test_execution_explanation_reports_uncertain_reservation_separately():
+    rows = _rows()
+    rows[0].update({
+        "result_json": {},
+        "reservation_status": "failed",
+        "reservation_hold_applied": True,
+        "reservation_requested": {"http_requests": 4, "tool_wall_seconds": 10},
+        "reservation_actual": {"http_requests": 1, "tool_wall_seconds": 2},
+        "execution_uncertain": True,
+    })
+
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="failed",
+        plan_payload=_plan(),
+        action_rows=rows,
+    )
+
+    assert explanation["actions"][0]["budget"]["uncertain"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 10,
+    }
+    assert explanation["actions"][0]["budget"]["released"] == {}
+    assert explanation["budget"]["uncertain"] == {
+        "http_requests": 4,
+        "tool_wall_seconds": 10,
+    }
 
 
 def test_execution_explanation_marks_required_partial_grade_unreliable():

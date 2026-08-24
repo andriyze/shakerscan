@@ -26,6 +26,14 @@ _TRAFFIC_DIMENSIONS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
 })
+_SCAN_BUDGET_FIELDS = {
+    "max_http_requests": "http_requests",
+    "max_state_changing_requests": "state_changing_requests",
+    "max_browser_actions": "browser_actions",
+    "max_tcp_ports": "tcp_ports_attempted",
+    "max_hosts": "hosts_attempted",
+    "max_tool_wall_seconds": "tool_wall_seconds",
+}
 
 _REASON_LABELS = {
     "capability_unknown": "The action capability is not registered",
@@ -101,6 +109,29 @@ def _budget(value: Any) -> dict[str, int]:
         if amount >= 0:
             result[name] = amount
     return {name: result[name] for name in sorted(result)}
+
+
+def _scan_budget_limits(value: Any) -> dict[str, int]:
+    raw = _object(value)
+    limits = _budget(raw)
+    for source, target in _SCAN_BUDGET_FIELDS.items():
+        if source in raw:
+            limits[target] = _integer(raw[source])
+    return {
+        name: limits[name]
+        for name in sorted(set(limits) & set(_SCAN_BUDGET_FIELDS.values()))
+    }
+
+
+def _budget_difference(
+    left: Mapping[str, int], right: Mapping[str, int],
+) -> dict[str, int]:
+    names = set(left) | set(right)
+    return {
+        name: max(0, int(left.get(name, 0)) - int(right.get(name, 0)))
+        for name in sorted(names)
+        if int(left.get(name, 0)) - int(right.get(name, 0)) > 0
+    }
 
 
 def _label(value: Any) -> str:
@@ -192,6 +223,7 @@ def build_scan_execution_explanation(
     action_rows: Sequence[Mapping[str, Any]],
     report: Mapping[str, Any] | None = None,
     plan_revision: Mapping[str, Any] | None = None,
+    plan_budget_limits: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge immutable plan, durable action index, and final report metadata.
 
@@ -294,15 +326,29 @@ def build_scan_execution_explanation(
                 if row.get("observation_manifest_id") else None
             )
         )
+        allocated = _budget(
+            raw_plan.get("requested_budget") or row.get("requested_budget")
+        )
+        reservation_status = _text(row.get("reservation_status"), maximum=40)
+        reservation_reserved = (
+            _budget(row.get("reservation_requested"))
+            if bool(row.get("reservation_hold_applied")) else {}
+        )
         reserved = _budget(
             terminal.get("budget_reserved")
             or result_payload.get("budget_reserved")
-            or row.get("requested_budget")
-            or raw_plan.get("requested_budget")
+            or reservation_reserved
         )
         consumed = _budget(
             terminal.get("budget_consumed")
             or result_payload.get("budget_consumed")
+            or row.get("reservation_actual")
+        )
+        uncertain = reserved if bool(row.get("execution_uncertain")) else {}
+        terminal_status = (status or "") in _TERMINAL
+        released = (
+            _budget_difference(reserved, consumed)
+            if terminal_status and not uncertain else {}
         )
         capability = str(
             raw_plan.get("capability_name") or row.get("capability_name") or "unknown"
@@ -336,7 +382,14 @@ def build_scan_execution_explanation(
                 "worker_id": _text(row.get("worker_id"), maximum=200),
                 "attempt": _integer(row.get("attempt")),
             },
-            "budget": {"reserved": reserved, "consumed": consumed},
+            "budget": {
+                "allocated": allocated,
+                "reserved": reserved,
+                "consumed": consumed,
+                "released": released,
+                "uncertain": uncertain,
+                "reservation_status": reservation_status,
+            },
             "observation": observation,
             "receipt": _receipt_projection(row.get("receipt_json"), row),
             "result_digest": _text(row.get("result_digest"), maximum=64),
@@ -509,6 +562,33 @@ def build_scan_execution_explanation(
             for item in actions
         ),
     }
+    allocated_budget = _sum_budgets(
+        item["budget"]["allocated"] for item in actions
+    )
+    reserved_budget = _sum_budgets(
+        item["budget"]["reserved"] for item in actions
+    )
+    consumed_budget = _sum_budgets(
+        item["budget"]["consumed"] for item in actions
+    )
+    released_budget = _sum_budgets(
+        item["budget"]["released"] for item in actions
+    )
+    uncertain_budget = _sum_budgets(
+        item["budget"]["uncertain"] for item in actions
+    )
+    limit_budget = _scan_budget_limits(plan_budget_limits)
+    if not limit_budget:
+        limit_budget = dict(allocated_budget)
+    budget_summary = {
+        "limit": limit_budget,
+        "allocated": allocated_budget,
+        "reserved": reserved_budget,
+        "consumed": consumed_budget,
+        "released": released_budget,
+        "uncertain": uncertain_budget,
+        "unallocated": _budget_difference(limit_budget, allocated_budget),
+    }
     return {
         "schema_version": EXPLANATION_SCHEMA,
         "scan_id": str(scan_id),
@@ -526,6 +606,7 @@ def build_scan_execution_explanation(
         "stage_timeline": stages,
         "actions": actions,
         "capabilities": grouped,
+        "budget": budget_summary,
         "coverage": {
             "status": coverage_status,
             "capability_coverage": capability_coverage,
@@ -564,6 +645,7 @@ def action_list_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "plan_revision": dict(explanation.get("plan_revision") or {}),
         "stage_timeline": list(explanation.get("stage_timeline") or []),
         "actions": list(explanation.get("actions") or []),
+        "budget": dict(explanation.get("budget") or {}),
         "transport_parity": dict(explanation.get("transport_parity") or {}),
     }
 
@@ -575,6 +657,7 @@ def capability_list_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "plan_digest": explanation.get("plan_digest"),
         "plan_revision": dict(explanation.get("plan_revision") or {}),
         "capabilities": list(explanation.get("capabilities") or []),
+        "budget": dict(explanation.get("budget") or {}),
         "capability_coverage": dict(
             _object(explanation.get("coverage")).get("capability_coverage") or {}
         ),
@@ -587,6 +670,7 @@ def coverage_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "scan_id": explanation.get("scan_id"),
         "plan_digest": explanation.get("plan_digest"),
         "plan_revision": dict(explanation.get("plan_revision") or {}),
+        "budget": dict(explanation.get("budget") or {}),
         **dict(explanation.get("coverage") or {}),
         "transport_parity": dict(explanation.get("transport_parity") or {}),
     }
