@@ -1,5 +1,8 @@
 # AI-Native Scan and Hunt Architecture RFC
 
+The normative deterministic-Scan traffic classification is recorded in
+[ADR 0001: Scan traffic risk classes](decisions/0001-scan-traffic-risk-classes.md).
+
 **Status:** implemented; legacy web/device Hunt engines quarantined for migration reads and cancellation
 **Plan date:** 2026-08-19
 **Pinned `origin/smart` baseline:** `84c185538990e9403b5c972ff91b5f212799910d`
