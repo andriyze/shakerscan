@@ -62,6 +62,8 @@ def test_postman_5000_import_builds_redacted_paginated_index():
     assert "bearer" not in serialized_row
     assert "password" not in serialized_row
     assert "secret-0" not in serialized_row
+    assert rows[0]["redacted_url"].startswith("https://api.example.test/items/0?")
+    assert rows[0]["normalized_path"] == "/items/0"
 
     first = page_index(rows, offset=0, limit=500)
     last = page_index(rows, offset=4_500, limit=500)

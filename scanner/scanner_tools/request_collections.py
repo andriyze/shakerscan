@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 from typing import Any, Iterable, Mapping
+import urllib.parse
 
 from .device_postman import HARD_MAX_COLLECTION_BYTES, HARD_MAX_REQUESTS, SAFE_METHODS
 from .device_request_formats import (
@@ -26,6 +27,20 @@ REQUEST_COLLECTION_AGENT_PREVIEW_MAX = 200
 REQUEST_COLLECTION_PAGE_MAX = 500
 REQUEST_COLLECTION_DOCUMENT_DEFAULT_BYTES = 25 * 1024 * 1024
 REQUEST_COLLECTION_DOCUMENT_HARD_MAX_BYTES = HARD_MAX_COLLECTION_BYTES
+
+
+def _canonical_index_path(value: Any) -> str:
+    """Reduce one already-redacted request URL to a query-free route path."""
+    raw = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return "/"
+    path = parsed.path if parsed.scheme or parsed.netloc else raw.partition("?")[0]
+    path = path.partition("#")[0].strip()
+    if not path.startswith("/"):
+        path = "/" + path.lstrip("/")
+    return (path or "/")[:4_096]
 
 
 def _compile_safe_path_regex(value: str) -> re.Pattern[str]:
@@ -195,14 +210,15 @@ def redacted_index(requests: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
     rows: list[dict[str, Any]] = []
     for ordinal, request in enumerate(requests):
         method = str(request.get("method") or "GET").strip().upper()
+        redacted_url = str(request.get("url") or "")[:2_000]
         rows.append({
             "request_id": str(request.get("id") or "")[:64],
             "ordinal": ordinal,
             "folder": str(request.get("folder") or "")[:500],
             "name": str(request.get("name") or "")[:300],
             "method": method,
-            "redacted_url": str(request.get("url") or "")[:2_000],
-            "normalized_path": str(request.get("url_template") or request.get("url") or "")[:2_000],
+            "redacted_url": redacted_url,
+            "normalized_path": _canonical_index_path(redacted_url),
             "body_mode": str(request.get("body_mode") or "none")[:80],
             "auth_type": str(request.get("auth_type") or "none")[:160],
             "tags": [
