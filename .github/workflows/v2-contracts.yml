@@ -190,7 +190,7 @@ jobs:
             tests/test_scan_work_manifests.py \
             tests/test_observation_manifests.py \
             tests/test_observation_store.py \
-            tests/test_scan_placement_transport.py
+            tests/test_scan_placement_transport.py \
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py \
