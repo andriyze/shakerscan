@@ -115,9 +115,13 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     steps = workflow["jobs"]["contracts"]["steps"]
     assert len([step for step in steps if "run" in step]) >= 10
     text = _workflow_text()
-    assert "--collect-only" in text
-    assert "--junitxml=artifacts/v2-full-python.xml" in text
-    assert "--cov-report=xml:artifacts/v2-coverage.xml" in text
+    assert "scripts/run_complete_python_suite.py --collect-only" in text
+    assert "scripts/run_complete_python_suite.py" in text
+    assert "--coverage --artifacts-dir artifacts" in text
+    runner = (ROOT / "scripts" / "run_complete_python_suite.py").read_text()
+    assert 'artifacts / "v2-full-python.xml"' in runner
+    assert 'artifacts / "v2-coverage.xml"' in runner
+    assert "partition_test_files(repo_root)" in runner
     assert "docker compose build" in text
     assert "scripts/docker_api_overlay_smoke.sh" in text
     assert "npm --prefix ui run build" in text

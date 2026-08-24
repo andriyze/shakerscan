@@ -2,6 +2,9 @@ import json
 import os
 import re
 import shlex
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
 import subprocess
@@ -256,81 +259,126 @@ printf '%s\\n%s' "$body" "${SHAKERSCAN_TEST_HTTP_CODE:-201}"
     return fake_bin, capture
 
 
-def test_scanner_wrapper_submits_unified_full_coverage_payload(tmp_path):
-    fake_bin, capture = _write_fake_scan_commands(tmp_path)
-    env = {
-        **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "SHAKERSCAN_TEST_CAPTURE": str(capture),
-        # Do not inherit a remote host cached in the developer runtime .env;
-        # this wrapper test asserts the portable default link.
-        "SHAKERSCAN_PUBLIC_HOST": "localhost",
-    }
-    result = subprocess.run(
-        [
-            "bash",
-            str(ROOT / "scanner.sh"),
-            "scan",
-            "https://app.example.test/path?value=one&other=two",
-            "--type",
-            "smart",
-            "--execution",
-            "coverage",
-            "--coverage-depth",
-            "deep",
-            "--shards",
-            "auto",
-            "--auth-state-shards",
-            "--approval-receipt",
-            "approval-123",
-            "--require-current-workers",
-            "--confirm-active",
-        ],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+@contextmanager
+def _scan_api(*, rejection: bool = False):
+    state: dict[str, object] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self, status: int, value: object) -> None:
+            body = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            assert self.path == "/scan/contracts"
+            self._json(200, {
+                "schema_version": "scan-public-contract/v1",
+                "families": [],
+                "advanced_limits": [],
+            })
+
+        def do_POST(self):
+            assert self.path == "/scans"
+            length = int(self.headers.get("Content-Length") or 0)
+            state["payload"] = json.loads(self.rfile.read(length))
+            if rejection:
+                self._json(409, {
+                    "detail": {
+                        "error": "approval_required",
+                        "message": "Approval required",
+                    },
+                })
+            else:
+                self._json(201, {"scan_id": "scan-123", "status": "pending"})
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, state
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_scanner_wrapper_submits_canonical_full_coverage_payload():
+    with _scan_api() as (port, state):
+        env = {
+            **os.environ,
+            "SHAKERSCAN_PUBLIC_HOST": "127.0.0.1",
+            "SHAKERSCAN_API_PORT": str(port),
+            "SHAKERSCAN_UI_PORT": "3000",
+        }
+        result = subprocess.run(
+            [
+                "bash",
+                str(ROOT / "scanner.sh"),
+                "scan",
+                "https://app.example.test/path?value=one&other=two",
+                "--budget-profile",
+                "thorough",
+                "--active-testing",
+                "--execution",
+                "coverage",
+                "--shards",
+                "auto",
+                "--auth-state-shards",
+                "--approval-receipt",
+                "approval-123",
+                "--require-current-workers",
+                "--confirm-active",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(capture.read_text())
+    payload = state["payload"]
     assert payload["target"] == "https://app.example.test/path?value=one&other=two"
-    assert payload["options"]["scan_type"] == "smart"
+    assert payload["budget_profile"] == "thorough"
+    assert payload["policy"]["active_testing"] is True
     assert payload["options"]["parallel"] is True
     assert payload["options"]["shard_strategy"] == "coverage"
     assert payload["options"]["shards"] == "auto"
-    assert payload["options"]["budget_profile"] == "exhaustive"
-    assert payload["options"]["exploit_depth"] is True
     assert payload["options"]["auth_state_shards"] is True
-    assert payload["options"]["approval_receipt_id"] == "approval-123"
+    assert payload["approval_receipt_id"] == "approval-123"
     assert payload["options"]["require_current_workers"] is True
+    assert "scan_type" not in json.dumps(payload)
+    assert "exploit_depth" not in json.dumps(payload)
     assert "http://localhost:3000/scans/scan-123" in result.stdout
 
 
-def test_scanner_wrapper_fails_loudly_on_api_rejection(tmp_path):
-    fake_bin, capture = _write_fake_scan_commands(tmp_path)
-    env = {
-        **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "SHAKERSCAN_TEST_CAPTURE": str(capture),
-        "SHAKERSCAN_TEST_HTTP_CODE": "409",
-        "SHAKERSCAN_TEST_BODY": '{"detail":{"error":"approval_required","message":"Approval required"}}',
-    }
-    result = subprocess.run(
-        ["bash", str(ROOT / "scanner.sh"), "scan", "https://app.example.test"],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+def test_scanner_wrapper_fails_loudly_on_api_rejection():
+    with _scan_api(rejection=True) as (port, _state):
+        env = {
+            **os.environ,
+            "SHAKERSCAN_PUBLIC_HOST": "127.0.0.1",
+            "SHAKERSCAN_API_PORT": str(port),
+        }
+        result = subprocess.run(
+            ["bash", str(ROOT / "scanner.sh"), "scan", "https://app.example.test"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
 
     assert result.returncode != 0
-    assert "HTTP 409" in result.stdout
-    assert "Approval required" in result.stdout
+    assert "HTTP 409" in result.stderr
+    assert "Approval required" in result.stderr
     assert "Scan ID: null" not in result.stdout
 
 

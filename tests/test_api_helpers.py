@@ -1055,7 +1055,7 @@ def test_device_hunt_public_history_exposes_only_bounded_action_metadata():
     assert "transcript" not in summary and "events" not in summary and "capabilities" not in summary
 
 
-def test_deep_hunt_wire_budget_denial_is_a_tool_result_not_a_terminal_run(monkeypatch):
+def test_retired_legacy_run_tool_is_rejected_without_execution(monkeypatch):
     state = api_module._agent_new_state("budget test", [], [])
     state["wire_request_budget_limit"] = 100
     state["action_budget_limit"] = 12
@@ -1086,8 +1086,12 @@ def test_deep_hunt_wire_budget_denial_is_a_tool_result_not_a_terminal_run(monkey
 
     assert outcome["stop"] is False
     assert state["tool_calls_made"] == 0
-    assert state["events"][-1]["reservation_rejected"] == api_module.agent_tools.scanner_request_reservation("nuclei")
-    assert "wire_request_budget_insufficient" in state["messages"][-1]["content"]
+    assert state["events"][-1] == {
+        "iteration": 0,
+        "tool": "run_tool",
+        "hallucinated": True,
+    }
+    assert "run_tool" in state["messages"][-1]["content"]
 
 
 def test_model_intake_stage_manifest_is_bound_to_guest_build_inputs(tmp_path, monkeypatch):
@@ -20205,10 +20209,19 @@ def test_passive_scan_admission_needs_no_continuation():
         allowed_root_domains=("example.test",),
     )
 
+    contract = resolve_scan_contract(budget_profile="balanced")
+    template_manifest = api_module._compile_scan_template_work_manifest(
+        scan_id="36333333-3333-4333-8333-333333333333",
+        scan_contract=contract,
+        target_binding=target,
+    )
+    assert template_manifest is not None
+
     plan, continuation = api_module._compile_scan_admission_action_authority(
         scan_id="36333333-3333-4333-8333-333333333333",
-        scan_contract=resolve_scan_contract(budget_profile="balanced"),
+        scan_contract=contract,
         target_binding=target,
+        template_manifest_ref=template_manifest.reference().canonical_dict(),
     )
 
     assert continuation is None

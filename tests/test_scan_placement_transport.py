@@ -116,9 +116,14 @@ def test_private_placement_file_handles_bounded_worst_case_urls_without_environm
 
 def test_production_sources_do_not_transport_placement_bodies_in_environment():
     worker_source = (ROOT / "api" / "worker.py").read_text(encoding="utf-8")
+    transport_source = (ROOT / "api" / "scan" / "placement_transport.py").read_text(
+        encoding="utf-8",
+    )
     scanner_source = (ROOT / "scanner" / "scanner.py").read_text(encoding="utf-8")
     obsolete_name = "SHAKERSCAN_CANONICAL_SCAN_" + "PLACEMENTS"
     assert obsolete_name not in worker_source
     assert obsolete_name not in scanner_source
-    assert PLACEMENT_FILE_ENV in worker_source
-    assert PLACEMENT_DIGEST_ENV in worker_source
+    assert PLACEMENT_FILE_ENV in transport_source
+    assert PLACEMENT_DIGEST_ENV in transport_source
+    assert PLACEMENT_FILE_ENV not in worker_source
+    assert PLACEMENT_DIGEST_ENV not in worker_source

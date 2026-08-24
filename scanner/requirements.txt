@@ -36,3 +36,4 @@ paramiko>=4.0.0
 
 # Test runner (so `make test` works in the api/worker image without an ad-hoc install).
 pytest>=8.0.0
+pytest-asyncio>=1.0.0

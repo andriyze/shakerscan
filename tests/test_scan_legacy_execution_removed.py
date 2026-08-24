@@ -14,7 +14,7 @@ def test_digestless_deterministic_scan_execution_is_absent_from_workers():
     assert "require_legacy_scan_execution_window" not in worker
     assert "require_legacy_scan_execution_window" not in broker
     assert "_execute_legacy_reserved_deterministic_scan" not in worker
-    assert worker.count("digest-less deterministic Scan execution has been removed") == 2
+    assert worker.count("digest-less deterministic Scan execution has been removed") == 1
     assert broker.count("digest-less deterministic Scan execution has been removed") == 1
     assert "canonical_action_authority is not None" in broker
 

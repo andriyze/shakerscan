@@ -1417,8 +1417,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 380 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 322 | `api/api.py` |
+| Public REST operations | 381 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 323 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1428,14 +1428,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 2 | `scanner.sh` |
 | Make targets | 16 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 354 | Python sources + Compose manifests |
+| Runtime environment keys | 353 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 2 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 94 | `db/init.sql` + migrations |
+| Durable tables | 95 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1643,6 +1643,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/hunts/{hunt_id}/shell-plans/{plan_id}/confirm` | `confirm_hunt_shell_plan` |
 | `GET` | `/investigation/candidates` | `list_investigation_candidates` |
 | `GET` | `/investigation/candidates/{candidate_id}` | `get_investigation_candidate` |
+| `GET` | `/metrics/v2` | `get_v2_operational_metrics` |
 | `POST` | `/model-intake/admission/verify` | `verify_model_intake_admission` |
 | `GET` | `/model-intake/admissions` | `list_model_intake_admissions` |
 | `POST` | `/model-intake/admissions/v2/observe` | `observe_model_intake_deployment_v2` |
@@ -2266,7 +2267,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
-| `GIT_COMMIT` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
+| `GIT_COMMIT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |
 | `HF_TOKEN` | `scanner/scanner_tools/model_intake.py` |
 | `HIBP_API_KEY` | `scanner/scanner.py` |
@@ -2379,7 +2380,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_RELEASE_VERSION` | `docker-compose.release.yml` |
 | `SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES` | `scanner/scanner_tools/common.py` |
 | `SCANNER_SUBPROCESS_RECEIPT_LIMIT` | `scanner/scanner_tools/common.py` |
-| `SCANNER_VERSION` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
+| `SCANNER_VERSION` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `SCAN_CANCEL_POLL_SECONDS` | `api/worker.py` |
 | `SCAN_CHECKPOINT_FILE` | `scanner/manifests.py`, `scanner/scanner.py` |
 | `SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS` | `api/worker.py` |
@@ -2390,7 +2391,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_LOG_TAIL` | `api/worker.py` |
 | `SCAN_LOG_TTL_SECONDS` | `api/worker.py` |
 | `SCAN_MAX_DURATION_DEFAULT_MINUTES` | `api/worker.py` |
-| `SCAN_MAX_DURATION_MINUTES` | `api/worker.py` |
 | `SCAN_PHASE4_CANCEL_GRACE` | `scanner/scanner.py` |
 | `SCAN_PHASE4_LOGS` | `scanner/scanner.py` |
 | `SCAN_PHASE4_MAX_SECONDS` | `scanner/scanner.py` |
@@ -2594,6 +2594,7 @@ Scan feature or a second orchestration engine.
 | `application_graph_nodes` | `db/init.sql` |
 | `approval_receipts` | `api/retest_contract.py` |
 | `asm_endpoint_attempts` | `db/init.sql` |
+| `auth_sessions` | `db/init.sql` |
 | `broker_job_leases` | `db/init.sql` |
 | `broker_job_results` | `db/init.sql` |
 | `campaign_actions` | `api/retest_contract.py` |

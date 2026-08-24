@@ -121,7 +121,7 @@ def test_scope_trims_discovery_budget():
         assert s.options["custom_budget"]["browser_max_pages"] == 5
         assert s.options["custom_budget"]["nuclei_max_targets"] == 120
         assert s.options["custom_budget"]["phase4_max_seconds"] == 20
-        assert s.options["custom_budget"]["active_max_seconds"] == 60
+        assert s.options["custom_budget"]["active_max_seconds"] == 90
         assert s.options["custom_budget"]["active_max_endpoints"] == 2
         assert s.options["custom_budget"]["active_params_per_endpoint"] == 2
         assert s.options["custom_budget"]["smart_bola_max_endpoints"] == 2
@@ -294,7 +294,7 @@ def test_scope_light_shards_keep_raw_speed_budget():
     for s in plan.shards:
         b = s.options["custom_budget"]
         assert b["max_duration_minutes"] == 6  # 4 + 2*1
-        assert b["active_max_seconds"] == 60
+        assert b["active_max_seconds"] == 90
         assert b["phase4_max_seconds"] == 20
 
 

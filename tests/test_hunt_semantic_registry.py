@@ -11,12 +11,14 @@ sys.path.insert(0, str(ROOT / "api"))
 
 import agent_tools
 from hunt.capability_reservations import (
+    DURABLE_AUTH_HUNT_CAPABILITIES,
     DURABLE_BROWSER_HUNT_CAPABILITIES,
     DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
     DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
     DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
     DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
     DURABLE_INLINE_HUNT_CAPABILITIES,
+    DURABLE_HTTP_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
     DURABLE_WORKER_HUNT_CAPABILITIES,
 )
@@ -36,6 +38,8 @@ def test_every_planner_capability_has_one_registry_owned_executor():
 
     routed = set().union(
         DURABLE_INLINE_HUNT_CAPABILITIES,
+        DURABLE_AUTH_HUNT_CAPABILITIES,
+        DURABLE_HTTP_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
         DURABLE_BROWSER_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
@@ -107,7 +111,7 @@ def test_hunt_handler_validates_registry_input_before_reservation_or_action_writ
     start = source.index("async def execute_hunt_capability(")
     end = source.index('\n\n@app.post("/hunts/{hunt_id}/shell-plans', start)
     handler = source[start:end]
-    validation = handler.index("CAPABILITY_REGISTRY.validate_input")
+    validation = handler.index("CAPABILITY_REGISTRY.validate_hunt_input")
     assert validation < handler.index("create_requested")
     assert validation < handler.index("INSERT INTO hunt_actions")
     assert "spec.hunt_executor" in handler

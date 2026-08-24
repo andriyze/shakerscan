@@ -53,7 +53,6 @@ def test_inline_hunt_capability_set_is_explicit_and_bounded():
     assert DURABLE_INLINE_HUNT_CAPABILITIES == {
         "collections.inspect",
         "collections.select",
-        "http.request",
         "tls.inspect",
     }
     assert hunt_capability_lease_seconds({"tool_wall_seconds": 10}) == 90
@@ -200,8 +199,9 @@ def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     assert handler.index("record.start(") < handler.index("if name == \"collections.inspect\"")
     assert "status='reserved'" in handler
     assert "1 + MAX_REDIRECT_HOPS" in handler
-    assert "record_receipt=False" in handler
-    assert "HttpRequestExecutionAdapter(" in handler
+    assert '"worker_auth", "worker_http"' in handler
+    assert "_enqueue_canonical_http_capability(" in handler
+    assert "HttpRequestExecutionAdapter(" not in handler
     assert "TlsInspectionExecutionAdapter(" in handler
     assert "ControlPlaneExecutionAdapter(" in handler
     assert handler.count("CapabilityExecutor().execute(") >= 4

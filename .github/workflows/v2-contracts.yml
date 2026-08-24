@@ -362,20 +362,15 @@ jobs:
       - name: Install the locked runtime and coverage reporter
         run: |
           python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
-          python -m pip install --disable-pip-version-check coverage==7.10.7 pytest-cov==7.0.0
+          python -m pip install --disable-pip-version-check coverage==7.10.7
 
       - name: Collect the complete suite
-        env:
-          PYTHONPATH: .:api:scanner
-        run: python -m pytest --collect-only -q -p no:cacheprovider tests
+        run: python scripts/run_complete_python_suite.py --collect-only
 
       - name: Run the complete Python suite
-        env:
-          PYTHONPATH: .:api:scanner
         run: >-
-          python -m pytest -q -p no:cacheprovider tests
-          --junitxml=artifacts/v2-full-python.xml
-          --cov=api --cov=scanner --cov-report=xml:artifacts/v2-coverage.xml
+          python scripts/run_complete_python_suite.py
+          --coverage --artifacts-dir artifacts
 
       - name: Upload full-suite results and coverage
         if: always()
