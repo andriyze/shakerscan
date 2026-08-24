@@ -42,6 +42,7 @@ if "fastapi" not in sys.modules:
             self.headers = headers
 
     fastapi_mod.FastAPI = _FakeFastAPI
+    fastapi_mod.Header = lambda default=None, **k: default
     fastapi_mod.HTTPException = _FakeHTTPException
     fastapi_mod.Query = lambda default=None, **k: default
     fastapi_mod.Request = type("_Req", (), {"__init__": lambda self, **k: None})

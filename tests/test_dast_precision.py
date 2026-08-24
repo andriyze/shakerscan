@@ -16,13 +16,12 @@ from scanner_tools import nuclei as nuclei_module  # noqa: E402
 from scanner_tools.finding_validator import apply_validation_to_finding, validate_finding, validate_sqli, validate_ssrf, validate_xss  # noqa: E402
 from scanner_tools.tls_scanner import build_crypto_inventory  # noqa: E402
 
-sys.path.pop(0)
-
 SCANNER_MAIN_PATH = os.path.join(os.path.dirname(__file__), "..", "scanner", "scanner.py")
 SCANNER_MAIN_SPEC = importlib.util.spec_from_file_location("scanner_main_for_tests", SCANNER_MAIN_PATH)
 scanner_main = importlib.util.module_from_spec(SCANNER_MAIN_SPEC)
 assert SCANNER_MAIN_SPEC and SCANNER_MAIN_SPEC.loader
 SCANNER_MAIN_SPEC.loader.exec_module(scanner_main)
+sys.path.pop(0)
 _refresh_ai_quality_metrics = scanner_main._refresh_ai_quality_metrics
 apply_post_ai_precision_policy = scanner_main.apply_post_ai_precision_policy
 

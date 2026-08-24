@@ -32,6 +32,7 @@ if "fastapi" not in sys.modules:
         get = post = patch = put = delete = on_event = _decorator
 
     fastapi_mod.FastAPI = _FakeFastAPI
+    fastapi_mod.Header = lambda default=None, **k: default
     fastapi_mod.HTTPException = type("_HTTPExc", (Exception,), {})
     fastapi_mod.Query = lambda default=None, **k: default
     fastapi_mod.Request = type("_Req", (), {"__init__": lambda self, **k: None})

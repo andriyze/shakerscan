@@ -52,6 +52,7 @@ if "fastapi" not in sys.modules:
             self.query_params = query_params or {}
 
     fastapi_mod.FastAPI = _FakeFastAPI
+    fastapi_mod.Header = _fake_query
     fastapi_mod.HTTPException = _FakeHTTPException
     fastapi_mod.Query = _fake_query
     fastapi_mod.Request = _FakeRequest
