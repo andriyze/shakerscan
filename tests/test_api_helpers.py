@@ -19641,6 +19641,11 @@ def test_cors_allow_origins_is_an_allowlist_not_wildcard(monkeypatch):
     assert "https://ops.internal" in origins2
 
 
+def test_cors_exposes_native_hunt_admission_contract_to_the_ui():
+    """The browser must be able to distinguish a canonical V2 Hunt admission."""
+    assert "x-shakerscan-hunt-contract" in api_module._cors_kwargs["expose_headers"]
+
+
 def test_unsafe_origin_guard_rejects_before_handler_and_preserves_cli_and_allowlisted_ui():
     calls = []
 

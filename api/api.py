@@ -4607,6 +4607,10 @@ _cors_kwargs: dict[str, Any] = {
     "allow_credentials": False,
     "allow_methods": ["*"],
     "allow_headers": ["*"],
+    # The Hunt launcher fail-closes unless the browser can prove that the
+    # canonical V2 endpoint admitted the request. CORS hides non-safelisted
+    # response headers unless they are explicitly exposed.
+    "expose_headers": ["x-shakerscan-hunt-contract"],
 }
 # Optional regex for dynamic remote origins (e.g. a Tailscale MagicDNS name) without listing each.
 _cors_regex = os.environ.get("SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX", "").strip()
