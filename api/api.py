@@ -30443,6 +30443,20 @@ async def submit_scan_compat(request: LegacyScanRequest, response: Response):
     return await _submit_scan(request, allow_inline_authentication=True)
 
 
+def _scan_requires_durable_approval(
+    scan_contract: ResolvedScanContract,
+    *,
+    credential_refs: Sequence[Mapping[str, Any]] = (),
+    confirmed_active_collection_replay: bool = False,
+) -> bool:
+    """Keep admission aligned with the per-action runtime approval gate."""
+    return bool(
+        scan_contract.policy.active_testing
+        or credential_refs
+        or confirmed_active_collection_replay
+    )
+
+
 async def _submit_scan(
     request: _ScanRequestBase,
     *,
@@ -30680,6 +30694,13 @@ async def _submit_scan(
         credential_action_name = (
             f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"
         )
+        durable_approval_required = _scan_requires_durable_approval(
+            scan_contract,
+            credential_refs=credential_refs,
+            confirmed_active_collection_replay=(
+                confirmed_active_collection_replay
+            ),
+        )
 
         approval_context = await _validate_approval_receipt_for_action(
             conn,
@@ -30688,13 +30709,9 @@ async def _submit_scan(
             target_id=target_id,
             action_name=credential_action_name,
             risk_tier="credential" if credential_refs else "active",
-            always_require_receipt=bool(
-                credential_refs or confirmed_active_collection_replay
-            ),
-            require_target_binding=bool(
-                credential_refs or confirmed_active_collection_replay
-            ),
-            require_expiry=bool(credential_refs),
+            always_require_receipt=durable_approval_required,
+            require_target_binding=durable_approval_required,
+            require_expiry=durable_approval_required,
         )
         if approval_context:
             options_payload.update(approval_context)

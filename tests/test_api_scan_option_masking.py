@@ -1651,6 +1651,24 @@ def test_approval_receipt_policy_defaults_to_compatibility_mode(monkeypatch):
     response = api_module._sanitize_automation_settings_response()
 
     assert response["safety_boundaries"]["approval_receipts_required_for_state_changing_actions"] is False
+
+
+def test_active_scan_always_requires_durable_target_bound_approval():
+    active = types.SimpleNamespace(
+        policy=types.SimpleNamespace(active_testing=True),
+    )
+    passive = types.SimpleNamespace(
+        policy=types.SimpleNamespace(active_testing=False),
+    )
+
+    assert api_module._scan_requires_durable_approval(active) is True
+    assert api_module._scan_requires_durable_approval(passive) is False
+    assert api_module._scan_requires_durable_approval(
+        passive, credential_refs=({"profile_id": "profile-1"},),
+    ) is True
+    assert api_module._scan_requires_durable_approval(
+        passive, confirmed_active_collection_replay=True,
+    ) is True
     # No durable row + no Redis flag => compatibility mode => no receipt required.
     conn = _DurableSettingsConn()
     asyncio.run(
