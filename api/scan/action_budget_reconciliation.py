@@ -6,18 +6,29 @@ from typing import Any, Mapping
 
 
 _RECONCILIATION_SQL = r"""
+WITH cutover AS (
+    SELECT COALESCE(
+        (SELECT applied_at FROM app_schema_migrations
+          WHERE name='v2_scan_action_budget_link_v1'),
+        'epoch'::timestamptz
+    ) AS applied_at
+)
 SELECT
     (
         SELECT COUNT(*)
           FROM scan_capability_actions a
+         CROSS JOIN cutover c
          WHERE a.receipt_json->>'budget_reservation_id' IS NOT NULL
            AND a.reservation_id IS NULL
+           AND a.updated_at >= c.applied_at
     ) AS receipt_link_missing,
     (
         SELECT COUNT(*)
           FROM scan_capability_actions a
           JOIN budget_reservations r ON r.id=a.reservation_id
-         WHERE r.owner_kind <> 'scan'
+         CROSS JOIN cutover c
+         WHERE a.updated_at >= c.applied_at
+           AND (r.owner_kind <> 'scan'
             OR r.owner_id <> a.scan_id::text
             OR r.action_id <> a.action_id
             OR r.action_digest <> a.action_digest
@@ -28,8 +39,27 @@ SELECT
                     r.status NOT IN ('committed','released','failed')
                     OR r.execution_receipt_hash IS DISTINCT FROM a.receipt_hash
                 )
-            )
+            ))
     ) AS linked_authority_mismatch,
+    (
+        SELECT COUNT(*)
+          FROM scan_capability_actions a
+          JOIN budget_reservations r ON r.id=a.reservation_id
+         CROSS JOIN cutover c
+         WHERE a.updated_at < c.applied_at
+           AND (r.owner_kind <> 'scan'
+            OR r.owner_id <> a.scan_id::text
+            OR r.action_id <> a.action_id
+            OR r.action_digest <> a.action_digest
+            OR r.capability_name <> a.capability_name
+            OR (
+                a.status IN ('success','partial','failed','timed_out')
+                AND (
+                    r.status NOT IN ('committed','released','failed')
+                    OR r.execution_receipt_hash IS DISTINCT FROM a.receipt_hash
+                )
+            ))
+    ) AS legacy_historical_mismatch,
     (
         SELECT COUNT(*)
           FROM scan_capability_actions a
@@ -78,6 +108,7 @@ async def scan_action_budget_reconciliation(conn: Any) -> dict[str, Any]:
             "linked_authority_mismatch",
             "stale_execution_without_hold",
             "stale_terminal_reservation_without_action",
+            "legacy_historical_mismatch",
             "linked_action_count",
         )
     }

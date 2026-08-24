@@ -23,6 +23,7 @@ def test_reconciliation_reports_only_content_free_aggregate_health():
         "linked_authority_mismatch": 2,
         "stale_execution_without_hold": 3,
         "stale_terminal_reservation_without_action": 4,
+        "legacy_historical_mismatch": 7,
         "linked_action_count": 50,
     })
 
@@ -35,9 +36,11 @@ def test_reconciliation_reports_only_content_free_aggregate_health():
         "linked_authority_mismatch": 2,
         "stale_execution_without_hold": 3,
         "stale_terminal_reservation_without_action": 4,
+        "legacy_historical_mismatch": 7,
         "linked_action_count": 50,
     }
     assert "receipt_json->>'budget_reservation_id'" in conn.query
+    assert "v2_scan_action_budget_link_v1" in conn.query
     assert "INTERVAL '5 minutes'" in conn.query
 
 
