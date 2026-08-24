@@ -133,7 +133,7 @@ def test_active_collection_replay_has_an_approval_bound_hidden_contract():
     assert specification.planner_visible is False
 
 
-def test_authz_verification_is_read_only_proof_gated_and_planner_hidden():
+def test_authz_verification_is_read_only_proof_gated_and_worker_bound():
     specification = CAPABILITY_REGISTRY.require("authz.verify")
 
     assert specification.execution_kind == "http"
@@ -146,7 +146,11 @@ def test_authz_verification_is_read_only_proof_gated_and_planner_hidden():
     assert specification.placement_requirements[
         "deterministic_proof_contract"
     ] is True
-    assert specification.planner_visible is False
+    assert specification.planner_visible is True
+    assert specification.hunt_executor == "worker_http"
+    assert set(
+        specification.planner_contract()["input_schema"]["properties"]
+    ) == {"primary_session_ref", "secondary_session_ref", "routes"}
 
 
 def test_ssh_proposal_registry_budget_is_control_plane_only():

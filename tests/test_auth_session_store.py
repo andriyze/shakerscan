@@ -109,7 +109,7 @@ class SessionConn:
                 "live_profile_expires_at": NOW + timedelta(days=1),
                 "live_allowed_capabilities": [
                     "auth.session.establish", "auth.session.refresh",
-                    "auth.session.revoke", "http.request",
+                    "auth.session.revoke", "authz.verify", "http.request",
                 ],
             }
         if normalized.startswith("UPDATE auth_sessions SET status='revoked'"):

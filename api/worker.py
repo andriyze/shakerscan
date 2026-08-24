@@ -23506,6 +23506,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
     session_store = PostgresAuthSessionStore()
     credential_stack = AsyncExitStack()
     worker_session = None
+    secondary_worker_session = None
     private_session = None
     result: dict[str, Any] = {
         "job_id": job_id,
@@ -23862,6 +23863,76 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             adapter_type = AuthSessionExecutionAdapter
             redacted_execution = {
                 "session_ref": session_metadata.session_ref,
+                "secret_values_visible": False,
+            }
+        elif capability_name == "authz.verify":
+            primary_ref = str(capability_input["primary_session_ref"])
+            secondary_ref = str(capability_input["secondary_session_ref"])
+            if primary_ref == secondary_ref:
+                raise AuthSessionStoreError(
+                    "authorization proof requires two distinct session references"
+                )
+            async with db_pool.acquire() as authority_conn:
+                await validate_worker_credential_authority(
+                    authority_conn,
+                    owner_kind="hunt",
+                    owner_id=str(hunt_id),
+                    target=target,
+                    approval_receipt_id=policy.approval_receipt_id,
+                    scope_receipt_id=target.scope_receipt_id,
+                    action_name="hunt.capability:authz.verify",
+                )
+                worker_session = await session_store.load_for_worker(
+                    authority_conn,
+                    session_ref=primary_ref,
+                    owner_kind="hunt",
+                    owner_id=hunt_id,
+                    target=target,
+                    capability="authz.verify",
+                )
+                secondary_worker_session = await session_store.load_for_worker(
+                    authority_conn,
+                    session_ref=secondary_ref,
+                    owner_kind="hunt",
+                    owner_id=hunt_id,
+                    target=target,
+                    capability="authz.verify",
+                )
+            if (
+                worker_session.metadata.principal_slot != "primary"
+                or secondary_worker_session.metadata.principal_slot != "secondary"
+                or worker_session.metadata.profile_id
+                == secondary_worker_session.metadata.profile_id
+            ):
+                raise AuthSessionStoreError(
+                    "authorization proof requires distinct primary and secondary profiles"
+                )
+            primary_headers = worker_session.headers()
+            secondary_headers = secondary_worker_session.headers()
+            routes = [str(item) for item in capability_input["routes"]]
+
+            async def execute_authz() -> dict[str, Any]:
+                return await verify_target_bound_object_authorization(
+                    target_url,
+                    routes,
+                    target=target,
+                    primary_headers=primary_headers,
+                    secondary_headers=secondary_headers,
+                )
+
+            operation = execute_authz
+            adapter_type = AuthzVerificationExecutionAdapter
+            redacted_execution = {
+                "primary_session_ref": primary_ref,
+                "secondary_session_ref": secondary_ref,
+                "primary_profile_id": worker_session.metadata.profile_id,
+                "secondary_profile_id": (
+                    secondary_worker_session.metadata.profile_id
+                ),
+                "routes": [redact_url(item) for item in routes],
+                "route_inventory_digest": authz_route_inventory_digest(routes),
+                "route_count": len(routes),
+                "principal_contexts_distinct": True,
                 "secret_values_visible": False,
             }
         else:
@@ -24245,6 +24316,14 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
     finally:
         if worker_session is not None:
             worker_session.close()
+        if secondary_worker_session is not None:
+            secondary_worker_session.close()
+        for header_set_name in ("primary_headers", "secondary_headers"):
+            header_set = locals().get(header_set_name)
+            if isinstance(header_set, dict):
+                for name in list(header_set):
+                    header_set[name] = ""
+                header_set.clear()
         for name in list(trusted_headers if "trusted_headers" in locals() else {}):
             trusted_headers[name] = ""
         if "trusted_headers" in locals():

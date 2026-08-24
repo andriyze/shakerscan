@@ -720,7 +720,26 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             )),
             "authz-differential/v1",
             ("cross_principal_ownership_differential", "tool_receipt"),
-            planner_visible=False,
+            planner_visible=True,
+            hunt_executor="worker_http",
+            planner_input_schema=_schema({
+                "primary_session_ref": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                },
+                "secondary_session_ref": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                },
+                "routes": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 4_000},
+                    "minItems": 1,
+                    "maxItems": 50,
+                },
+            }, required=(
+                "primary_session_ref", "secondary_session_ref", "routes",
+            )),
         ),
         CapabilitySpec(
             "tls.inspect", "Inspect TLS configuration for a target-bound origin.",

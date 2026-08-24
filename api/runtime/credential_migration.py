@@ -36,6 +36,7 @@ LEGACY_WEB_CAPABILITIES = (
     "auth.session.establish",
     "auth.session.refresh",
     "auth.session.revoke",
+    "authz.verify",
     "http.request",
     "request.replay",
     "scan.execute",

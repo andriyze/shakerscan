@@ -40865,7 +40865,15 @@ async def execute_hunt_capability(
                 except (TypeError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
             uses_session = bool(
-                name == "http.request" and request.input.get("session_ref")
+                (
+                    name == "http.request"
+                    and request.input.get("session_ref")
+                )
+                or (
+                    name == "authz.verify"
+                    and request.input.get("primary_session_ref")
+                    and request.input.get("secondary_session_ref")
+                )
             )
             requires_call_approval = (
                 spec.requires_active_approval

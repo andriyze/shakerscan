@@ -23,7 +23,7 @@ def test_auth_and_http_routes_derive_from_the_canonical_registry():
         "auth.session.refresh",
         "auth.session.revoke",
     }
-    assert DURABLE_HTTP_HUNT_CAPABILITIES == {"http.request"}
+    assert DURABLE_HTTP_HUNT_CAPABILITIES == {"authz.verify", "http.request"}
     assert all(
         CAPABILITY_REGISTRY.require(name).hunt_executor == "worker_auth"
         for name in DURABLE_AUTH_HUNT_CAPABILITIES
@@ -46,6 +46,16 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
     assert "session_ref" in request["input_schema"]["properties"]
     assert request["placement"]["credentials_resolved_server_side"] is True
 
+    authz = CAPABILITY_REGISTRY.require(
+        "authz.verify"
+    ).planner_contract()["input_schema"]
+    assert set(authz["properties"]) == {
+        "primary_session_ref", "secondary_session_ref", "routes",
+    }
+    assert authz["required"] == [
+        "primary_session_ref", "secondary_session_ref", "routes",
+    ]
+
 
 def test_control_plane_queue_contains_no_decrypted_session_or_profile_material():
     source = (ROOT / "api/api.py").read_text()
@@ -63,6 +73,22 @@ def test_control_plane_queue_contains_no_decrypted_session_or_profile_material()
         assert forbidden not in enqueue
 
 
+def test_authz_session_use_requires_fresh_credential_approval():
+    source = (ROOT / "api/api.py").read_text()
+    handler = _slice(
+        source,
+        "async def execute_hunt_capability(",
+        "\n\n@app.post(\"/hunts/{hunt_id}/shell-plans/",
+    )
+    assert 'name == "authz.verify"' in handler
+    assert 'request.input.get("primary_session_ref")' in handler
+    assert 'request.input.get("secondary_session_ref")' in handler
+    assert (
+        'risk_tier="credential" if principal_slot != "anonymous" or uses_session'
+        in handler
+    )
+
+
 def test_worker_reloads_every_authority_before_session_or_http_execution():
     source = (ROOT / "api/worker.py").read_text()
     handler = _slice(
@@ -76,6 +102,8 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
         "validate_worker_credential_authority(",
         "WorkerCredentialResolver().resolve(",
         "session_store.load_for_worker(",
+        "authorization proof requires distinct primary and secondary profiles",
+        "verify_target_bound_object_authorization(",
         "execute_bound_http_request(",
         "terminalize_hunt_capability(",
         "reservation_store.persist_terminal(",
@@ -85,6 +113,7 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
         assert required in handler
     assert "allow_write=False" in handler
     assert "worker_session.close()" in handler
+    assert "secondary_worker_session.close()" in handler
     assert "private_session.close()" in handler
     assert "credential_stack.aclose()" in handler
 
