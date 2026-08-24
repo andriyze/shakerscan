@@ -313,8 +313,8 @@ def test_scan_process_reserves_only_remaining_report_wall_time():
         "hosts_attempted": 0,
         "tool_wall_seconds": 55,
     }
-    assert prepared.capability_name == "scan.execute"
-    assert prepared.adapter_name == "scanner.dast"
+    assert prepared.capability_name == "scan.finalize"
+    assert prepared.adapter_name == "scanner.report"
     assert prepared.estimated_budget == {
         "tool_wall_seconds": 55,
     }

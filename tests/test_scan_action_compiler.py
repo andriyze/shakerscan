@@ -207,6 +207,8 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
         "tool_wall_seconds": 30,
     }
     assert plan.actions[-1].action_id == "finalize.report"
+    assert plan.actions[-1].capability_name == "scan.finalize"
+    assert plan.actions[-1].placement["adapter_name"] == "scanner.report"
     assert set(plan.actions[-1].dependencies) == set(by_id) - {"finalize.report"}
 
 

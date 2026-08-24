@@ -70,7 +70,7 @@ def allocate_scan_action_plan(
     tiers. A selected smaller tier is frozen into the returned action digest before
     traffic. Required work fails admission when no tier fits; optional work remains
     in the immutable plan with a stable skip reason. The residual authority is
-    assigned once to ``scan.execute`` so legacy internal checks cannot expand.
+    assigned once to the finalizer so legacy internal checks cannot expand.
     """
     limits = budget.ledger_limits()
     allocated = {name: 0 for name in limits}

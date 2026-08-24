@@ -63,7 +63,7 @@ def _plan():
                 "action_digest": "f" * 64,
                 "stage": "finalize_evidence",
                 "ordinal": 2,
-                "capability_name": "scan.execute",
+                "capability_name": "scan.finalize",
                 "required": True,
                 "admission_status": "planned",
                 "capability_args": {"report_only": True},

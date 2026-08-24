@@ -493,7 +493,7 @@ async def _noop():
 
 def test_database_neutral_finalizer_reads_only_durable_results_and_observations():
     baseline = _action("baseline.http", "http.request", 0)
-    final = _action("finalize.report", "scan.execute", 1, dependencies=(baseline.action_id,))
+    final = _action("finalize.report", "scan.finalize", 1, dependencies=(baseline.action_id,))
     plan = ScanActionPlan(
         scan_id=str(uuid.uuid4()),
         execution_plan_digest="a" * 64,

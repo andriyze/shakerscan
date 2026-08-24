@@ -256,7 +256,7 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
         action_id="finalize.report",
         stage="finalize_evidence",
         ordinal=1,
-        capability_name="scan.execute",
+        capability_name="scan.finalize",
         capability_args={"report_only": True},
         target_binding_digest=parent.target_binding_digest,
         input_binding_digest="e" * 64,

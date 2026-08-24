@@ -30257,7 +30257,7 @@ def _compile_scan_admission_action_authority(
             allowed_capabilities.add("xss.request_verify")
         if "sqli" in enabled_families:
             allowed_capabilities.add("sqli.request_verify")
-    required_holds = (*required_capabilities, "scan.execute")
+    required_holds = (*required_capabilities, "scan.finalize")
     remaining = dict(parent_allocation.residual_scan_execute_budget)
     for capability_name in required_holds:
         specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)

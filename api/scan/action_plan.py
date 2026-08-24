@@ -995,7 +995,7 @@ class ScanActionPlanCompiler:
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
                 "finalize.report",
-                self._registry.require("scan.execute").budget_cost,
+                self._registry.require("scan.finalize").budget_cost,
             )
             for name, amount in finalizer_budget.items():
                 reserved[name] = reserved.get(name, 0) + amount
@@ -1189,7 +1189,7 @@ class ScanActionPlanCompiler:
             add(
                 "finalize.report",
                 "finalize_evidence",
-                "scan.execute",
+                "scan.finalize",
                 {"report_only": True},
                 dependencies=tuple(row.action_id for row in blueprints),
                 required=True,

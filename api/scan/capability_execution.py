@@ -377,7 +377,7 @@ def prepare_scan_process_capability(
     """Bind the deterministic report assembler to its remaining wall-time hold.
 
     Target traffic is owned by the separately placed fixed-stage capabilities.
-    ``scan.execute`` receives no HTTP, browser, TCP, host, or mutation grant.
+    ``scan.finalize`` receives no HTTP, browser, TCP, host, or mutation grant.
     Missing wall capacity is represented as a one-unit request that the locked
     ledger will reject, producing a durable blocked receipt.
     """
@@ -422,8 +422,8 @@ def prepare_scan_process_capability(
         "runtime_budget": runtime_budget,
     }
     prepared = PreparedExecution(
-        capability_name="scan.execute",
-        adapter_name="scanner.dast",
+        capability_name="scan.finalize",
+        adapter_name="scanner.report",
         adapter_version="1",
         commands=(),
         estimated_budget=requested,

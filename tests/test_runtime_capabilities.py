@@ -33,14 +33,16 @@ def test_registry_is_authoritative_for_legacy_hunt_tools_and_arsenal():
         assert template["output_schema"] == spec.output_schema
         assert template["evidence_contract"] == spec.evidence_contract
 
-    arsenal = {
-        item["tool_name"]: item
-        for item in command_arsenal.describe_tools(probe_versions=False)["tools"]
-    }
+    arsenal = command_arsenal.describe_tools(probe_versions=False)["tools"]
     for tool_name, spec in registered.items():
-        assert arsenal[tool_name]["capability_name"] == spec.name
-        assert arsenal[tool_name]["risk_tier"] == spec.risk_tier
-        assert arsenal[tool_name]["evidence_parser"] == spec.output_schema
+        matching = next(
+            item for item in arsenal
+            if item["tool_name"] == tool_name
+            and item["capability_name"] == spec.name
+        )
+        assert matching["capability_name"] == spec.name
+        assert matching["risk_tier"] == spec.risk_tier
+        assert matching["evidence_parser"] == spec.output_schema
 
 
 def test_registry_filters_target_kind_and_active_permission():
@@ -52,9 +54,9 @@ def test_registry_filters_target_kind_and_active_permission():
     }
 
     assert safe_web == {
-        "scan.execute",
+        "scan.finalize", "scan.execute",
         "web.probe", "http.request", "dns.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
-        "browser.interact",
+        "browser.interact", "web.crawl", "web.content_discover", "templates.passive_scan",
         "collections.inspect", "collections.select", "collections.replay_safe",
     }
     assert all_device == {
@@ -66,17 +68,25 @@ def test_registry_filters_target_kind_and_active_permission():
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
 
 
-def test_scan_execute_is_a_placed_evidence_report_assembler():
-    specification = CAPABILITY_REGISTRY.require("scan.execute")
+def test_scan_finalize_is_an_offline_placed_evidence_report_assembler():
+    specification = CAPABILITY_REGISTRY.require("scan.finalize")
 
     assert specification.budget_cost == {"tool_wall_seconds": 1}
     assert specification.placement_requirements == {
         "network_reachability": False,
-        "runtime_target_binding": True,
+        "runtime_target_binding": False,
         "fixed_stage_plan": True,
         "durable_reservation": True,
         "placed_evidence_only": True,
+        "offline_only": True,
     }
+
+
+def test_scan_execute_remains_only_as_historical_compatibility_identity():
+    specification = CAPABILITY_REGISTRY.require("scan.execute")
+
+    assert specification.placement_requirements["deprecated_compatibility"] is True
+    assert specification.planner_visible is False
 
 
 def test_auth_session_registry_contract_is_target_bound_and_worker_private():

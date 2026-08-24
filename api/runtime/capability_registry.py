@@ -182,21 +182,38 @@ def _http_principal_schema(
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
         CapabilitySpec(
-            "scan.execute",
-            "Execute one immutable fixed-stage deterministic Scan plan.",
-            "internal", "passive", _HTTP_TARGETS, "scanner.dast", "1",
+            "scan.finalize",
+            "Build one deterministic report from immutable action receipts and manifests.",
+            "internal", "passive", _HTTP_TARGETS, "scanner.report", "1",
             None,
             {"tool_wall_seconds": 1},
             {
                 "network_reachability": False,
-                "runtime_target_binding": True,
+                "runtime_target_binding": False,
                 "fixed_stage_plan": True,
                 "durable_reservation": True,
                 "placed_evidence_only": True,
+                "offline_only": True,
             },
             _schema(),
             "scan-report/v2",
             ("scan_report", "coverage_summary", "tool_receipts"),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
+            "scan.execute",
+            "Deprecated compatibility identity for historical monolithic Scan receipts.",
+            "internal", "passive", _HTTP_TARGETS, "scanner.dast.compat", "1",
+            None,
+            {"tool_wall_seconds": 1},
+            {
+                "network_reachability": False,
+                "runtime_target_binding": False,
+                "deprecated_compatibility": True,
+            },
+            _schema(),
+            "scan-report/v1",
+            ("historical_scan_report",),
             planner_visible=False,
         ),
         CapabilitySpec(

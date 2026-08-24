@@ -44,20 +44,20 @@ def _action(
         action_id=action_id,
         stage="finalize_evidence" if action_id == "finalize.report" else "deterministic_baseline",
         ordinal=ordinal,
-        capability_name="scan.execute" if action_id == "finalize.report" else capability_name,
+        capability_name="scan.finalize" if action_id == "finalize.report" else capability_name,
         capability_args={"report_only": True} if action_id == "finalize.report" else {"method": "GET"},
         target_binding_digest="a" * 64,
         input_binding_digest=hashlib.sha256(action_id.encode()).hexdigest(),
         requested_budget={"http_requests": 1, "tool_wall_seconds": 2},
         placement={
             "eligible_backends": ["local", "broker"],
-            "adapter_name": "scanner.dast" if action_id == "finalize.report" else "httpx",
+            "adapter_name": "scanner.report" if action_id == "finalize.report" else "httpx",
             "adapter_version": "1",
         },
         dependencies=dependencies,
         required=True,
         supporting=False,
-        output_schema="scan-report/v1" if action_id == "finalize.report" else "http-observation/v1",
+        output_schema="scan-report/v2" if action_id == "finalize.report" else "http-observation/v1",
     )
 
 
