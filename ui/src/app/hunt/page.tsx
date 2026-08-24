@@ -31,6 +31,7 @@ import {
 import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+import { usableWebTargets } from '@/lib/targetChoices'
 
 type TargetChoice = {
   id: string
@@ -112,7 +113,7 @@ function HuntContent() {
           : Array.isArray(targetRows)
             ? targetRows
             : []
-        setWebTargets(targets)
+        setWebTargets(usableWebTargets(targets))
         setDevices(deviceRows.devices || [])
         const requested = searchParams.get('target') || searchParams.get('target_id')
         if (requested) setTargetId(requested)

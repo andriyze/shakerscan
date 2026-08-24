@@ -21,6 +21,7 @@ import {
 } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { validateScanTarget } from '@/lib/targetValidation'
+import { usableWebTargets } from '@/lib/targetChoices'
 
 type BudgetProfile = 'fast' | 'balanced' | 'thorough'
 
@@ -99,7 +100,7 @@ export default function NewScanPage() {
       .then((rows) => {
         if (cancelled) return
         const list = Array.isArray(rows?.targets) ? rows.targets : Array.isArray(rows) ? rows : []
-        setExistingTargets(list)
+        setExistingTargets(usableWebTargets(list))
       })
       .catch(() => undefined)
     getWorkers()

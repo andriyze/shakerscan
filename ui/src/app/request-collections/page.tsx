@@ -33,6 +33,7 @@ import {
   Textarea,
   useToast,
 } from '@/components/ui'
+import { usableWebTargets } from '@/lib/targetChoices'
 
 type Choice = {
   id: string
@@ -118,7 +119,7 @@ export default function RequestCollectionsPage() {
     Promise.all([getTargets({ limit: 500 }), getDevices({ limit: 500 })])
       .then(([web, connected]) => {
         if (cancelled) return
-        setTargets((web.targets || []).filter((item) => item.is_active))
+        setTargets(usableWebTargets(web.targets || []))
         setDevices((connected.devices || []).filter((item) => item.is_active))
       })
       .catch((cause) => {
