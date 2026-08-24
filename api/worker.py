@@ -11916,7 +11916,6 @@ async def _execute_reserved_deterministic_scan(
     scan_id: str,
     job_id: str,
     runtime_request_grant: int | None = None,
-    collection_replay_result_holder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute the persisted immutable Scan action graph on the local backend."""
     normalized, admission = prepare_worker_dispatch(options)
@@ -13743,7 +13742,6 @@ async def process_scan_job(job_data: dict):
     )
     heartbeat_thread.start()
 
-    collection_replay_summary: dict[str, Any] = {}
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -13762,7 +13760,6 @@ async def process_scan_job(job_data: dict):
                         scan_id=scan_id,
                         job_id=job_id,
                         runtime_request_grant=runtime_request_grant,
-                        collection_replay_result_holder=collection_replay_summary,
                     )
                 else:
                     result = await run_scan(
@@ -13828,8 +13825,6 @@ async def process_scan_job(job_data: dict):
             result = _unexpected_scan_exception_result(str(target or ""), e)
             print(f"[{job_id[:8]}] Unexpected scan failure: {result['error']}", flush=True)
 
-        if collection_replay_summary:
-            result["request_collection_replay"] = collection_replay_summary
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result = _apply_runtime_scope_guard_to_result(result, options)

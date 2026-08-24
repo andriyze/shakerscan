@@ -415,8 +415,7 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
         "\n\nasync def _execute_scan_subdomain_discovery", scheduler_start,
     )
     scheduler = worker[scheduler_start:scheduler_end]
-    dispatcher_start = worker.index("class _CanonicalLocalScanDispatcher:")
-    dispatcher = worker[dispatcher_start:scheduler_start]
+    dispatcher = (root / "api" / "scan" / "action_adapter.py").read_text()
 
     assert 'FROM scans s JOIN targets t' in handler
     assert 'persisted_options.get("request_collections")' in handler
@@ -446,9 +445,14 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert process.index("_hydrate_generic_scan_credentials") < process.index(
         "_execute_reserved_deterministic_scan("
     )
-    assert "_execute_scan_request_collections(" in dispatcher
-    assert "trusted_primary_headers=resolve_scan_http_principal(" in dispatcher
-    assert "collection_replay_result_holder.update" in dispatcher
+    assert "_execute_scan_request_collections(" in scheduler
+    assert "trusted_primary_headers=resolve_scan_http_principal(" in scheduler
+    assert "private_replay_plan_loader=load_private_replay_plan" in scheduler
+    assert "async def _collection_replay" in dispatcher
+    assert "self._private_replay_plan(action)" in dispatcher
+    assert "collection_replay_result_holder" not in scheduler
+    assert "collection_replay_result_holder" not in process
+    assert "class DatabaseNeutralScanActionDispatcher:" in dispatcher
     assert "ScanOrchestrator(" in scheduler
 
 
