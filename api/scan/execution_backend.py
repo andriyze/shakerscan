@@ -346,7 +346,14 @@ class PostgresScanExecutionBackend:
                       AND action_digest=$3
                       AND execution_plan_digest=$4
                       AND target_binding_digest=$5
-                      AND status='planned'
+                      AND (
+                          status='planned'
+                          OR (
+                              status IN ('leased','running')
+                              AND lease_expires_at IS NOT NULL
+                              AND lease_expires_at <= now()
+                          )
+                      )
                 RETURNING attempt""",
             uuid.UUID(self._plan.scan_id),
             action.action_id,
@@ -469,6 +476,7 @@ class PostgresScanExecutionBackend:
                     WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
                       AND lease_id=$4 AND lease_token_hash=$5
                       AND worker_id=$6 AND status IN ('leased','running')
+                      AND lease_expires_at > now()
                 RETURNING result_json""",
                 uuid.UUID(self._plan.scan_id),
                 action.action_id,

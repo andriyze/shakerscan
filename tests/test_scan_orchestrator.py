@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -373,7 +373,15 @@ class FakePostgresConn:
         action_id = str(args[1])
         row = self.rows[action_id]
         if "SET status='leased'" in query:
-            if row["status"] != "planned" or row["action_digest"] != args[2]:
+            reclaimable = (
+                row["status"] in {"leased", "running"}
+                and row.get("lease_expires_at") is not None
+                and row["lease_expires_at"] <= datetime.now(timezone.utc)
+            )
+            if (
+                (row["status"] != "planned" and not reclaimable)
+                or row["action_digest"] != args[2]
+            ):
                 return None
             row.update({
                 "status": "leased",
@@ -391,6 +399,8 @@ class FakePostgresConn:
                 or row["lease_id"] != args[3]
                 or row["lease_token_hash"] != args[4]
                 or row["worker_id"] != args[5]
+                or row.get("lease_expires_at") is None
+                or row["lease_expires_at"] <= datetime.now(timezone.utc)
             ):
                 return None
             row["status"] = "running"
@@ -402,6 +412,8 @@ class FakePostgresConn:
                 or row["lease_id"] != args[3]
                 or row["lease_token_hash"] != args[4]
                 or row["worker_id"] != args[5]
+                or row.get("lease_expires_at") is None
+                or row["lease_expires_at"] <= datetime.now(timezone.utc)
             ):
                 return None
             row.update({
@@ -475,6 +487,50 @@ def test_postgres_backend_fails_closed_after_lease_authority_is_lost():
         asyncio.run(backend.settle(
             lease, _result(action, status=CapabilityResultStatus.SUCCESS),
         ))
+
+
+def test_postgres_backend_reclaims_expired_action_and_rejects_stale_worker():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    first = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    second = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-2",
+        token_factory=lambda: "zyxwvutsrqponmlkjihgfedcba543210",
+    )
+    action = plan.actions[0]
+    stale_lease = asyncio.run(first.acquire_action(action))
+    row = conn.rows[action.action_id]
+    row["status"] = "running"
+    row["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    recovered_lease = asyncio.run(second.acquire_action(action))
+
+    assert recovered_lease.attempt == 2
+    assert recovered_lease.lease_id != stale_lease.lease_id
+    assert row["worker_id"] == "local-worker-2"
+    with pytest.raises(ActionLeaseLost, match="heartbeat"):
+        asyncio.run(first.heartbeat(stale_lease))
+    with pytest.raises(ActionLeaseLost, match="settlement"):
+        asyncio.run(first.settle(
+            stale_lease,
+            _result(action, status=CapabilityResultStatus.SUCCESS),
+        ))
+
+    asyncio.run(second.heartbeat(recovered_lease))
+    settled = asyncio.run(second.settle(
+        recovered_lease,
+        _result(action, status=CapabilityResultStatus.SUCCESS),
+    ))
+    assert settled.status is CapabilityResultStatus.SUCCESS
+    assert row["status"] == "success"
+    assert row["attempt"] == 2
 
 
 def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
