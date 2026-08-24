@@ -196,6 +196,15 @@ function HuntContent() {
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
   const configuredDuration = positiveInteger(maxDurationSeconds)
   const approvalTtlMinutes = Math.ceil((configuredDuration ?? HUNT_BUDGET_PROFILES[budget].max_duration_seconds) / 60) + 15
+  const startBlockedReason = !targetId
+    ? 'Choose a target to continue.'
+    : !objective.trim()
+      ? 'Describe what the Hunt should investigate.'
+      : privileged && !authorizationConfirmed
+        ? 'Confirm that you are authorized to use the selected capabilities.'
+        : privileged && !approvalReceipt.trim()
+          ? 'Create or paste a target-bound approval receipt.'
+          : null
   const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network'
     ? ['ssh']
     : targetKind === 'device'
@@ -571,27 +580,28 @@ function HuntContent() {
                 />
               )}
 
-              <Field label="Capability allowlist (optional)">
-                <div>
-                  <input
-                    value={capabilityIds}
-                    onChange={(event) => setCapabilityIds(event.target.value)}
-                    placeholder="web.probe, web.crawl, templates.scan"
-                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Leave empty for the server-defined capabilities allowed by this target and policy.
-                  </p>
-                </div>
+              <Field
+                label="Capability allowlist (optional)"
+                hint="Leave empty for the server-defined capabilities allowed by this target and policy."
+              >
+                <input
+                  value={capabilityIds}
+                  onChange={(event) => setCapabilityIds(event.target.value)}
+                  placeholder="web.probe, web.crawl, templates.scan"
+                  className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
+                />
               </Field>
 
               {error && (
-                <p className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">
+                <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">
                   {error}
                 </p>
               )}
-              <div className="flex justify-end">
-                <Button onClick={start} loading={starting} disabled={!targetId || !objective.trim()}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p id="hunt-start-guidance" className={`text-xs ${startBlockedReason ? 'text-amber-300' : 'text-gray-500'}`}>
+                  {startBlockedReason || 'Ready to start. The runtime will enforce the target, policy, and budget shown above.'}
+                </p>
+                <Button onClick={start} loading={starting} disabled={Boolean(startBlockedReason)} aria-describedby="hunt-start-guidance">
                   Start Hunt
                 </Button>
               </div>
