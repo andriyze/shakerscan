@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
 from api.scan.authorization import (
     ActionAuthorityDecision,
@@ -68,6 +69,25 @@ def test_fresh_target_bound_approval_allows_active_canonical_action():
 
 def test_database_record_authority_rows_are_read_at_runtime():
     now, scope, approval, target = _authority()
+
+    assert revalidate_action_authority(
+        action={"capability_name": "xss.verify"},
+        target_binding=target,
+        scope_receipt=_DatabaseRecord(scope),
+        approval_receipt=_DatabaseRecord(approval),
+        scope_receipt_id="scope-1",
+        approval_receipt_id=approval["id"],
+        now=now,
+    ) is ActionAuthorityDecision.ALLOWED
+
+
+def test_database_json_columns_are_decoded_before_runtime_scope_checks():
+    now, scope, approval, target = _authority()
+    scope["allowed_hosts"] = json.dumps(scope["allowed_hosts"])
+    scope["allowed_root_domains"] = json.dumps(
+        scope["allowed_root_domains"]
+    )
+    approval["confirmations"] = json.dumps(approval["confirmations"])
 
     assert revalidate_action_authority(
         action={"capability_name": "xss.verify"},

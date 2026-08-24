@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 import ipaddress
+import json
 from typing import Any, Mapping
 
 try:
@@ -50,7 +51,13 @@ def _timestamp(value: Any) -> datetime | None:
 
 def _sequence(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
-        return (value,)
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return (value,)
+        if not isinstance(decoded, list):
+            return (value,)
+        value = decoded
     if not isinstance(value, (list, tuple, set, frozenset)):
         return ()
     return tuple(str(item) for item in value)
