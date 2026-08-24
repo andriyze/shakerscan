@@ -30188,6 +30188,23 @@ def _compile_scan_admission_action_authority(
         if family in required_by_family
         and family not in set(scan_contract.policy.exclude_families)
     )
+    enabled_families = {
+        family
+        for family in required_by_family
+        if family not in set(scan_contract.policy.exclude_families)
+        and (
+            not scan_contract.policy.include_families
+            or family in set(scan_contract.policy.include_families)
+        )
+    }
+    allowed_capabilities = {
+        required_by_family[family] for family in enabled_families
+    }
+    if scan_contract.policy.allow_state_changing_http:
+        if "xss" in enabled_families:
+            allowed_capabilities.add("xss.request_verify")
+        if "sqli" in enabled_families:
+            allowed_capabilities.add("sqli.request_verify")
     required_holds = (*required_capabilities, "scan.execute")
     remaining = dict(parent_allocation.residual_scan_execute_budget)
     for capability_name in required_holds:
@@ -30222,6 +30239,7 @@ def _compile_scan_admission_action_authority(
             ),
         ),
         required_capabilities=required_capabilities,
+        allowed_capabilities=tuple(sorted(allowed_capabilities)),
     )
     return parent_plan, continuation
 

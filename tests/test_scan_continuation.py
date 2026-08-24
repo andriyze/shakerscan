@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
+
+import pytest
 
 from api.runtime.models import TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
     ContinuationBudgetCeiling,
+    SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
     ScanContinuationAllocation,
     ScanContinuationError,
     build_discovery_continuation_manifests,
@@ -85,6 +89,7 @@ def _plans():
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
         required_capabilities=("xss.verify",),
+        allowed_capabilities=("xss.verify",),
     )
     endpoints = build_endpoint_manifest(
         scan_id=SCAN_ID,
@@ -131,6 +136,32 @@ def test_admission_plan_can_stop_before_manifest_bound_actions():
     assert ScanContinuationAllocation.from_dict(
         allocation.canonical_dict()
     ) == allocation
+
+
+def test_v1_continuation_allocation_remains_readable_for_inflight_scans():
+    parent, continuation, allocation = _plans()
+    legacy = ScanContinuationAllocation(
+        scan_id=allocation.scan_id,
+        parent_plan_digest=allocation.parent_plan_digest,
+        execution_plan_digest=allocation.execution_plan_digest,
+        target_binding_digest=allocation.target_binding_digest,
+        parent_action_ids=allocation.parent_action_ids,
+        budget_ceiling=allocation.budget_ceiling,
+        max_endpoint_entries=allocation.max_endpoint_entries,
+        max_candidate_entries=allocation.max_candidate_entries,
+        required_capabilities=allocation.required_capabilities,
+        schema_version=SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
+    )
+
+    restored = ScanContinuationAllocation.from_dict(legacy.canonical_dict())
+
+    assert restored == legacy
+    assert "xss.verify" in restored.allowed_capabilities
+    assert merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        allocation=restored,
+    ).actions[-1].action_id == "finalize.report"
 
 
 def test_continuation_append_preserves_parent_and_binds_one_finalizer():
@@ -216,6 +247,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
         required_capabilities=("xss.request_verify",),
+        allowed_capabilities=("xss.request_verify", "xss.verify"),
     )
     continuation_raw = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -269,6 +301,127 @@ def test_continuation_cannot_exceed_its_upfront_budget_ceiling():
         assert "upfront allocation" in str(exc)
     else:
         raise AssertionError("over-budget continuation was accepted")
+
+
+def test_continuation_cannot_add_a_capability_family():
+    parent, continuation, allocation = _plans()
+    no_families = ScanContinuationAllocation(
+        **{
+            **allocation.digest_material(),
+            "required_capabilities": [],
+            "allowed_capabilities": [],
+        }
+    )
+
+    with pytest.raises(ScanContinuationError, match="outside its allocation"):
+        merge_scan_action_continuation(
+            parent_plan=parent,
+            continuation_plan=continuation,
+            allocation=no_families,
+        )
+
+
+def test_continuation_cannot_change_existing_private_input_authority():
+    target = _target()
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+            "include_families": ["xss"],
+        },
+        approval_receipt_id="approval-1",
+    )
+    collection = ({
+        "collection_id": "collection-a",
+        "selection_id": "selection-a",
+        "binding_id": "binding-a",
+        "version": 1,
+        "selection_digest": "a" * 64,
+        "active": True,
+        "max_requests": 1,
+    },)
+    request_ref = ScanWorkManifestReference(
+        manifest_id="70000000-0000-4000-8000-000000000090",
+        kind="request",
+        content_schema="request-manifest/v1",
+        manifest_digest="d" * 64,
+        entry_count=1,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="70000000-0000-4000-8000-000000000091",
+        kind="request_candidate",
+        content_schema="request-candidate-manifest/v1",
+        manifest_digest="f" * 64,
+        entry_count=1,
+        status="complete",
+    ).canonical_dict()
+    parent_raw = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=target,
+        request_collection_refs=collection,
+        request_manifest_refs={"a" * 64: request_ref},
+        defer_manifest_actions=True,
+        include_finalizer=False,
+    )
+    parent_allocation = allocate_scan_action_plan(
+        parent_raw,
+        contract.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+    )
+    parent = parent_allocation.plan
+    allocation = ScanContinuationAllocation(
+        scan_id=SCAN_ID,
+        parent_plan_digest=parent.plan_digest,
+        execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest,
+        parent_action_ids=tuple(action.action_id for action in parent.actions),
+        budget_ceiling=parent_allocation.residual_scan_execute_budget,
+        max_endpoint_entries=contract.budget.max_endpoints,
+        max_candidate_entries=contract.budget.max_http_requests,
+        allowed_capabilities=("xss.verify",),
+    )
+    continuation = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=target,
+        request_collection_refs=collection,
+        request_manifest_refs={"a" * 64: request_ref},
+        request_candidate_manifest_ref=candidate_ref,
+        action_scope="endpoint",
+        action_budgets={"inputs.collection_00": {}},
+    )
+    changed = tuple(
+        replace(
+            action,
+            capability_args={
+                **dict(action.capability_args),
+                "request_collection_ref": {
+                    **dict(action.capability_args["request_collection_ref"]),
+                    "selection_digest": "e" * 64,
+                },
+            },
+            action_digest=None,
+        )
+        if action.action_id == "inputs.collection_00" else action
+        for action in continuation.actions
+    )
+    tampered = type(continuation)(
+        scan_id=continuation.scan_id,
+        execution_plan_digest=continuation.execution_plan_digest,
+        target_binding_digest=continuation.target_binding_digest,
+        actions=changed,
+    )
+
+    with pytest.raises(ScanContinuationError, match="changed credential or collection"):
+        merge_scan_action_continuation(
+            parent_plan=parent,
+            continuation_plan=tampered,
+            allocation=allocation,
+        )
 
 
 def test_discovery_receipts_compile_reproducible_endpoint_and_candidate_work():

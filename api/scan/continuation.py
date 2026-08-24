@@ -29,9 +29,18 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import TargetBinding
 
 
-SCAN_CONTINUATION_ALLOCATION_SCHEMA = "scan-continuation-allocation/v1"
+SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1 = "scan-continuation-allocation/v1"
+SCAN_CONTINUATION_ALLOCATION_SCHEMA = "scan-continuation-allocation/v2"
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_ACTIONS = 512
+_LEGACY_CONTINUATION_CAPABILITIES = (
+    "authz.verify",
+    "sqli.request_verify",
+    "sqli.verify",
+    "templates.scan",
+    "xss.request_verify",
+    "xss.verify",
+)
 
 
 class ScanContinuationError(ValueError):
@@ -98,11 +107,15 @@ class ScanContinuationAllocation:
     max_endpoint_entries: int
     max_candidate_entries: int
     required_capabilities: tuple[str, ...] = ()
+    allowed_capabilities: tuple[str, ...] = ()
     schema_version: str = SCAN_CONTINUATION_ALLOCATION_SCHEMA
     allocation_digest: str | None = field(default=None, compare=True)
 
     def __post_init__(self) -> None:
-        if self.schema_version != SCAN_CONTINUATION_ALLOCATION_SCHEMA:
+        if self.schema_version not in {
+            SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
+            SCAN_CONTINUATION_ALLOCATION_SCHEMA,
+        }:
             raise ScanContinuationError("unsupported Scan continuation allocation")
         try:
             scan_id = str(uuid.UUID(str(self.scan_id)))
@@ -122,6 +135,20 @@ class ScanContinuationAllocation:
         }))
         if len(capabilities) > 32:
             raise ScanContinuationError("too many required continuation capabilities")
+        allowed_capabilities = tuple(sorted({
+            str(item or "").strip() for item in self.allowed_capabilities
+            if str(item or "").strip()
+        }))
+        if self.schema_version == SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1:
+            allowed_capabilities = tuple(sorted(set(
+                _LEGACY_CONTINUATION_CAPABILITIES
+            ) | set(capabilities)))
+        if len(allowed_capabilities) > 32:
+            raise ScanContinuationError("too many allowed continuation capabilities")
+        if set(capabilities) - set(allowed_capabilities):
+            raise ScanContinuationError(
+                "required continuation capabilities exceed the allowed families"
+            )
         for name, value, maximum in (
             ("max_endpoint_entries", self.max_endpoint_entries, 100_000),
             ("max_candidate_entries", self.max_candidate_entries, 20_000),
@@ -141,6 +168,7 @@ class ScanContinuationAllocation:
         object.__setattr__(self, "parent_action_ids", action_ids)
         object.__setattr__(self, "budget_ceiling", _budget(self.budget_ceiling))
         object.__setattr__(self, "required_capabilities", capabilities)
+        object.__setattr__(self, "allowed_capabilities", allowed_capabilities)
         expected = _digest(self.digest_material())
         if self.allocation_digest is not None and _hex(
             self.allocation_digest, name="allocation_digest",
@@ -151,7 +179,7 @@ class ScanContinuationAllocation:
         object.__setattr__(self, "allocation_digest", expected)
 
     def digest_material(self) -> dict[str, Any]:
-        return {
+        material = {
             "schema_version": self.schema_version,
             "scan_id": self.scan_id,
             "parent_plan_digest": self.parent_plan_digest,
@@ -163,6 +191,9 @@ class ScanContinuationAllocation:
             "max_candidate_entries": self.max_candidate_entries,
             "required_capabilities": list(self.required_capabilities),
         }
+        if self.schema_version != SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1:
+            material["allowed_capabilities"] = list(self.allowed_capabilities)
+        return material
 
     def canonical_dict(self) -> dict[str, Any]:
         return {**self.digest_material(), "allocation_digest": self.allocation_digest}
@@ -175,6 +206,8 @@ class ScanContinuationAllocation:
             "budget_ceiling", "max_endpoint_entries", "max_candidate_entries",
             "required_capabilities", "allocation_digest",
         }
+        if value.get("schema_version") == SCAN_CONTINUATION_ALLOCATION_SCHEMA:
+            expected.add("allowed_capabilities")
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ScanContinuationError("continuation allocation fields are invalid")
         return cls(**dict(value))
@@ -215,7 +248,10 @@ def merge_scan_action_continuation(
             "continuation plan must contain exactly one finalizer"
         )
 
-    parent_ids = set(allocation.parent_action_ids)
+    parent_by_id = {
+        action.action_id: action for action in parent_plan.actions
+    }
+    parent_ids = set(parent_by_id)
     appended: list[ScanAction] = []
     for action in continuation_plan.actions:
         if action.action_id == "finalize.report":
@@ -224,9 +260,29 @@ def merge_scan_action_continuation(
             if action.action_id.startswith((
                 "inputs.auth_", "inputs.collection_",
             )):
+                parent_action = parent_by_id[action.action_id]
+                if (
+                    action.capability_name != parent_action.capability_name
+                    or action.capability_args != parent_action.capability_args
+                    or action.target_binding_digest
+                    != parent_action.target_binding_digest
+                ):
+                    raise ScanContinuationError(
+                        "continuation changed credential or collection authority: "
+                        f"{action.action_id}"
+                    )
                 continue
             raise ScanContinuationError(
                 f"continuation action duplicates parent authority: {action.action_id}"
+            )
+        if action.action_id.startswith(("inputs.auth_", "inputs.collection_")):
+            raise ScanContinuationError(
+                f"continuation introduced new private input authority: {action.action_id}"
+            )
+        if action.capability_name not in set(allocation.allowed_capabilities):
+            raise ScanContinuationError(
+                "continuation introduced a capability outside its allocation: "
+                f"{action.capability_name}"
             )
         appended.append(action)
 
@@ -378,6 +434,7 @@ def build_discovery_continuation_manifests(
 __all__ = [
     "ContinuationBudgetCeiling",
     "SCAN_CONTINUATION_ALLOCATION_SCHEMA",
+    "SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1",
     "ScanContinuationAllocation",
     "ScanContinuationError",
     "build_discovery_continuation_manifests",

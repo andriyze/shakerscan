@@ -302,6 +302,7 @@ def test_action_store_applies_one_idempotent_continuation_revision():
         },
         max_endpoint_entries=500,
         max_candidate_entries=1_000,
+        allowed_capabilities=(),
     )
     amended = merge_scan_action_continuation(
         parent_plan=parent,

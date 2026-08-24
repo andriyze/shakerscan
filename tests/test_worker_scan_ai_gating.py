@@ -2324,6 +2324,7 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=contract.budget.max_http_requests,
         required_capabilities=("xss.verify",),
+        allowed_capabilities=("xss.verify",),
     )
     results = {
         action.action_id: types.SimpleNamespace(
