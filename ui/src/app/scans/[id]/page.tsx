@@ -14,6 +14,9 @@ function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
     return 'AI Gate'
   }
+  if (scan?.scan_type === 'scan' || scan?.run_kind === 'web_dast') {
+    return 'DAST'
+  }
   return String(scan?.scan_type || '')
     .split('_')
     .filter(Boolean)
