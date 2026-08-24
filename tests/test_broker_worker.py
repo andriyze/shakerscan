@@ -427,6 +427,29 @@ def test_broker_state_requires_owner_only_https_but_not_data_store_credentials(t
         broker_worker.load_state(state_path)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "DATABASE_URL", "REDIS_URL", "PGHOST", "PGPASSWORD",
+        "POSTGRES_PASSWORD", "POSTGRES_USER", "POSTGRES_DB",
+    ],
+)
+def test_broker_runtime_refuses_data_store_environment(name):
+    with pytest.raises(
+        broker_worker.BrokerWorkerError,
+        match="forbidden data-store configuration",
+    ):
+        broker_worker.assert_outbound_only_runtime_environment({name: "configured"})
+
+
+def test_broker_runtime_accepts_only_outbound_control_configuration():
+    broker_worker.assert_outbound_only_runtime_environment({
+        "FLEET_BROKER_STATE_PATH": "/run/shakerscan-fleet/state.json",
+        "SHAKERSCAN_BROKER_LEASE": "1",
+        "ARTIFACT_STORAGE_REQUIRED": "false",
+    })
+
+
 def test_broker_state_rejects_non_https_control_plane(tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps({

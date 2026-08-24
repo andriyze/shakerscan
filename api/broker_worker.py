@@ -78,6 +78,32 @@ _SCAN_RUNTIME_BUDGET_DIMENSIONS = frozenset({
     "tool_wall_seconds",
 })
 
+_FORBIDDEN_DATA_STORE_ENVIRONMENT = frozenset({
+    "DATABASE_URL",
+    "REDIS_URL",
+    "PGHOST",
+    "PGPASSWORD",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_USER",
+    "POSTGRES_DB",
+})
+
+
+def assert_outbound_only_runtime_environment(
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse to start if a broker container receives data-store authority."""
+    values = environment if environment is not None else os.environ
+    forbidden = sorted(
+        name for name in _FORBIDDEN_DATA_STORE_ENVIRONMENT
+        if str(values.get(name) or "").strip()
+    )
+    if forbidden:
+        raise BrokerWorkerError(
+            "outbound-only broker runtime received forbidden data-store "
+            f"configuration: {', '.join(forbidden)}"
+        )
+
 
 def _broker_scan_action_plan(
     job: dict[str, Any], lease: dict[str, Any],
@@ -939,6 +965,7 @@ def main() -> int:
     parser.add_argument("--worker-id", default=os.environ.get("WORKER_ID") or os.environ.get("HOSTNAME") or "broker-worker")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+    assert_outbound_only_runtime_environment()
     worker_id = worker_runtime_identity(args.worker_id)
     os.environ["SHAKERSCAN_BROKER_LEASE"] = "1"
     os.environ["ARTIFACT_STORAGE_REQUIRED"] = "false"
