@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { API_URL, getScan, getScanLogs, getHealth, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getHealth, getFindings, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -352,6 +352,113 @@ function deploySeverityClass(severity?: string): string {
     default:
       return 'bg-gray-700 text-gray-300'
   }
+}
+
+function ScanFindingContextCard({
+  scan,
+  targetFindings,
+  targetFindingsTotal,
+  loading,
+  error,
+}: {
+  scan: any
+  targetFindings: Finding[]
+  targetFindingsTotal: number
+  loading: boolean
+  error: string | null
+}) {
+  if (!scan?.target_id) return null
+  const rawCurrent = Array.isArray(scan?.result?.findings) ? scan.result.findings : []
+  const persistedCurrent = targetFindings.filter((finding) => finding.scan_id === scan.id)
+  const existing = targetFindings.filter((finding) => finding.scan_id !== scan.id)
+  const currentKeys = new Set(rawCurrent.map((finding: any) => [
+    String(finding?.title || ''),
+    String(finding?.url || ''),
+    String(finding?.cwe || ''),
+  ].join('|')))
+  const additionalPersistedCurrent = persistedCurrent.filter((finding) => !currentKeys.has([
+    String(finding.title || ''),
+    String(finding.url || ''),
+    String(finding.cwe || ''),
+  ].join('|')))
+  const current = [
+    ...rawCurrent.map((finding: any, index: number) => ({
+      ...finding,
+      _rowKey: `raw-${finding.id || finding.fingerprint || index}`,
+      _origin: 'this scan' as const,
+      _persisted: false,
+    })),
+    ...additionalPersistedCurrent.map((finding) => ({
+      ...finding,
+      _rowKey: `persisted-${finding.id}`,
+      _origin: 'this scan' as const,
+      _persisted: true,
+    })),
+  ]
+  const rows = [
+    ...current,
+    ...existing.map((finding) => ({
+      ...finding,
+      _rowKey: `existing-${finding.id}`,
+      _origin: 'already on target' as const,
+      _persisted: true,
+    })),
+  ]
+
+  return (
+    <Card className="mb-6 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-200">Findings from this scan and earlier scans</h2>
+          <p className="mt-1 text-xs text-gray-500">
+            New signals are separated from findings that were already tracked on this target.
+          </p>
+        </div>
+        <Link href={`/findings?target_id=${scan.target_id}`} className="text-xs text-blue-300 hover:text-blue-200">
+          Open all target findings
+        </Link>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-xs">
+        <span className="rounded bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} from this scan</span>
+        <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existing.length} already on target</span>
+        {targetFindingsTotal > targetFindings.length && (
+          <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-200">
+            showing {targetFindings.length} of {targetFindingsTotal} saved records
+          </span>
+        )}
+      </div>
+      {loading ? (
+        <p className="mt-3 text-sm text-gray-500">Loading target finding history…</p>
+      ) : error ? (
+        <p role="alert" className="mt-3 text-sm text-amber-300">{error}</p>
+      ) : rows.length === 0 ? (
+        <p className="mt-3 text-sm text-gray-500">No findings were reported by this scan or earlier scans of the target.</p>
+      ) : (
+        <ul className="mt-3 divide-y divide-gray-800 rounded-lg border border-gray-800">
+          {rows.map((finding: any) => (
+            <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
+                {String(finding.severity || 'info')}
+              </span>
+              <span className={`rounded px-1.5 py-0.5 text-xs ${finding._origin === 'this scan' ? 'bg-blue-500/10 text-blue-200' : 'bg-gray-800 text-gray-300'}`}>
+                {finding._origin}
+              </span>
+              {finding.id && finding._persisted ? (
+                <Link href={`/findings/${finding.id}`} className="min-w-0 flex-1 break-words text-gray-200 hover:text-white">
+                  {finding.title || 'Untitled finding'}
+                </Link>
+              ) : (
+                <span className="min-w-0 flex-1 break-words text-gray-200">{finding.title || 'Untitled finding'}</span>
+              )}
+              <span className="text-xs text-gray-500">
+                {finding.proof_state?.replaceAll('_', ' ') || (finding.verified ? 'verified' : finding.suspected ? 'needs verification' : finding.status?.replaceAll('_', ' ') || 'unverified')}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  )
 }
 
 function formatAiGateLabel(value: string | null | undefined): string {
@@ -1327,6 +1434,10 @@ function ScanDetailContent() {
   const [buildFingerprint, setBuildFingerprint] = useState<string | null>(null)
   const [deploymentDecision, setDeploymentDecision] = useState<DeploymentDecision | null>(null)
   const [deploymentDecisionLoading, setDeploymentDecisionLoading] = useState(false)
+  const [targetFindings, setTargetFindings] = useState<Finding[]>([])
+  const [targetFindingsTotal, setTargetFindingsTotal] = useState(0)
+  const [targetFindingsLoading, setTargetFindingsLoading] = useState(false)
+  const [targetFindingsError, setTargetFindingsError] = useState<string | null>(null)
   const logsRef = useRef<HTMLDivElement | null>(null)
   // Latest known scan status, read inside the polling interval so the "should we
   // keep polling?" decision always sees the current value (not a stale closure
@@ -1367,6 +1478,24 @@ function ScanDetailContent() {
         statusRef.current = data?.status ?? null
         setScan(data)
         setError(null)
+        if (data?.target_id && ['completed', 'failed'].includes(String(data?.status))) {
+          setTargetFindingsLoading(true)
+          try {
+            const findingData = await getFindings({
+              target_id: data.target_id,
+              limit: 100,
+              sort_by: 'severity',
+              sort_order: 'desc',
+            })
+            setTargetFindings(findingData.findings || [])
+            setTargetFindingsTotal(findingData.total || 0)
+            setTargetFindingsError(null)
+          } catch {
+            setTargetFindingsError('Could not load earlier findings for this target.')
+          } finally {
+            setTargetFindingsLoading(false)
+          }
+        }
         if (data?.status === 'completed' || data?.status === 'failed') {
           refreshDeploymentDecision()
         }
@@ -1529,6 +1658,7 @@ function ScanDetailContent() {
           <ParentCoverageRollup scan={scan} />
           <ExecutionPlanCard scan={scan} />
           {renderStoredScanLogs(true)}
+          <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
           <AiGateCampaignReviewCard scan={scan} />
           <DeploymentDecisionCard
             decision={deploymentDecision}
@@ -1553,6 +1683,7 @@ function ScanDetailContent() {
         <ParentCoverageRollup scan={scan} />
         <ExecutionPlanCard scan={scan} />
         {renderStoredScanLogs(true)}
+        <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
       </div>
     )
   }
@@ -1599,6 +1730,7 @@ function ScanDetailContent() {
       <ParentCoverageRollup scan={scan} />
       <ExecutionPlanCard scan={scan} />
       {renderStoredScanLogs()}
+      <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
       <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}

@@ -1206,6 +1206,7 @@ export interface LocalAgentsResponse {
 
 export interface Scan {
   id: string
+  target_id?: string | null
   target_url: string
   target_name?: string
   status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
