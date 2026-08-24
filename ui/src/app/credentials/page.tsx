@@ -67,6 +67,8 @@ type Draft = {
   capabilities: string
 }
 
+type DraftErrors = Partial<Record<keyof Draft, string>>
+
 const EMPTY_DRAFT: Draft = {
   name: '',
   authKind: 'bearer_token',
@@ -111,6 +113,26 @@ function needsUsername(kind: CredentialAuthKind): boolean {
 
 function needsEndpoint(kind: CredentialAuthKind): boolean {
   return ['form_login', 'oauth_client_credentials', 'oauth_password'].includes(kind)
+}
+
+function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
+  const errors: DraftErrors = {}
+  if (!rotating && !draft.name.trim()) errors.name = 'Enter a profile name.'
+  if (needsUsername(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'
+  if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {
+    errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'
+  }
+  if (needsEndpoint(draft.authKind) && !draft.endpointUrl.trim()) errors.endpointUrl = 'Enter the login or token endpoint.'
+  if (draft.authKind === 'oauth_client_credentials' && !draft.clientId.trim()) errors.clientId = 'Enter the OAuth client ID.'
+  if (draft.authKind === 'custom_headers') {
+    if (!draft.customHeaders.trim()) errors.customHeaders = 'Enter at least one Name: value header.'
+  } else if (!draft.secret.trim()) {
+    errors.secret = draft.authKind.startsWith('ssh_private_key') ? 'Paste the private key.' : 'Enter the secret value.'
+  }
+  if (draft.authKind === 'ssh_private_key_with_passphrase' && !draft.secondarySecret.trim()) {
+    errors.secondarySecret = 'Enter the private-key passphrase.'
+  }
+  return errors
 }
 
 function secretPayload(draft: Draft): CredentialSecretPayload {
@@ -159,6 +181,8 @@ export default function CredentialsPage() {
   const [deactivating, setDeactivating] = useState<CredentialProfile | null>(null)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
+  const [draftErrors, setDraftErrors] = useState<DraftErrors>({})
+  const [editorError, setEditorError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -222,6 +246,8 @@ export default function CredentialsPage() {
       authKind: firstKind,
       principalSlot: isSsh(firstKind) ? 'ssh' : 'primary',
     })
+    setDraftErrors({})
+    setEditorError(null)
     setEditorOpen(true)
   }
 
@@ -236,15 +262,30 @@ export default function CredentialsPage() {
       headerName: profile.configuration.parameter_name || profile.configuration.header_name || 'X-API-Key',
       capabilities: profile.allowed_capabilities.join(', '),
     })
+    setDraftErrors({})
+    setEditorError(null)
     setEditorOpen(true)
+  }
+
+  function updateDraft(patch: Partial<Draft>) {
+    setDraft((current) => ({ ...current, ...patch }))
+    setDraftErrors((current) => {
+      const next = { ...current }
+      for (const key of Object.keys(patch) as (keyof Draft)[]) delete next[key]
+      return next
+    })
+    setEditorError(null)
   }
 
   async function saveProfile() {
     if (!targetId) return
-    if (!rotating && !draft.name.trim()) {
-      toast.error('Profile name is required')
+    const validationErrors = validateDraft(draft, Boolean(rotating))
+    if (Object.keys(validationErrors).length) {
+      setDraftErrors(validationErrors)
+      setEditorError('Complete the highlighted required fields before saving this credential.')
       return
     }
+    setEditorError(null)
     setBusy(true)
     try {
       const material = secretPayload(draft)
@@ -272,7 +313,9 @@ export default function CredentialsPage() {
       setEditorOpen(false)
       await loadProfiles()
     } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : 'Credential update failed')
+      const message = cause instanceof Error ? cause.message : 'Credential update failed'
+      setEditorError(message)
+      toast.error(message)
     } finally {
       setBusy(false)
     }
@@ -380,41 +423,46 @@ export default function CredentialsPage() {
         onClose={() => { if (!busy) setEditorOpen(false) }}
         footer={<><Button variant="secondary" disabled={busy} onClick={() => setEditorOpen(false)}>Cancel</Button><Button loading={busy} onClick={() => void saveProfile()}>{rotating ? 'Rotate credential' : 'Create profile'}</Button></>}
       >
+        {editorError && (
+          <div role="alert" className="mb-4 rounded border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
+            {editorError}
+          </div>
+        )}
         <div className="grid gap-4 sm:grid-cols-2">
-          {!rotating && <Field label="Profile name" required><Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>}
+          {!rotating && <Field label="Profile name" error={draftErrors.name} required><Input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} /></Field>}
           <Field label="Authentication type" required>
             <Select
               value={draft.authKind}
               disabled={Boolean(rotating)}
               onChange={(event) => {
                 const kind = event.target.value as CredentialAuthKind
-                setDraft({
-                  ...draft,
+                updateDraft({
                   authKind: kind,
                   principalSlot: isSsh(kind) ? 'ssh' : draft.principalSlot === 'ssh' ? 'primary' : draft.principalSlot,
                   capabilities: kind === 'query_parameter' ? 'request.replay' : draft.capabilities,
                 })
+                setDraftErrors({})
               }}
             >
               {availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
             </Select>
           </Field>
-          {!rotating && <Field label="Principal slot"><Select value={draft.principalSlot} disabled={isSsh(draft.authKind)} onChange={(event) => setDraft({ ...draft, principalSlot: event.target.value as CredentialPrincipalSlot })}><option value="primary">Primary</option><option value="secondary">Secondary</option><option value="service">Service</option>{isSsh(draft.authKind) && <option value="ssh">SSH</option>}</Select></Field>}
-          {!rotating && <Field label="Principal label"><Input value={draft.principalLabel} onChange={(event) => setDraft({ ...draft, principalLabel: event.target.value })} placeholder="Optional human-readable identity" /></Field>}
-          {needsUsername(draft.authKind) && <Field label="Username" required><Input autoComplete="off" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></Field>}
-          {(draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && <Field label={draft.authKind === 'query_parameter' ? 'Parameter name' : 'Header name'} required><Input value={draft.headerName} onChange={(event) => setDraft({ ...draft, headerName: event.target.value })} /></Field>}
-          {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" required><Input value={draft.endpointUrl} onChange={(event) => setDraft({ ...draft, endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
-          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => setDraft({ ...draft, clientId: event.target.value })} /></Field>}
-          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label="OAuth scopes"><Input value={draft.scopes} onChange={(event) => setDraft({ ...draft, scopes: event.target.value })} placeholder="openid profile" /></Field>}
+          {!rotating && <Field label="Principal slot"><Select value={draft.principalSlot} disabled={isSsh(draft.authKind)} onChange={(event) => updateDraft({ principalSlot: event.target.value as CredentialPrincipalSlot })}><option value="primary">Primary</option><option value="secondary">Secondary</option><option value="service">Service</option>{isSsh(draft.authKind) && <option value="ssh">SSH</option>}</Select></Field>}
+          {!rotating && <Field label="Principal label"><Input value={draft.principalLabel} onChange={(event) => updateDraft({ principalLabel: event.target.value })} placeholder="Optional human-readable identity" /></Field>}
+          {needsUsername(draft.authKind) && <Field label="Username" error={draftErrors.username} required><Input autoComplete="off" value={draft.username} onChange={(event) => updateDraft({ username: event.target.value })} /></Field>}
+          {(draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && <Field label={draft.authKind === 'query_parameter' ? 'Parameter name' : 'Header name'} error={draftErrors.headerName} required><Input value={draft.headerName} onChange={(event) => updateDraft({ headerName: event.target.value })} /></Field>}
+          {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" error={draftErrors.endpointUrl} required><Input value={draft.endpointUrl} onChange={(event) => updateDraft({ endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
+          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} error={draftErrors.clientId} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => updateDraft({ clientId: event.target.value })} /></Field>}
+          {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label="OAuth scopes"><Input value={draft.scopes} onChange={(event) => updateDraft({ scopes: event.target.value })} placeholder="openid profile" /></Field>}
           {draft.authKind !== 'custom_headers' && (draft.authKind === 'ssh_private_key' || draft.authKind === 'ssh_private_key_with_passphrase' ? (
-            <Field className="sm:col-span-2" label="Private key" required><Textarea rows={7} value={draft.secret} onChange={(event) => setDraft({ ...draft, secret: event.target.value })} /></Field>
+            <Field className="sm:col-span-2" label="Private key" error={draftErrors.secret} required><Textarea rows={7} value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
           ) : (
-            <Field className="sm:col-span-2" label={draft.authKind === 'authorization_header' ? 'Full Authorization value' : draft.authKind === 'cookie' ? 'Cookie value' : 'Secret'} required><Input type="password" autoComplete="new-password" value={draft.secret} onChange={(event) => setDraft({ ...draft, secret: event.target.value })} /></Field>
+            <Field className="sm:col-span-2" label={draft.authKind === 'authorization_header' ? 'Full Authorization value' : draft.authKind === 'cookie' ? 'Cookie value' : 'Secret'} error={draftErrors.secret} required><Input type="password" autoComplete="new-password" value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
           ))}
-          {draft.authKind === 'ssh_private_key_with_passphrase' && <Field className="sm:col-span-2" label="Key passphrase" required><Input type="password" autoComplete="new-password" value={draft.secondarySecret} onChange={(event) => setDraft({ ...draft, secondarySecret: event.target.value })} /></Field>}
-          {draft.authKind === 'custom_headers' && <Field className="sm:col-span-2" label="Headers" hint="One Name: value pair per line. Values are encrypted and will not be shown again." required><Textarea rows={6} value={draft.customHeaders} onChange={(event) => setDraft({ ...draft, customHeaders: event.target.value })} /></Field>}
-          <Field label="Expires at"><Input type="datetime-local" value={draft.expiresAt} onChange={(event) => setDraft({ ...draft, expiresAt: event.target.value })} /></Field>
-          {!rotating && <Field label="Allowed capabilities" hint="Comma or space separated; blank permits any worker capability."><Input value={draft.capabilities} onChange={(event) => setDraft({ ...draft, capabilities: event.target.value })} /></Field>}
+          {draft.authKind === 'ssh_private_key_with_passphrase' && <Field className="sm:col-span-2" label="Key passphrase" error={draftErrors.secondarySecret} required><Input type="password" autoComplete="new-password" value={draft.secondarySecret} onChange={(event) => updateDraft({ secondarySecret: event.target.value })} /></Field>}
+          {draft.authKind === 'custom_headers' && <Field className="sm:col-span-2" label="Headers" hint="One Name: value pair per line. Values are encrypted and will not be shown again." error={draftErrors.customHeaders} required><Textarea rows={6} value={draft.customHeaders} onChange={(event) => updateDraft({ customHeaders: event.target.value })} /></Field>}
+          <Field label="Expires at"><Input type="datetime-local" value={draft.expiresAt} onChange={(event) => updateDraft({ expiresAt: event.target.value })} /></Field>
+          {!rotating && <Field label="Allowed capabilities" hint="Comma or space separated; blank permits any worker capability."><Input value={draft.capabilities} onChange={(event) => updateDraft({ capabilities: event.target.value })} /></Field>}
         </div>
         <p className="mt-5 text-xs text-gray-500">The secret is sent once over the local API, encrypted before storage, and resolved only inside an authorized worker action.</p>
       </Modal>
