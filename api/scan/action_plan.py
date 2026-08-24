@@ -13,10 +13,20 @@ import uuid
 try:
     from runtime.budgets import BUDGET_DIMENSIONS
     from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
+    from runtime.credentials import (
+        CredentialContractError,
+        HTTP_CREDENTIAL_KINDS,
+        normalize_credential_kind,
+    )
     from runtime.models import TargetBinding
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
     from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
+    from ..runtime.credentials import (
+        CredentialContractError,
+        HTTP_CREDENTIAL_KINDS,
+        normalize_credential_kind,
+    )
     from ..runtime.models import TargetBinding
 
 from .execution import ScanExecutionPlan
@@ -170,21 +180,25 @@ def credential_profile_action_refs(
             raise ScanActionPlanError("credential profile version is invalid") from exc
         if not profile_id or lane not in {"primary", "secondary", "service", "ssh"} or version < 1:
             raise ScanActionPlanError("credential profile action reference is incomplete")
+        try:
+            auth_kind = normalize_credential_kind(
+                raw.get("auth_kind"), accept_legacy_alias=True,
+            )
+        except CredentialContractError as exc:
+            raise ScanActionPlanError(
+                "credential profile action auth kind is unsupported"
+            ) from exc
+        if auth_kind not in HTTP_CREDENTIAL_KINDS:
+            raise ScanActionPlanError(
+                "credential profile action auth kind is unsupported"
+            )
         material = {
             "profile_id": profile_id,
             "version": version,
             "lane": lane,
             "target_kind": str(raw.get("target_kind") or "").strip().lower(),
-            "auth_kind": str(raw.get("auth_kind") or "").strip().lower(),
+            "auth_kind": auth_kind,
         }
-        if material["auth_kind"] not in {
-            "authorization_header", "bearer_token", "api_key_header",
-            "cookie", "basic_auth", "multi_header", "query_param",
-            "form_login", "oauth_client_credentials", "oauth_password",
-        }:
-            raise ScanActionPlanError(
-                "credential profile action auth kind is unsupported"
-            )
         result.append({
             "profile_id": profile_id,
             "version": version,

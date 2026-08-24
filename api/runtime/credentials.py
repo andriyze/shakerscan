@@ -34,6 +34,10 @@ SSH_CREDENTIAL_KINDS = frozenset({
     "ssh_private_key_with_passphrase",
 })
 CREDENTIAL_KINDS = HTTP_CREDENTIAL_KINDS | SSH_CREDENTIAL_KINDS
+CREDENTIAL_KIND_ALIASES = {
+    "multi_header": "custom_headers",
+    "query_param": "query_parameter",
+}
 IMMEDIATE_HTTP_HEADER_KINDS = frozenset({
     "authorization_header", "bearer_token", "api_key_header", "cookie",
     "basic_auth", "custom_headers",
@@ -47,6 +51,18 @@ _FORBIDDEN_HEADERS = frozenset({
 
 class CredentialContractError(ValueError):
     """Credential material is incomplete or unsafe for worker execution."""
+
+
+def normalize_credential_kind(
+    value: Any, *, accept_legacy_alias: bool = False,
+) -> str:
+    """Return one canonical credential kind without creating a second vocabulary."""
+    kind = str(value or "").strip().lower()
+    if accept_legacy_alias:
+        kind = CREDENTIAL_KIND_ALIASES.get(kind, kind)
+    if kind not in CREDENTIAL_KINDS:
+        raise CredentialContractError("auth_kind is not supported")
+    return kind
 
 
 def _text(
@@ -149,9 +165,7 @@ def build_credential_secret(
     parameter_name: Any = None,
 ) -> str:
     """Validate and serialize one plaintext envelope for immediate encryption."""
-    kind = str(auth_kind or "").strip().lower()
-    if kind not in CREDENTIAL_KINDS:
-        raise CredentialContractError("auth_kind is not supported")
+    kind = normalize_credential_kind(auth_kind)
     needs_secret = kind != "custom_headers"
     primary = _text(
         secret,
@@ -231,9 +245,10 @@ def build_credential_secret(
 
 def parse_credential_secret(auth_kind: Any, decrypted_value: Any) -> dict[str, Any]:
     """Revalidate worker-decrypted material and accept the two legacy raw formats."""
-    kind = str(auth_kind or "").strip().lower()
-    if kind not in CREDENTIAL_KINDS:
-        raise CredentialContractError("stored auth_kind is not supported")
+    try:
+        kind = normalize_credential_kind(auth_kind)
+    except CredentialContractError as exc:
+        raise CredentialContractError("stored auth_kind is not supported") from exc
     raw = str(decrypted_value or "")
     try:
         value = json.loads(raw)

@@ -590,3 +590,26 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
     )
     assert replay.requested_budget["http_requests"] == 8
     assert replay.requested_budget["state_changing_requests"] == 8
+
+
+@pytest.mark.parametrize(
+    ("submitted_kind", "canonical_kind"),
+    [
+        ("custom_headers", "custom_headers"),
+        ("query_parameter", "query_parameter"),
+        ("multi_header", "custom_headers"),
+        ("query_param", "query_parameter"),
+    ],
+)
+def test_credential_action_refs_use_the_canonical_runtime_vocabulary(
+    submitted_kind, canonical_kind,
+):
+    reference = credential_profile_action_refs(({
+        "profile_id": "profile-1",
+        "profile_version": 3,
+        "scan_lane": "primary",
+        "target_kind": "web",
+        "auth_kind": submitted_kind,
+    },))[0]
+
+    assert reference["auth_kind"] == canonical_kind
