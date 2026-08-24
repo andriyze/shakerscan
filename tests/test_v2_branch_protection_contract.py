@@ -46,7 +46,6 @@ def test_v2_execution_boundary_requires_code_owner_review():
         "/api/agent_tools.py",
         "/api/worker.py",
         "/api/broker_worker.py",
-        "/api/broker_worker_v2.py",
         "/api/parallel_scan.py",
         "/scanner/scanner.py",
         "/scanner/scanner_tools/request_meter.py",

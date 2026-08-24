@@ -21,7 +21,6 @@
 /api/api.py @andriyze
 /api/worker.py @andriyze
 /api/broker_worker.py @andriyze
-/api/broker_worker_v2.py @andriyze
 /api/parallel_scan.py @andriyze
 /scanner/scanner.py @andriyze
 /scanner/scanner_tools/request_meter.py @andriyze

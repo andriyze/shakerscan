@@ -14,7 +14,6 @@ on:
       - api/parallel_scan.py
       - api/api.py
       - api/broker_worker.py
-      - api/broker_worker_v2.py
       - api/worker.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
@@ -79,7 +78,6 @@ on:
       - api/parallel_scan.py
       - api/api.py
       - api/broker_worker.py
-      - api/broker_worker_v2.py
       - api/worker.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
@@ -320,7 +318,6 @@ jobs:
             api/api.py \
             api/worker.py \
             api/broker_worker.py \
-            api/broker_worker_v2.py \
             api/agent_tools.py \
             api/hunt/capability_executor.py \
             api/capabilities \

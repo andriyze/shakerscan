@@ -22,7 +22,6 @@ def test_v2_workflow_watches_runtime_scanner_and_gate_paths():
         "api/hunt/capability_executor.py",
         "api/parallel_scan.py",
         "api/broker_worker.py",
-        "api/broker_worker_v2.py",
         "api/scan/**",
         "api/worker.py",
         "scanner/scanner.py",
