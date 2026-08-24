@@ -344,6 +344,30 @@ def test_runtime_scope_guard_blocks_dast_when_final_url_missing():
     assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "blocked"
 
 
+def test_runtime_scope_guard_accepts_receipt_driven_dast_destination_evidence():
+    result = {
+        "runtime_destinations": [{
+            "label": "baseline.http:0:0",
+            "url": "https://app.example.com",
+            "final_url": "https://app.example.com",
+            "source": "http.request",
+            "resolved_host": "app.example.com",
+            "resolved_ips": ["8.8.8.8"],
+        }],
+        "findings": [{"title": "persisted finding"}],
+        "result": {"score": 90, "grade": "A"},
+    }
+
+    checked = worker._apply_runtime_scope_guard_to_result(
+        result,
+        {"runtime_scope_guard": _runtime_scope_guard_with_dns()},
+    )
+
+    assert checked.get("error") is None
+    assert checked["findings"] == [{"title": "persisted finding"}]
+    assert checked["scan_metadata"]["runtime_scope_check"]["status"] == "allowed"
+
+
 def test_runtime_scope_guard_allows_ai_gate_runtime_destination_in_scope():
     result = {
         "ai_gate": {

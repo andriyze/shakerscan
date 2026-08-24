@@ -8984,6 +8984,23 @@ def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]
                 )
         return records
 
+    runtime_destinations = result.get("runtime_destinations")
+    if isinstance(runtime_destinations, list):
+        for item in runtime_destinations:
+            if not isinstance(item, dict):
+                continue
+            add(
+                str(item.get("label") or "dast_action"),
+                item.get("url"),
+                item.get("final_url"),
+                source=item.get("source") or "canonical_action_observation",
+                redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
+                resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
+                resolved_host=item.get("resolved_host"),
+            )
+        if records:
+            return records
+
     http = result.get("http") if isinstance(result.get("http"), dict) else {}
     final_url = str(http.get("final_url") or "").strip()
     final_host = urllib.parse.urlparse(final_url).hostname if final_url else None

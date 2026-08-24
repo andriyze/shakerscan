@@ -68,6 +68,47 @@ def test_finalizer_is_a_pure_deterministic_projection_of_receipts():
     assert first["scan_metadata"]["finalizer"] == "pure_receipt_projection/v1"
 
 
+def test_finalizer_projects_content_free_runtime_destinations_from_observations():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "path": "/reset?token=<redacted>",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "final_url": "https://app.example.test/account?key=<redacted>",
+        },
+        "redirect_chain": [{"location": "https://app.example.test/account"}],
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["runtime_destinations"] == [{
+        "label": "baseline.http:0:0",
+        "url": "https://app.example.test",
+        "final_url": "https://app.example.test",
+        "source": "http.request",
+        "resolved_host": "app.example.test",
+        "resolved_ips": ["192.0.2.10"],
+    }]
+    assert "token" not in str(report["runtime_destinations"])
+
+
 def test_finalizer_promotes_only_deterministic_proof_contracts():
     xss = _action("verify.xss", 0, capability_name="xss.verify")
     sqli = _action(

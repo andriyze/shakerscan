@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.parse
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
@@ -266,6 +267,81 @@ def _finding_identity(finding: Mapping[str, Any]) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def _http_origin(value: Any) -> str | None:
+    """Return a content-free HTTP origin suitable for scope revalidation."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+        scheme = parsed.scheme.lower()
+        host = str(parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not host:
+        return None
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    authority = display_host if port in (None, default_port) else f"{display_host}:{port}"
+    return urllib.parse.urlunsplit((scheme, authority, "", "", ""))
+
+
+def _runtime_destinations(
+    *,
+    action_id: str,
+    capability_name: str,
+    observations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project content-free destination evidence from manifest-bound observations."""
+    destinations: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for observation_index, raw in enumerate(observations):
+        item = dict(raw)
+        request = item.get("request") if isinstance(item.get("request"), Mapping) else {}
+        response = item.get("response") if isinstance(item.get("response"), Mapping) else {}
+        url_values: list[Any] = [
+            request.get("origin"), request.get("url"), item.get("origin"),
+            item.get("url"), item.get("request_url"), item.get("final_url"),
+            item.get("matched_at"), item.get("consumer_url"),
+            item.get("producer_url"), response.get("final_url"),
+            response.get("location"),
+        ]
+        for hop in item.get("redirect_chain") or ():
+            if isinstance(hop, Mapping):
+                url_values.extend((hop.get("url"), hop.get("location"), hop.get("final_url")))
+            else:
+                url_values.append(hop)
+        origins = list(dict.fromkeys(
+            origin for value in url_values if (origin := _http_origin(value))
+        ))
+        if not origins:
+            continue
+        raw_ips: list[Any] = [
+            request.get("pinned_address"), request.get("connected_address"),
+            response.get("remote_ip"), item.get("pinned_address"),
+            item.get("connected_address"), item.get("remote_ip"),
+            item.get("host_ip"),
+        ]
+        if isinstance(item.get("resolved_ips"), (list, tuple)):
+            raw_ips.extend(item["resolved_ips"])
+        resolved_ips = tuple(dict.fromkeys(
+            str(value).strip() for value in raw_ips if str(value or "").strip()
+        ))
+        for origin_index, origin in enumerate(origins):
+            key = (origin, resolved_ips)
+            if key in seen:
+                continue
+            seen.add(key)
+            destination = {
+                "label": f"{action_id}:{observation_index}:{origin_index}",
+                "url": origin,
+                "final_url": origin,
+                "source": capability_name,
+                "resolved_host": urllib.parse.urlsplit(origin).hostname,
+                "resolved_ips": list(resolved_ips),
+            }
+            destinations.append(destination)
+    return destinations
+
+
 def _score(findings: Sequence[Mapping[str, Any]]) -> tuple[int, str]:
     score = max(0, 100 - sum(
         _SEVERITY_WEIGHT.get(str(item.get("severity") or "info"), 0)
@@ -302,6 +378,7 @@ def finalize_scan_report(
         )
     findings_by_id: dict[str, dict[str, Any]] = {}
     action_rows: list[dict[str, Any]] = []
+    runtime_destinations: list[dict[str, Any]] = []
     for action in expected_actions:
         result = action_results[action.action_id]
         if result.action_digest != action.action_digest:
@@ -316,6 +393,11 @@ def finalize_scan_report(
             raise ScanFinalizationError("observation count differs from its action manifest")
         for finding in _findings_for_action(result, rows):
             findings_by_id.setdefault(_finding_identity(finding), finding)
+        runtime_destinations.extend(_runtime_destinations(
+            action_id=action.action_id,
+            capability_name=action.capability_name,
+            observations=rows,
+        ))
         action_rows.append({
             "action_id": action.action_id,
             "stage": action.stage,
@@ -454,6 +536,7 @@ def finalize_scan_report(
     return {
         "schema_version": SCAN_REPORT_SCHEMA,
         "target": str(target_url),
+        "runtime_destinations": runtime_destinations,
         "findings": findings,
         "result": {
             "score": score,
