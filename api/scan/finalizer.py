@@ -22,7 +22,7 @@ _SEVERITY_WEIGHT = {
 }
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
-    "browser.proof",
+    "xss.request_verify", "sqli.request_verify", "browser.proof",
 })
 _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
@@ -73,6 +73,8 @@ def _findings_for_action(
     allowed_kinds = {
         "xss.verify": {"xss_alert"},
         "sqli.verify": {"sqli_finding"},
+        "xss.request_verify": {"request_body_verification"},
+        "sqli.request_verify": {"request_body_verification"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "tls.inspect": {"tls_protocol"},
@@ -105,6 +107,65 @@ def _findings_for_action(
                 "needs_verification": False,
                 "proof_state": "verified",
                 "verification_reason": "Deterministic alert execution proof satisfied",
+            })
+            findings.append(finding)
+        elif kind == "request_body_verification":
+            family = str(item.get("family") or "").strip().lower()
+            proof_status = str(item.get("proof_status") or "").strip().lower()
+            expected_family = (
+                "xss" if result.capability_name == "xss.request_verify"
+                else "sqli"
+            )
+            expected_proof = (
+                "reflected_candidate_only"
+                if expected_family == "xss" else "db_error_candidate_only"
+            )
+            if (
+                family != expected_family
+                or proof_status != expected_proof
+                or item.get("finding_verdict") != "suspected"
+            ):
+                continue
+            finding = _base_finding(
+                tool=f"request_{expected_family}_differential",
+                title=(
+                    "Potential reflected cross-site scripting"
+                    if expected_family == "xss"
+                    else "Potential SQL injection"
+                ),
+                severity="high",
+                cwe="CWE-79" if expected_family == "xss" else "CWE-89",
+                url=None,
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    "method": item.get("method"),
+                    "body_encoding": item.get("body_encoding"),
+                    "field_path": item.get("field_path"),
+                    "control_status": item.get("control_status"),
+                    "candidate_status": item.get("candidate_status"),
+                    "control_response_sha256": item.get(
+                        "control_response_sha256"
+                    ),
+                    "candidate_response_sha256": item.get(
+                        "candidate_response_sha256"
+                    ),
+                    "proof_contract": item.get("proof_contract"),
+                    "proof_status": proof_status,
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": False,
+                "suspected": True,
+                "needs_verification": True,
+                "proof_state": "likely_vulnerable",
+                "verification_reason": (
+                    "Request mutation differential requires execution proof"
+                    if expected_family == "xss"
+                    else "Request mutation produced a candidate-only database error"
+                ),
             })
             findings.append(finding)
         elif kind == "sqli_finding":

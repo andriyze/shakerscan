@@ -161,6 +161,87 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     ]
 
 
+def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
+    request_xss = _action(
+        "verify.request_xss.0", 0, capability_name="xss.request_verify",
+    )
+    request_sqli = _action(
+        "verify.request_sqli.0", 1, dependencies=(request_xss.action_id,),
+        capability_name="sqli.request_verify",
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(request_xss.action_id, request_sqli.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(request_xss, request_sqli, final),
+    )
+    results = _results(plan)
+    results[request_xss.action_id] = _result_with_observation_count(
+        request_xss, 2,
+    )
+    results[request_sqli.action_id] = _result_with_observation_count(
+        request_sqli, 1,
+    )
+    observations = {
+        request_xss.action_id: (
+            {
+                "kind": "request_body_verification",
+                "family": "xss",
+                "candidate_id": "candidate-xss",
+                "request_ref_id": "request-xss",
+                "method": "POST",
+                "field_path": "comment",
+                "proof_contract": "xss_reflection_differential/v1",
+                "proof_status": "reflected_candidate_only",
+                "finding_verdict": "suspected",
+            },
+            {
+                "kind": "request_body_verification",
+                "family": "xss",
+                "candidate_id": "safe-control",
+                "proof_status": "not_proven",
+                "finding_verdict": "not_proven",
+            },
+        ),
+        request_sqli.action_id: ({
+            "kind": "request_body_verification",
+            "family": "sqli",
+            "candidate_id": "candidate-sqli",
+            "request_ref_id": "request-sqli",
+            "method": "POST",
+            "field_path": "id",
+            "proof_contract": "sqli_error_differential/v1",
+            "proof_status": "db_error_candidate_only",
+            "finding_verdict": "suspected",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 2
+    by_tool = {item["tool"]: item for item in report["findings"]}
+    assert set(by_tool) == {
+        "request_xss_differential", "request_sqli_differential",
+    }
+    assert all(item["suspected"] is True for item in by_tool.values())
+    assert all(item["verified"] is False for item in by_tool.values())
+    assert by_tool["request_xss_differential"]["evidence"][
+        "canonical_capability"
+    ] == "xss.request_verify"
+    assert by_tool["request_sqli_differential"]["evidence"][
+        "canonical_capability"
+    ] == "sqli.request_verify"
+
+
 def test_finalizer_explains_required_action_degradation():
     plan = _plan()
     results = _results(plan)
