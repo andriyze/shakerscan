@@ -1,3 +1,5 @@
+import { MAX_SCAN_TARGET_CHARS } from './targetLimits.mjs'
+
 const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i
 const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/
 
@@ -5,6 +7,9 @@ export function validateScanTarget(value: string): string | null {
   const trimmed = value.trim()
   if (!trimmed) {
     return 'Please enter a target URL'
+  }
+  if (trimmed.length > MAX_SCAN_TARGET_CHARS) {
+    return `Target URL must be ${MAX_SCAN_TARGET_CHARS.toLocaleString()} characters or fewer`
   }
   if (/\s/.test(trimmed)) {
     return 'Target cannot contain spaces'
