@@ -4108,6 +4108,38 @@ def test_standalone_enforcing_request_budget_reserves_request_tokens():
     }) == 77
 
 
+def test_canonical_rate_reservation_uses_immutable_plan_not_legacy_mode(monkeypatch):
+    budget = types.SimpleNamespace(max_http_requests=77, max_endpoints=13)
+    policy = types.SimpleNamespace(active_testing=True)
+    admission = types.SimpleNamespace(canonical=True, plan=types.SimpleNamespace(
+        budget=budget,
+        policy=policy,
+    ))
+    monkeypatch.setattr(
+        worker,
+        "prepare_worker_dispatch",
+        lambda options: (dict(options), admission),
+    )
+    monkeypatch.setattr(
+        worker,
+        "resolve_or_consume_budget",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical budget must not use a legacy scan-mode resolver")
+        ),
+    )
+
+    assert worker._standalone_scan_rate_reservation_amount({
+        "request_budget_mode": "enforce",
+    }) == 77
+    assert worker._standalone_scan_rate_reservation_amount({
+        "request_budget_mode": "off",
+    }) == 13
+    assert worker._standalone_scan_rate_reservation_amount({
+        "request_budget_mode": "off",
+        "custom_endpoints": [f"GET /{index}" for index in range(20)],
+    }) == 13
+
+
 def test_active_endpoint_attempts_from_report_filters_valid_entries():
     attempts = worker._active_endpoint_attempts_from_report(
         {

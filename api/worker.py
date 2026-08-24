@@ -401,9 +401,9 @@ TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
 DEVICE_SSH_AUTH_COOLDOWN_SECONDS = max(60, int(os.environ.get("DEVICE_SSH_AUTH_COOLDOWN_SECONDS", "1800")))
 DEVICE_SSH_AUTH_DAILY_FAILURE_CAP = max(1, int(os.environ.get("DEVICE_SSH_AUTH_DAILY_FAILURE_CAP", "3")))
 
-VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+LEGACY_DAST_SCAN_TYPE_LABELS = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
-ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
+LEGACY_ACTIVE_SCAN_TYPE_LABELS = {"smart", "full", "aggressive"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",
     "auth_cookies",
@@ -5689,15 +5689,29 @@ def _known_endpoint_count(options: dict[str, Any] | None) -> int:
 
 
 def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> int:
-    """Estimate active endpoint budget before a standalone scanner subprocess runs.
+    """Resolve domain-rate admission from canonical authority or legacy metadata.
 
-    ASM and dynamic coverage batches already know their endpoint IDs before
-    execution. Standalone smart/full/aggressive scans discover active work
-    inside the scanner process, so reserve the resolved active endpoint budget
-    up front instead of fail-opening unlimited discovered requests.
+    Canonical Scan must never re-derive authority from a compatibility mode.
+    Its immutable plan is the only source for HTTP and endpoint ceilings.
     """
     opts = options or {}
+    if not is_deterministic_dast(opts):
+        return 0
     request_budget_mode = _effective_request_budget_mode(opts)
+    _normalized, admission = prepare_worker_dispatch(opts)
+    if admission.canonical:
+        if admission.plan is None:
+            return 0
+        if request_budget_mode == "enforce":
+            return max(0, int(admission.plan.budget.max_http_requests))
+        known = _known_endpoint_count(opts)
+        if known > 0:
+            return min(known, max(0, int(admission.plan.budget.max_endpoints)))
+        if not admission.plan.policy.active_testing:
+            return 0
+        return max(0, int(admission.plan.budget.max_endpoints))
+
+    # Isolated compatibility jobs retain their historical budget translation.
     if request_budget_mode == "enforce":
         custom_budget = opts.get("custom_budget") if isinstance(opts.get("custom_budget"), dict) else {}
         try:
@@ -5721,7 +5735,7 @@ def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> 
         or opts.get("xss")
         or opts.get("check_family")
         or opts.get("asm_check_family")
-        or scan_type in ACTIVE_ENFORCED_SCAN_TYPES
+        or scan_type in LEGACY_ACTIVE_SCAN_TYPE_LABELS
     )
     if not active_requested:
         return 0
@@ -22581,7 +22595,7 @@ def _worker_placement_labels() -> dict[str, Any]:
         detected_tools
         | {str(item).strip().lower() for item in configured_tools if str(item).strip()}
     )
-    configured_tiers = labels.get("scan_tiers") or list(VALID_DAST_SCAN_TYPES)
+    configured_tiers = labels.get("scan_tiers") or list(LEGACY_DAST_SCAN_TYPE_LABELS)
     if isinstance(configured_tiers, str):
         configured_tiers = [configured_tiers]
     labels["scan_tiers"] = sorted(
