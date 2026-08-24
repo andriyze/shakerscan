@@ -856,3 +856,39 @@ def test_postgres_backend_converts_full_receipt_and_observations_in_one_settleme
     assert stored_receipt["receipt_id"] == receipt.receipt_id
     assert stored_receipt["budget_reservation_id"]
     assert stored_receipt["receipt_hash"] != receipt.receipt_hash
+
+
+def test_postgres_backend_settles_zero_cost_pure_finalizer_reservation():
+    finalizer = replace(
+        _action("finalize.report", 0),
+        requested_budget={},
+        dependencies=(),
+        action_digest=None,
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(finalizer,),
+    )
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    lease = asyncio.run(backend.acquire_action(finalizer))
+    receipt = _raw_receipt(
+        finalizer,
+        worker_id="local-worker-1",
+        consumed={},
+    )
+
+    result = asyncio.run(backend.settle(lease, receipt))
+
+    assert result.status is CapabilityResultStatus.SUCCESS
+    assert result.budget_reserved == {}
+    stored_receipt = json.loads(conn.rows[finalizer.action_id]["receipt_json"])
+    assert stored_receipt["budget_reservation_id"]
+    assert stored_receipt["budget_reservation_state"] == "committed"

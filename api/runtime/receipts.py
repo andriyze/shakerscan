@@ -20,6 +20,7 @@ from .budgets import BUDGET_DIMENSIONS
 
 
 _TERMINAL_RESERVATION_STATES = frozenset({"committed", "released", "failed"})
+_ZERO_COST_RESERVATION_CAPABILITIES = frozenset({"scan.finalize"})
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -185,9 +186,13 @@ class CapabilityReceipt:
         for kind, amount in consumed.items():
             if amount > reserved[kind]:
                 raise ValueError(f"budget_consumed exceeds the reservation for {kind}")
-        if reservation_id and not reserved and status not in {
-            "blocked", "cancelled", "failed", "skipped",
-        }:
+        if (
+            reservation_id
+            and not reserved
+            and status not in {"blocked", "cancelled", "failed", "skipped"}
+            and str(self.capability_name or "").strip()
+            not in _ZERO_COST_RESERVATION_CAPABILITIES
+        ):
             raise ValueError("budget reservation linkage requires budget_reserved")
         if reservation_state == "released" and any(consumed.values()):
             raise ValueError("released budget reservation cannot report consumed budget")

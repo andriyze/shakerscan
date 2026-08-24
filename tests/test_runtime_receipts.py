@@ -77,6 +77,21 @@ def test_skipped_zero_cost_action_can_link_a_terminal_reservation():
     assert receipt.budget_reservation_state == "failed"
 
 
+def test_successful_pure_finalizer_can_link_a_zero_cost_reservation():
+    receipt = _receipt(
+        capability_name="scan.finalize",
+        adapter_name="scanner.report",
+        status="success",
+        budget_reservation_id="zero-cost-finalizer-reservation",
+        budget_reservation_state="committed",
+        budget_reserved={},
+        budget_consumed={},
+    )
+
+    assert receipt.budget_reserved == {}
+    assert receipt.budget_reservation_state == "committed"
+
+
 def test_receipt_requires_an_owner_and_honest_timeout_state():
     with pytest.raises(ValueError, match="belong to a scan or hunt"):
         _receipt(hunt_id=None)
