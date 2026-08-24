@@ -8,6 +8,7 @@ and the honest context packer.
 import os
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -356,6 +357,19 @@ def test_run_tool_argv_templates_hardcode_flags():
     assert argv[argv.index("-type") + 1] == "http"
     assert argv[argv.index("-severity") + 1] == "high,critical"
     assert argv[argv.index("-tags") + 1] == "cve,exposure"
+
+
+def test_httpx_release_does_not_require_runtime_classifier_download():
+    dockerfile = (
+        Path(__file__).resolve().parents[1] / "scanner" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    # v1.9+ initializes a roughly 92 MB Hugging Face DIT model download merely
+    # for JSON output.  Scanner processes must remain offline except for their
+    # frozen target destination.
+    assert (
+        "build_tool httpx github.com/projectdiscovery/httpx/cmd/httpx v1.8.1"
+        in dockerfile
+    )
 
 
 def test_sqlmap_runtime_path_is_worker_bound_per_job():

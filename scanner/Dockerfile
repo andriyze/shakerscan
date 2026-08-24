@@ -56,7 +56,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     }; \
     install_tools() { \
       build_tool tlsx github.com/projectdiscovery/tlsx/cmd/tlsx v1.3.0 && \
-      build_tool httpx github.com/projectdiscovery/httpx/cmd/httpx v1.10.0 && \
+      build_tool httpx github.com/projectdiscovery/httpx/cmd/httpx v1.8.1 && \
       build_tool katana github.com/projectdiscovery/katana/cmd/katana v1.7.0 && \
       build_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder v2.15.0 && \
       build_tool naabu github.com/projectdiscovery/naabu/v2/cmd/naabu v2.3.7 && \
