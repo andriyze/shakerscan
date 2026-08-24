@@ -11,7 +11,11 @@ import uuid
 
 import pytest
 
-from api.scan.continuation import root_scan_plan_revision
+from api.scan.continuation import (
+    ScanContinuationAllocation,
+    ScanPlanRevision,
+    root_scan_plan_revision,
+)
 from api.scan.capability_result import (
     CapabilityResultReference,
     CapabilityResultStatus,
@@ -116,6 +120,67 @@ def test_offline_rebuild_verifies_observation_content_digest():
 
     with pytest.raises(ScanReportRebuildError, match="content digest"):
         rebuild_scan_report(bundle)
+
+
+def test_offline_rebuild_binds_amended_revision_to_exact_allocation():
+    bundle, _expected = _bundle()
+    plan = _plan()
+    allocation = ScanContinuationAllocation(
+        scan_id=plan.scan_id,
+        parent_plan_digest="a" * 64,
+        execution_plan_digest=plan.execution_plan_digest,
+        target_binding_digest=plan.target_binding_digest,
+        parent_action_ids=(plan.actions[0].action_id,),
+        budget_ceiling={
+            "http_requests": 1,
+            "state_changing_requests": 0,
+            "browser_actions": 0,
+            "tcp_ports_attempted": 0,
+            "hosts_attempted": 0,
+            "tool_wall_seconds": 1,
+        },
+        max_endpoint_entries=1,
+        max_candidate_entries=1,
+        allowed_capabilities=(),
+    )
+    revision = ScanPlanRevision(
+        scan_id=plan.scan_id,
+        revision=1,
+        plan_digest=plan.plan_digest,
+        parent_plan_digest=allocation.parent_plan_digest,
+        continuation_allocation_digest=allocation.allocation_digest,
+        discovery_result_digest="b" * 64,
+        work_manifest_references=({
+            "schema_version": "scan-work-manifest-reference/v1",
+            "manifest_id": "55555555-5555-4555-8555-555555555555",
+            "kind": "candidate",
+            "content_schema": "candidate-manifest/v1",
+            "manifest_digest": "d" * 64,
+            "entry_count": 1,
+            "status": "complete",
+        },),
+        continuation_plan_digest="e" * 64,
+    )
+    bundle["plan_revision"] = revision.canonical_dict()
+    bundle["continuation_allocation"] = allocation.canonical_dict()
+    bundle["expected_report_digest"] = None
+
+    rebuilt = rebuild_scan_report(bundle)
+    assert rebuilt["canonical_action_execution"]["plan_revision"] == (
+        revision.canonical_dict()
+    )
+
+    tampered = copy.deepcopy(bundle)
+    tampered["continuation_allocation"]["budget_ceiling"][
+        "tool_wall_seconds"
+    ] = 2
+    with pytest.raises(ScanReportRebuildError, match="allocation"):
+        rebuild_scan_report(tampered)
+
+    missing = copy.deepcopy(bundle)
+    missing["continuation_allocation"] = None
+    with pytest.raises(ScanReportRebuildError, match="requires"):
+        rebuild_scan_report(missing)
 
 
 def test_offline_rebuild_modules_import_no_network_clients():

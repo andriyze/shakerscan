@@ -16,6 +16,7 @@ from api.scan.action_store import (
     ACTION_BUDGET_LINK_MIGRATION_NAME,
     ACTION_LEASE_MIGRATION_NAME,
     ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME,
+    ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME,
     MIGRATION_NAME,
     PostgresScanActionStore,
     SCAN_ACTION_SCHEMA_SQL,
@@ -24,6 +25,7 @@ from api.scan.action_store import (
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
     ScanContinuationAllocation,
+    ScanContinuationError,
     ScanPlanRevision,
     merge_scan_action_continuation,
 )
@@ -304,6 +306,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     assert ACTION_CONTINUATION_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_BUDGET_LINK_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES budget_reservations(id)" in SCAN_ACTION_SCHEMA_SQL
     assert "idx_scan_capability_actions_reservation" in SCAN_ACTION_SCHEMA_SQL
@@ -350,6 +353,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "revision_digest" in source
         assert "discovery_result_digest" in source
         assert "work_manifest_refs_json" in source
+        assert "scan_action_plan_revisions_immutable_shape_check" in source
 
 
 def test_action_store_rolls_back_failed_continuation_and_resumes_only_incomplete_actions():
@@ -432,6 +436,11 @@ def test_action_store_rolls_back_failed_continuation_and_resumes_only_incomplete
     asyncio.run(store.persist_continuation_allocation(
         conn, allocation=allocation, parent_plan=parent,
     ))
+    assert conn.revisions[0]["continuation_allocation_digest"] is None
+    assert not any(
+        query.lstrip().startswith("UPDATE scan_action_plan_revisions")
+        for query, _args in conn.executed
+    )
     loaded_allocation = asyncio.run(store.load_continuation_allocation(
         conn, scan_id=SCAN_ID,
     ))
@@ -463,6 +472,25 @@ def test_action_store_rolls_back_failed_continuation_and_resumes_only_incomplete
     ) == tuple(
         action.action_id for action in amended.actions[len(parent.actions):]
     )
+
+
+def test_root_plan_revision_rejects_mutable_allocation_link_and_tampering():
+    plan = _plan(defer=True)
+    with pytest.raises(ScanContinuationError, match="allocation-free"):
+        ScanPlanRevision(
+            scan_id=plan.scan_id,
+            revision=0,
+            plan_digest=plan.plan_digest,
+            continuation_allocation_digest="a" * 64,
+        )
+
+    conn = FakeConn()
+    store = PostgresScanActionStore()
+    asyncio.run(store.persist_plan(conn, plan=plan))
+    conn.revisions[0]["continuation_allocation_digest"] = "a" * 64
+
+    with pytest.raises(ScanActionStoreError, match="stored Scan plan revision"):
+        asyncio.run(store.load_plan_revision(conn, scan_id=plan.scan_id))
 
 
 def test_action_store_persists_precomputed_optional_skips_as_unsettled_actions():

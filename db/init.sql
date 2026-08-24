@@ -274,7 +274,26 @@ CREATE TABLE scan_action_plan_revisions (
     plan_json JSONB NOT NULL CHECK (jsonb_typeof(plan_json) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (scan_id, revision),
-    UNIQUE (scan_id, plan_digest)
+    UNIQUE (scan_id, plan_digest),
+    CONSTRAINT scan_action_plan_revisions_immutable_shape_check CHECK (
+        (
+            revision=0
+            AND parent_plan_digest IS NULL
+            AND continuation_allocation_digest IS NULL
+            AND discovery_result_digest IS NULL
+            AND work_manifest_refs_json='[]'::jsonb
+            AND continuation_plan_digest IS NULL
+        )
+        OR
+        (
+            revision=1
+            AND parent_plan_digest IS NOT NULL
+            AND continuation_allocation_digest IS NOT NULL
+            AND discovery_result_digest IS NOT NULL
+            AND jsonb_array_length(work_manifest_refs_json) > 0
+            AND continuation_plan_digest IS NOT NULL
+        )
+    )
 );
 
 CREATE TABLE scan_work_manifests (

@@ -8,11 +8,16 @@ from typing import Any, Mapping, Sequence
 
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference
-from .continuation import ScanPlanRevision
+from .continuation import (
+    ScanContinuationAllocation,
+    ScanContinuationError,
+    ScanPlanRevision,
+)
 from .finalizer import finalize_scan_report
 
 
-SCAN_REPORT_REBUILD_BUNDLE_SCHEMA = "scan-report-rebuild-bundle/v1"
+SCAN_REPORT_REBUILD_BUNDLE_SCHEMA_V1 = "scan-report-rebuild-bundle/v1"
+SCAN_REPORT_REBUILD_BUNDLE_SCHEMA = "scan-report-rebuild-bundle/v2"
 
 
 class ScanReportRebuildError(ValueError):
@@ -26,6 +31,7 @@ def build_scan_report_rebuild_bundle(
     action_results: Mapping[str, CapabilityResultReference],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     plan_revision: ScanPlanRevision,
+    continuation_allocation: ScanContinuationAllocation | None = None,
     work_manifest_references: Sequence[Mapping[str, Any]] = (),
     expected_report_digest: str | None = None,
 ) -> dict[str, Any]:
@@ -35,6 +41,10 @@ def build_scan_report_rebuild_bundle(
         "target_url": str(target_url),
         "plan": plan.canonical_dict(),
         "plan_revision": plan_revision.canonical_dict(),
+        "continuation_allocation": (
+            continuation_allocation.canonical_dict()
+            if continuation_allocation is not None else None
+        ),
         "action_results": {
             action_id: result.canonical_dict()
             for action_id, result in sorted(action_results.items())
@@ -55,20 +65,69 @@ def build_scan_report_rebuild_bundle(
 
 def rebuild_scan_report(bundle: Mapping[str, Any]) -> dict[str, Any]:
     """Rebuild and verify a Scan report using only the supplied frozen bundle."""
-    expected_fields = {
+    common_fields = {
         "schema_version", "target_url", "plan", "plan_revision",
         "action_results", "observations", "work_manifest_references",
         "expected_report_digest",
     }
-    if not isinstance(bundle, Mapping) or set(bundle) != expected_fields:
+    if not isinstance(bundle, Mapping):
         raise ScanReportRebuildError("offline report bundle fields are invalid")
-    if bundle.get("schema_version") != SCAN_REPORT_REBUILD_BUNDLE_SCHEMA:
+    schema_version = bundle.get("schema_version")
+    expected_fields = (
+        common_fields | {"continuation_allocation"}
+        if schema_version == SCAN_REPORT_REBUILD_BUNDLE_SCHEMA
+        else common_fields
+    )
+    if set(bundle) != expected_fields:
+        raise ScanReportRebuildError("offline report bundle fields are invalid")
+    if schema_version not in {
+        SCAN_REPORT_REBUILD_BUNDLE_SCHEMA,
+        SCAN_REPORT_REBUILD_BUNDLE_SCHEMA_V1,
+    }:
         raise ScanReportRebuildError("offline report bundle schema is unsupported")
     try:
         plan = ScanActionPlan.from_dict(bundle["plan"])
         revision = ScanPlanRevision.from_dict(bundle["plan_revision"])
     except (TypeError, ValueError, KeyError) as exc:
         raise ScanReportRebuildError("offline report plan authority is invalid") from exc
+    allocation = None
+    raw_allocation = bundle.get("continuation_allocation")
+    try:
+        if raw_allocation is not None:
+            allocation = ScanContinuationAllocation.from_dict(raw_allocation)
+    except (ScanContinuationError, TypeError, ValueError) as exc:
+        raise ScanReportRebuildError(
+            "offline continuation allocation is invalid"
+        ) from exc
+    if revision.revision == 0:
+        if allocation is not None:
+            raise ScanReportRebuildError(
+                "root report revision must be allocation-free"
+            )
+    else:
+        if schema_version == SCAN_REPORT_REBUILD_BUNDLE_SCHEMA_V1:
+            raise ScanReportRebuildError(
+                "legacy rebuild bundle cannot prove an amended allocation"
+            )
+        if allocation is None:
+            raise ScanReportRebuildError(
+                "amended report revision requires its continuation allocation"
+            )
+        parent_ids = tuple(allocation.parent_action_ids)
+        if (
+            allocation.scan_id != plan.scan_id
+            or allocation.allocation_digest
+            != revision.continuation_allocation_digest
+            or allocation.parent_plan_digest != revision.parent_plan_digest
+            or allocation.execution_plan_digest != plan.execution_plan_digest
+            or allocation.target_binding_digest != plan.target_binding_digest
+            or tuple(
+                action.action_id for action in plan.actions[:len(parent_ids)]
+            ) != parent_ids
+        ):
+            raise ScanReportRebuildError(
+                "continuation allocation differs from the amended revision"
+            )
 
     raw_results = bundle.get("action_results")
     raw_observations = bundle.get("observations")

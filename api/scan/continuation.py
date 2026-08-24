@@ -280,9 +280,15 @@ class ScanPlanRevision:
             if self.continuation_plan_digest is not None else None
         )
         if self.revision == 0:
-            if parent is not None or discovery is not None or continuation is not None or references:
+            if (
+                parent is not None
+                or allocation is not None
+                or discovery is not None
+                or continuation is not None
+                or references
+            ):
                 raise ScanContinuationError(
-                    "root Scan plan revision cannot contain amendment evidence"
+                    "root Scan plan revision must be allocation-free"
                 )
         elif not all((parent, allocation, discovery, continuation)) or not references:
             raise ScanContinuationError(
@@ -360,14 +366,11 @@ class ScanPlanRevision:
 
 def root_scan_plan_revision(
     plan: ScanActionPlan,
-    *,
-    continuation_allocation_digest: str | None = None,
 ) -> ScanPlanRevision:
     return ScanPlanRevision(
         scan_id=plan.scan_id,
         revision=0,
         plan_digest=str(plan.plan_digest),
-        continuation_allocation_digest=continuation_allocation_digest,
     )
 
 

@@ -25,6 +25,9 @@ ACTION_LEASE_MIGRATION_NAME = "v2_scan_action_leases_v1"
 ACTION_CONTINUATION_MIGRATION_NAME = "v2_scan_action_continuations_v1"
 ACTION_BUDGET_LINK_MIGRATION_NAME = "v2_scan_action_budget_link_v1"
 ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME = "v2_scan_plan_revision_chain_v1"
+ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME = (
+    "v2_scan_plan_revision_immutability_v1"
+)
 SCAN_ACTION_SCHEMA_SQL = r"""
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_json JSONB;
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_digest TEXT;
@@ -161,6 +164,39 @@ ALTER TABLE scan_action_plan_revisions
     ADD COLUMN IF NOT EXISTS continuation_plan_digest CHAR(64);
 ALTER TABLE scan_action_plan_revisions
     ADD COLUMN IF NOT EXISTS revision_digest CHAR(64);
+UPDATE scan_action_plan_revisions
+SET continuation_allocation_digest=NULL
+WHERE revision=0 AND continuation_allocation_digest IS NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname='scan_action_plan_revisions_immutable_shape_check'
+           AND conrelid='scan_action_plan_revisions'::regclass
+    ) THEN
+        ALTER TABLE scan_action_plan_revisions
+        ADD CONSTRAINT scan_action_plan_revisions_immutable_shape_check
+        CHECK (
+            (
+                revision=0
+                AND parent_plan_digest IS NULL
+                AND continuation_allocation_digest IS NULL
+                AND discovery_result_digest IS NULL
+                AND work_manifest_refs_json='[]'::jsonb
+                AND continuation_plan_digest IS NULL
+            )
+            OR
+            (
+                revision=1
+                AND parent_plan_digest IS NOT NULL
+                AND continuation_allocation_digest IS NOT NULL
+                AND discovery_result_digest IS NOT NULL
+                AND jsonb_array_length(work_manifest_refs_json) > 0
+                AND continuation_plan_digest IS NOT NULL
+            )
+        );
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS app_schema_migrations (
     name TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -177,6 +213,9 @@ VALUES ('v2_scan_action_continuations_v1')
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_plan_revision_chain_v1')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_scan_plan_revision_immutability_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 
@@ -262,15 +301,15 @@ RETURNING scan_id, revision, plan_digest
 """
 
 
-_LINK_ROOT_CONTINUATION_SQL = r"""
-UPDATE scan_action_plan_revisions
-SET continuation_allocation_digest=$3
+_REQUIRE_IMMUTABLE_ROOT_REVISION_SQL = r"""
+SELECT scan_id, revision, plan_digest
+FROM scan_action_plan_revisions
 WHERE scan_id=$1 AND revision=0 AND plan_digest=$2
-  AND (
-      continuation_allocation_digest IS NULL
-      OR continuation_allocation_digest=$3
-  )
-RETURNING scan_id, revision, plan_digest
+  AND parent_plan_digest IS NULL
+  AND continuation_allocation_digest IS NULL
+  AND discovery_result_digest IS NULL
+  AND work_manifest_refs_json='[]'::jsonb
+  AND continuation_plan_digest IS NULL
 """
 
 
@@ -457,13 +496,12 @@ class PostgresScanActionStore:
             raise ScanActionStoreError(
                 "Scan continuation allocation conflicts with persisted authority"
             )
-        linked = await conn.fetchrow(
-            _LINK_ROOT_CONTINUATION_SQL,
+        root = await conn.fetchrow(
+            _REQUIRE_IMMUTABLE_ROOT_REVISION_SQL,
             uuid.UUID(allocation.scan_id),
             parent_plan.plan_digest,
-            allocation.allocation_digest,
         )
-        if linked is None:
+        if root is None:
             raise ScanActionStoreError(
                 "Scan continuation allocation has no immutable root revision"
             )
