@@ -127,6 +127,7 @@ class ReplayTransportResult:
     elapsed_ms: int = 0
     error_code: str | None = None
     timed_out: bool = False
+    attempted_addresses: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status_code is not None and (
@@ -149,12 +150,23 @@ class ReplayTransportResult:
                 address = str(ipaddress.ip_address(self.connected_address))
             except ValueError as exc:
                 raise ReplayExecutionError("transport connected_address is invalid") from exc
+        attempted: list[str] = []
+        for raw_address in self.attempted_addresses:
+            try:
+                item = str(ipaddress.ip_address(str(raw_address or "").strip()))
+            except ValueError as exc:
+                raise ReplayExecutionError(
+                    "transport attempted address is invalid"
+                ) from exc
+            if item not in attempted:
+                attempted.append(item)
         object.__setattr__(self, "status_code", int(self.status_code) if self.status_code else None)
         object.__setattr__(self, "connected_address", address)
         object.__setattr__(self, "response_headers", _response_headers(self.response_headers))
         object.__setattr__(self, "response_body", body)
         object.__setattr__(self, "elapsed_ms", int(self.elapsed_ms))
         object.__setattr__(self, "error_code", error)
+        object.__setattr__(self, "attempted_addresses", tuple(attempted))
 
 
 class ReplayTransport(Protocol):
@@ -237,6 +249,16 @@ def _validate_transport_result(
             )
     elif result.connected_address not in set(target.allowed_addresses):
         raise ReplayExecutionError("transport connected outside the frozen target address set")
+    if not set(result.attempted_addresses).issubset(set(target.allowed_addresses)):
+        raise ReplayExecutionError("transport attempted outside the frozen target address set")
+    if (
+        result.connected_address is not None
+        and result.attempted_addresses
+        and result.connected_address not in result.attempted_addresses
+    ):
+        raise ReplayExecutionError(
+            "transport connected address is absent from its attempt telemetry"
+        )
     if _origin(result.final_url) not in set(plan.allowed_origins):
         raise ReplayExecutionError("transport final URL escaped the replay origin binding")
 
@@ -250,6 +272,7 @@ def _observation(request: ReplayRequest, result: ReplayTransportResult) -> dict[
         "redacted_url": public_request["redacted_url"],
         "final_url": _redacted_url(result.final_url),
         "connected_address": result.connected_address,
+        "attempted_addresses": list(result.attempted_addresses),
         "status_code": result.status_code,
         "response_header_names": sorted(str(name)[:200] for name in result.response_headers),
         "response_body_sha256": hashlib.sha256(result.response_body).hexdigest(),

@@ -105,7 +105,44 @@ class PinnedAiohttpReplayTransport:
         if follow_redirects:
             raise ReplayExecutionError("exact replay transport cannot follow redirects")
         factory = _pinned_factory(request, target)
-        address = factory.addresses[0]
+        attempted_addresses: list[str] = []
+        connected_addresses: list[str] = []
+
+        class TrackedSocket(socket.socket):
+            def _capture_peer(self) -> None:
+                try:
+                    peername = super().getpeername()
+                    address = str(ipaddress.ip_address(str(peername[0])))
+                except (OSError, ValueError, IndexError, TypeError):
+                    return
+                if address not in connected_addresses:
+                    connected_addresses.append(address)
+
+            def connect(self, address):
+                try:
+                    result = super().connect(address)
+                except (BlockingIOError, InterruptedError):
+                    raise
+                self._capture_peer()
+                return result
+
+            def getsockopt(self, level, option, *args):
+                result = super().getsockopt(level, option, *args)
+                if (
+                    level == socket.SOL_SOCKET
+                    and option == socket.SO_ERROR
+                    and result == 0
+                ):
+                    self._capture_peer()
+                return result
+
+        def tracked_socket_factory(addr_info):
+            family, type_, proto, _canonical_name, sockaddr = addr_info
+            address = str(ipaddress.ip_address(str(sockaddr[0])))
+            if address not in attempted_addresses:
+                attempted_addresses.append(address)
+            return TrackedSocket(family=family, type=type_, proto=proto)
+
         resolver = _FrozenAddressResolver(factory=factory)
         connector = aiohttp.TCPConnector(
             resolver=resolver,
@@ -113,6 +150,9 @@ class PinnedAiohttpReplayTransport:
             ssl=_insecure_tls_context(),
             limit=1,
             force_close=True,
+            happy_eyeballs_delay=0.25,
+            interleave=0,
+            socket_factory=tracked_socket_factory,
         )
         timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
         started = asyncio.get_running_loop().time()
@@ -131,6 +171,15 @@ class PinnedAiohttpReplayTransport:
                     data=request.body or None,
                     allow_redirects=False,
                 ) as response:
+                    if not connected_addresses:
+                        raise ReplayExecutionError(
+                            "transport could not prove its connected target address"
+                        )
+                    connected_address = connected_addresses[-1]
+                    if connected_address not in factory.connection_addresses:
+                        raise ReplayExecutionError(
+                            "transport connected outside its frozen fallback set"
+                        )
                     body = await response.content.read(MAX_REPLAY_RESPONSE_BODY_BYTES + 1)
                     if len(body) > MAX_REPLAY_RESPONSE_BODY_BYTES:
                         raise ReplayExecutionError(
@@ -142,7 +191,8 @@ class PinnedAiohttpReplayTransport:
                     )
                     return ReplayTransportResult(
                         status_code=response.status,
-                        connected_address=address,
+                        connected_address=connected_address,
+                        attempted_addresses=tuple(attempted_addresses),
                         final_url=str(response.url),
                         response_headers=dict(response.headers),
                         response_body=body,
@@ -164,7 +214,8 @@ class PinnedAiohttpReplayTransport:
             timed_out = isinstance(exc, (asyncio.TimeoutError, aiohttp.ServerTimeoutError))
             return ReplayTransportResult(
                 status_code=None,
-                connected_address=None if pre_connect else address,
+                connected_address=None,
+                attempted_addresses=tuple(attempted_addresses),
                 final_url=request.url,
                 response_headers={},
                 response_body=b"",

@@ -19,6 +19,7 @@ class _SuccessTransport:
         return ReplayTransportResult(
             status_code=200,
             connected_address=target.allowed_addresses[0],
+            attempted_addresses=(target.allowed_addresses[0],),
             final_url=request.url,
             response_headers={"Content-Type": "text/plain"},
             response_body=b"ok",
@@ -99,6 +100,9 @@ def test_executor_resumes_owner_held_reservation_and_settles_all_dimensions():
     assert 0 <= outcome.reservation.actual["tool_wall_seconds"] <= 60
     assert settlements[0][1].input_digest == _plan().input_digest
     assert settlements[0][2]["http_requests"] == 1
+    assert outcome.receipt.observations[0]["attempted_addresses"] == [
+        "192.0.2.10",
+    ]
 
 
 def test_pinned_transport_preserves_exact_headers_and_body_without_dns():
@@ -169,9 +173,53 @@ def test_pinned_transport_preserves_exact_headers_and_body_without_dns():
     result, wire = asyncio.run(drive())
     assert result.status_code == 200
     assert result.connected_address == "127.0.0.1"
+    assert result.attempted_addresses == ("127.0.0.1",)
     assert b"Authorization: Bearer exact-secret" in wire
     assert b"X-Exact: preserved" in wire
     assert wire.endswith(b'{"secret":"body-value"}')
+
+
+def test_pinned_replay_fails_over_in_stable_order_and_reports_the_real_peer():
+    async def drive():
+        async def serve(_reader, writer):
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                b"Connection: close\r\n\r\nok"
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        try:
+            server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("test sandbox does not permit a loopback listener")
+        port = server.sockets[0].getsockname()[1]
+        origin = f"http://replay.test:{port}"
+        plan = build_replay_plan(
+            [{"id": "request-1", "method": "GET", "url": origin + "/"}],
+            allowed_origins=[origin], default_origin=origin,
+        )
+        target = TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="replay.test",
+            allowed_origins=(origin,),
+            allowed_addresses=("127.0.0.1", "127.0.0.0"),
+        )
+        try:
+            return await PinnedAiohttpReplayTransport().send(
+                plan.requests[0], target=target,
+                timeout_seconds=3, follow_redirects=False,
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    result = asyncio.run(drive())
+    assert result.status_code == 200
+    assert result.connected_address == "127.0.0.1"
+    assert result.attempted_addresses == ("127.0.0.0", "127.0.0.1")
 
 
 def test_hunt_api_never_decrypts_collection_replay_payloads():
