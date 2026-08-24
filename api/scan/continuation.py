@@ -221,7 +221,9 @@ def merge_scan_action_continuation(
         if action.action_id == "finalize.report":
             continue
         if action.action_id in parent_ids:
-            if action.action_id.startswith("inputs.auth_"):
+            if action.action_id.startswith((
+                "inputs.auth_", "inputs.collection_",
+            )):
                 continue
             raise ScanContinuationError(
                 f"continuation action duplicates parent authority: {action.action_id}"

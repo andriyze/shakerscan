@@ -124,6 +124,57 @@ def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_autho
     )
 
 
+def test_endpoint_request_verifiers_depend_on_collection_replay_inputs():
+    collection = ({
+        "collection_id": "collection-a",
+        "selection_id": "selection-a",
+        "binding_id": "binding-a",
+        "version": 1,
+        "selection_digest": "a" * 64,
+        "active": True,
+        "max_requests": 1,
+    },)
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(
+            include=("xss", "sqli"), state=True,
+        ),
+        target_binding=_target(),
+        request_collection_refs=collection,
+        request_manifest_refs={
+            "a" * 64: _request_manifest_ref(
+                "10000000-0000-4000-8000-000000000082", "3" * 64,
+            ),
+        },
+        request_candidate_manifest_ref=_request_candidate_manifest_ref(1),
+        action_scope="endpoint",
+        action_budgets={"inputs.collection_00": {}},
+    )
+    by_id = {action.action_id: action for action in plan.actions}
+
+    assert by_id["inputs.collection_00"].requested_budget == {}
+    assert by_id["verify.request_xss"].dependencies == (
+        "inputs.collection_00",
+    )
+    assert by_id["verify.request_sqli"].dependencies == (
+        "inputs.collection_00",
+    )
+
+
+def test_endpoint_request_verification_rejects_missing_private_replay_inputs():
+    with pytest.raises(
+        ScanActionPlanError,
+        match="requires immutable collection replay inputs",
+    ):
+        ScanActionPlanCompiler().compile(
+            scan_id=SCAN_ID,
+            execution_plan=_execution(include=("xss",), state=True),
+            target_binding=_target(),
+            request_candidate_manifest_ref=_request_candidate_manifest_ref(),
+            action_scope="endpoint",
+        )
+
+
 def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families():
     plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,

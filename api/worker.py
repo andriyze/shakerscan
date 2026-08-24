@@ -13990,6 +13990,10 @@ async def _materialize_local_scan_continuation(
         if str(item.get("scan_lane") or item.get("lane") or "").lower()
         in {"primary", "secondary"}
     }
+    zero_cost_existing_inputs.update({
+        f"inputs.collection_{index:02d}": {}
+        for index, _item in enumerate(collection_refs)
+    })
     continuation_raw = ScanActionPlanCompiler().compile(
         scan_id=dispatcher.scan_id,
         execution_plan=dispatcher.execution.execution_plan,

@@ -844,7 +844,28 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
-        for index, reference in enumerate(collections if scope == "full" else ()):
+        replay_inputs_required = (
+            scope == "full"
+            or (
+                scope == "endpoint"
+                and bool(request_candidate_ref)
+                and policy.allow_state_changing_http
+                and (xss or sqli)
+            )
+        )
+        if (
+            scope == "endpoint"
+            and bool(request_candidate_ref)
+            and policy.allow_state_changing_http
+            and (xss or sqli)
+            and not collections
+        ):
+            raise ScanActionPlanError(
+                "request verification requires immutable collection replay inputs"
+            )
+        for index, reference in enumerate(
+            collections if replay_inputs_required else ()
+        ):
             capability_name = (
                 "collections.replay_active"
                 if reference.get("active") is True and policy.allow_state_changing_http

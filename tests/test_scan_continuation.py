@@ -14,6 +14,7 @@ from api.scan.continuation import (
 )
 from api.scan.contracts import resolve_scan_contract
 from api.scan.work_manifests import (
+    ScanWorkManifestReference,
     build_candidate_manifest,
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
@@ -151,6 +152,100 @@ def test_continuation_append_preserves_parent_and_binds_one_finalizer():
         and action.capability_args["candidate_manifest_ref"]["manifest_digest"]
         for action in amended.actions
     )
+
+
+def test_continuation_request_verifier_binds_parent_collection_replay():
+    target = _target()
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+            "include_families": ["xss"],
+        },
+        approval_receipt_id="approval-1",
+    )
+    collection = ({
+        "collection_id": "collection-a",
+        "selection_id": "selection-a",
+        "binding_id": "binding-a",
+        "version": 1,
+        "selection_digest": "a" * 64,
+        "active": True,
+        "max_requests": 1,
+    },)
+    request_ref = ScanWorkManifestReference(
+        manifest_id="70000000-0000-4000-8000-000000000080",
+        kind="request",
+        content_schema="request-manifest/v1",
+        manifest_digest="b" * 64,
+        entry_count=1,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="70000000-0000-4000-8000-000000000081",
+        kind="request_candidate",
+        content_schema="request-candidate-manifest/v1",
+        manifest_digest="c" * 64,
+        entry_count=1,
+        status="complete",
+    ).canonical_dict()
+    parent_raw = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=target,
+        request_collection_refs=collection,
+        request_manifest_refs={"a" * 64: request_ref},
+        defer_manifest_actions=True,
+        include_finalizer=False,
+    )
+    parent_allocation = allocate_scan_action_plan(
+        parent_raw,
+        contract.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+    )
+    parent = parent_allocation.plan
+    allocation = ScanContinuationAllocation(
+        scan_id=SCAN_ID,
+        parent_plan_digest=parent.plan_digest,
+        execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest,
+        parent_action_ids=tuple(action.action_id for action in parent.actions),
+        budget_ceiling=parent_allocation.residual_scan_execute_budget,
+        max_endpoint_entries=contract.budget.max_endpoints,
+        max_candidate_entries=min(20_000, contract.budget.max_http_requests),
+        required_capabilities=("xss.request_verify",),
+    )
+    continuation_raw = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=target,
+        request_collection_refs=collection,
+        request_manifest_refs={"a" * 64: request_ref},
+        request_candidate_manifest_ref=candidate_ref,
+        action_scope="endpoint",
+        action_budgets={"inputs.collection_00": {}},
+    )
+    continuation = allocate_scan_action_plan(
+        continuation_raw,
+        ContinuationBudgetCeiling(allocation.budget_ceiling),
+    ).plan
+
+    amended = merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        allocation=allocation,
+    )
+    verifier = next(
+        action for action in amended.actions
+        if action.capability_name == "xss.request_verify"
+    )
+
+    assert verifier.dependencies == ("inputs.collection_00",)
+    assert sum(
+        action.action_id == "inputs.collection_00" for action in amended.actions
+    ) == 1
 
 
 def test_continuation_cannot_exceed_its_upfront_budget_ceiling():
