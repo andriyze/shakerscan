@@ -225,7 +225,7 @@ def test_pinned_replay_fails_over_in_stable_order_and_reports_the_real_peer():
 def test_hunt_api_never_decrypts_collection_replay_payloads():
     source = open("api/api.py", encoding="utf-8").read()
     start = source.index("async def _hunt_replay_safe_collection")
-    end = source.index("\n\nasync def _validate_legacy_device_hunt_credentials", start)
+    end = source.index("\n\nasync def _validate_hunt_credential_references", start)
     replay_helper = source[start:end]
     assert "decrypt_secret" not in replay_helper
     assert '"type": "request_collection_replay"' in replay_helper

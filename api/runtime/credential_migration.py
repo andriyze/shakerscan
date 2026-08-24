@@ -32,7 +32,14 @@ except ModuleNotFoundError:
 LEGACY_WEB_MIGRATION = "v2_target_credentials_to_generic_v1"
 LEGACY_DEVICE_MIGRATION = "v2_device_credentials_to_generic_v1"
 LEGACY_AI_MIGRATION = "v2_ai_credentials_to_generic_v1"
-LEGACY_WEB_CAPABILITIES = ("request.replay", "scan.execute")
+LEGACY_WEB_CAPABILITIES = (
+    "auth.session.establish",
+    "auth.session.refresh",
+    "auth.session.revoke",
+    "http.request",
+    "request.replay",
+    "scan.execute",
+)
 LEGACY_DEVICE_WEB_CAPABILITIES = ("request.replay", "device.http.probe")
 LEGACY_DEVICE_SSH_CAPABILITIES = ("device.ssh.propose",)
 LEGACY_AI_CAPABILITIES = (

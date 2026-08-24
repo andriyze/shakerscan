@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from runtime.credential_store import PostgresCredentialProfileStore
+from runtime.auth_session_store import PostgresAuthSessionStore
 from runtime.credential_migration import (
     migrate_legacy_ai_credentials,
     migrate_legacy_device_credentials,
@@ -979,6 +980,10 @@ async def run_schema_migrations(pool) -> None:
             # under the same startup lock so neither API nor workers can observe profiles
             # without their immutable version and binding tables.
             await PostgresCredentialProfileStore().ensure_schema(conn)
+
+            # Interactive Hunt identities are durable opaque references whose
+            # cookies/tokens remain encrypted until a leased worker uses them.
+            await PostgresAuthSessionStore().ensure_schema(conn)
 
             # Durable key/value store for settings that must survive a Redis
             # flush/restart. Redis remains a cache for non-security automation

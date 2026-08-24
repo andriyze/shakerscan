@@ -19,6 +19,8 @@ ExecutionKind = Literal[
 RiskTier = Literal["read_only", "passive", "active", "credential", "mutation"]
 HuntExecutor = Literal[
     "inline",
+    "worker_auth",
+    "worker_http",
     "worker_network",
     "worker_browser",
     "worker_scanner",
@@ -61,6 +63,7 @@ class CapabilitySpec:
     retest_contract: str | None = None
     planner_visible: bool = True
     hunt_executor: HuntExecutor | None = None
+    planner_input_schema: Mapping[str, Any] | None = None
     redaction_contract: tuple[str, ...] = (
         "authorization headers", "cookies", "tokens", "private keys"
     )
@@ -122,7 +125,9 @@ class CapabilitySpec:
             "description": self.description,
             "risk_tier": self.risk_tier,
             "target_kinds": sorted(self.target_kinds),
-            "input_schema": dict(self.input_schema),
+            "input_schema": dict(
+                self.planner_input_schema or self.input_schema
+            ),
             "output_schema": self.output_schema,
             "budget_cost": dict(self.budget_cost),
             "required_approval": self.required_approval,
@@ -221,6 +226,30 @@ class CapabilityRegistry:
         _validate_schema_value(spec.input_schema, value, path="input", depth=0)
         return dict(value)
 
+    def validate_hunt_input(self, name: str, value: Any) -> dict[str, Any]:
+        """Validate the planner projection without exposing Scan-private fields."""
+        spec = self.require(name)
+        if spec.planner_input_schema is None:
+            return self.validate_input(name, value)
+        if not isinstance(value, Mapping):
+            raise CapabilityInputContractError("capability input must be an object")
+        try:
+            encoded = json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise CapabilityInputContractError(
+                "capability input must be JSON serializable"
+            ) from exc
+        if len(encoded) > 65_536:
+            raise CapabilityInputContractError(
+                "capability input exceeds the 65536-byte limit"
+            )
+        _validate_schema_value(
+            spec.planner_input_schema, value, path="input", depth=0,
+        )
+        return dict(value)
+
 
 def _validate_schema_value(
     schema: Mapping[str, Any], value: Any, *, path: str, depth: int,
@@ -309,7 +338,7 @@ def _schema(
 
 _HTTP_PRINCIPAL_BINDING_PROPERTIES: Mapping[str, Any] = MappingProxyType({
     "as_principal": {
-        "type": "string", "enum": ["primary", "secondary"],
+        "type": "string", "enum": ["primary", "secondary", "service"],
     },
     "principal_binding_digest": {
         "type": "string", "pattern": "^[0-9a-f]{64}$",
@@ -570,9 +599,13 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
                 "follow_redirects": {"type": "boolean"},
+                "session_ref": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                },
             }, required=("method", "path")),
             "http-observation/v1", ("http_observation", "tool_receipt"),
-            hunt_executor="inline",
+            hunt_executor="worker_http",
         ),
         CapabilitySpec(
             "auth.session.establish",
@@ -605,8 +638,57 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "endpoint_binding_digest", "endpoint_path",
             )),
             "credential-session/v1",
-            ("credential_session_observation", "tool_receipt"),
-            planner_visible=False,
+            ("credential_session", "tool_receipt"),
+            planner_visible=True,
+            hunt_executor="worker_auth",
+            planner_input_schema=_schema({
+                "as_principal": {
+                    "type": "string",
+                    "enum": ["primary", "secondary", "service"],
+                },
+            }, required=("as_principal",)),
+        ),
+        CapabilitySpec(
+            "auth.session.refresh",
+            "Refresh one opaque target-bound session using its current managed profile.",
+            "http", "credential", _HTTP_TARGETS, "auth.session", "1",
+            "credential_use", {"http_requests": 4, "tool_wall_seconds": 45},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "credentials_resolved_server_side": True,
+                "worker_private_result": True,
+            },
+            _schema({
+                "session_ref": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                },
+            }, required=("session_ref",)),
+            "credential-session/v1",
+            ("credential_session", "tool_receipt"),
+            hunt_executor="worker_auth",
+        ),
+        CapabilitySpec(
+            "auth.session.revoke",
+            "Revoke one opaque target-bound session and destroy its sealed identity.",
+            "internal", "credential", _HTTP_TARGETS, "auth.session", "1",
+            "credential_use", {"tool_wall_seconds": 5},
+            {
+                "network_reachability": False,
+                "runtime_target_binding": True,
+                "credentials_resolved_server_side": True,
+                "worker_private_result": True,
+            },
+            _schema({
+                "session_ref": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                },
+            }, required=("session_ref",)),
+            "credential-session/v1",
+            ("credential_session_revocation", "tool_receipt"),
+            hunt_executor="worker_auth",
         ),
         CapabilitySpec(
             "authz.verify",

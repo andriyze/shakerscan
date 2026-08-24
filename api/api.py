@@ -650,6 +650,8 @@ try:
         DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
         DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
         DURABLE_BROWSER_HUNT_CAPABILITIES,
+        DURABLE_AUTH_HUNT_CAPABILITIES,
+        DURABLE_HTTP_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -688,6 +690,8 @@ except ModuleNotFoundError:
         DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
         DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
         DURABLE_BROWSER_HUNT_CAPABILITIES,
+        DURABLE_AUTH_HUNT_CAPABILITIES,
+        DURABLE_HTTP_HUNT_CAPABILITIES,
         DURABLE_INLINE_HUNT_CAPABILITIES,
         DURABLE_SCANNER_HUNT_CAPABILITIES,
         DURABLE_WORKER_HUNT_CAPABILITIES,
@@ -37445,6 +37449,80 @@ async def _enqueue_canonical_network_capability(
     }
 
 
+async def _enqueue_canonical_http_capability(
+    *,
+    capability_name: str,
+    capability_input: Mapping[str, Any],
+    expected_budget: Mapping[str, int],
+    timeout_ms: int,
+    hunt_id: str,
+    action_id: str,
+    reservation_id: str,
+    action_digest: str,
+) -> dict[str, Any]:
+    """Queue opaque session/HTTP work without credentials or target authority."""
+    redis_client = get_redis()
+    job_id = str(uuid.uuid4())
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    payload = {
+        "job_id": job_id,
+        "type": "canonical_http_capability",
+        "capability_name": capability_name,
+        "capability_input": dict(capability_input),
+        "expected_budget": {
+            str(key): int(value) for key, value in expected_budget.items()
+        },
+        "hunt_id": str(hunt_id),
+        "action_id": str(action_id),
+        "budget_reservation_id": str(reservation_id),
+        "action_digest": str(action_digest),
+        "submitted_at": utc_now_iso(),
+        "_base_queue_name": AGENT_TOOL_QUEUE_NAME,
+    }
+    redis_client.hset(
+        f"job:{job_id}",
+        mapping={
+            "status": "queued",
+            "current_phase": "canonical_http_capability_queued",
+            "tool": capability_name,
+        },
+    )
+    redis_client.expire(
+        f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300),
+    )
+    enqueue_job(redis_client, AGENT_TOOL_QUEUE_NAME, payload)
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            raw = redis_client.get(result_key)
+            if raw is not None:
+                redis_client.delete(result_key)
+                value = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                parsed = json.loads(value)
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(
+                        "canonical HTTP worker returned a malformed result"
+                    )
+                return parsed
+            await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        redis_client.set(
+            cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30),
+        )
+        raise
+    redis_client.set(
+        cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30),
+    )
+    return {
+        "status": "timeout",
+        "error": "worker_result_timeout",
+        "partial": False,
+        "budget_consumed": {},
+        "durable_budget_settled": False,
+    }
+
+
 async def _enqueue_canonical_browser_capability(
     *, capability_name: str, capability_input: Mapping[str, Any],
     expected_input_digest: str, expected_budget: Mapping[str, int],
@@ -40678,6 +40756,8 @@ async def execute_hunt_capability(
     name = str(capability_name or "").strip().lower()
     network_capability_names = DURABLE_WORKER_HUNT_CAPABILITIES
     browser_capability_names = DURABLE_BROWSER_HUNT_CAPABILITIES
+    auth_capability_names = DURABLE_AUTH_HUNT_CAPABILITIES
+    http_capability_names = DURABLE_HTTP_HUNT_CAPABILITIES
     prepared_network = None
     network_target = None
     network_policy = None
@@ -40696,7 +40776,7 @@ async def execute_hunt_capability(
             detail="Capability is not exposed to Hunt planners",
         )
     try:
-        agent_tools.CAPABILITY_REGISTRY.validate_input(name, request.input)
+        agent_tools.CAPABILITY_REGISTRY.validate_hunt_input(name, request.input)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     action_id: uuid.UUID | None = None
@@ -40763,7 +40843,10 @@ async def execute_hunt_capability(
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
             principal_slot = (
                 agent_tools.normalize_principal_slot(request.input.get("as_principal"))
-                if name in {"http.request", "collections.replay_safe"} else "anonymous"
+                if name in {
+                    "http.request", "collections.replay_safe", "auth.session.establish",
+                }
+                else "anonymous"
             )
             if name == "collections.replay_safe":
                 principal = _hunt_managed_principal_reference(
@@ -40781,7 +40864,14 @@ async def execute_hunt_capability(
                     })
                 except (TypeError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
-            requires_call_approval = spec.requires_active_approval or principal_slot != "anonymous"
+            uses_session = bool(
+                name == "http.request" and request.input.get("session_ref")
+            )
+            requires_call_approval = (
+                spec.requires_active_approval
+                or principal_slot != "anonymous"
+                or uses_session
+            )
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
@@ -40789,7 +40879,7 @@ async def execute_hunt_capability(
                 call_approval_context = await _validate_approval_receipt_for_action(
                     conn, policy.get("approval_receipt_id"), target_url=target_url,
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
-                    command=name, risk_tier="credential" if principal_slot != "anonymous" else str(spec.risk_tier), always_require_receipt=True,
+                    command=name, risk_tier="credential" if principal_slot != "anonymous" or uses_session else str(spec.risk_tier), always_require_receipt=True,
                     require_target_binding=True,
                     require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
                 )
@@ -40936,6 +41026,7 @@ async def execute_hunt_capability(
             worker_managed_budget = spec.hunt_executor == "worker_replay"
             worker_durable_budget = spec.hunt_executor in {
                 "worker_network", "worker_scanner", "worker_browser",
+                "worker_auth", "worker_http",
             }
             api_managed_budget = spec.hunt_executor in {
                 "inline", "device_control", "device_http", "device_queue",
@@ -41358,48 +41449,21 @@ async def execute_hunt_capability(
                 # Device counters can advance before a socket or downstream
                 # queue raises, so settlement must retain the execution state.
                 context["device_state"] = device_state
-        elif name == "http.request":
-            http_input = dict(request.input)
-            http_input.setdefault("method", "GET")
-            http_input.setdefault("path", "/")
-            http_adapter = HttpRequestExecutionAdapter(
-                specification=spec,
-                operation=lambda: _agent_tool_http_request(
-                    run["target_id"],
-                    str(context["target"]["url"]),
-                    http_input,
-                    created_by=f"hunt_v2:{hunt_id}",
-                    allow_write=False,
-                    approval_receipt_id=policy.get("approval_receipt_id"),
-                    authorized_addresses=(
-                        context.get("authorized_target_addresses") or []
-                    ),
-                    record_receipt=False,
-                ),
-                requested_budget=(
-                    durable_reservation.record.requested
-                    if durable_reservation is not None
-                    else charges
-                ),
-                redacted_execution=_hunt_redacted_capability_input(
-                    name, http_input,
-                ),
+        elif name in auth_capability_names | http_capability_names:
+            if durable_reservation is None or durable_action_digest is None:
+                raise RuntimeError(
+                    "HTTP capability reservation was not initialized"
+                )
+            result = await _enqueue_canonical_http_capability(
+                capability_name=name,
+                capability_input=request.input,
+                expected_budget=durable_reservation.record.requested,
+                timeout_ms=int(spec.default_timeout_ms),
+                hunt_id=str(run["id"]),
+                action_id=str(action_id),
+                reservation_id=durable_reservation.record.reservation_id,
+                action_digest=durable_action_digest,
             )
-            capability_execution = await CapabilityExecutor().execute(
-                CapabilityExecutionContext(
-                    specification=spec,
-                    target=inline_web_target_binding(),
-                    requested_budget=(
-                        durable_reservation.record.requested
-                        if durable_reservation is not None
-                        else charges
-                    ),
-                ),
-                http_adapter,
-                heartbeat=lambda: asyncio.sleep(0),
-                cancelled=lambda: False,
-            )
-            result = http_adapter.result
         elif name in browser_capability_names:
             if (
                 durable_reservation is None

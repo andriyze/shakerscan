@@ -104,7 +104,19 @@ def test_auth_session_registry_contract_is_target_bound_and_worker_private():
         "credentials_resolved_server_side": True,
         "worker_private_result": True,
     }
-    assert specification.planner_visible is False
+    assert specification.planner_visible is True
+    assert specification.hunt_executor == "worker_auth"
+    assert specification.planner_contract()["input_schema"] == {
+        "type": "object",
+        "properties": {
+            "as_principal": {
+                "type": "string",
+                "enum": ["primary", "secondary", "service"],
+            },
+        },
+        "additionalProperties": False,
+        "required": ["as_principal"],
+    }
 
 
 def test_active_collection_replay_has_an_approval_bound_hidden_contract():
@@ -187,7 +199,9 @@ def test_canonical_http_tools_declare_content_free_principal_bindings():
         properties = CAPABILITY_REGISTRY.require(
             capability_name
         ).input_schema["properties"]
-        assert properties["as_principal"]["enum"] == ["primary", "secondary"]
+        assert properties["as_principal"]["enum"] == [
+            "primary", "secondary", "service",
+        ]
         assert properties["principal_binding_digest"]["pattern"] == (
             "^[0-9a-f]{64}$"
         )

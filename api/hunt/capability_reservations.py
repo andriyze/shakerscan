@@ -36,6 +36,8 @@ DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES = _hunt_executor_names(
 DURABLE_WORKER_HUNT_CAPABILITIES = _hunt_executor_names("worker_network")
 DURABLE_BROWSER_HUNT_CAPABILITIES = _hunt_executor_names("worker_browser")
 DURABLE_SCANNER_HUNT_CAPABILITIES = _hunt_executor_names("worker_scanner")
+DURABLE_AUTH_HUNT_CAPABILITIES = _hunt_executor_names("worker_auth")
+DURABLE_HTTP_HUNT_CAPABILITIES = _hunt_executor_names("worker_http")
 
 
 def hunt_capability_action_digest(

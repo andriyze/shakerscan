@@ -103,6 +103,13 @@ class WorkerPrivateScanSession:
     def headers(self) -> dict[str, str]:
         return dict(self._headers)
 
+    def close(self) -> None:
+        """Best-effort clearing for worker-private identity material."""
+        if isinstance(self._headers, dict):
+            for name in list(self._headers):
+                self._headers[name] = ""
+            self._headers.clear()
+
     def execution_result(self) -> dict[str, Any]:
         return {
             "ok": self.established,
@@ -412,6 +419,7 @@ async def establish_target_bound_http_session(
     target: TargetBinding,
     request_executor: SessionRequestExecutor = execute_bound_http_request,
     now: datetime | None = None,
+    session_ref: str | None = None,
 ) -> WorkerPrivateScanSession:
     """Perform one explicit, pinned form/OAuth exchange and retain values in memory."""
     _validate_material(credential)
@@ -522,10 +530,16 @@ async def establish_target_bound_http_session(
         expires_at, refresh_after = _session_timing(
             latest, now=established_at,
         )
-        session_ref = str(uuid.uuid4())
+        opaque_session_ref = str(session_ref or uuid.uuid4())
+        try:
+            uuid.UUID(opaque_session_ref)
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise SessionCredentialContractError(
+                "session reference is invalid"
+            ) from exc
         principal = credential.principal or credential.lane
         observation.update({
-            "session_ref": session_ref,
+            "session_ref": opaque_session_ref,
             "profile_id": credential.profile_id,
             "profile_version": credential.profile_version or None,
             "principal": principal,
@@ -547,7 +561,7 @@ async def establish_target_bound_http_session(
             error=None,
             request_count=request_count,
             _headers=headers,
-            session_ref=session_ref,
+            session_ref=opaque_session_ref,
             profile_id=credential.profile_id,
             profile_version=credential.profile_version,
             principal=principal,

@@ -81,7 +81,7 @@ const EMPTY_DRAFT: Draft = {
   scopes: '',
   customHeaders: '',
   expiresAt: '',
-  capabilities: 'request.replay, scan.execute',
+  capabilities: 'auth.session.establish, auth.session.refresh, auth.session.revoke, http.request, request.replay, scan.execute',
 }
 
 function splitValues(value: string): string[] {

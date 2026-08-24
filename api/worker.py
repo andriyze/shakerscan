@@ -67,7 +67,10 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.http import execute_bound_http_request
-from capabilities.auth import establish_target_bound_http_session
+from capabilities.auth import (
+    TargetBoundSessionCredential,
+    establish_target_bound_http_session,
+)
 from capabilities.authz import (
     authz_route_inventory_digest,
     verify_target_bound_object_authorization,
@@ -87,6 +90,8 @@ from capabilities.replay import ReplayExecutionAdapter
 from capabilities.request_mutation import RequestMutationVerificationAdapter
 from hunt.capability_reservations import (
     DURABLE_BROWSER_HUNT_CAPABILITIES,
+    DURABLE_AUTH_HUNT_CAPABILITIES,
+    DURABLE_HTTP_HUNT_CAPABILITIES,
     DURABLE_SCANNER_HUNT_CAPABILITIES,
     DURABLE_WORKER_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
@@ -95,6 +100,10 @@ from hunt.capability_reservations import (
 )
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from runtime.budget_reservations import DurableBudgetReservation
+from runtime.auth_session_store import (
+    AuthSessionStoreError,
+    PostgresAuthSessionStore,
+)
 from runtime.budgets import BudgetExceeded
 from runtime.capability_settlement import terminalize_capability_reservation
 from runtime.receipts import CapabilityReceipt
@@ -21740,6 +21749,114 @@ def _worker_terminal_network_result(
     }
 
 
+def _worker_hunt_web_target(
+    run: Mapping[str, Any],
+    context: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> tuple[TargetBinding, str]:
+    if str(run["target_kind"]) not in {"web", "api"} or not run["target_id"]:
+        raise CapabilityInputError("HTTP capability requires a Web or API Hunt target")
+    target_context = (
+        dict(context.get("target") or {})
+        if isinstance(context.get("target"), Mapping) else {}
+    )
+    target_url = str(target_context.get("url") or "").strip()
+    parsed = urllib.parse.urlsplit(target_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise CapabilityInputError("persisted Hunt target URL is invalid")
+    root_domain = str(
+        target_context.get("root_domain") or parsed.hostname
+    ).lower().rstrip(".")
+    target = TargetBinding(
+        target_id=str(run["target_id"]),
+        target_kind=str(run["target_kind"]),
+        canonical_host=parsed.hostname,
+        allowed_origins=tuple(target_context.get("origins") or ()),
+        allowed_addresses=tuple(
+            str(item)
+            for item in context.get("authorized_target_addresses") or ()
+            if str(item)
+        ),
+        allowed_root_domains=(root_domain,) if root_domain else (),
+        environment=str(target_context.get("environment") or "unknown"),
+        scope_receipt_id=str(policy.get("scope_receipt_id") or "") or None,
+    )
+    return target, target_url
+
+
+def _worker_hunt_profile_context(
+    context: Mapping[str, Any],
+    principal_slot: str,
+    *,
+    capability: str,
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    reference = select_hunt_principal_reference(
+        context, principal_slot, capability=capability,
+    )
+    if reference is None:
+        raise CredentialReferenceError(
+            "authenticated Hunt capability requires a managed principal"
+        )
+    matches = [
+        dict(item)
+        for item in context.get("credential_refs") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("profile_id") or "") == reference["profile_id"]
+        and str(item.get("principal_slot") or "") == reference["principal_slot"]
+    ]
+    if len(matches) != 1:
+        raise CredentialReferenceError(
+            "managed Hunt principal context is missing or ambiguous"
+        )
+    item = matches[0]
+    if profile_id is not None and str(item.get("profile_id") or "") != str(profile_id):
+        raise CredentialReferenceError(
+            "authentication session profile differs from the Hunt principal"
+        )
+    return item
+
+
+def _worker_session_credential(
+    resolved: Any,
+    context_ref: Mapping[str, Any],
+    *,
+    target: TargetBinding,
+) -> TargetBoundSessionCredential:
+    interactive = resolved.interactive_http()
+    allowed = tuple(sorted({
+        str(item).strip()
+        for item in context_ref.get("allowed_capabilities") or ()
+        if str(item).strip()
+    }))
+    if not allowed:
+        allowed = ("http.request",)
+    binding_digest = hashlib.sha256(json.dumps({
+        "schema_version": "hunt-session-credential-binding/v1",
+        "profile_id": resolved.profile.profile_id,
+        "profile_version": resolved.profile.current_version,
+        "principal_slot": resolved.profile.principal_slot,
+        "target_binding_digest": target.digest,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return TargetBoundSessionCredential(
+        lane=resolved.profile.principal_slot,
+        auth_kind=resolved.profile.auth_kind,
+        endpoint_url=interactive.endpoint_url,
+        binding_digest=binding_digest,
+        username=interactive.username,
+        secret=interactive.secret,
+        client_id=interactive.client_id,
+        scopes=interactive.scopes,
+        profile_id=resolved.profile.profile_id,
+        profile_version=resolved.profile.current_version,
+        principal=(resolved.profile.principal_label or resolved.profile.principal_slot),
+        compatible_capabilities=allowed,
+        oauth_password_explicitly_allowed=(
+            resolved.profile.auth_kind == "oauth_password"
+        ),
+    )
+
+
 async def _record_hunt_network_tool_receipt(
     conn: Any,
     *,
@@ -23379,6 +23496,785 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             redis_client.delete(cancel_key)
 
 
+async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> None:
+    """Execute one Hunt auth/session/HTTP action entirely on its leased worker."""
+    job_id = str(job_data.get("job_id") or "").strip()
+    result_key = f"agent_tool_result:{job_id}"
+    cancel_key = f"agent_tool_cancel:{job_id}"
+    redis_client = get_redis()
+    reservation_store = PostgresBudgetReservationStore()
+    session_store = PostgresAuthSessionStore()
+    credential_stack = AsyncExitStack()
+    worker_session = None
+    private_session = None
+    result: dict[str, Any] = {
+        "job_id": job_id,
+        "status": "failed",
+        "error": "worker_fault",
+        "durable_budget_settled": False,
+    }
+    publish_result = True
+    persisted = None
+    try:
+        if not job_id:
+            raise CapabilityInputError("HTTP capability job requires an identity")
+        hunt_id = uuid.UUID(str(job_data.get("hunt_id") or ""))
+        action_id = uuid.UUID(str(job_data.get("action_id") or ""))
+        reservation_id = str(uuid.UUID(
+            str(job_data.get("budget_reservation_id") or "")
+        ))
+        queued_action_digest = str(job_data.get("action_digest") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", queued_action_digest):
+            raise CapabilityInputError("HTTP capability action digest is invalid")
+        capability_name = str(
+            job_data.get("capability_name") or ""
+        ).strip().lower()
+        if capability_name not in (
+            DURABLE_AUTH_HUNT_CAPABILITIES | DURABLE_HTTP_HUNT_CAPABILITIES
+        ):
+            raise CapabilityInputError(
+                "capability is not a durable authentication or HTTP action"
+            )
+        capability_input = agent_tools.CAPABILITY_REGISTRY.validate_hunt_input(
+            capability_name, dict(job_data.get("capability_input") or {}),
+        )
+        spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                run = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,
+                )
+                if not run:
+                    raise CapabilityInputError("HTTP Hunt does not exist")
+                action = await conn.fetchrow(
+                    """SELECT id, capability_name, status FROM hunt_actions
+                       WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                    action_id,
+                    hunt_id,
+                )
+                if not action or str(action["capability_name"]) != capability_name:
+                    raise CapabilityInputError("HTTP action identity is invalid")
+                stored = await reservation_store.load(
+                    conn, reservation_id, for_update=True,
+                )
+                if (
+                    stored is None
+                    or stored.action_id != str(action_id)
+                    or stored.record.owner_kind != "hunt"
+                    or stored.record.owner_id != str(hunt_id)
+                    or stored.record.capability_name != capability_name
+                ):
+                    raise ReservationConflict(
+                        "HTTP reservation identity does not match the queued action"
+                    )
+                if stored.action_digest != queued_action_digest:
+                    raise ReservationConflict(
+                        "HTTP reservation action digest does not match the queue"
+                    )
+                if stored.record.terminal:
+                    result = _worker_terminal_network_result(
+                        stored, job_id=job_id,
+                    )
+                    return
+                if stored.record.status == "running":
+                    publish_result = False
+                    result = {
+                        "job_id": job_id,
+                        "status": "running",
+                        "error": "idempotent_redelivery_running",
+                        "budget_reservation_id": reservation_id,
+                        "durable_budget_settled": False,
+                        "idempotent_redelivery": True,
+                    }
+                    return
+                if stored.record.status != "reserved" or str(action["status"]) != "reserved":
+                    raise ReservationConflict("HTTP action is not dispatchable")
+                if str(run["status"]) not in {
+                    "active", "awaiting_planner", "budget_exhausted",
+                }:
+                    raise CapabilityInputError("Hunt is no longer executable")
+
+                context = _worker_json_object(run["context_pack"])
+                hunt_policy = _worker_json_object(run["policy_json"])
+                allowed = {
+                    str(item)
+                    for item in hunt_policy.get("allowed_capabilities") or ()
+                }
+                if capability_name not in allowed:
+                    raise CapabilityInputError(
+                        "HTTP capability is outside the persisted Hunt allowlist"
+                    )
+                target, target_url = _worker_hunt_web_target(
+                    run, context, hunt_policy,
+                )
+                policy = ScanPolicy(
+                    active_testing=bool(hunt_policy.get("active_testing")),
+                    network_discovery=bool(hunt_policy.get("network_discovery")),
+                    subdomain_discovery=False,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=hunt_policy.get("approval_receipt_id"),
+                )
+                expected_budget = {
+                    str(key): int(value)
+                    for key, value in dict(
+                        job_data.get("expected_budget") or {}
+                    ).items()
+                }
+                requested_budget = dict(stored.record.requested)
+                if expected_budget != requested_budget:
+                    raise ReservationConflict(
+                        "control-plane and worker HTTP budgets differ"
+                    )
+                recomputed_digest = hunt_capability_action_digest(
+                    hunt_id=hunt_id,
+                    action_id=action_id,
+                    capability_name=capability_name,
+                    target_kind=str(run["target_kind"]),
+                    target_id=run["target_id"],
+                    capability_input=capability_input,
+                    requested_budget=requested_budget,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                )
+                if recomputed_digest != queued_action_digest:
+                    raise ReservationConflict(
+                        "HTTP queue payload does not match its durable action"
+                    )
+                authority_decision = await revalidate_scan_action_authority(
+                    conn,
+                    action=SimpleNamespace(capability_name=capability_name),
+                    target_binding=target,
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                )
+                if authority_decision is not ActionAuthorityDecision.ALLOWED:
+                    raise CapabilityInputError(
+                        "HTTP action authority rejected at dispatch: "
+                        f"{authority_decision.value}"
+                    )
+                lease_seconds = hunt_capability_lease_seconds(requested_budget)
+                running = stored.record.start(
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
+                persisted = await reservation_store.persist_transition(
+                    conn, previous=stored, current=running,
+                )
+                updated = await conn.execute(
+                    """UPDATE hunt_actions SET status='running', started_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$2 AND status='reserved'""",
+                    action_id,
+                    hunt_id,
+                )
+                if not str(updated).endswith(" 1"):
+                    raise ReservationConflict(
+                        "HTTP action changed before worker dispatch"
+                    )
+
+        async def heartbeat_reservation() -> None:
+            nonlocal persisted
+            if persisted is None:
+                raise ReservationStoreError(
+                    "HTTP reservation persistence was not initialized"
+                )
+            async with db_pool.acquire() as heartbeat_conn:
+                async with heartbeat_conn.transaction():
+                    owner = await heartbeat_conn.fetchrow(
+                        "SELECT status FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                        hunt_id,
+                    )
+                    if not owner or str(owner["status"]) not in {
+                        "active", "awaiting_planner", "budget_exhausted",
+                    }:
+                        raise ReservationStoreError(
+                            "Hunt stopped during HTTP execution"
+                        )
+                    latest = await reservation_store.load(
+                        heartbeat_conn, reservation_id, for_update=True,
+                    )
+                    if (
+                        latest is None
+                        or latest.record.state_digest != persisted.record.state_digest
+                        or latest.record.worker_id != worker_id
+                    ):
+                        raise ReservationConflict(
+                            "HTTP reservation changed before heartbeat"
+                        )
+                    heartbeat = latest.record.heartbeat(
+                        worker_id=worker_id,
+                        lease_seconds=lease_seconds,
+                    )
+                    persisted = await reservation_store.persist_transition(
+                        heartbeat_conn, previous=latest, current=heartbeat,
+                    )
+
+        session_metadata = None
+        session_context_ref = None
+        trusted_headers: dict[str, str] = {}
+        principal_slot = "anonymous"
+
+        if capability_name == "auth.session.establish":
+            principal_slot = str(capability_input["as_principal"])
+            session_context_ref = _worker_hunt_profile_context(
+                context, principal_slot, capability="auth.session.establish",
+            )
+            conn = await credential_stack.enter_async_context(db_pool.acquire())
+            authority = await validate_worker_credential_authority(
+                conn,
+                owner_kind="hunt",
+                owner_id=str(hunt_id),
+                target=target,
+                approval_receipt_id=policy.approval_receipt_id,
+                scope_receipt_id=target.scope_receipt_id,
+                action_name="hunt.capability:auth.session.establish",
+            )
+            resolved = await credential_stack.enter_async_context(
+                WorkerCredentialResolver().resolve(
+                    conn,
+                    profile_id=session_context_ref["profile_id"],
+                    target=target,
+                    capability="auth.session.establish",
+                    authority=authority,
+                )
+            )
+            if (
+                resolved.profile.current_version
+                != int(session_context_ref.get("profile_version") or 0)
+                or resolved.profile.principal_slot != principal_slot
+                or resolved.profile.auth_kind
+                != str(session_context_ref.get("auth_kind") or "")
+            ):
+                raise CredentialResolutionError(
+                    "managed Hunt principal changed after admission"
+                )
+            credential = _worker_session_credential(
+                resolved, session_context_ref, target=target,
+            )
+
+            async def establish_session_operation() -> dict[str, Any]:
+                nonlocal private_session
+                private_session = await establish_target_bound_http_session(
+                    credential, target=target,
+                )
+                return private_session.execution_result()
+
+            operation = establish_session_operation
+            adapter_type = AuthSessionExecutionAdapter
+            redacted_execution = {
+                "as_principal": principal_slot,
+                "profile_id": resolved.profile.profile_id,
+                "profile_version": resolved.profile.current_version,
+                "secret_values_visible": False,
+            }
+        elif capability_name == "auth.session.refresh":
+            async with db_pool.acquire() as conn:
+                session_metadata = await session_store.load_for_refresh(
+                    conn,
+                    session_ref=capability_input["session_ref"],
+                    owner_kind="hunt",
+                    owner_id=hunt_id,
+                    target=target,
+                )
+            principal_slot = session_metadata.principal_slot
+            session_context_ref = _worker_hunt_profile_context(
+                context,
+                principal_slot,
+                capability="auth.session.refresh",
+                profile_id=session_metadata.profile_id,
+            )
+            conn = await credential_stack.enter_async_context(db_pool.acquire())
+            authority = await validate_worker_credential_authority(
+                conn,
+                owner_kind="hunt",
+                owner_id=str(hunt_id),
+                target=target,
+                approval_receipt_id=policy.approval_receipt_id,
+                scope_receipt_id=target.scope_receipt_id,
+                action_name="hunt.capability:auth.session.refresh",
+            )
+            resolved = await credential_stack.enter_async_context(
+                WorkerCredentialResolver().resolve(
+                    conn,
+                    profile_id=session_metadata.profile_id,
+                    target=target,
+                    capability="auth.session.refresh",
+                    authority=authority,
+                )
+            )
+            if (
+                resolved.profile.current_version != session_metadata.profile_version
+                or resolved.profile.principal_slot != session_metadata.principal_slot
+                or resolved.profile.auth_kind != session_metadata.auth_kind
+            ):
+                raise CredentialResolutionError(
+                    "authentication session profile changed before refresh"
+                )
+            credential = _worker_session_credential(
+                resolved, session_context_ref, target=target,
+            )
+
+            async def refresh_session_operation() -> dict[str, Any]:
+                nonlocal private_session
+                private_session = await establish_target_bound_http_session(
+                    credential,
+                    target=target,
+                    session_ref=session_metadata.session_ref,
+                )
+                return private_session.execution_result()
+
+            operation = refresh_session_operation
+            adapter_type = AuthSessionExecutionAdapter
+            redacted_execution = {
+                "session_ref": session_metadata.session_ref,
+                "as_principal": principal_slot,
+                "profile_id": session_metadata.profile_id,
+                "profile_version": session_metadata.profile_version,
+                "secret_values_visible": False,
+            }
+        elif capability_name == "auth.session.revoke":
+            async with db_pool.acquire() as conn:
+                session_metadata = await session_store.load_for_refresh(
+                    conn,
+                    session_ref=capability_input["session_ref"],
+                    owner_kind="hunt",
+                    owner_id=hunt_id,
+                    target=target,
+                )
+
+            async def revoke_observation() -> dict[str, Any]:
+                return {
+                    "ok": True,
+                    "status": "success",
+                    "observation": {
+                        "kind": "credential_session_revocation",
+                        "session_ref": session_metadata.session_ref,
+                        "principal_slot": session_metadata.principal_slot,
+                        "profile_id": session_metadata.profile_id,
+                        "status": "revoked",
+                        "secret_values_visible": False,
+                    },
+                    "budget_consumed": {},
+                }
+
+            operation = revoke_observation
+            adapter_type = AuthSessionExecutionAdapter
+            redacted_execution = {
+                "session_ref": session_metadata.session_ref,
+                "secret_values_visible": False,
+            }
+        else:
+            supplied_session_ref = capability_input.get("session_ref")
+            requested_principal = str(
+                capability_input.get("as_principal") or "anonymous"
+            ).strip().lower()
+            if supplied_session_ref and requested_principal not in {
+                "", "anonymous", "anon", "none",
+            }:
+                raise CredentialReferenceError(
+                    "http.request accepts either session_ref or as_principal, not both"
+                )
+            if supplied_session_ref:
+                async with db_pool.acquire() as authority_conn:
+                    await validate_worker_credential_authority(
+                        authority_conn,
+                        owner_kind="hunt",
+                        owner_id=str(hunt_id),
+                        target=target,
+                        approval_receipt_id=policy.approval_receipt_id,
+                        scope_receipt_id=target.scope_receipt_id,
+                        action_name="hunt.capability:http.request",
+                    )
+                    worker_session = await session_store.load_for_worker(
+                        authority_conn,
+                        session_ref=supplied_session_ref,
+                        owner_kind="hunt",
+                        owner_id=hunt_id,
+                        target=target,
+                        capability="http.request",
+                    )
+                trusted_headers = worker_session.headers()
+                principal_slot = worker_session.metadata.principal_slot
+            elif requested_principal not in {"", "anonymous", "anon", "none"}:
+                principal_slot = requested_principal
+                context_ref = _worker_hunt_profile_context(
+                    context, principal_slot, capability="http.request",
+                )
+                conn = await credential_stack.enter_async_context(db_pool.acquire())
+                authority = await validate_worker_credential_authority(
+                    conn,
+                    owner_kind="hunt",
+                    owner_id=str(hunt_id),
+                    target=target,
+                    approval_receipt_id=policy.approval_receipt_id,
+                    scope_receipt_id=target.scope_receipt_id,
+                    action_name="hunt.capability:http.request",
+                )
+                resolved = await credential_stack.enter_async_context(
+                    WorkerCredentialResolver().resolve(
+                        conn,
+                        profile_id=context_ref["profile_id"],
+                        target=target,
+                        capability="http.request",
+                        authority=authority,
+                    )
+                )
+                if (
+                    resolved.profile.current_version
+                    != int(context_ref.get("profile_version") or 0)
+                    or resolved.profile.principal_slot != principal_slot
+                ):
+                    raise CredentialResolutionError(
+                        "managed Hunt principal changed after admission"
+                    )
+                trusted_headers = resolved.http_headers().as_dict()
+            public_input = dict(capability_input)
+            public_input.pop("session_ref", None)
+            public_input.pop("as_principal", None)
+
+            async def execute_http() -> dict[str, Any]:
+                return await execute_bound_http_request(
+                    target_url,
+                    public_input,
+                    target=target,
+                    allow_write=False,
+                    trusted_headers=trusted_headers,
+                    principal_slot=principal_slot,
+                    timeout_seconds=min(
+                        60,
+                        max(1, int(spec.default_timeout_ms / 1000)),
+                    ),
+                    allow_bound_origin_redirects=True,
+                )
+
+            operation = execute_http
+            adapter_type = HttpRequestExecutionAdapter
+            redacted_execution = _redact_receipt_value({
+                **public_input,
+                "as_principal": principal_slot,
+                "session_ref": str(supplied_session_ref or "") or None,
+                "credential_headers_injected": bool(trusted_headers),
+                "secret_values_visible": False,
+            })
+
+        adapter = adapter_type(
+            specification=spec,
+            operation=operation,
+            requested_budget=persisted.record.requested,
+            redacted_execution=redacted_execution,
+        )
+        started_at = persisted.record.started_at or datetime.now(timezone.utc)
+        execution = await CapabilityExecutor().execute(
+            CapabilityExecutionContext(
+                specification=spec,
+                target=target,
+                requested_budget=persisted.record.requested,
+            ),
+            adapter,
+            heartbeat=heartbeat_reservation,
+            cancelled=lambda: bool(redis_client.exists(cancel_key)),
+        )
+        status = execution.status
+        observations = [dict(item) for item in execution.observations]
+        parser_errors = [str(item) for item in execution.errors]
+        partial = execution.partial
+        timed_out = execution.timed_out
+        actual = dict(execution.actual_budget)
+        error = (
+            parser_errors[0]
+            if parser_errors and status in {"failed", "blocked", "cancelled"}
+            else None
+        )
+        finished_at = datetime.now(timezone.utc)
+        action_status = (
+            "completed" if status == "success"
+            else "partial" if status == "partial"
+            else "cancelled" if status == "cancelled"
+            else "failed"
+        )
+        receipt_id = uuid.uuid4()
+        receipt_result = {
+            "ok": status == "success",
+            "error": error,
+            "timed_out": timed_out,
+            "receipt_observations": observations[:5_000],
+        }
+        settled_session = None
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,
+                )
+                if not locked:
+                    raise ReservationStoreError(
+                        "HTTP Hunt disappeared during settlement"
+                    )
+                latest = await reservation_store.load(
+                    conn, reservation_id, for_update=True,
+                )
+                if (
+                    latest is None
+                    or persisted is None
+                    or latest.record.state_digest != persisted.record.state_digest
+                    or latest.record.status != "running"
+                    or latest.record.worker_id != worker_id
+                ):
+                    raise ReservationConflict(
+                        "HTTP reservation changed before settlement"
+                    )
+                current_used = _worker_json_object(locked["budget_used_json"])
+                current_ledger = {
+                    key: int(current_used.get(key) or 0)
+                    for key in _worker_hunt_ledger_limits(
+                        _worker_json_object(locked["budget_json"])
+                    )
+                }
+                terminal, capability_receipt = terminalize_hunt_capability(
+                    latest.record,
+                    action_digest=queued_action_digest,
+                    capability_name=capability_name,
+                    adapter_name=spec.adapter,
+                    adapter_version=spec.adapter_version,
+                    parser_version=execution.parser_version,
+                    target_id=target.target_id,
+                    target_kind=target.target_kind,
+                    capability_input=execution.redacted_execution,
+                    action_status=action_status,
+                    actual_budget=actual,
+                    worker_id=worker_id,
+                    started_at=started_at.isoformat(),
+                    finished_at=finished_at.isoformat(),
+                    receipt_id=str(receipt_id),
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=policy.approval_receipt_id,
+                    result=receipt_result,
+                )
+                reconciled = terminal.reconcile_consumed(current_ledger)
+                if status == "success" and capability_name == "auth.session.establish":
+                    if private_session is None or session_context_ref is None:
+                        raise AuthSessionStoreError(
+                            "successful session action has no worker-private state"
+                        )
+                    settled_session = await session_store.create(
+                        conn,
+                        owner_kind="hunt",
+                        owner_id=hunt_id,
+                        target=target,
+                        profile_id=private_session.profile_id,
+                        profile_version=private_session.profile_version,
+                        principal_slot=private_session.lane,
+                        principal_label=private_session.principal,
+                        auth_kind=private_session.auth_kind,
+                        compatible_capabilities=private_session.compatible_capabilities,
+                        headers=private_session.headers(),
+                        established_at=private_session.established_at,
+                        expires_at=private_session.expires_at,
+                        refresh_after=private_session.refresh_after,
+                        evidence_receipt_digest=private_session.evidence_receipt_digest,
+                        source_action_id=action_id,
+                        session_ref=private_session.session_ref,
+                    )
+                elif status == "success" and capability_name == "auth.session.refresh":
+                    if private_session is None or session_metadata is None:
+                        raise AuthSessionStoreError(
+                            "successful refresh has no worker-private state"
+                        )
+                    settled_session = await session_store.refresh(
+                        conn,
+                        session_ref=session_metadata.session_ref,
+                        owner_kind="hunt",
+                        owner_id=hunt_id,
+                        target=target,
+                        expected_profile_version=session_metadata.profile_version,
+                        headers=private_session.headers(),
+                        established_at=private_session.established_at,
+                        expires_at=private_session.expires_at,
+                        refresh_after=private_session.refresh_after,
+                        evidence_receipt_digest=private_session.evidence_receipt_digest,
+                        source_action_id=action_id,
+                    )
+                elif status == "success" and capability_name == "auth.session.revoke":
+                    settled_session = await session_store.revoke(
+                        conn,
+                        session_ref=session_metadata.session_ref,
+                        owner_kind="hunt",
+                        owner_id=hunt_id,
+                        target=target,
+                        reason="hunt_capability_revoked",
+                    )
+                receipt_prepared = SimpleNamespace(
+                    capability_name=capability_name,
+                    adapter_name=spec.adapter,
+                    adapter_version=spec.adapter_version,
+                    redacted_execution=execution.redacted_execution,
+                )
+                await _record_hunt_network_tool_receipt(
+                    conn,
+                    receipt_id=receipt_id,
+                    hunt_id=hunt_id,
+                    action_id=action_id,
+                    reservation_id=reservation_id,
+                    action_digest=queued_action_digest,
+                    target=target,
+                    policy=policy,
+                    prepared=receipt_prepared,
+                    status=status,
+                    partial=partial,
+                    timed_out=timed_out,
+                    parser_errors=parser_errors,
+                    record_count=len(observations),
+                    reserved=latest.record.requested,
+                    actual=actual,
+                    used_after=reconciled,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+                if settled_session is not None and capability_name in {
+                    "auth.session.establish", "auth.session.refresh",
+                }:
+                    await session_store.bind_evidence_receipt(
+                        conn,
+                        session_ref=settled_session.session_ref,
+                        receipt_id=receipt_id,
+                        evidence_receipt_digest=(
+                            settled_session.evidence_receipt_digest
+                        ),
+                    )
+                persisted = await reservation_store.persist_terminal(
+                    conn,
+                    previous=latest,
+                    terminal=terminal,
+                    ledger_after_settlement=reconciled,
+                    receipt=capability_receipt,
+                )
+                current_used.update(reconciled)
+                await conn.execute(
+                    "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
+                    hunt_id,
+                    json.dumps(current_used),
+                )
+                action_result = {
+                    "status": status,
+                    "error": error,
+                    "record_count": len(observations),
+                    "parser_errors": parser_errors[:20],
+                    "budget_reservation_id": reservation_id,
+                    "budget_reservation_state": terminal.status,
+                    "receipt_id": str(receipt_id),
+                    "session": (
+                        settled_session.public_dict()
+                        if settled_session is not None else None
+                    ),
+                }
+                updated = await conn.execute(
+                    """UPDATE hunt_actions
+                       SET status=$2, result_summary=$3, receipt_id=$4,
+                           completed_at=NOW()
+                       WHERE id=$1 AND hunt_run_id=$5 AND status='running'""",
+                    action_id,
+                    action_status,
+                    json.dumps(action_result),
+                    receipt_id,
+                    hunt_id,
+                )
+                if not str(updated).endswith(" 1"):
+                    raise ReservationConflict(
+                        "HTTP action changed before settlement"
+                    )
+        result = {
+            "job_id": job_id,
+            "status": status,
+            "ok": status == "success",
+            "error": error,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "partial": partial,
+            "timed_out": timed_out,
+            "typed_output": {
+                "parser": execution.parser_version,
+                "parser_status": (
+                    "partial" if partial
+                    else "parsed" if status == "success" else "failed"
+                ),
+                "records": observations[:5_000],
+                "record_count": len(observations),
+                "errors": parser_errors[:20],
+            },
+            "budget_consumed": dict(terminal.actual),
+            "used_after_reconciliation": dict(reconciled),
+            "execution": dict(execution.redacted_execution),
+            "reservation_id": reservation_id,
+            "budget_reservation_id": reservation_id,
+            "budget_reservation_state": terminal.status,
+            "receipt_id": str(receipt_id),
+            "receipt": capability_receipt.public_dict(),
+            "session": (
+                settled_session.public_dict()
+                if settled_session is not None else None
+            ),
+            "durable_budget_settled": True,
+            "network_binding": "runtime_target_binding",
+        }
+    except asyncio.CancelledError:
+        raise
+    except (
+        AuthSessionStoreError,
+        CapabilityInputError,
+        CredentialReferenceError,
+        CredentialResolutionError,
+        ReservationConflict,
+        ReservationStoreError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"contract:{str(exc)[:240]}",
+            "durable_budget_settled": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - leave leased work to the sweeper
+        result = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": f"worker_fault:{type(exc).__name__}",
+            "durable_budget_settled": False,
+        }
+    finally:
+        if worker_session is not None:
+            worker_session.close()
+        for name in list(trusted_headers if "trusted_headers" in locals() else {}):
+            trusted_headers[name] = ""
+        if "trusted_headers" in locals():
+            trusted_headers.clear()
+        if private_session is not None and hasattr(private_session, "close"):
+            private_session.close()
+        try:
+            await credential_stack.aclose()
+        except Exception:  # noqa: BLE001 - cleanup must not hide a durable result
+            pass
+        if job_id and publish_result:
+            redis_client.set(
+                result_key,
+                json.dumps(result, default=str, separators=(",", ":")),
+                ex=_AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.hset(
+                f"job:{job_id}",
+                mapping={
+                    "status": str(result.get("status") or "failed"),
+                    "current_phase": "canonical_http_capability_complete",
+                    "error": str(result.get("error") or ""),
+                },
+            )
+            redis_client.expire(
+                f"job:{job_id}", _AGENT_TOOL_RESULT_TTL_SECONDS,
+            )
+            redis_client.delete(cancel_key)
+
+
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
     if job_data.get("schema_version") == SCAN_JOB_SCHEMA:
@@ -23449,6 +24345,8 @@ async def process_job(job_data: dict):
         await process_request_collection_replay_job(job_data)
     elif job_type == 'canonical_browser_capability':
         await process_canonical_browser_capability_job(job_data)
+    elif job_type == 'canonical_http_capability':
+        await process_canonical_http_capability_job(job_data)
     elif job_type == 'canonical_network_capability':
         await process_canonical_network_capability_job(job_data)
     elif job_type == 'finding_retest':
