@@ -229,6 +229,8 @@ async def execute_bound_http_request(
     started = time.perf_counter()
     redirect_chain: list[dict[str, Any]] = []
     hops_followed = 0
+    connection_attempts = 0
+    connected_addresses: list[str] = []
     response = None
     body = b""
     final_url = url
@@ -244,28 +246,45 @@ async def execute_bound_http_request(
             current_json_body = json_body
             current_form_body = form_body
             while True:
-                pinned_url, sni_hostname, host_header = (
-                    agent_tools._pinned_scanner_url(
-                        current_url, pinned_address,
+                response = None
+                for candidate_address in socket_factory.addresses:
+                    pinned_url, sni_hostname, host_header = (
+                        agent_tools._pinned_scanner_url(
+                            current_url, candidate_address,
+                        )
                     )
-                )
-                request = client.build_request(
-                    current_method,
-                    pinned_url,
-                    params=current_query,
-                    headers={**headers, "Host": host_header},
-                    cookies=dict(cookies or {}),
-                    json=(
-                        current_json_body
-                        if current_json_body is not None else None
-                    ),
-                    data=(
-                        current_form_body
-                        if current_form_body is not None else None
-                    ),
-                )
-                request.extensions["sni_hostname"] = sni_hostname
-                response = await client.send(request, stream=True)
+                    request = client.build_request(
+                        current_method,
+                        pinned_url,
+                        params=current_query,
+                        headers={**headers, "Host": host_header},
+                        cookies=dict(cookies or {}),
+                        json=(
+                            current_json_body
+                            if current_json_body is not None else None
+                        ),
+                        data=(
+                            current_form_body
+                            if current_form_body is not None else None
+                        ),
+                    )
+                    request.extensions["sni_hostname"] = sni_hostname
+                    connection_attempts += 1
+                    try:
+                        response = await client.send(request, stream=True)
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        # Retry only failures that happen before a connection.
+                        # A post-connect failure may follow target traffic and
+                        # must never duplicate a state-changing request.
+                        continue
+                    pinned_address = candidate_address
+                    connected_addresses.append(candidate_address)
+                    break
+                if response is None:
+                    raise httpx.ConnectError(
+                        "all frozen target addresses failed before connect"
+                    )
+                request_view["pinned_address"] = pinned_address
                 chunks: list[bytes] = []
                 received = 0
                 try:
@@ -389,6 +408,8 @@ async def execute_bound_http_request(
         "request": request_view,
         "response": summary,
         "provenance": "tool",
+        "connection_attempts": connection_attempts,
+        "connected_addresses": list(connected_addresses),
     }
     if follow_redirects:
         result["redirect_chain"] = redirect_chain

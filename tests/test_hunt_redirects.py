@@ -359,6 +359,47 @@ def test_scan_only_redirect_mode_crosses_between_bound_origins(monkeypatch):
     ]
 
 
+def test_target_bound_http_fails_over_only_before_connect(monkeypatch):
+    seen: list[tuple[str, str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((
+            request.url.host,
+            request.headers.get("host", ""),
+            request.extensions.get("sni_hostname"),
+        ))
+        if request.url.host == "192.0.2.10":
+            raise httpx.ConnectError("first frozen address unavailable", request=request)
+        return httpx.Response(200, text="second address")
+
+    class _MockClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="shop.test",
+        allowed_origins=("https://shop.test",),
+        allowed_addresses=("192.0.2.10", "192.0.2.11"),
+        allowed_root_domains=("shop.test",),
+    )
+
+    result = asyncio.run(execute_bound_http_request(
+        "https://shop.test", {"method": "GET", "path": "/"}, target=target,
+    ))
+
+    assert result["ok"] is True
+    assert result["connection_attempts"] == 2
+    assert result["connected_addresses"] == ["192.0.2.11"]
+    assert seen == [
+        ("192.0.2.10", "shop.test", "shop.test"),
+        ("192.0.2.11", "shop.test", "shop.test"),
+    ]
+
+
 def test_executor_caps_the_chain_at_three_hops(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"location": request.url.path + "x"})

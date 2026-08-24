@@ -161,6 +161,12 @@ jobs:
           httpx==0.28.1 pydantic==2.13.4 PyJWT==2.13.0
           PyYAML==6.0.3 redis==8.0.1
 
+      - name: Reject canonical target-transport bypasses
+        run: |
+          python scripts/check_scan_target_transport.py
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_scan_target_transport_gate.py
+
       - name: Validate canonical Scan and worker contracts
         run: |
           # Package-native contract tests must run in their own process. Legacy
