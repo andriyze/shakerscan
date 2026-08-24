@@ -468,6 +468,7 @@ try:
         request_collection_action_refs,
     )
     from scan.action_store import PostgresScanActionStore
+    from scan.action_budget_reconciliation import scan_action_budget_reconciliation
     from scan.authorization import (
         ActionAuthorityDecision,
         revalidate_scan_action_authority,
@@ -569,6 +570,7 @@ except ModuleNotFoundError:
         request_collection_action_refs,
     )
     from api.scan.action_store import PostgresScanActionStore
+    from api.scan.action_budget_reconciliation import scan_action_budget_reconciliation
     from api.scan.authorization import (
         ActionAuthorityDecision,
         revalidate_scan_action_authority,
@@ -13742,9 +13744,22 @@ async def health():
     expected_fingerprint = expected_build_fingerprint()
     expected_version = current_scanner_version()
     expected_remote_workers: Optional[int] = None
+    action_budget_reconciliation: dict[str, Any] = {
+        "status": "unavailable",
+        "inconsistent_count": 0,
+    }
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            try:
+                action_budget_reconciliation = (
+                    await scan_action_budget_reconciliation(conn)
+                )
+            except Exception:
+                action_budget_reconciliation = {
+                    "status": "unavailable",
+                    "inconsistent_count": 0,
+                }
             try:
                 expected_remote_workers = int(await conn.fetchval(
                     """
@@ -13800,7 +13815,12 @@ async def health():
     artifacts_ok = artifact_storage.get("status") != "error"
 
     return {
-        "status": "healthy" if db_ok and redis_ok and artifacts_ok else "degraded",
+        "status": (
+            "healthy"
+            if db_ok and redis_ok and artifacts_ok
+            and action_budget_reconciliation.get("status") != "degraded"
+            else "degraded"
+        ),
         "database": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "error",
         "artifact_storage": artifact_storage,
@@ -13811,6 +13831,7 @@ async def health():
         "scanner_version": expected_version,
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
+        "scan_action_budget_reconciliation": action_budget_reconciliation,
         "device_worker": _device_worker_readiness(),
         "agent_tool_worker": _agent_tool_worker_readiness(),
         "fleet": fleet_feature_state(),

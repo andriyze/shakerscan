@@ -241,6 +241,9 @@ CREATE INDEX idx_scan_capability_actions_scan_status
 CREATE INDEX idx_scan_capability_actions_lease_expiry
     ON scan_capability_actions(lease_expires_at)
     WHERE status IN ('leased','running');
+CREATE INDEX idx_scan_capability_actions_reservation
+    ON scan_capability_actions(reservation_id)
+    WHERE reservation_id IS NOT NULL;
 
 CREATE TABLE scan_action_plan_revisions (
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,

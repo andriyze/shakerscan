@@ -13,6 +13,7 @@ from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.action_store import (
     ACTION_CONTINUATION_MIGRATION_NAME,
+    ACTION_BUDGET_LINK_MIGRATION_NAME,
     ACTION_LEASE_MIGRATION_NAME,
     MIGRATION_NAME,
     PostgresScanActionStore,
@@ -228,7 +229,10 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     assert MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_LEASE_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_CONTINUATION_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_BUDGET_LINK_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
+    assert "REFERENCES budget_reservations(id)" in SCAN_ACTION_SCHEMA_SQL
+    assert "idx_scan_capability_actions_reservation" in SCAN_ACTION_SCHEMA_SQL
 
     init_sql = Path("db/init.sql").read_text(encoding="utf-8")
     repair_sql = Path(
@@ -242,6 +246,9 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     ).read_text(encoding="utf-8")
     continuation_repair_sql = Path(
         "db/repairs/2026-08-23_v2_scan_action_continuations.sql"
+    ).read_text(encoding="utf-8")
+    budget_link_repair_sql = Path(
+        "db/repairs/2026-08-24_v2_scan_action_budget_link.sql"
     ).read_text(encoding="utf-8")
     for source in (init_sql, repair_sql):
         assert "scan_action_plan_json" in source
@@ -258,6 +265,10 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, continuation_repair_sql):
         assert "scan_continuation_allocation_json" in source
         assert "scan_action_plan_revisions" in source
+    for source in (SCAN_ACTION_SCHEMA_SQL, budget_link_repair_sql):
+        assert "scan_capability_actions_reservation_fk" in source
+        assert "REFERENCES budget_reservations(id)" in source
+        assert "r.action_digest=a.action_digest" in source
 
 
 def test_action_store_applies_one_idempotent_continuation_revision():

@@ -10293,6 +10293,27 @@ async def _execute_reserved_scan_capability(
                 action_digest=action_digest,
                 record=requested,
             )
+            if canonical_action is not None:
+                linked = await conn.fetchrow(
+                    """UPDATE scan_capability_actions
+                          SET reservation_id=$4, updated_at=now()
+                        WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
+                          AND status IN ('leased','running')
+                          AND (reservation_id IS NULL OR reservation_id=$4)
+                    RETURNING reservation_id""",
+                    scan_uuid,
+                    canonical_action.action_id,
+                    canonical_action.action_digest,
+                    stored.record.reservation_id,
+                )
+                if (
+                    linked is None
+                    or str(linked.get("reservation_id") or "")
+                    != stored.record.reservation_id
+                ):
+                    raise ReservationConflict(
+                        "Scan action could not bind its durable budget reservation"
+                    )
             if stored.record.terminal:
                 return stored, True
             if stored.record.status != "requested":

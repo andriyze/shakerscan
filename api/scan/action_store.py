@@ -21,6 +21,7 @@ from .continuation import (
 MIGRATION_NAME = "v2_scan_capability_actions_v1"
 ACTION_LEASE_MIGRATION_NAME = "v2_scan_action_leases_v1"
 ACTION_CONTINUATION_MIGRATION_NAME = "v2_scan_action_continuations_v1"
+ACTION_BUDGET_LINK_MIGRATION_NAME = "v2_scan_action_budget_link_v1"
 SCAN_ACTION_SCHEMA_SQL = r"""
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_json JSONB;
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_digest TEXT;
@@ -90,6 +91,32 @@ ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_expires_at TI
 CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_lease_expiry
     ON scan_capability_actions(lease_expires_at)
     WHERE status IN ('leased','running');
+CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_reservation
+    ON scan_capability_actions(reservation_id)
+    WHERE reservation_id IS NOT NULL;
+DO $$
+BEGIN
+    IF to_regclass('budget_reservations') IS NOT NULL THEN
+        UPDATE scan_capability_actions a
+           SET reservation_id=r.id
+          FROM budget_reservations r
+         WHERE a.reservation_id IS NULL
+           AND r.owner_kind='scan'
+           AND r.owner_id=a.scan_id::text
+           AND r.action_id=a.action_id
+           AND r.action_digest=a.action_digest;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conname='scan_capability_actions_reservation_fk'
+               AND conrelid='scan_capability_actions'::regclass
+        ) THEN
+            ALTER TABLE scan_capability_actions
+            ADD CONSTRAINT scan_capability_actions_reservation_fk
+            FOREIGN KEY (reservation_id) REFERENCES budget_reservations(id)
+            ON DELETE RESTRICT;
+        END IF;
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS scan_action_plan_revisions (
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
     revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -106,7 +133,8 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO app_schema_migrations(name)
-VALUES ('v2_scan_capability_actions_v1')
+VALUES ('v2_scan_capability_actions_v1'),
+       ('v2_scan_action_budget_link_v1')
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_action_leases_v1')
