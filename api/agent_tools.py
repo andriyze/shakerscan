@@ -314,9 +314,9 @@ _SCANNER_BUILDERS = {
     "naabu": _tmpl_naabu,
 }
 SCANNER_ARG_TEMPLATES: dict[str, dict[str, Any]] = {
-    spec.legacy_tool_name: spec.legacy_template(_SCANNER_BUILDERS[spec.legacy_tool_name])
-    for spec in CAPABILITY_REGISTRY.legacy_tools()
-    if spec.legacy_tool_name in _SCANNER_BUILDERS
+    spec.process_tool_name: spec.scanner_template(_SCANNER_BUILDERS[spec.process_tool_name])
+    for spec in CAPABILITY_REGISTRY.process_tools()
+    if spec.process_tool_name in _SCANNER_BUILDERS
 }
 RUN_TOOL_NAMES: frozenset[str] = frozenset(SCANNER_ARG_TEMPLATES)
 
@@ -820,7 +820,7 @@ def build_enforced_scanner_plan(
         "upper_bound": hard,
     }
     try:
-        parser_version = str(CAPABILITY_REGISTRY.for_legacy_tool(scanner).output_schema)
+        parser_version = str(CAPABILITY_REGISTRY.for_process_tool(scanner).output_schema)
     except KeyError:
         parser_version = "scanner-output/v1"
     try:

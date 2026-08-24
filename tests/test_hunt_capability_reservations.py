@@ -204,7 +204,7 @@ def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     assert "TlsInspectionExecutionAdapter(" in handler
     assert "ControlPlaneExecutionAdapter(" in handler
     assert handler.count("CapabilityExecutor().execute(") >= 4
-    assert "elif spec.legacy_tool_name:" not in handler
+    assert "elif spec.process_tool_name:" not in handler
     assert "receipt_observations" in handler
     assert "scope_receipt_id=validated_scope_receipt_id" in handler
     assert "'reserved','running','completed','blocked','cancelled','failed','partial'" in migrations

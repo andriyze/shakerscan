@@ -21344,11 +21344,10 @@ def _agent_tool_worker_readiness() -> dict[str, Any]:
     expected_fingerprint = expected_build_fingerprint()
     expected_version = current_scanner_version()
     now = datetime.now(timezone.utc)
-    # The compatibility worker is required to serve every legacy-callable adapter. V2-only
-    # capabilities expose their own placement/readiness instead of making the old all-or-nothing
-    # run_tool worker fail closed before those routes are switched over.
+    # The isolated worker must serve every registered external process adapter. V2-only
+    # capabilities expose their own placement/readiness.
     required_tools = {
-        str(spec.binary) for spec in agent_tools.CAPABILITY_REGISTRY.legacy_tools() if spec.binary
+        str(spec.binary) for spec in agent_tools.CAPABILITY_REGISTRY.process_tools() if spec.binary
     }
     reports: list[dict[str, Any]] = []
     try:
@@ -37297,7 +37296,7 @@ async def _agent_tool_run_tool(
             pinned_address=pinned_address,
             authorized_addresses=frozen_addresses,
             reserved_budget=dict(
-                agent_tools.CAPABILITY_REGISTRY.for_legacy_tool(name).budget_cost
+                agent_tools.CAPABILITY_REGISTRY.for_process_tool(name).budget_cost
             ),
             oob_interactsh_server=oob_interactsh_server,
             oob_interactsh_token=oob_interactsh_token,

@@ -518,7 +518,7 @@ def prepare_scan_external_capability(
         raise ScanCapabilityContractError(
             f"{specification.name} is not an external Scan capability"
         )
-    if not specification.binary or not specification.legacy_tool_name:
+    if not specification.binary or not specification.process_tool_name:
         raise ScanCapabilityContractError(
             f"{specification.name} has no fixed-template adapter"
         )

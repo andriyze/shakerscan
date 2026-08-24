@@ -713,7 +713,7 @@ def test_active_scan_places_reserved_nuclei_before_baseline_process(monkeypatch)
             "hard_budget": reserved,
             "accounting_mode": "conservative",
             "proof_method": "rate_time_upper_bound",
-            "parser_version": worker.agent_tools.CAPABILITY_REGISTRY.for_legacy_tool(
+            "parser_version": worker.agent_tools.CAPABILITY_REGISTRY.for_process_tool(
                 tool
             ).output_schema,
         }

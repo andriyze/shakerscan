@@ -1,8 +1,7 @@
 """Canonical capability metadata for trusted Scan and Hunt execution.
 
-The registry names security operations by intent. External binaries are adapter details and
-legacy ``run_tool`` names are compatibility aliases only. This module deliberately contains no
-planner logic and does not execute processes.
+The registry names security operations by intent. External binary/tool identifiers are adapter
+details. This module deliberately contains no planner logic and does not execute processes.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ class CapabilitySpec:
     output_schema: str
     evidence_contract: tuple[str, ...]
     binary: str | None = None
-    legacy_tool_name: str | None = None
+    process_tool_name: str | None = None
     default_timeout_ms: int = 30_000
     version_args: tuple[str, ...] = ("--version",)
     common_paths: tuple[str, ...] = ()
@@ -64,10 +63,10 @@ class CapabilitySpec:
             "active", "credential", "mutation"
         }
 
-    def legacy_template(self, builder: Any) -> dict[str, Any]:
-        """Render the old scanner-template shape from canonical metadata."""
-        if not self.binary or not self.legacy_tool_name:
-            raise ValueError(f"{self.name} is not an external legacy-tool adapter")
+    def scanner_template(self, builder: Any) -> dict[str, Any]:
+        """Render the fixed scanner-process template from canonical metadata."""
+        if not self.binary or not self.process_tool_name:
+            raise ValueError(f"{self.name} is not an external process adapter")
         return {
             "binary": self.binary,
             "risk": "read_only" if self.risk_tier in {"read_only", "passive"} else "active",
@@ -89,17 +88,17 @@ class CapabilityRegistry:
 
     def __init__(self, specs: Iterable[CapabilitySpec]) -> None:
         by_name: dict[str, CapabilitySpec] = {}
-        by_legacy_tool: dict[str, CapabilitySpec] = {}
+        by_process_tool: dict[str, CapabilitySpec] = {}
         for spec in specs:
             if spec.name in by_name:
                 raise ValueError(f"duplicate capability: {spec.name}")
             by_name[spec.name] = spec
-            if spec.legacy_tool_name:
-                if spec.legacy_tool_name in by_legacy_tool:
-                    raise ValueError(f"duplicate legacy tool alias: {spec.legacy_tool_name}")
-                by_legacy_tool[spec.legacy_tool_name] = spec
+            if spec.process_tool_name:
+                if spec.process_tool_name in by_process_tool:
+                    raise ValueError(f"duplicate process tool: {spec.process_tool_name}")
+                by_process_tool[spec.process_tool_name] = spec
         self._by_name = MappingProxyType(by_name)
-        self._by_legacy_tool = MappingProxyType(by_legacy_tool)
+        self._by_process_tool = MappingProxyType(by_process_tool)
 
     def require(self, name: str) -> CapabilitySpec:
         try:
@@ -107,11 +106,11 @@ class CapabilityRegistry:
         except KeyError as exc:
             raise KeyError(f"unknown capability: {name}") from exc
 
-    def for_legacy_tool(self, tool_name: str) -> CapabilitySpec:
+    def for_process_tool(self, tool_name: str) -> CapabilitySpec:
         try:
-            return self._by_legacy_tool[str(tool_name or "").strip().lower()]
+            return self._by_process_tool[str(tool_name or "").strip().lower()]
         except KeyError as exc:
-            raise KeyError(f"unknown legacy tool: {tool_name}") from exc
+            raise KeyError(f"unknown process tool: {tool_name}") from exc
 
     def list(
         self, *, target_kind: str | None = None, include_active: bool = True
@@ -127,8 +126,8 @@ class CapabilityRegistry:
     def external_tools(self) -> tuple[CapabilitySpec, ...]:
         return tuple(spec for spec in self._by_name.values() if spec.binary)
 
-    def legacy_tools(self) -> tuple[CapabilitySpec, ...]:
-        return tuple(self._by_legacy_tool.values())
+    def process_tools(self) -> tuple[CapabilitySpec, ...]:
+        return tuple(self._by_process_tool.values())
 
     def required_binaries(self) -> frozenset[str]:
         return frozenset(spec.binary for spec in self.external_tools() if spec.binary)
@@ -649,7 +648,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
 )
 
 
-LEGACY_TOOL_TO_CAPABILITY: Mapping[str, str] = MappingProxyType(
-    {spec.legacy_tool_name: spec.name for spec in CAPABILITY_REGISTRY.legacy_tools()
-     if spec.legacy_tool_name}
+PROCESS_TOOL_TO_CAPABILITY: Mapping[str, str] = MappingProxyType(
+    {spec.process_tool_name: spec.name for spec in CAPABILITY_REGISTRY.process_tools()
+     if spec.process_tool_name}
 )

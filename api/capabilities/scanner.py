@@ -90,7 +90,7 @@ class ScannerExecutionAdapter:
                     reserved=self._requested_budget,
                 )
                 expected_tool = str(
-                    self._specification.legacy_tool_name
+                    self._specification.process_tool_name
                     or self._specification.adapter
                 )
                 if str(enforcement.get("tool_name") or "") != expected_tool:

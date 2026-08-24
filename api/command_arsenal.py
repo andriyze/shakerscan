@@ -2033,7 +2033,7 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
 def _registered_tool(spec: CapabilitySpec) -> ToolAdapterSpec:
     """Render Arsenal's compatibility record from canonical capability metadata."""
     return ToolAdapterSpec(
-        tool_name=str(spec.legacy_tool_name or spec.adapter),
+        tool_name=str(spec.process_tool_name or spec.adapter),
         family=spec.name,
         description=spec.description,
         risk_tier=spec.risk_tier,

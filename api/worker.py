@@ -21431,7 +21431,7 @@ async def process_canonical_scanner_capability_job(
             )
         capability_input = dict(job_data.get("capability_input") or {})
         spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-        if not spec.legacy_tool_name or not spec.binary:
+        if not spec.process_tool_name or not spec.binary:
             raise agent_tools.AgentToolError(
                 "canonical scanner capability has no fixed-template adapter"
             )
@@ -21686,7 +21686,7 @@ async def process_canonical_scanner_capability_job(
             specification=spec,
             process_payload={
                 "job_id": job_id,
-                "tool_name": spec.legacy_tool_name,
+                "tool_name": spec.process_tool_name,
                 "execution_target": execution_target,
                 "registered_target": registered_target,
                 "scanner_options": capability_input,
@@ -23369,9 +23369,9 @@ def _worker_build_report_payload() -> tuple[str, str]:
     tool_commands = dict(DEFAULT_WORKER_TOOL_COMMANDS)
     if AGENT_TOOL_ONLY_WORKER:
         tool_commands.update({
-            str(spec.legacy_tool_name): str(spec.binary or spec.legacy_tool_name)
+            str(spec.process_tool_name): str(spec.binary or spec.process_tool_name)
             for spec in agent_tools.CAPABILITY_REGISTRY.external_tools()
-            if spec.legacy_tool_name
+            if spec.process_tool_name
         })
     payload = json.dumps({
         "build_fingerprint": _worker_build_fingerprint(),

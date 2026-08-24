@@ -14,15 +14,15 @@ from runtime.budgets import (
     BudgetError, BudgetExceeded, BudgetLedger, reconcile_budget_snapshot,
     reserve_budget_snapshot,
 )
-from runtime.capability_registry import CAPABILITY_REGISTRY, LEGACY_TOOL_TO_CAPABILITY
+from runtime.capability_registry import CAPABILITY_REGISTRY, PROCESS_TOOL_TO_CAPABILITY
 from runtime.receipts import CapabilityReceipt
 
 
 def test_registry_is_authoritative_for_legacy_hunt_tools_and_arsenal():
-    registered = {spec.legacy_tool_name: spec for spec in CAPABILITY_REGISTRY.legacy_tools()}
+    registered = {spec.process_tool_name: spec for spec in CAPABILITY_REGISTRY.process_tools()}
 
     assert set(registered) == set(agent_tools.RUN_TOOL_NAMES)
-    assert set(LEGACY_TOOL_TO_CAPABILITY) == set(agent_tools.RUN_TOOL_NAMES)
+    assert set(PROCESS_TOOL_TO_CAPABILITY) == set(agent_tools.RUN_TOOL_NAMES)
     for tool_name, template in agent_tools.SCANNER_ARG_TEMPLATES.items():
         spec = registered[tool_name]
         assert template["capability"] == spec.name

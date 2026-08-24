@@ -25,7 +25,7 @@ def test_durable_scanner_capability_set_is_explicit():
         DURABLE_SCANNER_HUNT_CAPABILITIES
         | DURABLE_WORKER_HUNT_CAPABILITIES
     ) >= {
-        spec.name for spec in CAPABILITY_REGISTRY.legacy_tools()
+        spec.name for spec in CAPABILITY_REGISTRY.process_tools()
     }
 
 
@@ -71,7 +71,7 @@ def test_api_routes_scanners_through_worker_owned_durable_settlement():
     assert "reservation_id=durable_reservation.record.reservation_id" in scanner_branch
     assert "action_digest=durable_action_digest" in scanner_branch
     assert "_agent_tool_run_tool" not in scanner_branch
-    assert "elif spec.legacy_tool_name:" not in handler
+    assert "elif spec.process_tool_name:" not in handler
 
 
 def test_scanner_worker_rebuilds_authority_and_settles_atomically():
