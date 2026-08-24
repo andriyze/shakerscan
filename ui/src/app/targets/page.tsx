@@ -28,6 +28,14 @@ function isPlausibleTargetUrl(value: string): boolean {
   return /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(host)
 }
 
+function configureScanHref(targets: string[], forceBatch = false): string {
+  const uniqueTargets = Array.from(new Set(targets.map((target) => target.trim()).filter(Boolean)))
+  const params = new URLSearchParams()
+  if (forceBatch || uniqueTargets.length > 1) params.set('targets', uniqueTargets.join('\n'))
+  else if (uniqueTargets[0]) params.set('target', uniqueTargets[0])
+  return `/scan/new?${params.toString()}`
+}
+
 interface TargetsFilters {
   [key: string]: string | number | undefined
   search?: string
@@ -670,6 +678,8 @@ function TargetsContent() {
                           e.stopPropagation()
                           setOpenScanMenu(openScanMenu === domain.root_target!.id ? null : domain.root_target!.id)
                         }}
+                        aria-expanded={openScanMenu === domain.root_target!.id}
+                        aria-haspopup="menu"
                         className="flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
                       >
                         Scan
@@ -678,11 +688,20 @@ function TargetsContent() {
                         </svg>
                       </button>
                       {openScanMenu === domain.root_target!.id && (
-                        <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
-                          <button onClick={(e) => { e.stopPropagation(); handleScan(domain.root_target!.id) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
+                        <div role="menu" className="absolute right-0 mt-1 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                          <button role="menuitem" onClick={(e) => { e.stopPropagation(); handleScan(domain.root_target!.id) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
                             <span className="text-sm text-white font-medium">Run Scan</span>
                             <p className="text-xs text-gray-400 mt-0.5">Balanced budget · passive policy</p>
                           </button>
+                          <Link
+                            role="menuitem"
+                            href={configureScanHref([domain.root_target!.url])}
+                            onClick={(event) => { event.stopPropagation(); setOpenScanMenu(null) }}
+                            className="block w-full border-t border-gray-700 px-3 py-2 text-left hover:bg-gray-700"
+                          >
+                            <span className="text-sm font-medium text-white">Customize Scan…</span>
+                            <span className="mt-0.5 block text-xs text-gray-400">Choose budget, permissions, credentials, and coverage</span>
+                          </Link>
                         </div>
                       )}
                     </div>
@@ -696,6 +715,8 @@ function TargetsContent() {
                         e.stopPropagation()
                         setOpenScanAllMenu(openScanAllMenu === domain.root_domain ? null : domain.root_domain)
                       }}
+                      aria-expanded={openScanAllMenu === domain.root_domain}
+                      aria-haspopup="menu"
                       disabled={scanningDomains.has(domain.root_domain)}
                       className="flex items-center gap-1 px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white rounded text-xs font-medium transition-colors"
                       title={`Scan all ${domain.total_count} target${domain.total_count !== 1 ? 's' : ''} in this domain`}
@@ -718,16 +739,28 @@ function TargetsContent() {
                       )}
                     </button>
                     {openScanAllMenu === domain.root_domain && (
-                      <div className="absolute right-0 mt-1 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                      <div role="menu" className="absolute right-0 mt-1 w-72 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
                         <div className="px-3 py-2 border-b border-gray-700">
                           <p className="text-xs text-gray-400">
                             Scan {domain.root_target ? '1 root + ' : ''}{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
                           </p>
                         </div>
-                        <button onClick={(e) => { e.stopPropagation(); setOpenScanAllMenu(null); setScanAllPending({ domain }) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
+                        <button role="menuitem" onClick={(e) => { e.stopPropagation(); setOpenScanAllMenu(null); setScanAllPending({ domain }) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
                           <span className="text-sm text-white font-medium">Run Scan</span>
                           <p className="text-xs text-gray-400 mt-0.5">Balanced budget · passive policy</p>
                         </button>
+                        <Link
+                          role="menuitem"
+                          href={configureScanHref([
+                            ...(domain.root_target ? [domain.root_target.url] : []),
+                            ...domain.subdomains.map((target) => target.url),
+                          ], true)}
+                          onClick={(event) => { event.stopPropagation(); setOpenScanAllMenu(null) }}
+                          className="block w-full border-t border-gray-700 px-3 py-2 text-left hover:bg-gray-700"
+                        >
+                          <span className="text-sm font-medium text-white">Customize batch…</span>
+                          <span className="mt-0.5 block text-xs text-gray-400">Review every target and choose shared budget and permissions</span>
+                        </Link>
                       </div>
                     )}
                   </div>
@@ -860,6 +893,8 @@ function TargetsContent() {
                             e.stopPropagation()
                             setOpenScanMenu(openScanMenu === subdomain.id ? null : subdomain.id)
                           }}
+                          aria-expanded={openScanMenu === subdomain.id}
+                          aria-haspopup="menu"
                           className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
                         >
                           Scan
@@ -868,11 +903,20 @@ function TargetsContent() {
                           </svg>
                         </button>
                         {openScanMenu === subdomain.id && (
-                          <div className="absolute right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
-                            <button onClick={(e) => { e.stopPropagation(); handleScan(subdomain.id) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
+                          <div role="menu" className="absolute right-0 mt-1 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1">
+                            <button role="menuitem" onClick={(e) => { e.stopPropagation(); handleScan(subdomain.id) }} className="w-full px-3 py-2 text-left hover:bg-gray-700 transition-colors">
                               <span className="text-sm text-white font-medium">Run Scan</span>
                               <p className="text-xs text-gray-400 mt-0.5">Balanced budget · passive policy</p>
                             </button>
+                            <Link
+                              role="menuitem"
+                              href={configureScanHref([subdomain.url])}
+                              onClick={(event) => { event.stopPropagation(); setOpenScanMenu(null) }}
+                              className="block w-full border-t border-gray-700 px-3 py-2 text-left hover:bg-gray-700"
+                            >
+                              <span className="text-sm font-medium text-white">Customize Scan…</span>
+                              <span className="mt-0.5 block text-xs text-gray-400">Choose budget, permissions, credentials, and coverage</span>
+                            </Link>
                           </div>
                         )}
                       </div>

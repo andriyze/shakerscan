@@ -82,8 +82,18 @@ export default function NewScanPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    const requestedTarget = new URLSearchParams(window.location.search).get('target')?.trim()
-    if (requestedTarget) setTarget(requestedTarget)
+    const requestedParams = new URLSearchParams(window.location.search)
+    const requestedTargets = (requestedParams.get('targets') || '')
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const requestedTarget = requestedParams.get('target')?.trim()
+    if (requestedTargets.length > 0) {
+      setBatchMode(true)
+      setBatchTargets(Array.from(new Set(requestedTargets)).join('\n'))
+    } else if (requestedTarget) {
+      setTarget(requestedTarget)
+    }
     let cancelled = false
     getTargets()
       .then((rows) => {
