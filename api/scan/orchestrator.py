@@ -197,6 +197,24 @@ class ScanOrchestrator:
         if not isinstance(plan, ScanActionPlan):
             raise ScanOrchestrationError("ScanOrchestrator requires a canonical action plan")
         results = await self._load_terminal_results(plan)
+        preexisting = frozenset(results)
+        unavailable_private_state: set[str] = set()
+        restore = getattr(self._executor, "restore_terminal_state", None)
+        if restore is not None and len(results) < len(plan.actions):
+            for action in plan.actions:
+                result = results.get(action.action_id)
+                if (
+                    result is None
+                    or result.status not in _DEPENDENCY_SATISFIED
+                    or action.action_id not in preexisting
+                ):
+                    continue
+                try:
+                    restored = bool(await restore(action, result))
+                except Exception:
+                    restored = False
+                if not restored:
+                    unavailable_private_state.add(action.action_id)
 
         while len(results) < len(plan.actions):
             pending = [
@@ -224,6 +242,19 @@ class ScanOrchestrator:
                         action=action,
                         status=CapabilityResultStatus.SKIPPED,
                         reason=reason,
+                    )
+                elif (
+                    action.action_id != "finalize.report"
+                    and any(
+                        dependency in unavailable_private_state
+                        for dependency in action.dependencies
+                    )
+                ):
+                    result = await self._settle_without_execution(
+                        plan=plan,
+                        action=action,
+                        status=CapabilityResultStatus.BLOCKED,
+                        reason=CapabilityResultReason.DEPENDENCY_PRIVATE_STATE_UNAVAILABLE,
                     )
                 elif (
                     action.action_id != "finalize.report"

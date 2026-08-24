@@ -43,6 +43,13 @@ try:
         resolve_scan_http_principal,
         resolve_scan_interactive_credential,
     )
+    from scan.private_state import (
+        SCAN_AUTH_SESSION_STATE_KIND,
+        SCAN_PRIVATE_STATE_KEY_OPTION,
+        ScanPrivateStateError,
+        open_scan_auth_session_state,
+        seal_scan_auth_session_state,
+    )
 except (ImportError, ModuleNotFoundError):
     from .. import agent_tools
     from ..capabilities.auth import establish_target_bound_http_session
@@ -73,6 +80,13 @@ except (ImportError, ModuleNotFoundError):
         bind_scan_session_headers,
         resolve_scan_http_principal,
         resolve_scan_interactive_credential,
+    )
+    from .private_state import (
+        SCAN_AUTH_SESSION_STATE_KIND,
+        SCAN_PRIVATE_STATE_KEY_OPTION,
+        ScanPrivateStateError,
+        open_scan_auth_session_state,
+        seal_scan_auth_session_state,
     )
 
 try:
@@ -242,6 +256,77 @@ class DatabaseNeutralScanActionDispatcher:
 
     async def _observations(self, action_id: str) -> tuple[Mapping[str, Any], ...]:
         return await self.backend.load_observations(action_id)
+
+    async def restore_terminal_state(
+        self, action: ScanAction, _result: Any,
+    ) -> bool:
+        """Rehydrate sealed prerequisites without repeating completed traffic."""
+        if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
+            lane = (
+                "primary" if action.action_id.endswith("primary") else "secondary"
+            )
+            credential = resolve_scan_interactive_credential(
+                self.options, lane=lane,
+            )
+            if credential is None:
+                return True
+            if resolve_scan_http_principal(
+                self.options, lane=lane,
+            ).authenticated:
+                return True
+            checkpoints = [
+                item for item in await self._observations(action.action_id)
+                if item.get("kind") == SCAN_AUTH_SESSION_STATE_KIND
+            ]
+            if len(checkpoints) != 1:
+                return False
+            try:
+                headers = open_scan_auth_session_state(
+                    self.options.get(SCAN_PRIVATE_STATE_KEY_OPTION),
+                    checkpoints[0],
+                    scan_id=self.scan_id,
+                    action_id=action.action_id,
+                    action_digest=action.action_digest,
+                    target_binding_digest=self.target.digest,
+                    lane=lane,
+                    credential_binding_digest=credential.binding_digest,
+                )
+                self.options = bind_scan_session_headers(
+                    self.options, headers, lane=lane,
+                )
+            except (ScanPrivateStateError, ValueError, TypeError):
+                return False
+            return resolve_scan_http_principal(
+                self.options, lane=lane,
+            ).authenticated
+        if action.action_id.startswith("inputs.collection_"):
+            plan = self._private_replay_plans.get(action.action_id)
+            if plan is None:
+                return False
+            principal = resolve_scan_http_principal(
+                self.options, lane="primary",
+            )
+            primary_profile_bound = any(
+                isinstance(item, Mapping)
+                and str(item.get("scan_lane") or item.get("auth_state") or "")
+                in {"primary", "user1"}
+                for item in self.options.get("resolved_credential_profiles") or ()
+            )
+            if primary_profile_bound:
+                if not principal.authenticated:
+                    return False
+                plan = bind_replay_credential_headers(
+                    plan, principal.headers(), auth_kind="broker_session",
+                )
+            for request in plan.requests:
+                previous = self._private_requests.get(request.request_id)
+                if (
+                    previous is not None
+                    and previous.digest_dict() != request.digest_dict()
+                ):
+                    return False
+                self._private_requests[request.request_id] = request
+        return True
 
     async def _work_manifest(
         self,
@@ -553,7 +638,24 @@ class DatabaseNeutralScanActionDispatcher:
                 self.options = bind_scan_session_headers(
                     self.options, session.headers(), lane=lane,
                 )
-            return session.execution_result()
+            result = dict(session.execution_result())
+            if session.established and session.headers():
+                state_key = self.options.get(SCAN_PRIVATE_STATE_KEY_OPTION)
+                if not state_key:
+                    raise ScanPrivateStateError(
+                        "canonical auth session has no private checkpoint key"
+                    )
+                result["observations"] = [seal_scan_auth_session_state(
+                    state_key,
+                    scan_id=self.scan_id,
+                    action_id=action.action_id,
+                    action_digest=action.action_digest,
+                    target_binding_digest=self.target.digest,
+                    lane=lane,
+                    credential_binding_digest=credential.binding_digest,
+                    headers=session.headers(),
+                )]
+            return result
 
         specification = CAPABILITY_REGISTRY.require(action.capability_name)
         adapter = AuthSessionExecutionAdapter(

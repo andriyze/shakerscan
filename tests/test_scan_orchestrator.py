@@ -230,6 +230,28 @@ def test_resume_reuses_terminal_results_and_only_runs_remaining_actions():
     assert backend.acquired == ["baseline.security_txt", "finalize.report"]
 
 
+def test_resume_blocks_dependents_when_private_prerequisite_cannot_be_restored():
+    plan = _plan()
+    backend = FakeBackend(plan, "local")
+    backend.results[plan.actions[0].action_id] = _result(
+        plan.actions[0], status=CapabilityResultStatus.SUCCESS,
+    )
+
+    class StatefulExecutor(FakeExecutor):
+        async def restore_terminal_state(self, action, _result):
+            return action.action_id != plan.actions[0].action_id
+
+    executor = StatefulExecutor()
+    report = _run(ScanOrchestrator(backend=backend, executor=executor), plan)
+
+    blocked = report.action_results[plan.actions[1].action_id]
+    assert blocked.status is CapabilityResultStatus.BLOCKED
+    assert blocked.reason_code is (
+        CapabilityResultReason.DEPENDENCY_PRIVATE_STATE_UNAVAILABLE
+    )
+    assert executor.executed == ["finalize.report"]
+
+
 def test_failed_dependency_is_blocked_but_receipt_driven_finalizer_still_runs():
     plan = _plan()
     backend = FakeBackend(plan, "local")

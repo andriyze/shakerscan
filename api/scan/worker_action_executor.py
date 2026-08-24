@@ -12,6 +12,7 @@ except (ImportError, ModuleNotFoundError):  # top-level worker imports
     from runtime.receipts import CapabilityReceipt
 
 from .action_plan import ScanAction
+from .capability_result import CapabilityResultReference
 from .execution_backend import ActionHeartbeat, ActionLease
 
 
@@ -98,6 +99,17 @@ class ReceiptScanActionExecutor:
                 "worker receipt differs from immutable action authority"
             )
         return receipt
+
+    async def restore_terminal_state(
+        self,
+        action: ScanAction,
+        result: CapabilityResultReference,
+    ) -> bool:
+        """Restore worker-private prerequisites without repeating target traffic."""
+        restore = getattr(self._dispatcher, "restore_terminal_state", None)
+        if restore is None:
+            return True
+        return bool(await restore(action, result))
 
     async def terminal_without_execution(
         self,

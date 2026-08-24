@@ -41,6 +41,7 @@ class CapabilityResultReason(str, Enum):
     POLICY_DISABLED = "policy_disabled"
     INSUFFICIENT_PLAN_BUDGET = "insufficient_plan_budget"
     DEPENDENCY_FAILED = "dependency_failed"
+    DEPENDENCY_PRIVATE_STATE_UNAVAILABLE = "dependency_private_state_unavailable"
     PLACEMENT_UNAVAILABLE = "placement_unavailable"
     AUTHORIZATION_EXPIRED = "authorization_expired"
     AUTHORIZATION_REVOKED = "authorization_revoked"

@@ -520,6 +520,10 @@ try:
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
         private_replay_plan_payload,
     )
+    from scan.private_state import (
+        SCAN_PRIVATE_STATE_KEY_OPTION,
+        generate_scan_private_state_key,
+    )
     from scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -616,6 +620,10 @@ except ModuleNotFoundError:
     from api.scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
         private_replay_plan_payload,
+    )
+    from api.scan.private_state import (
+        SCAN_PRIVATE_STATE_KEY_OPTION,
+        generate_scan_private_state_key,
     )
     from api.scan.broker_execution import (
         BrokerScanExecutionError,
@@ -10646,6 +10654,7 @@ _BROKER_PRIVATE_OPTION_KEYS = frozenset({
     *SCAN_AUTHENTICATION_KEYS,
     "authentication",
     "ai_api_key",
+    SCAN_PRIVATE_STATE_KEY_OPTION,
 })
 
 
@@ -11055,6 +11064,15 @@ async def _build_broker_private_scan_payload(
         options=dict(payload.get("options") or {}),
         scan_id=scan_id,
     )
+    encrypted_state_key = options.get(SCAN_PRIVATE_STATE_KEY_OPTION)
+    if encrypted_state_key:
+        raw_state_key = decrypt_secret(encrypted_state_key)
+        if not raw_state_key or raw_state_key == encrypted_state_key:
+            raise HTTPException(
+                status_code=409,
+                detail="broker Scan private-state key could not be decrypted",
+            )
+        options[SCAN_PRIVATE_STATE_KEY_OPTION] = raw_state_key
     public_options, private_options = _split_broker_private_options(options)
     target = _broker_target_binding_from_options(public_options)
     replay_plans: dict[str, Any] = {}
@@ -30599,6 +30617,15 @@ async def _submit_scan(
             options_payload["credential_profile_refs"] = credential_refs
             options_payload["credential_target_kind"] = request.target_kind
             options_payload["credential_action_name"] = credential_action_name
+            if any(
+                str(item.get("auth_kind") or "") in {
+                    "form_login", "oauth_client_credentials", "oauth_password",
+                }
+                for item in credential_refs
+            ):
+                options_payload[SCAN_PRIVATE_STATE_KEY_OPTION] = encrypt_secret(
+                    generate_scan_private_state_key()
+                )
 
         if not credential_refs:
             options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)

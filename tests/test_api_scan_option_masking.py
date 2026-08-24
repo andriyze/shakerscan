@@ -2293,6 +2293,7 @@ def test_broker_private_option_split_keeps_public_job_secret_free():
         "budget_profile": "balanced",
         "auth_header": "Bearer canary-secret",
         "login_password": "canary-password",
+        api_module.SCAN_PRIVATE_STATE_KEY_OPTION: "canary-state-key",
         "credential_profile_refs": [{"profile_id": "profile-1"}],
         "resolved_credential_profiles": [{
             "profile_id": "profile-1", "scan_lane": "primary",
@@ -2305,6 +2306,7 @@ def test_broker_private_option_split_keeps_public_job_secret_free():
     }
     assert private["auth_header"] == "Bearer canary-secret"
     assert private["login_password"] == "canary-password"
+    assert private[api_module.SCAN_PRIVATE_STATE_KEY_OPTION] == "canary-state-key"
     assert private["resolved_credential_profiles"][0]["profile_id"] == "profile-1"
     assert "canary" not in json.dumps(public)
 

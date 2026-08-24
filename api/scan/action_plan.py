@@ -177,11 +177,20 @@ def credential_profile_action_refs(
             "target_kind": str(raw.get("target_kind") or "").strip().lower(),
             "auth_kind": str(raw.get("auth_kind") or "").strip().lower(),
         }
+        if material["auth_kind"] not in {
+            "authorization_header", "bearer_token", "api_key_header",
+            "cookie", "basic_auth", "multi_header", "query_param",
+            "form_login", "oauth_client_credentials", "oauth_password",
+        }:
+            raise ScanActionPlanError(
+                "credential profile action auth kind is unsupported"
+            )
         result.append({
             "profile_id": profile_id,
             "version": version,
             "digest": digest_input_bindings(material),
             "lane": lane,
+            "auth_kind": material["auth_kind"],
         })
     return tuple(result)
 
@@ -544,8 +553,13 @@ class ScanActionPlanCompiler:
         credentials = _reference_list(
             credential_profile_refs,
             name="credential profile",
-            allowed_keys=frozenset({"profile_id", "version", "digest", "lane", "principal_ref"}),
-            required_keys=frozenset({"profile_id", "version", "digest", "lane"}),
+            allowed_keys=frozenset({
+                "profile_id", "version", "digest", "lane", "auth_kind",
+                "principal_ref",
+            }),
+            required_keys=frozenset({
+                "profile_id", "version", "digest", "lane", "auth_kind",
+            }),
             maximum=4,
         )
         collections = _reference_list(
@@ -693,6 +707,9 @@ class ScanActionPlanCompiler:
                 scope != "discovery"
                 and reference is not None
                 and lane in {"primary", "secondary"}
+                and str(reference.get("auth_kind") or "") in {
+                    "form_login", "oauth_client_credentials", "oauth_password",
+                }
             ):
                 add(
                     f"inputs.auth_{lane}",

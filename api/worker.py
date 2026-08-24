@@ -213,6 +213,14 @@ from scan.stages import (
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.surface_manifest import build_scan_surface_manifest
 from scan.placement_transport import write_private_placement_bundle
+from scan.private_state import (
+    SCAN_AUTH_SESSION_STATE_KIND,
+    SCAN_PRIVATE_STATE_KEY_OPTION,
+    ScanPrivateStateError,
+    open_scan_auth_session_state,
+    seal_scan_auth_session_state,
+    validate_scan_private_state_key,
+)
 from scan.jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -1824,7 +1832,9 @@ async def _hydrate_generic_scan_credentials(
 ) -> dict[str, Any]:
     """Resolve admitted generic profiles after worker-side target/approval validation."""
     hydrated = dict(options or {})
-    raw_refs = hydrated.pop("credential_profile_refs", None)
+    # Keep the content-free references available to canonical continuation and
+    # shard compilers after the secret values have been resolved in memory.
+    raw_refs = hydrated.get("credential_profile_refs")
     if not isinstance(raw_refs, list) or not raw_refs:
         return hydrated
     if (
@@ -1851,8 +1861,8 @@ async def _hydrate_generic_scan_credentials(
     except (TypeError, ValueError, AttributeError) as exc:
         raise ScanCredentialError("generic Scan credential reference UUID is invalid") from exc
 
-    target_kind = str(hydrated.pop("credential_target_kind", "") or "").strip().lower()
-    action_name = str(hydrated.pop("credential_action_name", "") or "").strip()
+    target_kind = str(hydrated.get("credential_target_kind", "") or "").strip().lower()
+    action_name = str(hydrated.get("credential_action_name", "") or "").strip()
     if target_kind not in {"web", "api"} or not action_name:
         raise ScanCredentialError("generic Scan credential authority is incomplete")
 
@@ -1933,6 +1943,19 @@ async def _hydrate_generic_scan_credentials(
                     "scan_lane": str(ref["scan_lane"]),
                 })
     hydrated["resolved_credential_profiles"] = resolved_refs
+    return hydrated
+
+
+def _hydrate_scan_private_state_key(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Open the per-Scan checkpoint key only inside the executing worker."""
+    hydrated = dict(options)
+    encrypted = hydrated.get(SCAN_PRIVATE_STATE_KEY_OPTION)
+    if not encrypted:
+        return hydrated
+    raw = decrypt_secret(encrypted)
+    if not raw:
+        raise ScanPrivateStateError("Scan private-state key is unavailable")
+    hydrated[SCAN_PRIVATE_STATE_KEY_OPTION] = validate_scan_private_state_key(raw)
     return hydrated
 
 
@@ -10722,7 +10745,25 @@ async def _execute_scan_auth_session_capability(
             credential.session_credential(), target=target,
         )
         private_session_holder["session"] = session
-        return session.execution_result()
+        result = dict(session.execution_result())
+        if session.established and session.headers():
+            if canonical_action is not None:
+                state_key = options.get(SCAN_PRIVATE_STATE_KEY_OPTION)
+                if not state_key:
+                    raise ScanPrivateStateError(
+                        "canonical auth session has no private checkpoint key"
+                    )
+                result["observations"] = [seal_scan_auth_session_state(
+                    state_key,
+                    scan_id=scan_id,
+                    action_id=canonical_action.action_id,
+                    action_digest=canonical_action.action_digest,
+                    target_binding_digest=target.digest,
+                    lane=lane,
+                    credential_binding_digest=credential.binding_digest,
+                    headers=session.headers(),
+                )]
+        return result
 
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -13347,6 +13388,71 @@ class _CanonicalLocalScanDispatcher:
             )
         return observations
 
+    async def restore_terminal_state(
+        self, action: ScanAction, _result: CapabilityResultReference,
+    ) -> bool:
+        """Rehydrate private prerequisites without repeating completed traffic."""
+        if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
+            lane = (
+                "primary" if action.action_id.endswith("primary") else "secondary"
+            )
+            credential = resolve_scan_interactive_credential(
+                self.options, lane=lane,
+            )
+            if credential is None:
+                return True
+            if resolve_scan_http_principal(
+                self.options, lane=lane,
+            ).authenticated:
+                return True
+            checkpoints = [
+                item for item in await self._observations(action.action_id)
+                if item.get("kind") == SCAN_AUTH_SESSION_STATE_KIND
+            ]
+            if len(checkpoints) != 1:
+                return False
+            try:
+                headers = open_scan_auth_session_state(
+                    self.options.get(SCAN_PRIVATE_STATE_KEY_OPTION),
+                    checkpoints[0],
+                    scan_id=self.scan_id,
+                    action_id=action.action_id,
+                    action_digest=action.action_digest,
+                    target_binding_digest=self.target.digest,
+                    lane=lane,
+                    credential_binding_digest=credential.binding_digest,
+                )
+                self.options = bind_scan_session_headers(
+                    self.options, headers, lane=lane,
+                )
+            except (ScanPrivateStateError, ValueError, TypeError):
+                return False
+            return resolve_scan_http_principal(
+                self.options, lane=lane,
+            ).authenticated
+        if action.action_id.startswith("inputs.collection_"):
+            request_manifest = await self._work_manifest(
+                action, "request_manifest_ref", ScanWorkManifestKind.REQUEST,
+            )
+            try:
+                summary = await _execute_scan_request_collections(
+                    self.options,
+                    self.scan_id,
+                    job_id=self.job_id,
+                    runtime_request_grant=self.runtime_request_grant,
+                    trusted_primary_headers=resolve_scan_http_principal(
+                        self.options, lane="primary",
+                    ).headers(),
+                    canonical_action=action,
+                    canonical_request_manifest=request_manifest,
+                    private_request_holder=self.private_request_holder,
+                    restore_only=True,
+                )
+            except Exception:
+                return False
+            return summary.get("status") in {"success", "restored"}
+        return True
+
     async def _network_action(
         self, action: ScanAction, lease: ActionLease,
     ) -> CapabilityReceipt:
@@ -14753,6 +14859,7 @@ async def _execute_scan_request_collections(
     canonical_action: Any | None = None,
     canonical_request_manifest: ScanWorkManifest | None = None,
     private_request_holder: dict[str, Any] | None = None,
+    restore_only: bool = False,
 ) -> dict[str, Any]:
     """Execute saved Scan selections through the canonical exact replay executor."""
     try:
@@ -15062,33 +15169,47 @@ async def _execute_scan_request_collections(
                 )
             payload = {**dict(payload), "environment": dict(environment)}
 
-        async with db_pool.acquire() as conn:
-            current_used = _worker_json_object(await conn.fetchval(
-                "SELECT budget_used_json FROM scans WHERE id=$1", scan_uuid,
-            ))
-        consumed = {key: int(current_used.get(key) or 0) for key in limits}
-        capacity = remaining_scan_replay_capacity(
-            limits=limits,
-            consumed=consumed,
-            runtime_http_ceiling=runtime_http_ceiling,
-        )
-        if capacity.http_requests < 1 or capacity.tool_wall_seconds < 1:
-            raise ScanCollectionReplayContractError(
-                "Scan budget leaves no capacity for exact collection replay"
-            )
-        wall_reservation = min(300, capacity.tool_wall_seconds)
-        runtime_limit = min(capacity.http_requests, wall_reservation * 10)
-        if canonical_action is not None:
+        if restore_only:
+            if canonical_action is None:
+                raise ScanCollectionReplayContractError(
+                    "private request restoration requires canonical action authority"
+                )
             wall_reservation = int(
                 canonical_action.requested_budget.get("tool_wall_seconds") or 0
             )
             runtime_limit = int(
                 canonical_action.requested_budget.get("http_requests") or 0
             )
-            if wall_reservation < 1 or runtime_limit < 1:
+        else:
+            async with db_pool.acquire() as conn:
+                current_used = _worker_json_object(await conn.fetchval(
+                    "SELECT budget_used_json FROM scans WHERE id=$1", scan_uuid,
+                ))
+            consumed = {key: int(current_used.get(key) or 0) for key in limits}
+            capacity = remaining_scan_replay_capacity(
+                limits=limits,
+                consumed=consumed,
+                runtime_http_ceiling=runtime_http_ceiling,
+            )
+            if capacity.http_requests < 1 or capacity.tool_wall_seconds < 1:
                 raise ScanCollectionReplayContractError(
-                    "canonical collection action has no executable budget"
+                    "Scan budget leaves no capacity for exact collection replay"
                 )
+            wall_reservation = min(300, capacity.tool_wall_seconds)
+            runtime_limit = min(capacity.http_requests, wall_reservation * 10)
+            if canonical_action is not None:
+                wall_reservation = int(
+                    canonical_action.requested_budget.get(
+                        "tool_wall_seconds"
+                    ) or 0
+                )
+                runtime_limit = int(
+                    canonical_action.requested_budget.get("http_requests") or 0
+                )
+        if wall_reservation < 1 or runtime_limit < 1:
+            raise ScanCollectionReplayContractError(
+                "canonical collection action has no executable budget"
+            )
         runtime_selector = scan_replay_selector(
             stored_selection, replay_policy, runtime_limit=runtime_limit,
         )
@@ -15153,6 +15274,19 @@ async def _execute_scan_request_collections(
                         "duplicate private request reference changed during execution"
                     )
                 private_request_holder[private_request.request_id] = private_request
+
+        if restore_only:
+            summary["collections"].append({
+                "collection_id": collection_id,
+                "selection_id": selection_id,
+                "capability_name": replay_capability_name,
+                "replay_policy": replay_policy,
+                "status": "restored",
+                "restored_request_count": len(plan.requests),
+                "target_traffic": False,
+                "secret_values_visible": False,
+            })
+            continue
 
         additional_budget = {"tool_wall_seconds": wall_reservation}
         requested_budget = (
@@ -15670,6 +15804,7 @@ async def process_scan_job(job_data: dict):
             else:
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
+                options = _hydrate_scan_private_state_key(options)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
                     options = await _hydrate_device_scan_credentials(options, scan_id)
                     options = await _hydrate_device_request_collections(options, scan_id)

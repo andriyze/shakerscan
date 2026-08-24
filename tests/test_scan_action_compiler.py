@@ -186,8 +186,8 @@ def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
 
 def test_compiler_binds_opaque_inputs_and_is_independent_of_reference_order():
     credentials = (
-        {"profile_id": "secondary-id", "version": 2, "digest": "d" * 64, "lane": "secondary"},
-        {"profile_id": "primary-id", "version": 4, "digest": "e" * 64, "lane": "primary"},
+        {"profile_id": "secondary-id", "version": 2, "digest": "d" * 64, "lane": "secondary", "auth_kind": "form_login"},
+        {"profile_id": "primary-id", "version": 4, "digest": "e" * 64, "lane": "primary", "auth_kind": "form_login"},
     )
     collections = (
         {
@@ -337,6 +337,7 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
         "version": 2,
         "digest": "7" * 64,
         "lane": "primary",
+        "auth_kind": "form_login",
     },)
 
     endpoint = ScanActionPlanCompiler().compile(
@@ -500,6 +501,7 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
         "version": 3,
         "digest": credentials[0]["digest"],
         "lane": "primary",
+        "auth_kind": "bearer_token",
     },)
     assert len(credentials[0]["digest"]) == 64
     assert collections == ({
@@ -531,5 +533,9 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
     )
     assert replay.capability_args["request_collection_ref"] == collections[0]
     assert replay.capability_args["request_manifest_ref"]["entry_count"] == 8
+    assert all(
+        action.capability_name != "auth.session.establish"
+        for action in plan.actions
+    )
     assert replay.requested_budget["http_requests"] == 8
     assert replay.requested_budget["state_changing_requests"] == 8

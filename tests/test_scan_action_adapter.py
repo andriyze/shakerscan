@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import uuid
 
+import pytest
+
 from hunt.capability_executor import CapabilityAdapterResult
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
@@ -17,6 +19,15 @@ from scan.private_inputs import (
     BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
     BrokerPrivateScanInputs,
     private_replay_plan_payload,
+)
+from scan.private_state import (
+    SCAN_PRIVATE_STATE_KEY_OPTION,
+    generate_scan_private_state_key,
+    seal_scan_auth_session_state,
+)
+from runtime.scan_credentials import (
+    resolve_scan_http_principal,
+    resolve_scan_interactive_credential,
 )
 from scan.capability_result import (
     CapabilityReceiptReference,
@@ -309,6 +320,105 @@ def test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(mon
     assert "canary-body" not in durable
     assert "canary-header" not in durable
     assert "canary-query" not in durable
+
+    fresh = _dispatcher(
+        plan,
+        backend,
+        private_inputs=private_inputs,
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+    sent.clear()
+    assert asyncio.run(fresh.restore_terminal_state(collection, None)) is True
+    resumed_mutation = asyncio.run(fresh(
+        mutation, _lease(plan, mutation), _noop,
+    ))
+    assert resumed_mutation.status == "success"
+    assert len(sent) == 2
+
+
+def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
+    pytest.importorskip("cryptography")
+    scan_id = str(uuid.uuid4())
+    action = _action("inputs.auth_primary", "auth.session.establish", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    key = generate_scan_private_state_key()
+    options = {
+        SCAN_PRIVATE_STATE_KEY_OPTION: key,
+        "login_username": "operator",
+        "login_password": "worker-private-password",
+        "login_url": "/login",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 1,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+        }],
+    }
+    credential = resolve_scan_interactive_credential(options, lane="primary")
+    assert credential is not None
+    checkpoint = seal_scan_auth_session_state(
+        key,
+        scan_id=scan_id,
+        action_id=action.action_id,
+        action_digest=action.action_digest,
+        target_binding_digest=TARGET.digest,
+        lane="primary",
+        credential_binding_digest=credential.binding_digest,
+        headers={"Cookie": "session=worker-private-session"},
+    )
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    private_inputs = BrokerPrivateScanInputs.from_payload(
+        {
+            "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+            "lease_id": "lease-1",
+            "worker_id": "broker:worker-1",
+            "plan_digest": plan.plan_digest,
+            "target_binding_digest": TARGET.digest,
+            "expires_at": expires_at.isoformat(),
+            "options": options,
+            "replay_plans": {},
+        },
+        lease_id="lease-1",
+        worker_id="broker:worker-1",
+        plan_digest=plan.plan_digest,
+        target_binding_digest=TARGET.digest,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(observations={action.action_id: (checkpoint,)}),
+        private_inputs=private_inputs,
+    )
+
+    assert asyncio.run(
+        dispatcher.restore_terminal_state(action, None)
+    ) is True
+    principal = resolve_scan_http_principal(
+        dispatcher.options, lane="primary",
+    )
+    assert principal.authenticated is True
+    assert principal.headers() == {"Cookie": "session=worker-private-session"}
+    assert "worker-private-session" not in json.dumps(checkpoint)
+
+    tampered = dict(checkpoint)
+    tampered["action_digest"] = "f" * 64
+    tampered_dispatcher = _dispatcher(
+        plan,
+        Backend(observations={action.action_id: (tampered,)}),
+        private_inputs=private_inputs,
+    )
+    assert asyncio.run(
+        tampered_dispatcher.restore_terminal_state(action, None)
+    ) is False
 
 
 async def _noop():

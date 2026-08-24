@@ -34,6 +34,7 @@ def test_canary_never_crosses_public_scan_storage_or_transport_surfaces(tmp_path
         "version": 4,
         "digest": "d" * 64,
         "lane": "primary",
+        "auth_kind": "bearer_token",
     }
     action_plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
