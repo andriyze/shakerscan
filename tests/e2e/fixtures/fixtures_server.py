@@ -18,6 +18,8 @@ import json
 import os
 import pickle
 import threading
+import time
+import urllib.parse
 
 
 def _safetensors(payload: bytes = b"\0\0\0\0") -> bytes:
@@ -57,6 +59,49 @@ MCowBQYDK2VwAyEAO/G9DQkewHUIaigL4wnW349tDGRH9UnlyREUK1iv174=
 PLANTED_SECRETS = "password=PLANTEDpw1234 api_key=sk_live_PLANTEDkeyAAAAAAAAAAAA client_secret: PLANTEDcs5678"
 PLANTED_TOKENS = ("PLANTEDpw1234", "sk_live_PLANTEDkeyAAAAAAAAAAAA", "PLANTEDcs5678")
 
+_TRAFFIC_LOCK = threading.Lock()
+_TRAFFIC: list[dict] = []
+_PARITY_CONTROL = "shakerscan-parity-fixture-v1"
+
+
+def _record_traffic(handler: http.server.BaseHTTPRequestHandler, method: str) -> None:
+    path = urllib.parse.urlsplit(handler.path).path
+    if path.startswith("/__parity__/"):
+        return
+    authorization = str(handler.headers.get("Authorization") or "")
+    principal = (
+        "owner" if authorization == "Bearer parity-owner"
+        else "attacker" if authorization == "Bearer parity-attacker"
+        else "anonymous"
+    )
+    record = {
+        "sequence": 0,
+        "method": method,
+        "path": path,
+        "query_keys": sorted(urllib.parse.parse_qs(
+            urllib.parse.urlsplit(handler.path).query,
+            keep_blank_values=True,
+        )),
+        "content_type": str(handler.headers.get("Content-Type") or "")[:100],
+        "content_length": int(handler.headers.get("Content-Length") or 0),
+        "principal": principal,
+        "client_lane": str(handler.headers.get("X-ShakerScan-Parity-Lane") or "")[:80],
+        "timestamp_ns": time.time_ns(),
+    }
+    with _TRAFFIC_LOCK:
+        record["sequence"] = len(_TRAFFIC) + 1
+        _TRAFFIC.append(record)
+
+
+def parity_traffic() -> list[dict]:
+    with _TRAFFIC_LOCK:
+        return [dict(item) for item in _TRAFFIC]
+
+
+def reset_parity_traffic() -> None:
+    with _TRAFFIC_LOCK:
+        _TRAFFIC.clear()
+
 
 class _Dangerous:
     def __reduce__(self):  # serialized, never executed
@@ -67,19 +112,43 @@ DANGEROUS_PICKLE = pickle.dumps(_Dangerous())
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
-    def _send(self, code: int, body, ctype: str = "application/json") -> None:
+    def _send(
+        self,
+        code: int,
+        body,
+        ctype: str = "application/json",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         data = body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
         ln = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(ln) if ln else b""
+        if path == "/__parity__/reset":
+            if self.headers.get("X-Parity-Control") != _PARITY_CONTROL:
+                self._send(403, {"error": "forbidden"})
+                return
+            reset_parity_traffic()
+            self._send(200, {"status": "reset"})
+            return
+        _record_traffic(self, "POST")
         try:
-            body = json.loads(self.rfile.read(ln) or b"{}")
+            body = json.loads(raw or b"{}")
         except Exception:
             body = {}
         if path == "/ai/chat":
@@ -96,10 +165,95 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path == "/dast/xss":
             self._send(200, {"echo": str(body.get("message") or "")})
             return
+        if path == "/dast/json":
+            self._send(200, {"accepted": True, "name": str(body.get("name") or "")})
+            return
+        if path == "/dast/form":
+            form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+            self._send(200, {"accepted": True, "fields": sorted(form)})
+            return
+        if path == "/dast/multipart":
+            self._send(200, {
+                "accepted": True,
+                "multipart": "multipart/form-data" in str(self.headers.get("Content-Type") or ""),
+                "body_length": len(raw),
+            })
+            return
+        if path == "/graphql":
+            self._send(200, {"data": {"viewer": {"id": "parity-owner"}}})
+            return
         self._send(404, {"error": "not found"})
 
     def do_GET(self) -> None:  # noqa: N802
         p = self.path.split("?")[0]
+        if p == "/__parity__/traffic":
+            if self.headers.get("X-Parity-Control") != _PARITY_CONTROL:
+                self._send(403, {"error": "forbidden"})
+                return
+            self._send(200, {"traffic": parity_traffic()})
+            return
+        _record_traffic(self, "GET")
+        if p == "/":
+            self._send(200, """<!doctype html><html><head>
+<script src="/assets/parity-app.js"></script></head><body>
+<a href="/linked/a">linked route</a>
+<a href="/redirect/start">redirect route</a>
+<a href="/openapi.json">OpenAPI</a>
+<a href="/safe-template">template fixture</a>
+</body></html>""", "text/html")
+            return
+        if p == "/linked/a":
+            self._send(200, '<a href="/linked/b">next</a>', "text/html")
+            return
+        if p == "/linked/b":
+            self._send(200, {"route": "linked-b", "ok": True})
+            return
+        if p == "/assets/parity-app.js":
+            self._send(200, 'fetch("/api/js-discovered");', "application/javascript")
+            return
+        if p == "/api/js-discovered":
+            self._send(200, {"source": "javascript", "ok": True})
+            return
+        if p == "/redirect/start":
+            self._redirect("/redirect/final")
+            return
+        if p == "/redirect/final":
+            self._send(200, {"redirected": True})
+            return
+        if p == "/safe-template":
+            self._send(200, {"fixture": "safe-template-match"}, headers={
+                "X-ShakerScan-Template-Fixture": "v1",
+            })
+            return
+        if p == "/authz/orders/owner-order":
+            authorization = str(self.headers.get("Authorization") or "")
+            if authorization not in {"Bearer parity-owner", "Bearer parity-attacker"}:
+                self._send(401, {"error": "authorization required"})
+                return
+            # Deliberately vulnerable: both exact principals can read the owner
+            # object, giving the deterministic authz verifier a stable proof.
+            self._send(200, {"order_id": "owner-order", "owner": "parity-owner"})
+            return
+        if p == "/openapi.json":
+            self._send(200, {
+                "openapi": "3.0.3",
+                "info": {"title": "ShakerScan parity target", "version": "1"},
+                "paths": {
+                    "/dast/json": {"post": {"responses": {"200": {"description": "ok"}}}},
+                    "/dast/sqli": {"post": {"responses": {"200": {"description": "ok"}}}},
+                    "/dast/xss": {"post": {"responses": {"200": {"description": "ok"}}}},
+                    "/authz/orders/{order_id}": {
+                        "get": {
+                            "parameters": [{
+                                "name": "order_id", "in": "path", "required": True,
+                                "schema": {"type": "string"},
+                            }],
+                            "responses": {"200": {"description": "ok"}},
+                        },
+                    },
+                },
+            })
+            return
         if p == "/models/good.safetensors":
             self._send(200, GOOD, "application/octet-stream")
             return
@@ -125,6 +279,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, LARGE, "application/octet-stream")
             return
         self._send(404, {"error": "not found"})
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        _record_traffic(self, "HEAD")
+        self._send(200, b"", "text/plain")
 
     def log_message(self, *a) -> None:  # silence
         pass
