@@ -6,14 +6,29 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping
 
 try:
-    from check_registry import normalize_scan_policy_families
+    from check_registry import get_check_family, normalize_scan_policy_families
 except ModuleNotFoundError:
-    from ..check_registry import normalize_scan_policy_families
+    from ..check_registry import get_check_family, normalize_scan_policy_families
 
 try:
     from runtime.models import ScanBudget, ScanPolicy
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import ScanBudget, ScanPolicy
+
+try:
+    from runtime.credentials import HTTP_CREDENTIAL_KINDS
+    from runtime.request_collection_store import REPLAY_POLICIES
+    from runtime.scan_credentials import (
+        SCAN_CREDENTIAL_CAPABILITY,
+        SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.credentials import HTTP_CREDENTIAL_KINDS
+    from ..runtime.request_collection_store import REPLAY_POLICIES
+    from ..runtime.scan_credentials import (
+        SCAN_CREDENTIAL_CAPABILITY,
+        SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES,
+    )
 
 from .execution import ScanExecutionPlan
 from .legacy import (
@@ -27,6 +42,28 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
     "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4, 100, 100),
     "thorough": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 2_700, 8, 500, 500),
 }
+
+# These are the only family names with concrete canonical action-graph semantics.
+# The broader historical check registry remains available to ASM and compatibility
+# execution, but accepting those names here would create a successful no-op Scan.
+SCAN_V2_FAMILY_NAMES = ("recon", "nuclei", "xss", "sqli", "bola")
+_SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
+    "recon": ("web.probe", "web.crawl", "web.content_discover"),
+    "nuclei": ("templates.passive_scan", "templates.scan"),
+    "xss": ("xss.verify", "xss.request_verify"),
+    "sqli": ("sqli.verify", "sqli.request_verify"),
+    "bola": ("authz.verify",),
+}
+_SCAN_V2_BASELINE_CAPABILITIES = (
+    "http.request", "dns.inspect", "tls.inspect",
+)
+SCAN_V2_ZEROABLE_LIMITS = frozenset({"max_state_changing_requests"})
+SCAN_V2_INTERACTIVE_AUTH_KINDS = frozenset({
+    "form_login", "oauth_client_credentials", "oauth_password",
+})
+SCAN_V2_SECONDARY_AUTH_KINDS = frozenset({
+    "authorization_header", "bearer_token", "cookie", "basic_auth", "form_login",
+})
 
 _BUDGET_CEILINGS = {
     "max_duration_seconds": 172_800,
@@ -47,6 +84,69 @@ SCAN_AUTHENTICATION_KEYS = frozenset({
     "oauth_username", "oauth_password", "user2_cookies", "user2_header",
     "user2_login_url", "user2_login_username", "user2_login_password",
 })
+
+
+def public_scan_contract() -> dict[str, Any]:
+    """Return the generated UI/CLI contract for one canonical deterministic Scan."""
+    families: list[dict[str, Any]] = []
+    for name in SCAN_V2_FAMILY_NAMES:
+        specification = get_check_family(name)
+        if specification is None:  # pragma: no cover - guarded by contract tests
+            raise RuntimeError(f"canonical Scan family {name} is not registered")
+        families.append({
+            "name": specification.name,
+            "label": specification.label,
+            "description": specification.description,
+            "risk_level": specification.risk_level,
+            "requires_active_testing": bool(specification.is_active and name != "nuclei"),
+            "requires_credentials": specification.requires_credentials,
+            "default_enabled": name in {"recon", "nuclei"},
+            "capabilities": list(_SCAN_V2_FAMILY_CAPABILITIES[name]),
+        })
+    limits = []
+    profile_dicts = {
+        name: asdict(budget) for name, budget in BUDGET_PROFILES.items()
+    }
+    for name, maximum in _BUDGET_CEILINGS.items():
+        limits.append({
+            "name": name,
+            "minimum": 0 if name in SCAN_V2_ZEROABLE_LIMITS else 1,
+            "maximum": maximum,
+            "profile_ceilings": {
+                profile: int(values[name]) for profile, values in profile_dicts.items()
+            },
+        })
+    return {
+        "schema_version": "scan-public-contract/v1",
+        "generation": "v2",
+        "engine": "scan",
+        "execution_plan_schema": "scan-execution-plan/v1",
+        "action_plan_schema": "scan-action-plan/v1",
+        "budget_profiles": profile_dicts,
+        "advanced_limits": limits,
+        "families": families,
+        "passive_coverage": {
+            "description": (
+                "Every passive Scan runs the target baseline, surface discovery, "
+                "and the reviewed read-only template pack unless a family is excluded."
+            ),
+            "baseline_capabilities": list(_SCAN_V2_BASELINE_CAPABILITIES),
+            "default_families": ["recon", "nuclei"],
+        },
+        "credentials": {
+            "supported_auth_kinds": sorted(
+                set(HTTP_CREDENTIAL_KINDS) - {"query_parameter"}
+            ),
+            "interactive_auth_kinds": sorted(SCAN_V2_INTERACTIVE_AUTH_KINDS),
+            "secondary_auth_kinds": sorted(SCAN_V2_SECONDARY_AUTH_KINDS),
+            "semantic_capabilities": sorted(SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES),
+            "legacy_capability": SCAN_CREDENTIAL_CAPABILITY,
+        },
+        "request_collections": {
+            "replay_policies": sorted(REPLAY_POLICIES),
+            "active_policy": "confirmed_active",
+        },
+    }
 
 
 def normalize_scan_authentication(value: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -222,8 +322,20 @@ def resolve_scan_contract(
         or [],
         field="exclude_families",
     )
+    unsupported_families = (set(include) | set(exclude)) - set(SCAN_V2_FAMILY_NAMES)
+    if unsupported_families:
+        raise ValueError(
+            "families are not implemented by canonical Scan: "
+            + ", ".join(sorted(unsupported_families))
+        )
     if set(include) & set(exclude):
         raise ValueError("include_families and exclude_families must not overlap")
+    active_only_families = set(include) & {"xss", "sqli", "bola"}
+    if active_only_families and not active_testing:
+        raise ValueError(
+            "active_testing is required to include families: "
+            + ", ".join(sorted(active_only_families))
+        )
     resolved_policy = ScanPolicy(
         active_testing=active_testing,
         allow_state_changing_http=bool(policy_data.get("allow_state_changing_http", False)),

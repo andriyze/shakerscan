@@ -435,6 +435,7 @@ try:
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
         normalize_scan_authentication,
+        public_scan_contract,
         resolve_scan_contract,
     )
     from scan.collection_replay import (
@@ -541,6 +542,7 @@ except ModuleNotFoundError:
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
         normalize_scan_authentication,
+        public_scan_contract,
         resolve_scan_contract,
     )
     from api.scan.collection_replay import (
@@ -749,6 +751,7 @@ try:
         ScanCredentialError,
         admit_scan_credential_profiles,
         bind_resolved_scan_credential,
+        scan_credential_allows_capability,
         scan_credential_resolution_capability,
     )
     from runtime.sealed_inputs import (
@@ -794,6 +797,7 @@ except ModuleNotFoundError:
         ScanCredentialError,
         admit_scan_credential_profiles,
         bind_resolved_scan_credential,
+        scan_credential_allows_capability,
         scan_credential_resolution_capability,
     )
     from api.runtime.sealed_inputs import (
@@ -30801,6 +30805,31 @@ async def _submit_scan(
             target_kind=request.target_kind,
             profile_ids=request.credential_profile_ids,
         )
+        if "bola" in set(scan_contract.policy.include_families):
+            by_lane = {
+                str(item.get("scan_lane") or ""): item for item in credential_refs
+            }
+            if set(by_lane) != {"primary", "secondary"}:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "explicit BOLA coverage requires distinct primary and secondary "
+                        "credential profiles"
+                    ),
+                )
+            if any(
+                not scan_credential_allows_capability(
+                    item.get("allowed_capabilities") or (), "authz.verify",
+                )
+                for item in by_lane.values()
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "explicit BOLA coverage requires both credential profiles to "
+                        "allow authz.verify"
+                    ),
+                )
         credential_action_name = (
             f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"
         )
@@ -31146,6 +31175,12 @@ async def _submit_scan(
         response['warning'] = target_note
         response['original_target'] = request.target
     return response
+
+
+@app.get("/scan/contracts")
+async def get_scan_public_contract():
+    """Expose the canonical Scan vocabulary consumed by UI and CLI clients."""
+    return public_scan_contract()
 
 
 @app.post("/scans/batch")

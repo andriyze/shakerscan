@@ -6,14 +6,21 @@ import {
   getRequestCollection,
   listRequestCollections,
   type RequestCollectionDetail,
+  type RequestCollectionReplayPolicy,
   type RequestCollectionTargetKind,
 } from '@/lib/api'
+
+export type RequestCollectionSelectionMetadata = Record<string, {
+  replayPolicy: RequestCollectionReplayPolicy
+  name: string
+}>
 
 type Props = {
   targetId?: string
   targetKind: RequestCollectionTargetKind
   selectedIds: string[]
   onChange: (selectionIds: string[]) => void
+  onMetadataChange?: (metadata: RequestCollectionSelectionMetadata) => void
   allowConfirmedActive?: boolean
   disabled?: boolean
 }
@@ -23,6 +30,7 @@ export function RequestCollectionPicker({
   targetKind,
   selectedIds,
   onChange,
+  onMetadataChange,
   allowConfirmedActive = false,
   disabled = false,
 }: Props) {
@@ -33,6 +41,7 @@ export function RequestCollectionPicker({
   useEffect(() => {
     let cancelled = false
     onChange([])
+    onMetadataChange?.({})
     setDetails([])
     setError(null)
     if (!targetId) return () => { cancelled = true }
@@ -61,6 +70,16 @@ export function RequestCollectionPicker({
       .filter((selection) => bindingIds.has(selection.binding_id))
       .map((selection) => ({ collection: detail.collection, selection }))
   }), [details, targetId, targetKind])
+
+  useEffect(() => {
+    onMetadataChange?.(Object.fromEntries(choices.map(({ collection, selection }) => [
+      selection.id,
+      {
+        replayPolicy: selection.replay_policy,
+        name: `${collection.name} · ${selection.name}`,
+      },
+    ])))
+  }, [choices, onMetadataChange])
 
   function toggle(selectionId: string, checked: boolean) {
     const next = checked

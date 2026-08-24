@@ -1178,6 +1178,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const reliability = coverage?.grade_reliability || {}
   const parity = explanation?.transport_parity || {}
   const budget = explanation?.budget || {}
+  const planRevision = explanation?.plan_revision || {}
   const completed = Number(matrix.completed || 0)
   const total = Number(matrix.total || Math.max(0, actions.length - 1))
   const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) > 0
@@ -1206,6 +1207,24 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
             Open execution record
           </a>
         </div>
+      </div>
+
+      <div className="mt-3 grid gap-2 text-[11px] text-gray-500 md:grid-cols-2">
+        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+          <span className="text-gray-400">Plan:</span>{' '}
+          <span className="font-mono">{String(explanation?.plan_digest || 'pending')}</span>
+        </div>
+        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+          <span className="text-gray-400">Plan version:</span>{' '}
+          {String(planRevision.schema_version || explanation?.schema_version || 'unknown')}
+          {planRevision.revision !== undefined ? ` · revision ${Number(planRevision.revision)}` : ''}
+        </div>
+        {planRevision.continuation_plan_digest && (
+          <div className="rounded border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
+            <span className="text-gray-400">Continuation:</span>{' '}
+            <span className="font-mono">{String(planRevision.continuation_plan_digest)}</span>
+          </div>
+        )}
       </div>
 
       {reliability.reliable === false && (

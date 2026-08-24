@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from scan.contracts import (
     BUDGET_PROFILES, LEGACY_SCAN_MAPPING, bind_scan_scope_receipt,
-    normalize_scan_authentication, resolve_scan_contract,
+    normalize_scan_authentication, public_scan_contract, resolve_scan_contract,
 )
 
 
@@ -186,11 +186,12 @@ def test_active_state_change_family_and_network_policy_fail_closed():
 
 def test_family_policy_uses_only_canonical_registry_names():
     contract = resolve_scan_contract(policy={
+        "active_testing": True,
         "include_families": ["sql-injection", "XSS"],
-        "exclude_families": ["headers"],
+        "exclude_families": ["nuclei"],
     })
     assert contract.policy.include_families == ("sqli", "xss")
-    assert contract.policy.exclude_families == ("headers",)
+    assert contract.policy.exclude_families == ("nuclei",)
     assert resolve_scan_contract(
         policy={"include_families": ["all"]},
     ).policy.include_families == ()
@@ -198,6 +199,33 @@ def test_family_policy_uses_only_canonical_registry_names():
         resolve_scan_contract(policy={"include_families": ["legacy_magic"]})
     with pytest.raises(ValueError, match="cannot contain all"):
         resolve_scan_contract(policy={"exclude_families": ["all"]})
+    with pytest.raises(ValueError, match="not implemented by canonical Scan"):
+        resolve_scan_contract(policy={"include_families": ["headers"]})
+    with pytest.raises(ValueError, match="active_testing is required"):
+        resolve_scan_contract(policy={"include_families": ["xss"]})
+
+
+def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
+    contract = public_scan_contract()
+
+    assert contract["schema_version"] == "scan-public-contract/v1"
+    assert contract["engine"] == "scan"
+    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
+    assert [item["name"] for item in contract["families"]] == [
+        "recon", "nuclei", "xss", "sqli", "bola",
+    ]
+    assert contract["passive_coverage"]["default_families"] == ["recon", "nuclei"]
+    assert contract["credentials"]["legacy_capability"] == "scan.execute"
+    assert "http.request" in contract["credentials"]["semantic_capabilities"]
+    assert contract["request_collections"]["replay_policies"] == [
+        "confirmed_active", "discovery_only", "safe_reads",
+    ]
+    state_limit = next(
+        item for item in contract["advanced_limits"]
+        if item["name"] == "max_state_changing_requests"
+    )
+    assert state_limit["minimum"] == 0
+    assert state_limit["profile_ceilings"]["balanced"] == 100
 
 
 def test_network_discovery_is_explicitly_authorized_and_exhaustive_is_compat_alias():
