@@ -470,6 +470,13 @@ try:
     )
     from scan.action_store import PostgresScanActionStore
     from scan.action_budget_reconciliation import scan_action_budget_reconciliation
+    from scan.compatibility import (
+        CompatibilitySunsetError,
+        RAW_SECRET_COMPATIBILITY_SUNSET_HTTP,
+        compatibility_snapshot,
+        record_compatibility_call,
+        require_raw_secret_compatibility,
+    )
     from scan.authorization import (
         ActionAuthorityDecision,
         revalidate_scan_action_authority,
@@ -577,6 +584,13 @@ except ModuleNotFoundError:
     )
     from api.scan.action_store import PostgresScanActionStore
     from api.scan.action_budget_reconciliation import scan_action_budget_reconciliation
+    from api.scan.compatibility import (
+        CompatibilitySunsetError,
+        RAW_SECRET_COMPATIBILITY_SUNSET_HTTP,
+        compatibility_snapshot,
+        record_compatibility_call,
+        require_raw_secret_compatibility,
+    )
     from api.scan.authorization import (
         ActionAuthorityDecision,
         revalidate_scan_action_authority,
@@ -13819,6 +13833,7 @@ async def health():
         "status": "unavailable",
         "inconsistent_count": 0,
     }
+    legacy_compatibility = compatibility_snapshot(None)
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -13860,6 +13875,7 @@ async def health():
         r = get_redis()
         r.ping()
         redis_ok = True
+        legacy_compatibility = compatibility_snapshot(r)
         worker_build = _worker_build_report_summary(
             _live_worker_build_reports(
                 r.hgetall("shakerscan:worker_build") or {},
@@ -13903,6 +13919,7 @@ async def health():
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
         "scan_action_budget_reconciliation": action_budget_reconciliation,
+        "legacy_compatibility": legacy_compatibility,
         "device_worker": _device_worker_readiness(),
         "agent_tool_worker": _agent_tool_worker_readiness(),
         "fleet": fleet_feature_state(),
@@ -30521,6 +30538,7 @@ def _set_cli_v1_deprecation_headers(response: Response) -> None:
 async def submit_cli_v1_scan(request: CliV1ScanRequest, response: Response):
     """Compatibility bridge for the installed CLI's secret-free Scan flow."""
     _set_cli_v1_deprecation_headers(response)
+    record_compatibility_call(get_redis(), "cli_v1_submit")
     canonical = _translate_cli_v1_scan_request(request)
     result = await _submit_scan(canonical, allow_inline_authentication=False)
     result["requested_scan_type"] = request.scan_type
@@ -30535,6 +30553,7 @@ async def get_cli_v1_scan(
 ):
     """Compatibility bridge for CLI status and wait commands."""
     _set_cli_v1_deprecation_headers(response)
+    record_compatibility_call(get_redis(), "cli_v1_status")
     result = await get_scan(id)
     result.setdefault("scan_id", str(result.get("id") or id))
     scan_type = str(result.get("scan_type") or "") or None
@@ -30555,6 +30574,7 @@ async def submit_scan(
         "scan --type quick", "scan --type standard", "scan --type deep",
         "scan --type full", "scan --type aggressive", "scan --type smart",
     }:
+        record_compatibility_call(get_redis(), "cli_alias")
         logger.warning(
             "Deprecated Scan CLI compatibility command used: %s (sunset 2026-12-31)",
             compatibility_command,
@@ -30565,8 +30585,13 @@ async def submit_scan(
 @app.post("/scans/compat", deprecated=True)
 async def submit_scan_compat(request: LegacyScanRequest, response: Response):
     """Deprecated raw-auth bridge; new clients must use credential profiles."""
+    try:
+        require_raw_secret_compatibility()
+    except CompatibilitySunsetError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    record_compatibility_call(get_redis(), "raw_secret_scan")
     response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = "Thu, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Sunset"] = RAW_SECRET_COMPATIBILITY_SUNSET_HTTP
     response.headers["Link"] = '</credential-profiles>; rel="successor-version"'
     return await _submit_scan(request, allow_inline_authentication=True)
 
@@ -31206,8 +31231,13 @@ async def submit_batch(request: BatchRequest):
 @app.post("/scans/compat/batch", deprecated=True)
 async def submit_batch_compat(request: LegacyBatchRequest, response: Response):
     """Deprecated batch bridge for raw inline authentication."""
+    try:
+        require_raw_secret_compatibility()
+    except CompatibilitySunsetError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    record_compatibility_call(get_redis(), "raw_secret_batch")
     response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = "Thu, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Sunset"] = RAW_SECRET_COMPATIBILITY_SUNSET_HTTP
     response.headers["Link"] = '</credential-profiles>; rel="successor-version"'
     return await _submit_batch(request, allow_inline_authentication=True)
 
