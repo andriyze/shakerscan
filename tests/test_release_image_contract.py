@@ -55,6 +55,26 @@ def test_official_and_manual_publishers_ship_native_multiarch_api_image():
     assert 'API_TAGS=(-t "$API_REPO:$TAG")' in publisher
 
 
+def test_release_images_publish_sboms_and_verified_final_digest_provenance():
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
+    promotion = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+
+    assert workflow.count("provenance: mode=max") == 4
+    assert workflow.count("sbom: true") == 4
+    assert workflow.count("uses: actions/attest@v4") == 4
+    assert workflow.count("push-to-registry: true") == 4
+    assert workflow.count("create-storage-record: false") == 4
+    assert workflow.count("gh attestation verify") == 4
+    assert "github-actions-sigstore" in workflow
+    assert "final-multiarch-image-digests" in workflow
+    assert "attestations: write" in workflow
+
+    assert "attestations: read" in promotion
+    assert "Reverify signed candidate provenance" in promotion
+    assert "gh attestation verify" in promotion
+    assert ".provenance.verified == true" in promotion
+
+
 def test_scanner_image_bakes_release_identity_for_broker_workers():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()

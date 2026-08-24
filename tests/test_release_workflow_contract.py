@@ -20,6 +20,8 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert "codeql_run_id:" in text
     assert 'verify_run "$E2E_RUN_ID" "E2E (full release gate)"' in text
     assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
+    assert "Verify signed candidate provenance" in text
+    assert "final-multiarch-image-digests" in text
 
 
 def test_release_promotion_reuses_candidate_digests_without_physical_gate():
@@ -36,6 +38,7 @@ def test_release_promotion_reuses_candidate_digests_without_physical_gate():
     assert 'existing="$(docker buildx imagetools inspect' in text
     assert "docker build " not in text
     assert ":latest" not in text
+    assert "Reverify signed candidate provenance" in text
 
 
 def test_stable_channel_is_separate_last_step():

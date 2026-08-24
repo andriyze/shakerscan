@@ -22,7 +22,9 @@ then run **Release candidate** with `version`, the exact 40-character SHA, and b
 IDs. The workflow verifies those runs against the same SHA, runs the remaining frozen-source gates and native builds,
 bakes version plus source revision into `/opt/shakerscan/release-manifest.json`, pushes only
 `candidate-<sha>-<run-id>` multi-architecture manifests, and uploads
-`release-candidate-receipt.json`.
+`release-candidate-receipt.json`. Each platform build publishes BuildKit provenance and an SBOM;
+the final multi-architecture scanner, API, UI, and signer digests receive GitHub/Sigstore build
+attestations that are verified immediately and recorded in the receipt.
 
 Never deploy by a mutable version or `latest` during acceptance. Use the candidate tag or, for the
 strongest binding, the digests in the receipt.
@@ -41,7 +43,8 @@ patch a live candidate and keep the old build receipt.
 
 Run **Promote release** with the version, candidate SHA, and candidate workflow run ID. The workflow
 verifies that the candidate succeeded for the exact SHA, downloads its receipt, compares every
-registry digest, and creates version tags from those digests. It performs no build. The GitHub
+registry digest, re-verifies every signed provenance attestation, and creates version tags from
+those digests. It performs no build. The GitHub
 Release records build provenance. `latest` and the installer remain unchanged.
 
 ## 4. Public smoke and stable promotion

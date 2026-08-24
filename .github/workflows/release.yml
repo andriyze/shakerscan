@@ -34,6 +34,7 @@ jobs:
       contents: write
       actions: read
       packages: write
+      attestations: read
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@v6
@@ -75,9 +76,25 @@ jobs:
           receipt="$(find candidate-receipt -name release-candidate-receipt.json -type f -print -quit)"
           [[ -n "$receipt" ]]
           jq -e --arg version "$VERSION" --arg sha "$CANDIDATE_SHA" \
-            '.schema_version == "shakerscan-release-candidate/v1" and .version == $version and .candidate_sha == $sha and (.candidate_tag | test("^candidate-[0-9a-f]{40}-[0-9]+$")) and ([.images[] | test("^sha256:[0-9a-f]{64}$")] | all)' \
+            '.schema_version == "shakerscan-release-candidate/v1" and .version == $version and .candidate_sha == $sha and (.candidate_tag | test("^candidate-[0-9a-f]{40}-[0-9]+$")) and ([.images[] | test("^sha256:[0-9a-f]{64}$")] | all) and .provenance.verified == true and .provenance.issuer == "github-actions-sigstore" and .provenance.repository == env.GITHUB_REPOSITORY' \
             "$receipt"
           cp "$receipt" release-candidate-receipt.json
+
+      - name: Reverify signed candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          verify_provenance() {
+            image="$1"
+            key="$2"
+            digest="$(jq -r ".images.${key}" release-candidate-receipt.json)"
+            gh attestation verify "oci://docker.io/${image}@${digest}" --repo "$GITHUB_REPOSITORY"
+          }
+          verify_provenance "$SCANNER_IMAGE" scanner
+          verify_provenance "$API_IMAGE" api
+          verify_provenance "$UI_IMAGE" ui
+          verify_provenance "$SIGNER_IMAGE" signer
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
