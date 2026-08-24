@@ -864,15 +864,7 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
-        replay_inputs_required = (
-            scope == "full"
-            or (
-                scope == "endpoint"
-                and bool(request_candidate_ref)
-                and policy.allow_state_changing_http
-                and (xss or sqli)
-            )
-        )
+        replay_inputs_required = scope in {"full", "endpoint"}
         if (
             scope == "endpoint"
             and bool(request_candidate_ref)

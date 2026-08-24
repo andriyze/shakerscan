@@ -125,12 +125,12 @@ from scan.collection_replay import (
     EXECUTABLE_REPLAY_POLICIES,
     ScanCollectionReplayContractError,
     merge_scan_budget_usage,
+    narrow_replay_plan_to_request_manifest,
     remaining_scan_replay_capacity,
     scan_replay_authorization,
     scan_replay_ledger_limits,
     scan_replay_runtime_http_ceiling,
     scan_replay_selector,
-    validate_scan_replay_request_manifest,
 )
 from scan.capability_execution import (
     ScanCapabilityContractError,
@@ -182,6 +182,10 @@ from scan.continuation import (
     merge_scan_action_continuation,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.parallel_inputs import (
+    ParallelScanInputError,
+    partition_request_manifests,
+)
 from scan.external_process import fit_reservation_scaled_profile
 from scan.work_manifests import (
     ScanWorkManifest,
@@ -15308,7 +15312,13 @@ async def _execute_scan_request_collections(
                 "canonical collection action has no executable budget"
             )
         runtime_selector = scan_replay_selector(
-            stored_selection, replay_policy, runtime_limit=runtime_limit,
+            stored_selection,
+            replay_policy,
+            runtime_limit=(
+                stored_selection.max_requests
+                if canonical_request_manifest is not None
+                else runtime_limit
+            ),
         )
         selected = select_requests(payload, runtime_selector)
         if not selected:
@@ -15348,7 +15358,7 @@ async def _execute_scan_request_collections(
             authorization=authorization,
         )
         if canonical_request_manifest is not None:
-            validate_scan_replay_request_manifest(
+            plan = narrow_replay_plan_to_request_manifest(
                 plan, canonical_request_manifest,
             )
         async with db_pool.acquire() as conn:
@@ -17249,8 +17259,9 @@ def _compile_parallel_child_work_manifests(
     child_options: Mapping[str, Any],
     selected_shard: int,
     endpoints: Sequence[Any],
+    request_manifests_by_selection: Mapping[str, ScanWorkManifest] | None = None,
 ) -> tuple[dict[str, Any], tuple[ScanWorkManifest, ...]]:
-    """Freeze the exact value-free endpoint/candidate work assigned to a shard."""
+    """Freeze exact value-free endpoint/candidate/request work for one shard."""
     manifest_options = dict(child_options)
     manifest_options["custom_endpoints"] = [str(item) for item in endpoints]
     sub_budget = derive_scan_shard_budget(
@@ -17299,6 +17310,73 @@ def _compile_parallel_child_work_manifests(
     options["endpoint_manifest_ref"] = endpoint_manifest.reference().canonical_dict()
     options["candidate_manifest_ref"] = candidate_manifest.reference().canonical_dict()
     manifests: list[ScanWorkManifest] = [endpoint_manifest, candidate_manifest]
+    child_request_manifests = dict(request_manifests_by_selection or {})
+    if child_request_manifests:
+        original_refs = {
+            str(item.get("selection_digest") or "").lower(): dict(item)
+            for item in child_options.get("request_collections") or ()
+            if isinstance(item, Mapping)
+        }
+        collection_refs: list[dict[str, Any]] = []
+        request_refs: dict[str, dict[str, Any]] = {}
+        for selection_digest, request_manifest in sorted(
+            child_request_manifests.items()
+        ):
+            original = original_refs.get(selection_digest)
+            if original is None:
+                raise ParallelScanInputError(
+                    "parallel child request manifest lost its collection selection"
+                )
+            request_count = len(request_manifest.entries)
+            if request_count < 1:
+                raise ParallelScanInputError(
+                    "parallel child request manifest is empty"
+                )
+            selector = dict(original.get("selector") or {})
+            selector["max_requests"] = request_count
+            if "limit" in selector:
+                selector["limit"] = request_count
+            original["selector"] = selector
+            original["selected_requests"] = request_count
+            original["selected_mutating_requests"] = sum(
+                not bool(entry["safe_method"])
+                for entry in request_manifest.entries
+            )
+            collection_refs.append(original)
+            request_refs[selection_digest] = (
+                request_manifest.reference().canonical_dict()
+            )
+            manifests.append(request_manifest)
+        options["request_collections"] = collection_refs
+        options["request_manifest_refs"] = request_refs
+        if sub_budget.max_state_changing_requests > 0:
+            request_candidate_manifest = build_request_candidate_manifest(
+                tuple(
+                    child_request_manifests[key]
+                    for key in sorted(child_request_manifests)
+                ),
+                source_action_ids=tuple(
+                    action_id
+                    for key in sorted(child_request_manifests)
+                    for action_id in child_request_manifests[key].source_action_ids
+                ),
+                maximum=max(
+                    1, min(2_000, sub_budget.max_state_changing_requests),
+                ),
+            )
+            if request_candidate_manifest.entries:
+                options["request_candidate_manifest_ref"] = (
+                    request_candidate_manifest.reference().canonical_dict()
+                )
+                manifests.append(request_candidate_manifest)
+            else:
+                options.pop("request_candidate_manifest_ref", None)
+        else:
+            options.pop("request_candidate_manifest_ref", None)
+    else:
+        options["request_collections"] = []
+        options.pop("request_manifest_refs", None)
+        options.pop("request_candidate_manifest_ref", None)
     policy = parent_job.execution_plan.policy
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
@@ -17996,6 +18074,58 @@ async def process_scan_plan_job(job_data: dict):
             backbone_request_budget += request_budget
     parent_options['parallel_planned_request_budget'] = planned_request_budget
     parent_options['parallel_backbone_request_budget'] = backbone_request_budget
+    child_identities = tuple(
+        (str(uuid.uuid4()), str(uuid.uuid4()), shard.index)
+        for shard in plan.shards
+    )
+    request_partitions: dict[int, Mapping[str, ScanWorkManifest]] = {}
+    if canonical_parent_job is not None and isinstance(
+        parent_options.get("request_manifest_refs"), Mapping,
+    ):
+        parent_request_manifests = await _load_scan_continuation_request_manifests(
+            scan_id=canonical_parent_job.scan_id,
+            target_binding_digest=canonical_parent_job.target.digest,
+            options=parent_options,
+        )
+        manifests_by_id = {
+            str(manifest.manifest_id): manifest
+            for manifest in parent_request_manifests
+        }
+        manifests_by_selection: dict[str, ScanWorkManifest] = {}
+        for raw_digest, raw_ref in parent_options["request_manifest_refs"].items():
+            if not isinstance(raw_ref, Mapping):
+                raise ParallelScanInputError(
+                    "parallel parent request manifest reference is invalid"
+                )
+            reference = ScanWorkManifestReference.from_dict(raw_ref)
+            manifest = manifests_by_id.get(reference.manifest_id)
+            if manifest is None or manifest.reference() != reference:
+                raise ParallelScanInputError(
+                    "parallel parent request manifest is unavailable"
+                )
+            manifests_by_selection[str(raw_digest).lower()] = manifest
+        authenticated_shards = tuple(
+            shard.index for shard in plan.shards
+            if str(shard.options.get("auth_state") or "").lower()
+            not in {"", "anonymous"}
+        )
+        eligible_lanes = (
+            {"primary": authenticated_shards, "secondary": authenticated_shards}
+            if authenticated_shards else None
+        )
+        partitions = partition_request_manifests(
+            manifests_by_selection,
+            children=tuple(
+                (child_id, shard_index)
+                for child_id, _job_id, shard_index in child_identities
+            ),
+            eligible_shards_by_lane=eligible_lanes,
+        )
+        request_partitions = {
+            partition.shard_index: partition.manifests_by_selection
+            for partition in partitions
+        }
+
     child_jobs: list[
         tuple[
             str, str, dict[str, Any], dict[str, Any],
@@ -18003,9 +18133,13 @@ async def process_scan_plan_job(job_data: dict):
             tuple[ScanWorkManifest, ...], int,
         ]
     ] = []
-    for shard in plan.shards:
-        child_id = str(uuid.uuid4())
-        child_job_id = str(uuid.uuid4())
+    for shard, (child_id, child_job_id, identity_shard_index) in zip(
+        plan.shards, child_identities, strict=True,
+    ):
+        if identity_shard_index != shard.index:
+            raise ParallelScanInputError(
+                "parallel child identity differs from its planned shard"
+            )
         child_options = dict(shard.options)
         if canonical_parent_job is not None:
             assigned_endpoints = list(
@@ -18021,6 +18155,9 @@ async def process_scan_plan_job(job_data: dict):
                     child_options=child_options,
                     selected_shard=shard.index,
                     endpoints=assigned_endpoints,
+                    request_manifests_by_selection=request_partitions.get(
+                        shard.index,
+                    ),
                 )
             )
             child_job, child_options, payload = _canonical_shard_job(

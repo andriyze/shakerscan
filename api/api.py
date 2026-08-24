@@ -440,9 +440,9 @@ try:
     from scan.collection_replay import (
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
+        narrow_replay_plan_to_request_manifest,
         scan_replay_authorization,
         scan_replay_selector,
-        validate_scan_replay_request_manifest,
     )
     from scan.jobs import (
         CanonicalScanJob,
@@ -546,9 +546,9 @@ except ModuleNotFoundError:
     from api.scan.collection_replay import (
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
+        narrow_replay_plan_to_request_manifest,
         scan_replay_authorization,
         scan_replay_selector,
-        validate_scan_replay_request_manifest,
     )
     from api.scan.jobs import (
         CanonicalScanJob,
@@ -11054,7 +11054,7 @@ async def _broker_private_replay_plan(
             scan_replay_selector(
                 selection,
                 replay_policy,
-                runtime_limit=int(action.requested_budget.get("http_requests") or 0),
+                runtime_limit=selection.max_requests,
             ),
             allowed_origins=stored_origins,
             default_origin=stored_origins[0] if stored_origins else None,
@@ -11065,7 +11065,9 @@ async def _broker_private_replay_plan(
                 approval_receipt_id=options.get("approval_receipt_id"),
             ),
         )
-        validate_scan_replay_request_manifest(replay_plan, manifest)
+        replay_plan = narrow_replay_plan_to_request_manifest(
+            replay_plan, manifest,
+        )
         return private_replay_plan_payload(replay_plan)
     except (ValueError, ScanCollectionReplayContractError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

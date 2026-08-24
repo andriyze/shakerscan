@@ -2286,6 +2286,92 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
     ])
 
 
+def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+    from scan.work_manifests import build_request_manifest
+
+    child_scan_id = "22222222-2222-4222-8222-222222222225"
+    selection_digest = "d" * 64
+    contract = resolve_scan_contract(budget_profile="balanced")
+    parent = CanonicalScanJob.create(
+        job_id="parent-job",
+        scan_id="parent-scan",
+        target=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
+        execution_plan=contract.execution_plan,
+    )
+    request_manifest = build_request_manifest(
+        scan_id=child_scan_id,
+        target_binding_digest=parent.target.digest,
+        source_action_ids=("inputs.collection_00",),
+        requests=({
+            "request_ref_id": "opaque-request-2",
+            "route_id": "e" * 64,
+            "method": "GET",
+            "auth_lane": "anonymous",
+            "selected_shard": 1,
+            "safe_method": True,
+            "body_schema_digest": None,
+        },),
+    )
+    child_options = {
+        **contract.option_metadata(),
+        "skip_global_checks": True,
+        "custom_budget": {"request_max": 50, "max_urls": 20},
+        "request_collections": [{
+            "collection_id": "11111111-1111-4111-8111-111111111111",
+            "binding_id": "22222222-2222-4222-8222-222222222222",
+            "selection_id": "33333333-3333-4333-8333-333333333333",
+            "selection_digest": selection_digest,
+            "replay_policy": "safe_reads",
+            "selected_requests": 3,
+            "selector": {"max_requests": 3},
+        }],
+    }
+
+    options, manifests = worker._compile_parallel_child_work_manifests(
+        child_scan_id=child_scan_id,
+        target_url="https://example.test",
+        parent_job=parent,
+        child_options=child_options,
+        selected_shard=1,
+        endpoints=("GET /v1/items",),
+        request_manifests_by_selection={selection_digest: request_manifest},
+    )
+    child, options, _payload = worker._canonical_shard_job(
+        parent,
+        child_id=child_scan_id,
+        child_job_id="child-job",
+        child_options=options,
+        shard_label="scope[1]",
+        shard_index=1,
+        shard_count=2,
+    )
+    plan = worker._compile_parallel_child_action_plan(child, options)
+
+    collection = next(
+        action for action in plan.actions
+        if action.capability_name == "collections.replay_safe"
+    )
+    assert collection.requested_budget["http_requests"] == 1
+    assert options["request_collections"][0]["selected_requests"] == 1
+    assert options["request_collections"][0]["selector"]["max_requests"] == 1
+    assert options["request_manifest_refs"] == {
+        selection_digest: request_manifest.reference().canonical_dict()
+    }
+    assert request_manifest in manifests
+    assert "opaque-request-1" not in json.dumps(options)
+    assert "private-body-canary" not in json.dumps(options)
+
+
 def test_local_continuation_compiles_discovery_receipts_into_appended_actions(monkeypatch):
     import hashlib
 
