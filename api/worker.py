@@ -181,6 +181,7 @@ from scan.action_plan import (
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_store import PostgresScanActionStore
+from scan.operational_metrics import record_operational_event
 from scan.budget_allocator import allocate_scan_action_plan
 from scan.continuation import (
     ContinuationBudgetCeiling,
@@ -10212,6 +10213,10 @@ async def _execute_reserved_scan_capability(
                     approval_receipt_id=policy.approval_receipt_id,
                 )
                 if authority_decision is not ActionAuthorityDecision.ALLOWED:
+                    if authority_decision is ActionAuthorityDecision.REJECTED_REVOKED:
+                        record_operational_event(get_redis(), "approval_revocation")
+                    if authority_decision is ActionAuthorityDecision.REJECTED_SCOPE:
+                        record_operational_event(get_redis(), "target_transport_block")
                     raise ScanCapabilityContractError(
                         "Scan action authority rejected at dispatch: "
                         f"{authority_decision.value}"
@@ -14000,6 +14005,7 @@ async def _load_scan_continuation_request_manifests(
                 expected_target_binding_digest=target_binding_digest,
             )
             if manifest is None or manifest.reference() != reference:
+                record_operational_event(get_redis(), "manifest_download_failure")
                 raise ScanCapabilityContractError(
                     "continuation request manifest is unavailable"
                 )
@@ -14164,6 +14170,7 @@ async def _materialize_local_scan_continuation(
         "scan_continuation_plan_digest": amended.plan_digest,
         "scan_plan_revision": revision.canonical_dict(),
     })
+    record_operational_event(get_redis(), "continuation_compiled")
     return amended, revision
 
 
@@ -14302,6 +14309,7 @@ async def _execute_reserved_deterministic_scan(
                 execution_plan=execution.execution_plan,
             )
         except ScanContinuationError as exc:
+            record_operational_event(get_redis(), "continuation_rejected")
             raise ScanCapabilityContractError(str(exc)) from exc
         backend = PostgresScanExecutionBackend(
             pool=db_pool,
@@ -23691,6 +23699,10 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     approval_receipt_id=policy.approval_receipt_id,
                 )
                 if authority_decision is not ActionAuthorityDecision.ALLOWED:
+                    if authority_decision is ActionAuthorityDecision.REJECTED_REVOKED:
+                        record_operational_event(get_redis(), "approval_revocation")
+                    if authority_decision is ActionAuthorityDecision.REJECTED_SCOPE:
+                        record_operational_event(get_redis(), "target_transport_block")
                     raise CapabilityInputError(
                         "HTTP action authority rejected at dispatch: "
                         f"{authority_decision.value}"

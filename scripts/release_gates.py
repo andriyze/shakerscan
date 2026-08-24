@@ -114,6 +114,8 @@ GATES: dict[str, tuple[str, ...]] = {
         "tests/test_scan_security_invariants.py",
         "tests/test_scan_secret_surface_canary.py",
         "tests/test_scan_legacy_execution_removed.py",
+        "tests/test_scan_compatibility_sunset.py",
+        "tests/test_scan_operational_metrics.py",
         "tests/test_scan_action_plan.py",
         "tests/test_scan_job_contract.py",
         "tests/test_scan_authorization_revalidation.py",

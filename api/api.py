@@ -470,6 +470,10 @@ try:
     )
     from scan.action_store import PostgresScanActionStore
     from scan.action_budget_reconciliation import scan_action_budget_reconciliation
+    from scan.operational_metrics import (
+        record_operational_event,
+        scan_operational_metrics,
+    )
     from scan.compatibility import (
         CompatibilitySunsetError,
         RAW_SECRET_COMPATIBILITY_SUNSET_HTTP,
@@ -584,6 +588,10 @@ except ModuleNotFoundError:
     )
     from api.scan.action_store import PostgresScanActionStore
     from api.scan.action_budget_reconciliation import scan_action_budget_reconciliation
+    from api.scan.operational_metrics import (
+        record_operational_event,
+        scan_operational_metrics,
+    )
     from api.scan.compatibility import (
         CompatibilitySunsetError,
         RAW_SECRET_COMPATIBILITY_SUNSET_HTTP,
@@ -12298,6 +12306,7 @@ async def _materialize_broker_scan_continuation(
         ScanContinuationError,
         ScanWorkManifestError,
     ) as exc:
+        record_operational_event(get_redis(), "continuation_rejected")
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     manifest_store = PostgresScanManifestStore()
@@ -12332,6 +12341,7 @@ async def _materialize_broker_scan_continuation(
         uuid.UUID(parent_plan.scan_id),
         json.dumps(continuation_options),
     )
+    record_operational_event(get_redis(), "continuation_compiled")
     return amended, revision, continuation_options
 
 
@@ -13030,6 +13040,9 @@ async def submit_broker_job_result(
                         "result_sha256": result_hash,
                     },
                 )
+
+    if str(row["status"]) != "leased":
+        record_operational_event(get_redis(), "broker_duplicate_result")
 
     if row.get("ingest_enqueued_at"):
         redis_client = get_redis()
@@ -13924,6 +13937,53 @@ async def health():
         "agent_tool_worker": _agent_tool_worker_readiness(),
         "fleet": fleet_feature_state(),
     }
+
+
+@app.get("/metrics/v2")
+async def get_v2_operational_metrics():
+    """Expose content-free canonical runtime counters and actionable alerts."""
+    running_worker_ids = await asyncio.to_thread(
+        _running_scan_worker_container_ids_best_effort
+    )
+    try:
+        redis_client = get_redis()
+        raw_reports = _live_worker_build_reports(
+            redis_client.hgetall("shakerscan:worker_build") or {},
+            running_worker_ids,
+        )
+    except Exception:
+        redis_client = None
+        raw_reports = {}
+    worker_build = _worker_build_report_summary(
+        raw_reports,
+        expected_fingerprint=expected_build_fingerprint(),
+        expected_version=current_scanner_version(),
+        expected_count=(
+            len(running_worker_ids) if running_worker_ids is not None else None
+        ),
+    )
+    legacy = compatibility_snapshot(redis_client)
+    async with db_pool.acquire() as conn:
+        try:
+            reconciliation = await scan_action_budget_reconciliation(conn)
+        except Exception:
+            reconciliation = {
+                "status": "unavailable",
+                "inconsistent_count": 0,
+            }
+        metrics = await scan_operational_metrics(
+            conn,
+            redis_client=redis_client,
+            reconciliation=reconciliation,
+            worker_fingerprint_mismatches=(
+                int(worker_build.get("stale_count") or 0)
+                + int(worker_build.get("pending_count") or 0)
+            ),
+            legacy_compatibility_calls=int(legacy.get("total_calls") or 0),
+        )
+    metrics["worker_build"] = worker_build
+    metrics["legacy_compatibility"] = legacy
+    return metrics
 
 
 @app.get("/fleet/public-health", include_in_schema=False)
