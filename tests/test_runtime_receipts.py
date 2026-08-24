@@ -64,6 +64,19 @@ def test_receipt_round_trips_and_rejects_a_tampered_persisted_hash():
         CapabilityReceipt.from_dict(tampered)
 
 
+def test_skipped_zero_cost_action_can_link_a_terminal_reservation():
+    receipt = _receipt(
+        status="skipped",
+        budget_reservation_id="zero-cost-reservation",
+        budget_reservation_state="failed",
+        budget_reserved={},
+        budget_consumed={},
+    )
+
+    assert receipt.budget_reserved == {}
+    assert receipt.budget_reservation_state == "failed"
+
+
 def test_receipt_requires_an_owner_and_honest_timeout_state():
     with pytest.raises(ValueError, match="belong to a scan or hunt"):
         _receipt(hunt_id=None)

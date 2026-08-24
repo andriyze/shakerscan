@@ -185,7 +185,9 @@ class CapabilityReceipt:
         for kind, amount in consumed.items():
             if amount > reserved[kind]:
                 raise ValueError(f"budget_consumed exceeds the reservation for {kind}")
-        if reservation_id and not reserved:
+        if reservation_id and not reserved and status not in {
+            "blocked", "cancelled", "failed", "skipped",
+        }:
             raise ValueError("budget reservation linkage requires budget_reserved")
         if reservation_state == "released" and any(consumed.values()):
             raise ValueError("released budget reservation cannot report consumed budget")

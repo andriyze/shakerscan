@@ -17,6 +17,12 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 import uuid
 
 from .action_plan import SCAN_ACTION_PLAN_SCHEMA, ScanAction, ScanActionPlan
+from .action_reservations import (
+    ScanActionReservationError,
+    admit_and_start_scan_action_reservation,
+    heartbeat_scan_action_reservation,
+    settle_scan_action_reservation,
+)
 from .capability_result import (
     CapabilityReceiptReference,
     CapabilityResultReason,
@@ -34,9 +40,11 @@ from .work_manifests import (
 try:  # Preserve one class identity under api.scan.* host imports.
     from ..runtime.observation_store import PostgresObservationManifestStore
     from ..runtime.receipts import CapabilityReceipt
+    from ..runtime.reservation_store import PostgresBudgetReservationStore
 except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
     from runtime.observation_store import PostgresObservationManifestStore
     from runtime.receipts import CapabilityReceipt
+    from runtime.reservation_store import PostgresBudgetReservationStore
 
 
 ACTION_LEASE_SCHEMA = "scan-action-lease/v1"
@@ -318,6 +326,139 @@ class PostgresScanExecutionBackend:
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+    async def _persist_recovered_terminal_action(
+        self,
+        conn: Any,
+        *,
+        action: ScanAction,
+        receipt: CapabilityReceipt,
+        reservation_id: str,
+    ) -> None:
+        """Consume one terminal reservation after an expired action lease."""
+        result = await self._result_from_receipt(
+            conn, action=action, receipt=receipt,
+        )
+        result_json = json.dumps(
+            result.canonical_dict(), sort_keys=True, separators=(",", ":"),
+        )
+        manifest_id = (
+            uuid.UUID(result.observation_manifest_ref.manifest_id)
+            if result.observation_manifest_ref is not None else None
+        )
+        row = await conn.fetchrow(
+            """UPDATE scan_capability_actions
+                  SET status=$4, reason_code=$5, receipt_id=$6,
+                      receipt_hash=$7, observation_manifest_id=$8,
+                      result_digest=$9, result_json=$10::jsonb,
+                      receipt_json=$11::jsonb, reservation_id=$12,
+                      finished_at=now(), updated_at=now(),
+                      lease_token_hash=NULL, lease_expires_at=NULL
+                WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
+                  AND status IN ('leased','running')
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= now()
+                  AND reservation_id=$12
+            RETURNING result_json""",
+            uuid.UUID(self._plan.scan_id),
+            action.action_id,
+            action.action_digest,
+            result.status.value,
+            result.reason_code.value if result.reason_code is not None else None,
+            result.receipt_ref.receipt_id,
+            result.receipt_ref.receipt_hash,
+            manifest_id,
+            result.result_digest,
+            result_json,
+            json.dumps(
+                receipt.public_dict(), sort_keys=True, separators=(",", ":"),
+            ),
+            reservation_id,
+        )
+        if row is None:
+            raise ScanExecutionBackendError(
+                "expired action changed during conservative recovery"
+            )
+
+    async def _recover_expired_action(
+        self,
+        conn: Any,
+        *,
+        action: ScanAction,
+        state: Mapping[str, Any],
+    ) -> None:
+        """Settle once and charge the full hold instead of replaying traffic."""
+        worker_id = str(state.get("worker_id") or "").strip()
+        reservation_id = str(state.get("reservation_id") or "").strip()
+        if not worker_id or not reservation_id:
+            raise ScanExecutionBackendError(
+                "expired action has no authoritative worker budget lease"
+            )
+        stored = await PostgresBudgetReservationStore().load(
+            conn, reservation_id, for_update=True,
+        )
+        if stored is None:
+            raise ScanExecutionBackendError(
+                "expired action budget reservation is missing"
+            )
+        if stored.record.terminal:
+            if not stored.receipt:
+                raise ScanExecutionBackendError(
+                    "terminal expired-action reservation has no receipt"
+                )
+            try:
+                receipt = CapabilityReceipt.from_dict(stored.receipt)
+            except (TypeError, ValueError) as exc:
+                raise ScanExecutionBackendError(
+                    "terminal expired-action receipt is invalid"
+                ) from exc
+        else:
+            target_id = await conn.fetchval(
+                "SELECT target_id::text FROM scans WHERE id=$1",
+                uuid.UUID(self._plan.scan_id),
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            raw_receipt = CapabilityReceipt(
+                capability_name=action.capability_name,
+                adapter_name=str(action.placement.get("adapter_name") or ""),
+                adapter_version=str(action.placement.get("adapter_version") or ""),
+                target_id=str(target_id or self._plan.scan_id),
+                scan_id=self._plan.scan_id,
+                worker_id=worker_id,
+                status="failed",
+                input_digest=action.action_digest,
+                parser_version="expired-action-recovery/v1",
+                started_at=(
+                    stored.record.started_at.isoformat()
+                    if stored.record.started_at is not None else now
+                ),
+                finished_at=now,
+                redacted_execution={
+                    "action_id": action.action_id,
+                    "execution_started": True,
+                    "recovery": "expired_lease_full_charge",
+                },
+                budget_reserved=action.requested_budget,
+                budget_consumed=action.requested_budget,
+                observations=(),
+                errors=("expired_action_lease_execution_uncertain",),
+            )
+            try:
+                stored, receipt = await settle_scan_action_reservation(
+                    conn,
+                    plan=self._plan,
+                    action=action,
+                    worker_id=worker_id,
+                    receipt=raw_receipt,
+                )
+            except ScanActionReservationError as exc:
+                raise ScanExecutionBackendError(str(exc)) from exc
+        await self._persist_recovered_terminal_action(
+            conn,
+            action=action,
+            receipt=receipt,
+            reservation_id=stored.record.reservation_id,
+        )
+
     async def acquire_action(self, action: ScanAction) -> ActionLease:
         async with self._pool.acquire() as conn:
             return await self.acquire_action_with_connection(conn, action)
@@ -335,53 +476,99 @@ class PostgresScanExecutionBackend:
         token = str(self._token_factory() or "").strip()
         if not _LEASE_TOKEN_RE.fullmatch(token):
             raise ScanExecutionBackendError("generated lease token is invalid")
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._lease_seconds)
-        row = await conn.fetchrow(
-            """UPDATE scan_capability_actions
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=self._lease_seconds,
+        )
+        recovered_expired = False
+        async with conn.transaction():
+            state = await conn.fetchrow(
+                """SELECT status, result_json, action_digest, lease_expires_at,
+                          worker_id, reservation_id
+                     FROM scan_capability_actions
+                    WHERE scan_id=$1 AND action_id=$2
+                      AND action_digest=$3
+                      AND execution_plan_digest=$4
+                      AND target_binding_digest=$5
+                    FOR UPDATE""",
+                uuid.UUID(self._plan.scan_id),
+                action.action_id,
+                action.action_digest,
+                self._plan.execution_plan_digest,
+                self._plan.target_binding_digest,
+            )
+            if state is None:
+                raise ScanExecutionBackendError(
+                    "action immutable authority changed before lease"
+                )
+            status = str(state.get("status") or "")
+            if status in {
+                "success", "partial", "skipped", "blocked", "failed",
+                "cancelled", "timed_out",
+            }:
+                raise ActionAlreadyTerminal(action.action_id)
+            if status != "planned":
+                expires_at = state.get("lease_expires_at")
+                if (
+                    status in {"leased", "running"}
+                    and expires_at is not None
+                    and expires_at <= datetime.now(timezone.utc)
+                ):
+                    await self._recover_expired_action(
+                        conn, action=action, state=state,
+                    )
+                    recovered_expired = True
+                else:
+                    raise ScanExecutionBackendError(
+                        "action already has an active execution lease"
+                    )
+            if not recovered_expired:
+                try:
+                    reservation = await admit_and_start_scan_action_reservation(
+                        conn,
+                        plan=self._plan,
+                        action=action,
+                        worker_id=self._worker_id,
+                        lease_seconds=self._lease_seconds,
+                    )
+                except ScanActionReservationError as exc:
+                    raise ScanExecutionBackendError(str(exc)) from exc
+                if reservation.record.terminal:
+                    raise ScanExecutionBackendError(
+                        "terminal Scan reservation has no terminal action result"
+                    )
+                row = await conn.fetchrow(
+                """UPDATE scan_capability_actions
                       SET status='leased', backend_name=$6, worker_id=$7,
                           lease_id=$8, lease_token_hash=$9,
-                          lease_expires_at=$10, attempt=attempt+1,
+                          lease_expires_at=$10, reservation_id=$11,
+                          attempt=attempt+1,
                           started_at=COALESCE(started_at, now()), updated_at=now()
                     WHERE scan_id=$1 AND action_id=$2
                       AND action_digest=$3
                       AND execution_plan_digest=$4
                       AND target_binding_digest=$5
-                      AND (
-                          status='planned'
-                          OR (
-                              status IN ('leased','running')
-                              AND lease_expires_at IS NOT NULL
-                              AND lease_expires_at <= now()
-                          )
-                      )
+                      AND status='planned'
+                      AND (reservation_id IS NULL OR reservation_id=$11)
                 RETURNING attempt""",
-            uuid.UUID(self._plan.scan_id),
-            action.action_id,
-            action.action_digest,
-            self._plan.execution_plan_digest,
-            self._plan.target_binding_digest,
-            self.backend_name,
-            self._worker_id,
-            uuid.UUID(lease_id),
-            self._token_hash(token),
-            expires_at,
-        )
-        if row is None:
-            state = await conn.fetchrow(
-                """SELECT status, result_json, action_digest
-                     FROM scan_capability_actions
-                    WHERE scan_id=$1 AND action_id=$2""",
-                uuid.UUID(self._plan.scan_id),
-                action.action_id,
-            )
-            if state and str(state.get("status") or "") in {
-                "success", "partial", "skipped", "blocked", "failed",
-                "cancelled", "timed_out",
-            }:
-                raise ActionAlreadyTerminal(action.action_id)
-            raise ScanExecutionBackendError(
-                "action is already leased or its immutable authority changed"
-            )
+                    uuid.UUID(self._plan.scan_id),
+                    action.action_id,
+                    action.action_digest,
+                    self._plan.execution_plan_digest,
+                    self._plan.target_binding_digest,
+                    self.backend_name,
+                    self._worker_id,
+                    uuid.UUID(lease_id),
+                    self._token_hash(token),
+                    expires_at,
+                    reservation.record.reservation_id,
+                )
+                if row is None:
+                    raise ScanExecutionBackendError(
+                        "action changed while associating its budget hold"
+                    )
+                attempt = int(row["attempt"])
+        if recovered_expired:
+            raise ActionAlreadyTerminal(action.action_id)
         return ActionLease(
             lease_id=lease_id,
             lease_token=token,
@@ -393,14 +580,24 @@ class PostgresScanExecutionBackend:
             backend=self.backend_name,
             worker_id=self._worker_id,
             lease_seconds=self._lease_seconds,
-            attempt=int(row["attempt"]),
+            attempt=attempt,
         )
 
     async def heartbeat(self, lease: ActionLease) -> None:
         action = self._require_action(lease.action.action_id)
         validate_action_lease(lease, plan=self._plan, action=action)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._lease_seconds)
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            try:
+                await heartbeat_scan_action_reservation(
+                    conn,
+                    plan=self._plan,
+                    action=action,
+                    worker_id=self._worker_id,
+                    lease_seconds=self._lease_seconds,
+                )
+            except ScanActionReservationError as exc:
+                raise ActionLeaseLost(str(exc)) from exc
             row = await conn.fetchrow(
                 """UPDATE scan_capability_actions
                       SET status='running', lease_expires_at=$7, updated_at=now()
@@ -438,8 +635,23 @@ class PostgresScanExecutionBackend:
         action = self._require_action(lease.action.action_id)
         validate_action_lease(lease, plan=self._plan, action=action)
         receipt_json: str | None = None
+        reservation_id: str | None = None
         async with conn.transaction():
+            existing = await self._load_result_with_conn(conn, action)
+            if existing is not None:
+                return existing
             if isinstance(result, CapabilityReceipt):
+                try:
+                    reservation, result = await settle_scan_action_reservation(
+                        conn,
+                        plan=self._plan,
+                        action=action,
+                        worker_id=self._worker_id,
+                        receipt=result,
+                    )
+                    reservation_id = reservation.record.reservation_id
+                except ScanActionReservationError as exc:
+                    raise ScanExecutionBackendError(str(exc)) from exc
                 receipt_json = json.dumps(
                     result.public_dict(), sort_keys=True, separators=(",", ":"),
                 )
@@ -448,6 +660,10 @@ class PostgresScanExecutionBackend:
                 )
             if not isinstance(result, CapabilityResultReference):
                 raise ScanExecutionBackendError("action settlement result type is invalid")
+            if receipt_json is None:
+                raise ScanExecutionBackendError(
+                    "Scan action settlement requires a capability receipt"
+                )
             try:
                 placement_from_stored_result(action=action, stored=result)
             except CapabilityResultError as exc:
@@ -471,12 +687,14 @@ class PostgresScanExecutionBackend:
                           receipt_hash=$10, observation_manifest_id=$11,
                           result_digest=$12, result_json=$13::jsonb,
                           receipt_json=COALESCE($14::jsonb, receipt_json),
+                          reservation_id=COALESCE(reservation_id, $15),
                           finished_at=now(), updated_at=now(),
                           lease_token_hash=NULL, lease_expires_at=NULL
                     WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
                       AND lease_id=$4 AND lease_token_hash=$5
                       AND worker_id=$6 AND status IN ('leased','running')
                       AND lease_expires_at > now()
+                      AND reservation_id=$15
                 RETURNING result_json""",
                 uuid.UUID(self._plan.scan_id),
                 action.action_id,
@@ -492,6 +710,7 @@ class PostgresScanExecutionBackend:
                 result.result_digest,
                 result_json,
                 receipt_json,
+                reservation_id,
             )
             if row is None:
                 existing = await self._load_result_with_conn(conn, action)

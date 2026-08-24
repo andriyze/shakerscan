@@ -25,6 +25,8 @@ from api.scan.execution_backend import (
 )
 from api.scan.orchestrator import ScanOrchestrator
 from api.runtime.receipts import CapabilityReceipt
+from api.runtime.budget_reservations import DurableBudgetReservation
+from api.runtime.reservation_store import StoredBudgetReservation
 
 
 SCAN_ID = "30000000-0000-4000-8000-000000000001"
@@ -114,6 +116,36 @@ def _result(
         observation_manifest_ref=manifest,
         budget_reserved=action.requested_budget,
         budget_consumed=(action.requested_budget if charge_full else {}),
+    )
+
+
+def _raw_receipt(
+    action: ScanAction,
+    *,
+    worker_id: str,
+    status: str = "success",
+    consumed: dict[str, int] | None = None,
+) -> CapabilityReceipt:
+    now = datetime.now(timezone.utc).isoformat()
+    return CapabilityReceipt(
+        capability_name=action.capability_name,
+        adapter_name=str(action.placement["adapter_name"]),
+        adapter_version=str(action.placement["adapter_version"]),
+        target_id="50000000-0000-4000-8000-000000000010",
+        scan_id=SCAN_ID,
+        worker_id=worker_id,
+        status=status,
+        input_digest=action.action_digest,
+        parser_version="1",
+        started_at=now,
+        finished_at=now,
+        budget_reserved=action.requested_budget,
+        budget_consumed=(
+            consumed
+            if consumed is not None
+            else {"http_requests": 1, "tool_wall_seconds": 1}
+        ),
+        observations=({"kind": "http_response", "status_code": 200},),
     )
 
 
@@ -378,12 +410,34 @@ class FakePostgresConn:
     def __init__(self, plan):
         self.scan_status = "running"
         self.observations = {}
+        self.budget_rows = {}
+        self.budget_actions = {}
+        self.budget_json = {
+            "max_duration_seconds": 120,
+            "max_http_requests": 20,
+            "max_endpoints": 20,
+            "max_browser_actions": 20,
+            "max_tcp_ports": 20,
+            "max_tool_wall_seconds": 60,
+            "max_workers": 1,
+            "max_state_changing_requests": 0,
+            "max_hosts": 1,
+        }
+        self.budget_used = {
+            "http_requests": 0,
+            "state_changing_requests": 0,
+            "browser_actions": 0,
+            "tcp_ports_attempted": 0,
+            "hosts_attempted": 0,
+            "tool_wall_seconds": 0,
+        }
         self.rows = {
             action.action_id: {
                 "status": "planned",
                 "action_digest": action.action_digest,
                 "attempt": 0,
                 "result_json": None,
+                "reservation_id": None,
             }
             for action in plan.actions
         }
@@ -391,7 +445,94 @@ class FakePostgresConn:
     def transaction(self):
         return _PoolLease(self)
 
+    async def execute(self, query, *args):
+        if "UPDATE scans SET budget_used_json" in query:
+            value = args[1]
+            self.budget_used = json.loads(value) if isinstance(value, str) else dict(value)
+            return "UPDATE 1"
+        raise AssertionError(query)
+
+    @staticmethod
+    def _reservation_from_args(args):
+        state = json.loads(args[18])
+        for name in (
+            "created_at", "updated_at", "lease_expires_at", "started_at",
+            "finished_at",
+        ):
+            if state.get(name):
+                state[name] = datetime.fromisoformat(state[name])
+        return DurableBudgetReservation(**state)
+
+    @staticmethod
+    def _reservation_row(record, *, action_id, action_digest, args=None):
+        return {
+            "id": record.reservation_id,
+            "action_id": action_id,
+            "action_digest": action_digest,
+            "state_digest": record.state_digest,
+            "state_json": record.canonical_dict(),
+            "ledger_after_hold_json": (
+                json.loads(args[19]) if args and args[19] is not None else None
+            ),
+            "ledger_after_settlement_json": (
+                json.loads(args[20]) if args and args[20] is not None else None
+            ),
+            "receipt_json": (
+                json.loads(args[21]) if args and args[21] is not None else None
+            ),
+        }
+
     async def fetchrow(self, query, *args):
+        stripped = query.lstrip()
+        if "FROM scans WHERE id=$1 FOR UPDATE" in query:
+            if "budget_json" in query:
+                return {
+                    "status": self.scan_status,
+                    "budget_json": self.budget_json,
+                    "budget_used_json": self.budget_used,
+                }
+            return {
+                "status": self.scan_status,
+                "budget_used_json": self.budget_used,
+            }
+        if stripped.startswith("INSERT INTO budget_reservations"):
+            record = self._reservation_from_args(args)
+            action_id = str(args[3])
+            key = (record.owner_kind, record.owner_id, action_id)
+            if key in self.budget_actions:
+                return None
+            row = self._reservation_row(
+                record, action_id=action_id, action_digest=str(args[24]),
+            )
+            self.budget_rows[record.reservation_id] = row
+            self.budget_actions[key] = record.reservation_id
+            return row
+        if stripped.startswith("UPDATE budget_reservations"):
+            record = self._reservation_from_args(args)
+            current = self.budget_rows.get(record.reservation_id)
+            if current is None:
+                return None
+            previous = StoredBudgetReservation.from_row(current)
+            if (
+                previous.record.version != args[-2]
+                or previous.record.state_digest != args[-1]
+            ):
+                return None
+            row = self._reservation_row(
+                record,
+                action_id=current["action_id"],
+                action_digest=current["action_digest"],
+                args=args,
+            )
+            self.budget_rows[record.reservation_id] = row
+            return row
+        if "FROM budget_reservations" in query:
+            if "owner_kind=$1 AND owner_id=$2 AND action_id=$3" in query:
+                reservation_id = self.budget_actions.get(
+                    (str(args[0]), str(args[1]), str(args[2]))
+                )
+                return self.budget_rows.get(reservation_id)
+            return self.budget_rows.get(str(args[0]))
         if query.lstrip().startswith("INSERT INTO scan_observation_manifests"):
             incoming = {"manifest_json": args[10], "observations_json": args[11]}
             existing = self.observations.get(args[0])
@@ -401,14 +542,31 @@ class FakePostgresConn:
             return {"manifest_json": incoming["manifest_json"]}
         action_id = str(args[1])
         row = self.rows[action_id]
-        if "SET status='leased'" in query:
-            reclaimable = (
-                row["status"] in {"leased", "running"}
-                and row.get("lease_expires_at") is not None
-                and row["lease_expires_at"] <= datetime.now(timezone.utc)
-            )
+        if "SET status=$4" in query and "lease_expires_at <= now()" in query:
             if (
-                (row["status"] != "planned" and not reclaimable)
+                row["status"] not in {"leased", "running"}
+                or row.get("lease_expires_at") is None
+                or row["lease_expires_at"] > datetime.now(timezone.utc)
+                or row.get("reservation_id") != args[11]
+            ):
+                return None
+            row.update({
+                "status": args[3],
+                "reason_code": args[4],
+                "receipt_id": args[5],
+                "receipt_hash": args[6],
+                "observation_manifest_id": args[7],
+                "result_digest": args[8],
+                "result_json": args[9],
+                "receipt_json": args[10],
+                "reservation_id": args[11],
+                "lease_token_hash": None,
+                "lease_expires_at": None,
+            })
+            return {"result_json": row["result_json"]}
+        if "SET status='leased'" in query:
+            if (
+                row["status"] != "planned"
                 or row["action_digest"] != args[2]
             ):
                 return None
@@ -419,6 +577,7 @@ class FakePostgresConn:
                 "lease_id": args[7],
                 "lease_token_hash": args[8],
                 "lease_expires_at": args[9],
+                "reservation_id": args[10],
                 "attempt": row["attempt"] + 1,
             })
             return {"attempt": row["attempt"]}
@@ -454,6 +613,7 @@ class FakePostgresConn:
                 "result_digest": args[11],
                 "result_json": args[12],
                 "receipt_json": args[13],
+                "reservation_id": args[14],
                 "lease_token_hash": None,
                 "lease_expires_at": None,
             })
@@ -465,6 +625,8 @@ class FakePostgresConn:
         raise AssertionError(query)
 
     async def fetchval(self, query, *args):
+        if "SELECT target_id::text FROM scans" in query:
+            return "50000000-0000-4000-8000-000000000010"
         assert "SELECT status FROM scans" in query
         return self.scan_status
 
@@ -487,14 +649,14 @@ def test_postgres_backend_hashes_lease_token_and_settles_generic_result_atomical
         lease.lease_token.encode()
     ).hexdigest()
     asyncio.run(backend.heartbeat(lease))
-    result = _result(action, status=CapabilityResultStatus.SUCCESS)
-    settled = asyncio.run(backend.settle(lease, result))
+    receipt = _raw_receipt(action, worker_id="local-worker-1")
+    settled = asyncio.run(backend.settle(lease, receipt))
 
-    assert settled == result
-    assert asyncio.run(backend.load_result(action.action_id)) == result
+    assert settled.status is CapabilityResultStatus.SUCCESS
+    assert asyncio.run(backend.load_result(action.action_id)) == settled
     assert stored_row["status"] == "success"
     assert stored_row["lease_token_hash"] is None
-    assert stored_row["result_digest"] == result.result_digest
+    assert stored_row["result_digest"] == settled.result_digest
 
 
 def test_postgres_backend_fails_closed_after_lease_authority_is_lost():
@@ -514,11 +676,11 @@ def test_postgres_backend_fails_closed_after_lease_authority_is_lost():
         asyncio.run(backend.heartbeat(lease))
     with pytest.raises(ActionLeaseLost, match="settlement"):
         asyncio.run(backend.settle(
-            lease, _result(action, status=CapabilityResultStatus.SUCCESS),
+            lease, _raw_receipt(action, worker_id="local-worker-1"),
         ))
 
 
-def test_postgres_backend_reclaims_expired_action_and_rejects_stale_worker():
+def test_postgres_backend_rejects_reexecution_after_expired_action_lease():
     plan = _plan()
     conn = FakePostgresConn(plan)
     first = PostgresScanExecutionBackend(
@@ -539,27 +701,19 @@ def test_postgres_backend_reclaims_expired_action_and_rejects_stale_worker():
     row["status"] = "running"
     row["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    recovered_lease = asyncio.run(second.acquire_action(action))
+    with pytest.raises(ActionAlreadyTerminal):
+        asyncio.run(second.acquire_action(action))
 
-    assert recovered_lease.attempt == 2
-    assert recovered_lease.lease_id != stale_lease.lease_id
-    assert row["worker_id"] == "local-worker-2"
+    assert row["worker_id"] == "local-worker-1"
+    assert row["status"] == "failed"
+    assert row["result_json"]
     with pytest.raises(ActionLeaseLost, match="heartbeat"):
         asyncio.run(first.heartbeat(stale_lease))
-    with pytest.raises(ActionLeaseLost, match="settlement"):
-        asyncio.run(first.settle(
-            stale_lease,
-            _result(action, status=CapabilityResultStatus.SUCCESS),
-        ))
-
-    asyncio.run(second.heartbeat(recovered_lease))
-    settled = asyncio.run(second.settle(
-        recovered_lease,
-        _result(action, status=CapabilityResultStatus.SUCCESS),
+    replayed = asyncio.run(first.settle(
+        stale_lease,
+        _raw_receipt(action, worker_id="local-worker-1"),
     ))
-    assert settled.status is CapabilityResultStatus.SUCCESS
-    assert row["status"] == "success"
-    assert row["attempt"] == 2
+    assert replayed.status is CapabilityResultStatus.FAILED
 
 
 def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
@@ -620,4 +774,7 @@ def test_postgres_backend_converts_full_receipt_and_observations_in_one_settleme
     assert result.observation_manifest_ref is not None
     assert result.observation_manifest_ref.count == 1
     assert conn.observations
-    assert json.loads(conn.rows[action.action_id]["receipt_json"])["receipt_hash"] == receipt.receipt_hash
+    stored_receipt = json.loads(conn.rows[action.action_id]["receipt_json"])
+    assert stored_receipt["receipt_id"] == receipt.receipt_id
+    assert stored_receipt["budget_reservation_id"]
+    assert stored_receipt["receipt_hash"] != receipt.receipt_hash

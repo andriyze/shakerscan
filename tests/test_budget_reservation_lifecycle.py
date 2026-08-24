@@ -144,6 +144,7 @@ def test_serialized_record_is_json_safe_and_contains_no_execution_secrets():
     assert public["reservation_id"] == "reservation-1"
     assert public["owner_kind"] == "hunt"
     assert public["requested"] == {"http_requests": 10, "tool_wall_seconds": 20}
+    assert "allow_empty" not in public
     assert public["created_at"].endswith("+00:00")
     assert "authorization" not in repr(public).lower()
     assert "cookie" not in repr(public).lower()
@@ -185,3 +186,40 @@ def test_failure_reason_is_machine_readable_and_preexecution_usage_is_impossible
             actual={"http_requests": 1},
             now=NOW + timedelta(seconds=1),
         )
+
+
+def test_explicit_zero_cost_scan_action_reservation_is_still_durable():
+    with pytest.raises(ReservationTransitionError, match="positive amount"):
+        DurableBudgetReservation.request(
+            owner_kind="scan",
+            owner_id="scan-1",
+            capability_name="http.request",
+            amounts={},
+        )
+
+    requested = DurableBudgetReservation.request(
+        owner_kind="scan",
+        owner_id="scan-1",
+        capability_name="http.request",
+        amounts={},
+        allow_empty=True,
+        now=NOW,
+    )
+    reserved, ledger = requested.reserve_against(
+        limits={"http_requests": 10},
+        consumed={"http_requests": 3},
+        now=NOW,
+    )
+    running = reserved.start(worker_id="worker-1", now=NOW)
+    failed = running.fail(
+        reason="action_skipped",
+        actual={},
+        execution_receipt_hash=RECEIPT_HASH,
+        execution_may_have_started=False,
+        now=NOW,
+    )
+
+    assert ledger == {"http_requests": 3}
+    assert failed.requested == {}
+    assert failed.reconcile_consumed(ledger) == ledger
+    assert failed.canonical_dict()["allow_empty"] is True

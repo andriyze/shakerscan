@@ -109,6 +109,7 @@ class DurableBudgetReservation:
     execution_receipt_hash: str | None = None
     failure_reason: str | None = None
     execution_uncertain: bool = False
+    allow_empty: bool = False
     version: int = 1
 
     def __post_init__(self) -> None:
@@ -125,8 +126,10 @@ class DurableBudgetReservation:
             "requested", "reserved", "running", "committed", "released", "failed"
         }:
             raise ReservationTransitionError("invalid reservation status")
+        if not isinstance(self.allow_empty, bool):
+            raise ReservationTransitionError("allow_empty must be a boolean")
         requested = _amounts(self.requested)
-        if not requested:
+        if not requested and not self.allow_empty:
             raise ReservationTransitionError("reservation must hold at least one positive amount")
         actual = _amounts(self.actual or {}, allow_zero=True)
         outside = set(actual) - set(requested)
@@ -181,6 +184,7 @@ class DurableBudgetReservation:
         object.__setattr__(self, "owner_id", owner_id)
         object.__setattr__(self, "capability_name", capability)
         object.__setattr__(self, "requested", requested)
+        object.__setattr__(self, "allow_empty", bool(self.allow_empty))
         object.__setattr__(self, "actual", actual)
         object.__setattr__(self, "created_at", created)
         object.__setattr__(self, "updated_at", updated)
@@ -199,6 +203,7 @@ class DurableBudgetReservation:
         amounts: Mapping[str, int],
         now: datetime | None = None,
         reservation_id: str | None = None,
+        allow_empty: bool = False,
     ) -> "DurableBudgetReservation":
         timestamp = _utc(now)
         return cls(
@@ -207,6 +212,7 @@ class DurableBudgetReservation:
             owner_id=owner_id,
             capability_name=capability_name,
             requested=amounts,
+            allow_empty=allow_empty,
             actual={},
             created_at=timestamp,
             updated_at=timestamp,
@@ -432,6 +438,10 @@ class DurableBudgetReservation:
 
     def canonical_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        # Preserve the content address of every reservation written before
+        # explicit zero-cost Scan actions were introduced.
+        if not self.allow_empty:
+            payload.pop("allow_empty", None)
         for key in (
             "created_at", "updated_at", "lease_expires_at", "started_at", "finished_at"
         ):

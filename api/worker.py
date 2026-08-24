@@ -169,6 +169,7 @@ from scan.action_plan import (
     credential_profile_action_refs,
     request_collection_action_refs,
 )
+from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_store import PostgresScanActionStore
 from scan.budget_allocator import allocate_scan_action_plan
 from scan.continuation import (
@@ -13965,7 +13966,8 @@ async def _materialize_local_scan_continuation(
     parent_plan: ScanActionPlan,
     allocation: ScanContinuationAllocation,
     parent_results: Mapping[str, CapabilityResultReference],
-    dispatcher: _CanonicalLocalScanDispatcher,
+    dispatcher: DatabaseNeutralScanActionDispatcher,
+    execution_plan: Any,
 ) -> ScanActionPlan:
     observations = {
         action.action_id: await dispatcher._observations(action.action_id)
@@ -14026,7 +14028,7 @@ async def _materialize_local_scan_continuation(
     })
     continuation_raw = ScanActionPlanCompiler().compile(
         scan_id=dispatcher.scan_id,
-        execution_plan=dispatcher.execution.execution_plan,
+        execution_plan=execution_plan,
         target_binding=dispatcher.target,
         credential_profile_refs=credential_profile_action_refs(credential_refs),
         request_collection_refs=request_collection_action_refs(collection_refs),
@@ -14144,15 +14146,18 @@ async def _execute_reserved_deterministic_scan(
         worker_id=worker_id,
         backend_name="local",
     )
-    dispatcher = _CanonicalLocalScanDispatcher(
+    dispatcher = DatabaseNeutralScanActionDispatcher(
         target_url=target,
         options=normalized,
+        target=execution.target_binding,
+        policy=admission.plan.policy,
         scan_id=scan_id,
         job_id=job_id,
+        worker_id=worker_id,
         plan=plan,
         backend=backend,
-        runtime_request_grant=runtime_request_grant,
-        collection_replay_result_holder=collection_replay_result_holder,
+        process_runner=_execute_agent_scanner_process,
+        cancelled=lambda: _scan_cancel_requested(scan_id),
     )
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
@@ -14187,6 +14192,7 @@ async def _execute_reserved_deterministic_scan(
                 allocation=continuation_allocation,
                 parent_results=orchestration.action_results,
                 dispatcher=dispatcher,
+                execution_plan=execution.execution_plan,
             )
         except ScanContinuationError as exc:
             raise ScanCapabilityContractError(str(exc)) from exc
