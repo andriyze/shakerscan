@@ -49,7 +49,7 @@ try:
 except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import published_scanner_version
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -30543,8 +30543,21 @@ async def get_cli_v1_scan(
 
 
 @app.post("/scans")
-async def submit_scan(request: ScanRequest):
+async def submit_scan(
+    request: ScanRequest,
+    x_shakerscan_cli_compatibility: Optional[str] = Header(default=None),
+):
     """Submit one canonical secret-free Scan job."""
+    compatibility_command = str(x_shakerscan_cli_compatibility or "").strip().lower()
+    if compatibility_command in {
+        "scan-full", "scan-smart",
+        "scan --type quick", "scan --type standard", "scan --type deep",
+        "scan --type full", "scan --type aggressive", "scan --type smart",
+    }:
+        logger.warning(
+            "Deprecated Scan CLI compatibility command used: %s (sunset 2026-12-31)",
+            compatibility_command,
+        )
     return await _submit_scan(request, allow_inline_authentication=False)
 
 

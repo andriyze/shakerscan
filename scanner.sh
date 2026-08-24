@@ -1161,7 +1161,7 @@ install_dependencies() {
 
 command_needs_docker_runtime() {
     case "$1" in
-        start|stop|restart|status|scale|logs|scan|scan-full|scan-smart|gungnir|devices|build|rebuild|reset|shell)
+        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell)
             return 0
             ;;
         *)
@@ -1175,7 +1175,7 @@ command_needs_curl() {
     local subcmd="$2"
 
     case "$cmd" in
-        start|restart|status|scan|scan-full|scan-smart)
+        start|restart|status)
             return 0
             ;;
         gungnir)
@@ -1198,7 +1198,7 @@ command_needs_jq() {
 
 command_needs_python() {
     case "$1" in
-        mcp|research|report-rebuild)
+        scan|scan-full|scan-smart|mcp|research|report-rebuild)
             return 0
             ;;
         *)
@@ -1870,8 +1870,6 @@ print_help() {
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
     echo "                       worker aggregates all shakerscan-worker* containers"
     echo "  scan <target>      Submit the deterministic DAST Scan"
-    echo "  scan-full <target> Compatibility alias for 'scan --type full'"
-    echo "  scan-smart <target> Compatibility alias for 'scan --type smart'"
     echo "  report-rebuild <bundle>  Rebuild a deterministic report fully offline"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
@@ -1898,6 +1896,10 @@ print_help() {
     echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
+    echo ""
+    echo "Deprecated compatibility aliases (sunset 2026-12-31):"
+    echo "  scan-full <target> Translates to 'scan --budget-profile thorough --active-testing'"
+    echo "  scan-smart <target> Translates to the same deterministic Scan contract"
     echo ""
     echo "Options:"
     echo "  -w, --workers N    Number of workers (default: $WORKERS)"
@@ -2261,6 +2263,27 @@ show_worker_logs() {
             awk -v name="$container" '{ print "[" name "] " $0; fflush(); }'
     done
 }
+
+run_v2_scan_cli() {
+    local compatibility_alias="${1:-}"
+    shift || true
+    local cli_args=(
+        --api-url "$(api_base_url)"
+        --ui-url "$(ui_base_url)"
+    )
+    if [ "$CONFIRM_ACTIVE" -eq 1 ]; then
+        cli_args+=(--confirm-active)
+    fi
+    if [ -n "$compatibility_alias" ]; then
+        cli_args+=(--compatibility-alias "$compatibility_alias")
+    fi
+    if [ ! -f "$SCRIPT_DIR/scripts/scan_cli.py" ]; then
+        echo -e "${RED}Error: the V2 Scan CLI is missing from this runtime.${NC}" >&2
+        return 1
+    fi
+    python3 "$SCRIPT_DIR/scripts/scan_cli.py" "${cli_args[@]}" "$@"
+}
+
 
 print_scan_help() {
     local command_name="${1:-scan}"
@@ -3542,13 +3565,13 @@ case $COMMAND in
         show_logs "${ARGS[0]}" "$FOLLOW"
         ;;
     scan)
-        submit_scan "scan" "quick" 1 "${ARGS[@]}"
+        run_v2_scan_cli "" "${ARGS[@]}"
         ;;
     scan-full)
-        submit_scan "scan-full" "full" 0 "${ARGS[@]}"
+        run_v2_scan_cli "full" "${ARGS[@]}"
         ;;
     scan-smart)
-        submit_scan "scan-smart" "smart" 0 "${ARGS[@]}"
+        run_v2_scan_cli "smart" "${ARGS[@]}"
         ;;
     report-rebuild)
         if [ ! -f "$SCRIPT_DIR/scripts/rebuild_scan_report.py" ]; then

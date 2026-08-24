@@ -1376,15 +1376,16 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 374 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 317 | `api/api.py` |
+| Public REST operations | 379 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 321 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Scanner CLI flags | 161 | `scanner/scanner.py` |
-| Scanner wrapper commands | 28 | `scanner.sh` |
-| Make targets | 14 | `Makefile` |
+| Canonical scanner wrapper commands | 27 | `scanner.sh` |
+| Deprecated wrapper aliases | 2 | `scanner.sh` |
+| Make targets | 16 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 354 | Python sources + Compose manifests |
 | Scanner modules | 118 | `scanner/scanner_tools/` |
@@ -1443,6 +1444,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/ai/test-cases` | `list_ai_test_cases` |
 | `GET` | `/ai/test-cases/export` | `export_ai_test_cases` |
 | `GET` | `/ai/test-scenarios` | `list_ai_test_scenarios` |
+| `GET` | `/api/v1/findings` | `list_cli_v1_findings` |
+| `GET` | `/api/v1/scan` | `get_cli_v1_scan` |
+| `POST` | `/api/v1/scan` | `submit_cli_v1_scan` |
 | `POST` | `/arsenal/approvals` | `arsenal_create_approval` |
 | `GET` | `/arsenal/campaign-actions` | `arsenal_campaign_actions` |
 | `POST` | `/arsenal/campaign-actions/{campaign_action_id}/authz-promote` | `arsenal_promote_authz_replay` |
@@ -1687,6 +1691,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
 | `GET` | `/retests/finding/{finding_id:path}` | `list_finding_retests` |
 | `GET` | `/retests/{retest_id}` | `get_retest` |
+| `GET` | `/scan/contracts` | `get_scan_public_contract` |
 | `GET` | `/scans` | `list_scans` |
 | `POST` | `/scans` | `submit_scan` |
 | `POST` | `/scans/batch` | `submit_batch` |
@@ -1703,6 +1708,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
 | `GET` | `/scans/{scan_id}/device-activity` | `get_scan_device_activity` |
 | `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
+| `GET` | `/scans/{scan_id}/parity-artifact` | `get_scan_parity_artifact` |
 | `GET` | `/scans/{scan_id}/queue-delivery` | `get_scan_queue_delivery` |
 | `GET` | `/scans/{scan_id}/result` | `get_scan_result` |
 | `GET` | `/schedules` | `list_schedules` |
@@ -2061,8 +2067,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Names |
 |---|---|
-| `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `devices`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `devices`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
+| Deprecated compatibility aliases (sunset 2026-12-31) | `scan-full`, `scan-smart` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory

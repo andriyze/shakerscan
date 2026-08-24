@@ -184,7 +184,10 @@ def cli_flags() -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: row["flag"])
 
 
-def scanner_wrapper_commands() -> list[str]:
+DEPRECATED_WRAPPER_COMMANDS = frozenset({"scan-full", "scan-smart"})
+
+
+def _all_scanner_wrapper_commands() -> list[str]:
     path = ROOT / "scanner.sh"
     text = path.read_text(encoding="utf-8")
     markers = ('case "$COMMAND" in', "case $COMMAND in")
@@ -200,6 +203,22 @@ def scanner_wrapper_commands() -> list[str]:
             if re.fullmatch(r"[a-z][a-z0-9_-]*", command)
         )
     return sorted(commands)
+
+
+def scanner_wrapper_commands() -> list[str]:
+    """Return only the canonical wrapper command surface."""
+    return [
+        command for command in _all_scanner_wrapper_commands()
+        if command not in DEPRECATED_WRAPPER_COMMANDS
+    ]
+
+
+def scanner_wrapper_compatibility_commands() -> list[str]:
+    """Return aliases retained solely for the documented migration window."""
+    return [
+        command for command in _all_scanner_wrapper_commands()
+        if command in DEPRECATED_WRAPPER_COMMANDS
+    ]
 
 
 def make_targets() -> list[str]:
@@ -315,6 +334,7 @@ def render() -> str:
     agents = local_agents()
     flags = cli_flags()
     wrapper_commands = scanner_wrapper_commands()
+    compatibility_wrapper_commands = scanner_wrapper_compatibility_commands()
     make = make_targets()
     gates = release_gates()
     env = environment_variables()
@@ -341,7 +361,8 @@ def render() -> str:
             ["Tool adapters", len(adapters), "`api/command_arsenal.py`"],
             ["Local-agent adapters", len(agents), "`api/command_arsenal.py`"],
             ["Scanner CLI flags", len(flags), "`scanner/scanner.py`"],
-            ["Scanner wrapper commands", len(wrapper_commands), "`scanner.sh`"],
+            ["Canonical scanner wrapper commands", len(wrapper_commands), "`scanner.sh`"],
+            ["Deprecated wrapper aliases", len(compatibility_wrapper_commands), "`scanner.sh`"],
             ["Make targets", len(make), "`Makefile`"],
             ["Release gates", len(gates), "`scripts/release_gates.py`"],
             ["Runtime environment keys", len(env), "Python sources + Compose manifests"],
@@ -393,7 +414,8 @@ def render() -> str:
         "### Wrapper Commands, Make Targets, And Release Gates",
         "",
         *table(["Surface", "Names"], [
-            ["`scanner.sh` commands", ", ".join(code(name) for name in wrapper_commands)],
+            ["Canonical `scanner.sh` commands", ", ".join(code(name) for name in wrapper_commands)],
+            ["Deprecated compatibility aliases (sunset 2026-12-31)", ", ".join(code(name) for name in compatibility_wrapper_commands)],
             ["Make targets", ", ".join(code(name) for name in make)],
             ["Release gates", ", ".join(code(name) for name in gates)],
         ]),
