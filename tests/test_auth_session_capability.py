@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
@@ -158,6 +159,106 @@ def test_target_bound_oauth_exchange_extracts_token_without_public_exposure():
         "/oauth/token?<redacted-query>"
     )
     assert public["observation"]["header_names"] == ["Authorization"]
+
+
+def test_oauth_session_records_bounded_lifecycle_and_evidence_receipt():
+    established_at = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+
+    async def request_executor(_origin, _args, **kwargs):
+        kwargs["private_response_sink"](_private_response(
+            200,
+            body=json.dumps({
+                "access_token": "worker-private-token",
+                "token_type": "Bearer",
+                "expires_in": 600,
+            }),
+        ))
+        return {"ok": True, "request": {"method": "POST"}, "response": {"status": 200}}
+
+    session = asyncio.run(establish_target_bound_http_session(
+        TargetBoundSessionCredential(
+            lane="primary",
+            auth_kind="oauth_client_credentials",
+            endpoint_url="/oauth/token",
+            binding_digest="e" * 64,
+            client_id="scanner-client",
+            secret="worker-private-secret",
+            profile_id="00000000-0000-4000-8000-000000000001",
+            profile_version=7,
+            principal="service-account",
+            compatible_capabilities=("auth.session.establish", "http.request"),
+        ),
+        target=TARGET,
+        request_executor=request_executor,
+        now=established_at,
+    ))
+
+    assert session.established is True
+    assert session.expires_at == established_at + timedelta(seconds=600)
+    assert session.refresh_after == established_at + timedelta(seconds=540)
+    assert session.profile_version == 7
+    public = session.execution_result()["observation"]
+    assert public["session_ref"] == session.session_ref
+    assert public["principal"] == "service-account"
+    assert public["evidence_receipt_digest"] == session.evidence_receipt_digest
+    assert len(public["evidence_receipt_digest"]) == 64
+
+
+def test_oauth_password_requires_explicit_profile_authorization():
+    try:
+        asyncio.run(establish_target_bound_http_session(
+            TargetBoundSessionCredential(
+                lane="primary",
+                auth_kind="oauth_password",
+                endpoint_url="/oauth/token",
+                binding_digest="f" * 64,
+                username="operator",
+                secret="worker-private-password",
+                client_id="scanner-client",
+            ),
+            target=TARGET,
+        ))
+    except ValueError as exc:
+        assert "explicit profile authorization" in str(exc)
+    else:
+        raise AssertionError("OAuth password flow was accepted without explicit authority")
+
+
+def test_form_login_reports_unsupported_additional_factor_before_submission():
+    calls = []
+
+    async def request_executor(_origin, args, **kwargs):
+        calls.append(args)
+        kwargs["private_response_sink"](_private_response(
+            200,
+            body=(
+                '<form action="/session" method="post">'
+                '<input type="text" name="username">'
+                '<input type="password" name="password">'
+                '<input type="text" name="totp_code">'
+                "</form>"
+            ),
+        ))
+        return {"ok": True, "request": {"method": "GET"}, "response": {"status": 200}}
+
+    session = asyncio.run(establish_target_bound_http_session(
+        TargetBoundSessionCredential(
+            lane="primary",
+            auth_kind="form_login",
+            endpoint_url="/login",
+            binding_digest="1" * 64,
+            username="operator",
+            secret="worker-private-password",
+        ),
+        target=TARGET,
+        request_executor=request_executor,
+    ))
+
+    assert session.established is False
+    assert session.error == (
+        "target login form requires an unsupported additional factor"
+    )
+    assert len(calls) == 1
 
 
 def test_form_action_outside_frozen_target_fails_before_credential_submission():

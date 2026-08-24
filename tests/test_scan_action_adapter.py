@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from hunt.capability_executor import CapabilityAdapterResult
+from capabilities.auth import TargetBoundSessionCredential, WorkerPrivateScanSession
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 from runtime.request_replay_executor import ReplayTransportResult
@@ -181,6 +182,97 @@ def test_database_neutral_dispatcher_never_treats_profile_reference_as_secret():
         name: 0 for name in action.requested_budget
     }
     assert receipt.errors == ("not_applicable",)
+
+
+def test_database_neutral_auth_uses_worker_private_session_contract(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    profile_id = str(uuid.uuid4())
+    action = _action("inputs.auth_primary", "auth.session.establish", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    now = datetime.now(timezone.utc)
+    key = generate_scan_private_state_key()
+    options = {
+        SCAN_PRIVATE_STATE_KEY_OPTION: key,
+        "login_username": "operator",
+        "login_password": "worker-private-password",
+        "login_url": "/login",
+        "resolved_credential_profiles": [{
+            "profile_id": profile_id,
+            "profile_version": 2,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "principal_label": "owner",
+            "scan_lane": "primary",
+            "allowed_capabilities": ["auth.session.establish", "http.request"],
+        }],
+    }
+    private_inputs = BrokerPrivateScanInputs.from_payload(
+        {
+            "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+            "lease_id": "lease-1",
+            "worker_id": "broker:worker-1",
+            "plan_digest": plan.plan_digest,
+            "target_binding_digest": TARGET.digest,
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+            "options": options,
+            "replay_plans": {},
+        },
+        lease_id="lease-1",
+        worker_id="broker:worker-1",
+        plan_digest=plan.plan_digest,
+        target_binding_digest=TARGET.digest,
+    )
+    captured = {}
+
+    async def establish(credential, *, target):
+        captured["credential"] = credential
+        captured["target"] = target
+        return WorkerPrivateScanSession(
+            lane="primary",
+            auth_kind="form_login",
+            binding_digest=credential.binding_digest,
+            established=True,
+            observation={"kind": "credential_session", "status": "established"},
+            error=None,
+            request_count=1,
+            _headers={"Cookie": "session=worker-private-cookie"},
+            session_ref=str(uuid.uuid4()),
+            profile_id=profile_id,
+            profile_version=2,
+            principal="owner",
+            established_at=now,
+            expires_at=now + timedelta(hours=1),
+            refresh_after=now + timedelta(minutes=55),
+            compatible_capabilities=("auth.session.establish", "http.request"),
+            evidence_receipt_digest="e" * 64,
+        )
+
+    monkeypatch.setattr(
+        action_adapter_module, "establish_target_bound_http_session", establish,
+    )
+    dispatcher = _dispatcher(
+        plan, Backend(), private_inputs=private_inputs,
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert isinstance(captured["credential"], TargetBoundSessionCredential)
+    assert captured["credential"].profile_id == profile_id
+    assert captured["credential"].principal == "owner"
+    assert captured["target"] == TARGET
+    checkpoints = [
+        item for item in receipt.observations
+        if item.get("kind") == "credential_session_state"
+    ]
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["session_ref"]
+    assert "worker-private-cookie" not in json.dumps(receipt.public_dict())
 
 
 def test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(monkeypatch):
@@ -417,13 +509,14 @@ def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
         actions=(action,),
     )
     key = generate_scan_private_state_key()
+    profile_id = str(uuid.uuid4())
     options = {
         SCAN_PRIVATE_STATE_KEY_OPTION: key,
         "login_username": "operator",
         "login_password": "worker-private-password",
         "login_url": "/login",
         "resolved_credential_profiles": [{
-            "profile_id": "profile-1",
+            "profile_id": profile_id,
             "profile_version": 1,
             "auth_kind": "form_login",
             "principal_slot": "primary",
@@ -441,6 +534,9 @@ def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
         lane="primary",
         credential_binding_digest=credential.binding_digest,
         headers={"Cookie": "session=worker-private-session"},
+        profile_id=profile_id,
+        profile_version=1,
+        principal="primary",
     )
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     private_inputs = BrokerPrivateScanInputs.from_payload(

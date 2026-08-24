@@ -10809,6 +10809,15 @@ async def _execute_scan_auth_session_capability(
                     lane=lane,
                     credential_binding_digest=credential.binding_digest,
                     headers=session.headers(),
+                    session_ref=session.session_ref,
+                    profile_id=session.profile_id,
+                    profile_version=session.profile_version,
+                    principal=session.principal,
+                    established_at=session.established_at,
+                    expires_at=session.expires_at,
+                    refresh_after=session.refresh_after,
+                    compatible_capabilities=session.compatible_capabilities,
+                    evidence_receipt_digest=session.evidence_receipt_digest,
                 )]
         return result
 
@@ -13475,6 +13484,9 @@ class _CanonicalLocalScanDispatcher:
                     target_binding_digest=self.target.digest,
                     lane=lane,
                     credential_binding_digest=credential.binding_digest,
+                    profile_id=credential.profile_id,
+                    profile_version=credential.profile_version,
+                    principal=credential.principal,
                 )
                 self.options = bind_scan_session_headers(
                     self.options, headers, lane=lane,

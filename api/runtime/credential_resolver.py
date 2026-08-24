@@ -366,6 +366,7 @@ class ResolvedCredential:
             "principal_profile_version": self.profile.current_version,
             "auth_kind": self.profile.auth_kind,
             "principal_slot": self.profile.principal_slot,
+            "principal_label": self.profile.principal_label,
             "target_kind": self.profile.target_kind,
             "approval_receipt_id": self.authority.approval_receipt_id,
             "scope_receipt_id": self.authority.scope_receipt_id,

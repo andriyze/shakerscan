@@ -144,6 +144,10 @@ class ScanInteractiveCredential:
     public_endpoint_path: str
     source: str
     profile_reference_count: int
+    profile_id: str | None
+    profile_version: int
+    principal: str
+    allowed_capabilities: tuple[str, ...]
     _username: str | None = field(default=None, repr=False)
     _secret: str = field(default="", repr=False)
     _client_id: str | None = field(default=None, repr=False)
@@ -179,6 +183,14 @@ class ScanInteractiveCredential:
             secret=self._secret,
             client_id=self._client_id,
             scopes=self._scopes,
+            profile_id=self.profile_id,
+            profile_version=self.profile_version,
+            principal=self.principal,
+            compatible_capabilities=self.allowed_capabilities,
+            oauth_password_explicitly_allowed=(
+                self.auth_kind == "oauth_password"
+                and self.source == "credential_profiles"
+            ),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -188,6 +200,10 @@ class ScanInteractiveCredential:
             "endpoint_path": self.public_endpoint_path,
             "source": self.source,
             "profile_reference_count": self.profile_reference_count,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version or None,
+            "principal": self.principal,
+            "compatible_capabilities": list(self.allowed_capabilities),
             "secret_values_visible": False,
         }
 
@@ -287,6 +303,7 @@ def resolve_scan_http_principal(
             "profile_version": int(item.get("profile_version") or 0),
             "auth_kind": str(item.get("auth_kind") or ""),
             "principal_slot": str(item.get("principal_slot") or ""),
+            "principal_label": str(item.get("principal_label") or "") or None,
             "lane": normalized_lane,
             "allowed_capabilities": sorted(
                 str(value) for value in item.get("allowed_capabilities") or ()
@@ -437,6 +454,7 @@ def resolve_scan_interactive_credential(
             "profile_version": int(item.get("profile_version") or 0),
             "auth_kind": str(item.get("auth_kind") or ""),
             "principal_slot": str(item.get("principal_slot") or ""),
+            "principal_label": str(item.get("principal_label") or "") or None,
             "lane": normalized_lane,
             "allowed_capabilities": sorted(
                 str(value) for value in item.get("allowed_capabilities") or ()
@@ -445,6 +463,10 @@ def resolve_scan_interactive_credential(
         })
     if capability_name and lane_refs and not refs:
         return None
+    if len(refs) > 1:
+        raise ScanCredentialError(
+            "Scan session principal resolves to more than one profile"
+        )
     ref_kinds = {item["auth_kind"] for item in refs if item["auth_kind"]}
     if ref_kinds and ref_kinds != {selected["auth_kind"]}:
         raise ScanCredentialError(
@@ -466,6 +488,12 @@ def resolve_scan_interactive_credential(
     binding_digest = hashlib.sha256(json.dumps(
         binding, sort_keys=True, separators=(",", ":"),
     ).encode()).hexdigest()
+    profile_ref = refs[0] if refs else {}
+    principal = str(
+        profile_ref.get("principal_label")
+        or profile_ref.get("principal_slot")
+        or normalized_lane
+    )
     return ScanInteractiveCredential(
         lane=normalized_lane,
         auth_kind=str(selected["auth_kind"]),
@@ -477,6 +505,13 @@ def resolve_scan_interactive_credential(
         ),
         source=str(binding["source"]),
         profile_reference_count=len(refs),
+        profile_id=str(profile_ref.get("profile_id") or "") or None,
+        profile_version=int(profile_ref.get("profile_version") or 0),
+        principal=principal,
+        allowed_capabilities=tuple(
+            str(item) for item in profile_ref.get("allowed_capabilities") or ()
+            if str(item)
+        ),
         _username=(
             str(selected["username"]) if selected["username"] is not None else None
         ),
@@ -604,6 +639,7 @@ def admit_scan_credential_profiles(
             "principal_slot": slot,
             "scan_lane": lane,
             "auth_kind": profile.auth_kind,
+            "principal_label": profile.principal_label,
             "allowed_capabilities": list(allowed),
             "credential_resolution_capability": resolution_capability,
             "source": "credential_profiles",

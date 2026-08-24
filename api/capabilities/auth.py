@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+import hashlib
 from html.parser import HTMLParser
 import json
 import re
 from typing import Any, Awaitable, Callable, Mapping
 import urllib.parse
+import uuid
 
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
 from runtime.models import TargetBinding
@@ -23,11 +26,18 @@ SESSION_AUTH_KINDS = frozenset({
 })
 MAX_SESSION_FORM_BYTES = 16_384
 MAX_SESSION_FIELDS = 50
+DEFAULT_SESSION_TTL_SECONDS = 3_600
+MIN_SESSION_TTL_SECONDS = 1
+MAX_SESSION_TTL_SECONDS = 86_400
 _FIELD_NAME = re.compile(r"^[^\x00-\x20\x7f]{1,120}$")
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$")
 _TOKEN_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9._~-]{0,39}$")
 _USERNAME_FIELD = re.compile(
     r"(?:^|[-_.])(user(?:name)?|email|login|identifier|j_username)(?:$|[-_.])",
+    re.IGNORECASE,
+)
+_ADDITIONAL_FACTOR_FIELD = re.compile(
+    r"(?:^|[-_.])(?:mfa|otp|totp|one[-_.]?time|verification[-_.]?code)(?:$|[-_.])",
     re.IGNORECASE,
 )
 _SUCCESS_REDIRECTS = frozenset({301, 302, 303, 307, 308})
@@ -47,6 +57,11 @@ class TargetBoundSessionCredential:
     secret: str = field(default="", repr=False)
     client_id: str | None = field(default=None, repr=False)
     scopes: tuple[str, ...] = ()
+    profile_id: str | None = None
+    profile_version: int = 0
+    principal: str | None = None
+    compatible_capabilities: tuple[str, ...] = ()
+    oauth_password_explicitly_allowed: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -67,6 +82,15 @@ class WorkerPrivateScanSession:
     error: str | None
     request_count: int
     _headers: Mapping[str, str] = field(repr=False)
+    session_ref: str | None = None
+    profile_id: str | None = None
+    profile_version: int = 0
+    principal: str | None = None
+    established_at: datetime | None = None
+    expires_at: datetime | None = None
+    refresh_after: datetime | None = None
+    compatible_capabilities: tuple[str, ...] = ()
+    evidence_receipt_digest: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -149,6 +173,17 @@ def _validate_material(credential: TargetBoundSessionCredential) -> None:
         raise SessionCredentialContractError("OAuth client credentials require a client ID")
     if credential.auth_kind == "oauth_password" and not credential.username:
         raise SessionCredentialContractError("OAuth password flow requires a username")
+    if (
+        credential.auth_kind == "oauth_password"
+        and not credential.oauth_password_explicitly_allowed
+    ):
+        raise SessionCredentialContractError(
+            "OAuth password flow requires explicit profile authorization"
+        )
+    if credential.profile_version < 0:
+        raise SessionCredentialContractError("session credential version is invalid")
+    if credential.profile_id and credential.profile_version < 1:
+        raise SessionCredentialContractError("session credential version is invalid")
 
 
 def _endpoint_args(
@@ -205,6 +240,14 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
         ), "")
         if not password:
             continue
+        if any(
+            item.get("type") != "hidden"
+            and _ADDITIONAL_FACTOR_FIELD.search(str(item.get("name") or ""))
+            for item in inputs
+        ):
+            raise SessionCredentialContractError(
+                "target login form requires an unsupported additional factor"
+            )
         username = next((
             str(item.get("name") or "") for item in inputs
             if item.get("name") and (
@@ -295,6 +338,42 @@ def _session_headers(
     return result, sorted(safe_cookies)
 
 
+def _session_timing(
+    response: WorkerPrivateHTTPResponse,
+    *,
+    now: datetime,
+) -> tuple[datetime, datetime]:
+    """Return bounded expiry/refresh times without retaining token response values."""
+    ttl = DEFAULT_SESSION_TTL_SECONDS
+    try:
+        payload = json.loads(response.body().decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    supplied_ttl = False
+    if isinstance(payload, Mapping):
+        raw_ttl = payload.get("expires_in")
+        if isinstance(raw_ttl, (int, float)) and not isinstance(raw_ttl, bool):
+            ttl = int(raw_ttl)
+            supplied_ttl = True
+        elif isinstance(raw_ttl, str) and raw_ttl.strip().isdigit():
+            ttl = int(raw_ttl.strip())
+            supplied_ttl = True
+    if supplied_ttl and ttl <= 0:
+        raise SessionCredentialContractError(
+            "session exchange returned an expired identity"
+        )
+    ttl = max(MIN_SESSION_TTL_SECONDS, min(MAX_SESSION_TTL_SECONDS, ttl))
+    expires_at = now + timedelta(seconds=ttl)
+    refresh_lead = min(ttl, max(1, min(300, ttl // 10)))
+    return expires_at, expires_at - timedelta(seconds=refresh_lead)
+
+
+def _session_evidence_digest(observation: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(
+        dict(observation), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+
+
 def _bounded_form_size(value: Mapping[str, Any]) -> None:
     encoded = urllib.parse.urlencode({str(key): str(item) for key, item in value.items()})
     if len(encoded.encode("utf-8")) > MAX_SESSION_FORM_BYTES:
@@ -332,6 +411,7 @@ async def establish_target_bound_http_session(
     *,
     target: TargetBinding,
     request_executor: SessionRequestExecutor = execute_bound_http_request,
+    now: datetime | None = None,
 ) -> WorkerPrivateScanSession:
     """Perform one explicit, pinned form/OAuth exchange and retain values in memory."""
     _validate_material(credential)
@@ -340,6 +420,7 @@ async def establish_target_bound_http_session(
     )
     request_count = 0
     latest: WorkerPrivateHTTPResponse | None = None
+    established_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
     def capture(response: WorkerPrivateHTTPResponse) -> None:
         nonlocal latest
@@ -438,6 +519,25 @@ async def establish_target_bound_http_session(
             request_count=request_count,
             reason=None,
         )
+        expires_at, refresh_after = _session_timing(
+            latest, now=established_at,
+        )
+        session_ref = str(uuid.uuid4())
+        principal = credential.principal or credential.lane
+        observation.update({
+            "session_ref": session_ref,
+            "profile_id": credential.profile_id,
+            "profile_version": credential.profile_version or None,
+            "principal": principal,
+            "established_at": established_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "refresh_after": refresh_after.isoformat(),
+            "compatible_capabilities": sorted(
+                set(credential.compatible_capabilities)
+            ),
+        })
+        evidence_digest = _session_evidence_digest(observation)
+        observation["evidence_receipt_digest"] = evidence_digest
         return WorkerPrivateScanSession(
             lane=credential.lane,
             auth_kind=credential.auth_kind,
@@ -447,6 +547,17 @@ async def establish_target_bound_http_session(
             error=None,
             request_count=request_count,
             _headers=headers,
+            session_ref=session_ref,
+            profile_id=credential.profile_id,
+            profile_version=credential.profile_version,
+            principal=principal,
+            established_at=established_at,
+            expires_at=expires_at,
+            refresh_after=refresh_after,
+            compatible_capabilities=tuple(sorted(
+                set(credential.compatible_capabilities)
+            )),
+            evidence_receipt_digest=evidence_digest,
         )
     except SessionCredentialContractError as exc:
         reason = str(exc)
