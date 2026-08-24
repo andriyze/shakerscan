@@ -264,6 +264,53 @@ def test_resume_reuses_terminal_results_and_only_runs_remaining_actions():
     assert backend.acquired == ["baseline.security_txt", "finalize.report"]
 
 
+def test_orchestrator_emits_restored_running_and_settled_activity_events():
+    plan = _plan()
+    backend = FakeBackend(plan, "local")
+    backend.results[plan.actions[0].action_id] = _result(
+        plan.actions[0], status=CapabilityResultStatus.SUCCESS,
+    )
+    events = []
+
+    async def record(action, event, result):
+        events.append((
+            action.action_id,
+            event,
+            result.status.value if result is not None else None,
+        ))
+
+    report = _run(ScanOrchestrator(
+        backend=backend,
+        executor=FakeExecutor(),
+        event_callback=record,
+    ), plan)
+
+    assert report.status_matrix["finalize.report"] == "success"
+    assert events == [
+        ("baseline.http", "restored", "success"),
+        ("baseline.security_txt", "running", None),
+        ("baseline.security_txt", "settled", "success"),
+        ("finalize.report", "running", None),
+        ("finalize.report", "settled", "success"),
+    ]
+
+
+def test_orchestrator_observability_failure_cannot_fail_the_scan():
+    plan = _plan()
+    backend = FakeBackend(plan, "local")
+
+    async def broken_callback(*_args):
+        raise RuntimeError("unavailable log sink")
+
+    report = _run(ScanOrchestrator(
+        backend=backend,
+        executor=FakeExecutor(),
+        event_callback=broken_callback,
+    ), plan)
+
+    assert set(report.status_matrix.values()) == {"success"}
+
+
 def test_resume_blocks_dependents_when_private_prerequisite_cannot_be_restored():
     plan = _plan()
     backend = FakeBackend(plan, "local")

@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
 from runtime.models import ScanPolicy, TargetBinding
@@ -34,6 +34,7 @@ from runtime.sealed_inputs import (
     open_private_input,
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
+from scan.activity import scan_action_activity_event
 from scan.action_plan import ScanActionPlan, ScanActionPlanError
 from scan.continuation import ScanContinuationError, ScanPlanRevision
 from scan.broker_backend import (
@@ -549,6 +550,7 @@ async def _execute_broker_action_plan(
     plan_revision: ScanPlanRevision,
     worker_id: str,
     private_inputs: BrokerPrivateScanInputs | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run the shared ScanOrchestrator over the HTTPS action backend."""
     node_id = str(state["node_id"])
@@ -616,11 +618,40 @@ async def _execute_broker_action_plan(
         scope_receipt_id=target.scope_receipt_id,
         approval_receipt_id=dispatcher.policy.approval_receipt_id,
     )
+
+    def action_activity_callback(
+        active_plan: ScanActionPlan,
+        *,
+        progress_start: int,
+        progress_end: int,
+    ):
+        async def record(action, event, result) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(scan_action_activity_event(
+                plan=active_plan,
+                action=action,
+                event=event,
+                result=result,
+                progress_start=progress_start,
+                progress_end=progress_end,
+            ))
+
+        return record
+
+    initial_has_finalizer = any(
+        action.action_id == "finalize.report" for action in plan.actions
+    )
     orchestration = await ScanOrchestrator(
         backend=backend,
         executor=executor,
+        event_callback=action_activity_callback(
+            plan,
+            progress_start=5,
+            progress_end=95 if initial_has_finalizer else 45,
+        ),
     ).run(plan)
-    if not any(action.action_id == "finalize.report" for action in plan.actions):
+    if not initial_has_finalizer:
         if any(
             result.status.value == "cancelled"
             for result in orchestration.action_results.values()
@@ -710,6 +741,11 @@ async def _execute_broker_action_plan(
         orchestration = await ScanOrchestrator(
             backend=backend,
             executor=executor,
+            event_callback=action_activity_callback(
+                plan,
+                progress_start=45,
+                progress_end=95,
+            ),
         ).run(plan)
     final = orchestration.action_results.get("finalize.report")
     if final is None or final.observation_manifest_ref is None:
@@ -847,6 +883,7 @@ async def execute_lease(
                     plan_revision=plan_revision,
                     worker_id=action_worker_id,
                     private_inputs=private_inputs,
+                    progress_callback=progress_callback,
                 )
             else:
                 raise BrokerWorkerError(

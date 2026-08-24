@@ -179,6 +179,7 @@ from scan.action_plan import (
     request_collection_action_refs,
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
+from scan.activity import scan_action_activity_event
 from scan.action_store import PostgresScanActionStore
 from scan.operational_metrics import record_operational_event
 from scan.budget_allocator import allocate_scan_action_plan
@@ -7914,6 +7915,51 @@ async def update_scan_progress(scan_id: str, phase: str, progress: int, job_id: 
             pass
 
 
+def _append_scan_log_line(scan_id: str, line: str) -> None:
+    """Persist one bounded, generated Scan activity line for the UI."""
+    normalized = str(line or "").strip()[:1000]
+    if not normalized.startswith("[scan]"):
+        return
+    try:
+        redis_client = get_redis()
+        key = f"scan:{scan_id}:logs"
+        redis_client.rpush(key, normalized)
+        redis_client.ltrim(key, -SCAN_LOG_TAIL, -1)
+        redis_client.expire(key, SCAN_LOG_TTL_SECONDS)
+    except Exception:
+        pass
+
+
+def _local_scan_action_activity_callback(
+    *,
+    plan: ScanActionPlan,
+    scan_id: str,
+    job_id: str,
+    progress_start: int,
+    progress_end: int,
+) -> Callable[
+    [ScanAction, str, CapabilityResultReference | None], Awaitable[None]
+]:
+    async def record(action, event, result) -> None:
+        activity = scan_action_activity_event(
+            plan=plan,
+            action=action,
+            event=event,
+            result=result,
+            progress_start=progress_start,
+            progress_end=progress_end,
+        )
+        _append_scan_log_line(scan_id, activity["line"])
+        await update_scan_progress(
+            scan_id,
+            str(activity["phase"]),
+            int(activity["progress"]),
+            job_id=job_id,
+        )
+
+    return record
+
+
 _DEVICE_ACTIVITY_MESSAGES = {
     "device_inventory": "Starting device reachability and inventory checks",
     "device_tcp_discovery": "Scanning the requested TCP port scope",
@@ -12015,10 +12061,21 @@ async def _execute_reserved_deterministic_scan(
         scope_receipt_id=execution.target_binding.scope_receipt_id,
         approval_receipt_id=admission.plan.policy.approval_receipt_id,
     )
+    initial_has_finalizer = any(
+        action.action_id == "finalize.report" for action in plan.actions
+    )
     orchestration = await ScanOrchestrator(
-        backend=backend, executor=executor,
+        backend=backend,
+        executor=executor,
+        event_callback=_local_scan_action_activity_callback(
+            plan=plan,
+            scan_id=scan_id,
+            job_id=job_id,
+            progress_start=5,
+            progress_end=95 if initial_has_finalizer else 45,
+        ),
     ).run(plan)
-    if not any(action.action_id == "finalize.report" for action in plan.actions):
+    if not initial_has_finalizer:
         if any(
             result.status.value == "cancelled"
             for result in orchestration.action_results.values()
@@ -12067,7 +12124,15 @@ async def _execute_reserved_deterministic_scan(
             approval_receipt_id=admission.plan.policy.approval_receipt_id,
         )
         orchestration = await ScanOrchestrator(
-            backend=backend, executor=executor,
+            backend=backend,
+            executor=executor,
+            event_callback=_local_scan_action_activity_callback(
+                plan=plan,
+                scan_id=scan_id,
+                job_id=job_id,
+                progress_start=45,
+                progress_end=95,
+            ),
         ).run(plan)
     final_result = orchestration.action_results.get("finalize.report")
     if final_result is not None and final_result.status.value == "cancelled":

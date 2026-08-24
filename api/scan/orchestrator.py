@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import Awaitable, Callable, Mapping
 
 from .action_plan import SCAN_ACTION_PLAN_SCHEMA, ScanAction, ScanActionPlan
 from .capability_result import (
@@ -83,9 +83,28 @@ class ScanOrchestrator:
         *,
         backend: ScanExecutionBackend,
         executor: ScanActionExecutor,
+        event_callback: Callable[
+            [ScanAction, str, CapabilityResultReference | None], Awaitable[None]
+        ] | None = None,
     ) -> None:
         self._backend = backend
         self._executor = executor
+        self._event_callback = event_callback
+
+    async def _emit(
+        self,
+        action: ScanAction,
+        event: str,
+        result: CapabilityResultReference | None = None,
+    ) -> None:
+        """Emit best-effort observability without changing execution authority."""
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback(action, event, result)
+        except Exception:
+            # A log/progress sink must never change deterministic Scan results.
+            return
 
     @staticmethod
     def _validate_result(action: ScanAction, result: CapabilityResultReference) -> None:
@@ -164,6 +183,7 @@ class ScanOrchestrator:
             self._validate_result(action, stored)
             return stored
         validate_action_lease(lease, plan=plan, action=action)
+        await self._emit(action, "running")
         try:
             await self._backend.heartbeat(lease)
             result = await self._executor.execute(
@@ -197,6 +217,9 @@ class ScanOrchestrator:
         if not isinstance(plan, ScanActionPlan):
             raise ScanOrchestrationError("ScanOrchestrator requires a canonical action plan")
         results = await self._load_terminal_results(plan)
+        for action in plan.actions:
+            if action.action_id in results:
+                await self._emit(action, "restored", results[action.action_id])
         preexisting = frozenset(results)
         unavailable_private_state: set[str] = set()
         restore = getattr(self._executor, "restore_terminal_state", None)
@@ -227,6 +250,9 @@ class ScanOrchestrator:
                         action=action,
                         status=CapabilityResultStatus.CANCELLED,
                         reason=CapabilityResultReason.CANCELLED,
+                    )
+                    await self._emit(
+                        action, "settled", results[action.action_id],
                     )
                 break
 
@@ -276,6 +302,7 @@ class ScanOrchestrator:
                     )
                 self._validate_result(action, result)
                 results[action.action_id] = result
+                await self._emit(action, "settled", result)
                 progressed = True
                 break
             if not progressed:
