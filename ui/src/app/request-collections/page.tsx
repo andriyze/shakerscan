@@ -95,6 +95,7 @@ export default function RequestCollectionsPage() {
   const [environmentText, setEnvironmentText] = useState('')
   const [environmentName, setEnvironmentName] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
+  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})
 
   const [bindingOrigins, setBindingOrigins] = useState('')
   const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')
@@ -219,21 +220,37 @@ export default function RequestCollectionsPage() {
     setEnvironmentText('')
     setEnvironmentName('')
     setBaseUrl(defaultOrigin(selectedChoice))
+    setUploadErrors({})
     setUploaderOpen(true)
   }
 
   async function uploadCollection() {
     if (!targetId || !documentText.trim()) return
+    let document: unknown
+    let environment: unknown
+    try {
+      document = parseJson(documentText, 'Collection document')
+    } catch (cause) {
+      setUploadErrors({ document: cause instanceof Error ? cause.message : 'Collection document must be valid JSON.', form: 'Fix the highlighted collection document before uploading.' })
+      return
+    }
+    if (environmentText.trim()) {
+      try {
+        environment = parseJson(environmentText, 'Environment document')
+      } catch (cause) {
+        setUploadErrors({ environment: cause instanceof Error ? cause.message : 'Environment document must be valid JSON.', form: 'Fix the highlighted environment document before uploading.' })
+        return
+      }
+    }
+    setUploadErrors({})
     setBusy(true)
     try {
       const created = await createRequestCollection({
         target_id: targetId,
         name: uploadName.trim() || undefined,
         format: uploadFormat,
-        document: parseJson(documentText, 'Collection document'),
-        environment: environmentText.trim()
-          ? parseJson(environmentText, 'Environment document')
-          : undefined,
+        document,
+        environment,
         environment_name: environmentName.trim() || undefined,
         base_url: targetKind === 'device' && baseUrl.trim() ? baseUrl.trim() : undefined,
       })
@@ -242,7 +259,9 @@ export default function RequestCollectionsPage() {
       setSelectedId(created.id)
       toast.success('Encrypted request collection uploaded and indexed')
     } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : 'Collection upload failed')
+      const message = cause instanceof Error ? cause.message : 'Collection upload failed'
+      setUploadErrors({ form: message })
+      toast.error(message)
     } finally {
       setBusy(false)
     }
@@ -506,19 +525,24 @@ export default function RequestCollectionsPage() {
 
       <Modal open={uploaderOpen} onClose={() => setUploaderOpen(false)} title="Upload request collection" size="xl">
         <div className="space-y-4">
+          {uploadErrors.form && (
+            <div role="alert" className="rounded border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
+              {uploadErrors.form}
+            </div>
+          )}
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Collection name"><Input value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder="Production API" /></Field>
             <Field label="Format"><Select value={uploadFormat} onChange={(event) => setUploadFormat(event.target.value)}><option value="auto">Detect automatically</option><option value="postman">Postman</option><option value="har">HAR 1.2</option><option value="openapi">OpenAPI / Swagger</option></Select></Field>
           </div>
           <Field label="Collection JSON file">
-            <input type="file" accept=".json,.har,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) setDocumentText(value) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : 'Failed to read file'))} className="block w-full text-sm text-gray-400" />
+            <input type="file" accept=".json,.har,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) { setDocumentText(value); setUploadErrors({}) } }).catch((cause) => setUploadErrors({ document: cause instanceof Error ? cause.message : 'Failed to read file', form: 'The collection file could not be read.' }))} className="block w-full text-sm text-gray-400" />
           </Field>
-          <Field label="Collection JSON"><Textarea rows={10} value={documentText} onChange={(event) => setDocumentText(event.target.value)} placeholder="Paste a Postman, HAR, OpenAPI, or Swagger JSON document" /></Field>
+          <Field label="Collection JSON" error={uploadErrors.document} required><Textarea rows={10} value={documentText} onChange={(event) => { setDocumentText(event.target.value); setUploadErrors({}) }} placeholder="Paste a Postman, HAR, OpenAPI, or Swagger JSON document" /></Field>
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Environment name (optional)"><Input value={environmentName} onChange={(event) => setEnvironmentName(event.target.value)} /></Field>
-            <Field label="Environment JSON file (optional)"><input type="file" accept=".json,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) setEnvironmentText(value) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : 'Failed to read file'))} className="block w-full text-sm text-gray-400" /></Field>
+            <Field label="Environment JSON file (optional)"><input type="file" accept=".json,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) { setEnvironmentText(value); setUploadErrors({}) } }).catch((cause) => setUploadErrors({ environment: cause instanceof Error ? cause.message : 'Failed to read file', form: 'The environment file could not be read.' }))} className="block w-full text-sm text-gray-400" /></Field>
           </div>
-          <Field label="Environment JSON (optional)"><Textarea rows={5} value={environmentText} onChange={(event) => setEnvironmentText(event.target.value)} /></Field>
+          <Field label="Environment JSON (optional)" error={uploadErrors.environment}><Textarea rows={5} value={environmentText} onChange={(event) => { setEnvironmentText(event.target.value); setUploadErrors({}) }} /></Field>
           {targetKind === 'device' && <Field label="Device web base URL (optional)"><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://device.local:8443" /></Field>}
           <p className="rounded border border-emerald-800 bg-emerald-950/20 p-3 text-xs text-emerald-200">After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
           <div className="flex justify-end gap-3">
