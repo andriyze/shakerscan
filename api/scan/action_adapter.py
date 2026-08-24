@@ -765,6 +765,38 @@ class DatabaseNeutralScanActionDispatcher:
                 principal.headers(),
                 auth_kind="broker_session",
             )
+        bound_ref = action.capability_args.get("request_collection_ref")
+        option_ref = next((
+            dict(item)
+            for item in self.options.get("request_collections") or ()
+            if isinstance(item, Mapping)
+            and isinstance(bound_ref, Mapping)
+            and str(item.get("selection_id") or "")
+            == str(bound_ref.get("selection_id") or "")
+            and str(item.get("selection_digest") or "").lower()
+            == str(bound_ref.get("selection_digest") or "").lower()
+        ), {})
+        receipt_context: dict[str, Any] = {
+            "collection_id": str(option_ref.get("collection_id") or ""),
+            "selection_id": str(option_ref.get("selection_id") or ""),
+            "selection_digest": str(option_ref.get("selection_digest") or ""),
+            "collection_payload_digest": str(
+                option_ref.get("payload_sha256") or ""
+            ),
+            "environment_digest": str(
+                option_ref.get("environment_sha256") or ""
+            ),
+            "target_binding_digest": self.target.digest,
+        }
+        manifest_ref = action.capability_args.get("request_manifest_ref")
+        if isinstance(manifest_ref, Mapping):
+            receipt_context["request_manifest_digest"] = str(
+                manifest_ref.get("manifest_digest") or ""
+            )
+        if principal.authenticated and principal.binding_digest:
+            receipt_context["principal_binding_digest"] = (
+                principal.binding_digest
+            )
         wall = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         await heartbeat()
         outcome = await execute_replay_plan(
@@ -779,6 +811,7 @@ class DatabaseNeutralScanActionDispatcher:
             timeout_seconds=max(0.1, min(30.0, wall / len(plan.requests))),
             lease_seconds=max(30, wall + 5),
             authorized_budget=action.requested_budget,
+            receipt_context=receipt_context,
             receipt_capability_name=action.capability_name,
             receipt_input_digest=action.action_digest,
             cancelled=self.cancelled,

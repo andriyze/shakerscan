@@ -14997,6 +14997,14 @@ async def _bind_scan_replay_primary_credential(
             "principal_profile_ref": resolved.profile.profile_id,
             "principal_profile_version": resolved.profile.current_version,
             "principal_slot": resolved.profile.principal_slot,
+            "principal_binding_digest": hashlib.sha256(json.dumps({
+                "schema_version": "request-replay-principal-binding/v1",
+                "profile_id": resolved.profile.profile_id,
+                "profile_version": resolved.profile.current_version,
+                "principal_slot": resolved.profile.principal_slot,
+                "auth_kind": resolved.profile.auth_kind,
+                "target_binding_digest": target.digest,
+            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         }
     return bound, receipt_context
 
@@ -15410,8 +15418,21 @@ async def _execute_scan_request_collections(
             plan = narrow_replay_plan_to_request_manifest(
                 plan, canonical_request_manifest,
             )
+        receipt_context: dict[str, Any] = {
+            "collection_id": collection_id,
+            "selection_id": selection_id,
+            "selection_digest": expected_selection_digest,
+            "collection_payload_digest": expected_payload_sha256,
+            "target_binding_digest": target_binding.digest,
+        }
+        if expected_environment_sha256:
+            receipt_context["environment_digest"] = expected_environment_sha256
+        if canonical_request_manifest is not None:
+            receipt_context["request_manifest_digest"] = (
+                canonical_request_manifest.manifest_digest
+            )
         async with db_pool.acquire() as conn:
-            plan, receipt_context = await _bind_scan_replay_primary_credential(
+            plan, principal_receipt_context = await _bind_scan_replay_primary_credential(
                 conn,
                 plan=plan,
                 target=target_binding,
@@ -15419,6 +15440,8 @@ async def _execute_scan_request_collections(
                 options=persisted_options,
                 trusted_primary_headers=trusted_primary_headers,
             )
+        if principal_receipt_context:
+            receipt_context.update(principal_receipt_context)
         if private_replay_plan_holder is not None:
             if canonical_action is None:
                 raise ScanCollectionReplayContractError(
@@ -21358,6 +21381,15 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             default_origin=(target.allowed_origins[0] if target.allowed_origins else None),
             authorization=ReplayAuthorization(),
         )
+        receipt_context = {
+            "collection_id": collection_id,
+            "selection_id": selection_id,
+            "selection_digest": expected_selection_digest,
+            "collection_payload_digest": expected_payload_sha256,
+            "target_binding_digest": target.digest,
+        }
+        if expected_environment_sha256:
+            receipt_context["environment_digest"] = expected_environment_sha256
         if credential_profile_id:
             context_ref = select_hunt_principal_reference(context, principal_slot)
             if context_ref is None or context_ref["profile_id"] != credential_profile_id:
@@ -21393,11 +21425,19 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 resolved.http_headers().as_dict(),
                 auth_kind=resolved.profile.auth_kind,
             )
-            receipt_context = {
+            receipt_context.update({
                 "principal_profile_ref": resolved.profile.profile_id,
                 "principal_profile_version": resolved.profile.current_version,
                 "principal_slot": resolved.profile.principal_slot,
-            }
+                "principal_binding_digest": hashlib.sha256(json.dumps({
+                    "schema_version": "request-replay-principal-binding/v1",
+                    "profile_id": resolved.profile.profile_id,
+                    "profile_version": resolved.profile.current_version,
+                    "principal_slot": resolved.profile.principal_slot,
+                    "auth_kind": resolved.profile.auth_kind,
+                    "target_binding_digest": target.digest,
+                }, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            })
         additional_budget = {
             "agent_actions": 1,
             "tool_wall_seconds": max(

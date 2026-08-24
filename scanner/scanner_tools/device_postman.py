@@ -386,8 +386,10 @@ def _auth_values(auth: Any, variables: dict[str, str]) -> dict[str, str]:
     return values
 
 
-def _request_headers(request: dict[str, Any], auth: Any, variables: dict[str, str]) -> tuple[dict[str, str], list[str]]:
-    headers: dict[str, str] = {}
+def _request_headers(
+    request: dict[str, Any], auth: Any, variables: dict[str, str],
+) -> tuple[dict[str, str], list[tuple[str, str]], list[str]]:
+    header_items: list[tuple[str, str]] = []
     unresolved: set[str] = set()
     for item in request.get("header") or []:
         if not isinstance(item, dict) or item.get("disabled") is True:
@@ -400,19 +402,30 @@ def _request_headers(request: dict[str, Any], auth: Any, variables: dict[str, st
         if len(value) > MAX_HEADER_VALUE_CHARS:
             raise PostmanCollectionError("Postman header value exceeds the expanded size limit")
         if "\r" not in value and "\n" not in value:
-            headers[key] = value
-        if len(headers) >= MAX_HEADERS:
+            header_items.append((key, value))
+        if len(header_items) >= MAX_HEADERS:
             break
+
+    def contains(name: str) -> bool:
+        return any(key.lower() == name.lower() for key, _value in header_items)
+
     kind = _auth_type(auth)
     values = _auth_values(auth, variables)
-    if kind == "bearer" and values.get("token"):
-        headers.setdefault("Authorization", f"Bearer {values['token']}")
-    elif kind == "basic":
+    if kind == "bearer" and values.get("token") and not contains("Authorization"):
+        header_items.append(("Authorization", f"Bearer {values['token']}"))
+    elif kind == "basic" and not contains("Authorization"):
         username, password = values.get("username", ""), values.get("password", "")
-        headers.setdefault("Authorization", "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode())
+        header_items.append((
+            "Authorization",
+            "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode(),
+        ))
     elif kind == "apikey" and values.get("in", "header") == "header" and values.get("key"):
-        headers.setdefault(values["key"], values.get("value", ""))
-    return headers, sorted(unresolved)
+        if not contains(values["key"]):
+            header_items.append((values["key"], values.get("value", "")))
+    if len(header_items) > MAX_HEADERS:
+        raise PostmanCollectionError("Postman request contains too many headers")
+    headers = {key: value for key, value in header_items}
+    return headers, header_items, sorted(unresolved)
 
 
 def _request_body(request: dict[str, Any], variables: dict[str, str]) -> tuple[bytes, str | None, list[str], str | None]:
@@ -499,12 +512,17 @@ def resolve_requests(
         if len(url) > MAX_URL_CHARS:
             raise PostmanCollectionError("Postman URL exceeds the expanded size limit")
         url, unresolved_path = _substitute_path_variables(url, request_variables)
-        headers, unresolved_headers = _request_headers(request, auth, request_variables)
+        headers, header_items, unresolved_headers = _request_headers(
+            request, auth, request_variables,
+        )
         body, content_type, unresolved_body, body_error = _request_body(request, request_variables)
         if content_type and not any(key.lower() == "content-type" for key in headers):
             headers["Content-Type"] = content_type
+            header_items.append(("Content-Type", content_type))
         auth_kind = _auth_type(auth)
         auth_values = _auth_values(auth, request_variables)
+        raw_body = request.get("body") if isinstance(request.get("body"), dict) else {}
+        body_mode = content_type or str(raw_body.get("mode") or "none")
         if auth_kind == "apikey" and auth_values.get("in") == "query" and auth_values.get("key"):
             separator = "&" if "?" in url else "?"
             url += separator + urllib.parse.urlencode([(auth_values["key"], auth_values.get("value", ""))])
@@ -516,8 +534,10 @@ def resolve_requests(
             "url": url,
             "url_template": raw_template,
             "headers": headers,
+            "header_items": header_items,
             "sensitive_header_names": sorted(key.lower() for key in headers if _SENSITIVE_NAME_RE.search(key)),
             "body": body,
+            "body_mode": body_mode,
             "auth_type": auth_kind,
             "tags": _request_tags(request.get("tags")),
             "has_sensitive_material": auth_kind not in {"inherit", "noauth", ""} or any(_SENSITIVE_NAME_RE.search(key) for key in headers),

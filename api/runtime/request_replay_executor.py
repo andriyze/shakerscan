@@ -359,21 +359,57 @@ def _normalize_receipt_context(value: Mapping[str, Any] | None) -> dict[str, Any
     context = dict(value or {})
     if not context:
         return {}
-    profile_ref = str(context.get("principal_profile_ref") or "").strip()
-    principal_slot = str(context.get("principal_slot") or "").strip().lower()
-    try:
-        profile_version = int(context.get("principal_profile_version") or 0)
-    except (TypeError, ValueError) as exc:
-        raise ReplayExecutionError("principal receipt profile version is invalid") from exc
-    if not profile_ref or len(profile_ref) > 200 or profile_version < 1:
-        raise ReplayExecutionError("principal receipt profile binding is invalid")
-    if principal_slot not in {"primary", "secondary", "service"}:
-        raise ReplayExecutionError("principal receipt slot is invalid")
-    return {
-        "principal_profile_ref": profile_ref,
-        "principal_profile_version": profile_version,
-        "principal_slot": principal_slot,
+    allowed = {
+        "collection_id", "selection_id", "selection_digest",
+        "collection_payload_digest", "environment_digest",
+        "target_binding_digest", "request_manifest_digest",
+        "principal_binding_digest", "principal_profile_ref",
+        "principal_profile_version", "principal_slot",
     }
+    if set(context) - allowed:
+        raise ReplayExecutionError("replay receipt provenance contains unsupported fields")
+    normalized: dict[str, Any] = {}
+    for name in ("collection_id", "selection_id"):
+        item = str(context.get(name) or "").strip()
+        if item:
+            if len(item) > 200:
+                raise ReplayExecutionError("replay receipt provenance reference is invalid")
+            normalized[name] = item
+    for name in (
+        "selection_digest", "collection_payload_digest", "environment_digest",
+        "target_binding_digest", "request_manifest_digest",
+        "principal_binding_digest",
+    ):
+        item = str(context.get(name) or "").strip().lower()
+        if item:
+            if not re.fullmatch(r"[0-9a-f]{64}", item):
+                raise ReplayExecutionError(
+                    f"replay receipt provenance {name} is invalid"
+                )
+            normalized[name] = item
+
+    principal_fields = {
+        "principal_profile_ref", "principal_profile_version", "principal_slot",
+    }
+    if any(context.get(name) not in (None, "") for name in principal_fields):
+        profile_ref = str(context.get("principal_profile_ref") or "").strip()
+        principal_slot = str(context.get("principal_slot") or "").strip().lower()
+        try:
+            profile_version = int(context.get("principal_profile_version") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ReplayExecutionError(
+                "principal receipt profile version is invalid"
+            ) from exc
+        if not profile_ref or len(profile_ref) > 200 or profile_version < 1:
+            raise ReplayExecutionError("principal receipt profile binding is invalid")
+        if principal_slot not in {"primary", "secondary", "service"}:
+            raise ReplayExecutionError("principal receipt slot is invalid")
+        normalized.update({
+            "principal_profile_ref": profile_ref,
+            "principal_profile_version": profile_version,
+            "principal_slot": principal_slot,
+        })
+    return normalized
 
 
 def _receipt(

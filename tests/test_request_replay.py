@@ -68,6 +68,12 @@ def test_safe_replay_preserves_wire_semantics_but_public_view_redacts_values():
         "Authorization", "Cookie", "Content-Type"
     ]
     assert len(public["input_digest"]) == 64
+    assert public["retry_semantics"] == {
+        "durable_redelivery": "reuse_terminal_receipt",
+        "safe_methods": "new_action_new_reservation",
+        "state_changing_methods": "no_automatic_retry_fresh_approval",
+        "automatic_attempts_per_request": 1,
+    }
 
 
 def test_state_changing_replay_requires_active_policy_and_bound_approval():
@@ -200,3 +206,33 @@ def test_managed_principal_header_validation_fails_closed():
         bind_replay_credential_headers(
             plan, {"Authorization": "Bearer ok\r\nX-Evil: value"}, auth_kind="bearer_token",
         )
+
+
+def test_exact_replay_preserves_ordered_duplicate_headers_and_recomputes_wire_length():
+    request = _request()
+    request["header_items"] = [
+        ("X-Trace", "first"),
+        ("X-Trace", "second"),
+        ("Content-Length", "999999"),
+        ("Connection", "keep-alive"),
+        ("Content-Type", "application/octet-stream"),
+    ]
+    request["body"] = b"\x00\xff\x10binary"
+
+    plan = build_replay_plan(
+        [request], allowed_origins=["https://api.example.test"], limit=1,
+    )
+    replay_request = plan.requests[0]
+
+    assert replay_request.headers == (
+        ("X-Trace", "first"),
+        ("X-Trace", "second"),
+        ("Content-Type", "application/octet-stream"),
+    )
+    assert replay_request.body == b"\x00\xff\x10binary"
+    assert replay_request.wire_dict()["header_items"] == [
+        ("X-Trace", "first"),
+        ("X-Trace", "second"),
+        ("Content-Type", "application/octet-stream"),
+    ]
+    assert "Content-Length" not in replay_request.wire_dict()["headers"]

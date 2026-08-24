@@ -90,3 +90,28 @@ def test_private_replay_tamper_is_rejected_by_input_digest():
     payload["requests"][0]["body_b64"] = "dGFtcGVyZWQ="
     with pytest.raises(BrokerPrivateScanInputError, match="sealed digest"):
         replay_plan_from_private_payload(payload)
+
+
+def test_private_replay_round_trip_preserves_duplicate_header_lines():
+    plan = build_replay_plan(
+        [{
+            "id": "request-1",
+            "method": "GET",
+            "url": "https://app.example.test/api/items?tag=one&tag=two",
+            "header_items": [
+                ("X-Trace", "first"),
+                ("X-Trace", "second"),
+            ],
+            "body": b"\x00\xffbinary",
+        }],
+        allowed_origins=("https://app.example.test",),
+    )
+
+    restored = replay_plan_from_private_payload(private_replay_plan_payload(plan))
+
+    assert restored.requests[0].headers == (
+        ("X-Trace", "first"),
+        ("X-Trace", "second"),
+    )
+    assert restored.requests[0].body == b"\x00\xffbinary"
+    assert restored.input_digest == plan.input_digest

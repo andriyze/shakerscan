@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import sys
 
@@ -80,6 +81,34 @@ def test_har_requires_12_and_rejects_environment():
         device_request_formats.validate_request_document(bad)
     with pytest.raises(device_request_formats.RequestImportError, match="only for Postman"):
         device_request_formats.validate_request_document(_har(), {"values": []})
+
+
+def test_har_preserves_repeated_headers_and_decodes_bounded_binary_request_body():
+    document = _har()
+    request = document["log"]["entries"][0]["request"]
+    request["headers"] = [
+        {"name": "X-Trace", "value": "first"},
+        {"name": "X-Trace", "value": "second"},
+        {"name": "Content-Type", "value": "application/octet-stream"},
+    ]
+    request["cookies"] = []
+    body = b"\x00\xff\x10binary"
+    request["postData"] = {
+        "mimeType": "application/octet-stream",
+        "encoding": "base64",
+        "text": base64.b64encode(body).decode("ascii"),
+    }
+
+    payload, _summary = device_request_formats.validate_request_document(document)
+    resolved = device_request_formats.resolve_imported_requests(payload)[0]
+
+    assert resolved["header_items"] == [
+        ("X-Trace", "first"),
+        ("X-Trace", "second"),
+        ("Content-Type", "application/octet-stream"),
+    ]
+    assert resolved["body"] == body
+    assert resolved["error"] is None
 
 
 def test_openapi_generates_bounded_examples_and_preserves_state_gate_metadata():

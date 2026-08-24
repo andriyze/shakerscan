@@ -257,3 +257,80 @@ def test_non_ascii_request_ids_match_preview_and_worker_resolution():
     }
     payload, summary = device_postman.validate_and_summarize(collection)
     assert summary["requests"][0]["id"] == device_postman.resolve_requests(payload)[0]["id"]
+
+
+def test_postman_preserves_repeated_query_and_header_values_for_exact_replay():
+    collection = {
+        "info": {"name": "Repeated wire fields"},
+        "item": [{
+            "name": "Repeated",
+            "request": {
+                "method": "GET",
+                "url": "https://tv.local/items?tag=one&tag=two&empty=",
+                "header": [
+                    {"key": "X-Trace", "value": "first"},
+                    {"key": "X-Trace", "value": "second"},
+                ],
+            },
+        }],
+    }
+
+    payload, _summary = device_postman.validate_and_summarize(collection)
+    request = device_postman.resolve_requests(payload)[0]
+
+    assert request["url"].endswith("?tag=one&tag=two&empty=")
+    assert request["header_items"] == [
+        ("X-Trace", "first"),
+        ("X-Trace", "second"),
+    ]
+    # Compatibility consumers still see the final value, but the replay plan
+    # consumes ``header_items`` as the authoritative ordered representation.
+    assert request["headers"]["X-Trace"] == "second"
+
+
+def test_postman_preserves_urlencoded_json_graphql_and_multipart_wire_modes():
+    collection = {
+        "info": {"name": "Body modes"},
+        "item": [
+            {"name": "Form", "request": {
+                "method": "POST", "url": "https://tv.local/form",
+                "body": {"mode": "urlencoded", "urlencoded": [
+                    {"key": "tag", "value": "one"},
+                    {"key": "tag", "value": "two"},
+                ]},
+            }},
+            {"name": "JSON", "request": {
+                "method": "POST", "url": "https://tv.local/json",
+                "body": {"mode": "raw", "raw": '{"exact":true}',
+                         "options": {"raw": {"language": "json"}}},
+            }},
+            {"name": "GraphQL", "request": {
+                "method": "POST", "url": "https://tv.local/graphql",
+                "body": {"mode": "graphql", "graphql": {
+                    "query": "query Q($id: ID!) { item(id: $id) { id } }",
+                    "variables": '{"id":"7"}',
+                }},
+            }},
+            {"name": "Multipart", "request": {
+                "method": "POST", "url": "https://tv.local/multipart",
+                "body": {"mode": "formdata", "formdata": [
+                    {"key": "note", "value": "exact", "type": "text"},
+                ]},
+            }},
+        ],
+    }
+
+    payload, _summary = device_postman.validate_and_summarize(collection)
+    form, json_request, graphql, multipart = device_postman.resolve_requests(payload)
+
+    assert form["body"] == b"tag=one&tag=two"
+    assert form["body_mode"] == "application/x-www-form-urlencoded"
+    assert json_request["body"] == b'{"exact":true}'
+    assert json_request["body_mode"] == "application/json"
+    assert graphql["body"] == (
+        b'{"query":"query Q($id: ID!) { item(id: $id) { id } }",'
+        b'"variables":{"id":"7"}}'
+    )
+    assert graphql["body_mode"] == "application/json"
+    assert multipart["body_mode"].startswith("multipart/form-data; boundary=")
+    assert b'name="note"' in multipart["body"]

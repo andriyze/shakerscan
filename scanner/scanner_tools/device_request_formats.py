@@ -8,6 +8,7 @@ contract, so destination pinning and state-changing authorization remain in
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -226,18 +227,37 @@ def _resolve_har(document: Any, *, max_requests: int = MAX_REQUESTS) -> list[dic
             continue
         method = str(request.get("method") or "GET").strip().upper()
         url = str(request.get("url") or "").strip()
-        headers = dict(_header_rows(request.get("headers")))
+        header_items = _header_rows(request.get("headers"))
+        headers = dict(header_items)
         cookies = []
         for cookie in request.get("cookies") or []:
             if isinstance(cookie, dict) and cookie.get("name"):
                 cookies.append(f"{cookie['name']}={cookie.get('value', '')}")
         if cookies and not any(key.lower() == "cookie" for key in headers):
             headers["Cookie"] = "; ".join(cookies)
+            header_items.append(("Cookie", headers["Cookie"]))
         post_data = request.get("postData") if isinstance(request.get("postData"), dict) else {}
         body = b""
         body_error = None
         if isinstance(post_data.get("text"), str):
-            body = post_data["text"].encode("utf-8")
+            body_encoding = str(
+                post_data.get("encoding") or post_data.get("_encoding") or ""
+            ).strip().lower()
+            if body_encoding in {"base64", "base64url"}:
+                try:
+                    encoded = post_data["text"]
+                    if body_encoding == "base64url":
+                        encoded += "=" * (-len(encoded) % 4)
+                        body = base64.urlsafe_b64decode(encoded.encode("ascii"))
+                    else:
+                        body = base64.b64decode(encoded, validate=True)
+                except (ValueError, UnicodeEncodeError, base64.binascii.Error):
+                    body_error = "invalid_base64_request_body"
+                    body = b""
+            elif body_encoding:
+                body_error = "unsupported_request_body_encoding"
+            else:
+                body = post_data["text"].encode("utf-8")
         elif isinstance(post_data.get("params"), list):
             pairs = [
                 (str(item.get("name")), str(item.get("value") or ""))
@@ -247,6 +267,7 @@ def _resolve_har(document: Any, *, max_requests: int = MAX_REQUESTS) -> list[dic
         mime_type = str(post_data.get("mimeType") or "").strip()
         if body and mime_type and not any(key.lower() == "content-type" for key in headers):
             headers["Content-Type"] = mime_type
+            header_items.append(("Content-Type", mime_type))
         if len(body) > MAX_BODY_BYTES:
             body, body_error = b"", "request_body_exceeds_512_kib"
         has_sensitive = bool(cookies) or any(_SENSITIVE_NAME_RE.search(key) for key in headers)
@@ -258,6 +279,7 @@ def _resolve_har(document: Any, *, max_requests: int = MAX_REQUESTS) -> list[dic
             "url": url,
             "url_template": url,
             "headers": headers,
+            "header_items": header_items,
             "sensitive_header_names": sorted(key.lower() for key in headers if _SENSITIVE_NAME_RE.search(key)),
             "body": body,
             "body_mode": mime_type or ("raw" if body else "none"),

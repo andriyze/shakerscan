@@ -438,6 +438,42 @@ def test_canonical_action_can_bind_the_public_replay_adapter_identity():
     assert outcome.receipt.adapter_version == "1"
 
 
+def test_replay_receipt_preserves_content_free_source_authority_provenance():
+    context = {
+        "collection_id": "10000000-0000-4000-8000-000000000001",
+        "selection_id": "20000000-0000-4000-8000-000000000002",
+        "selection_digest": "a" * 64,
+        "collection_payload_digest": "b" * 64,
+        "environment_digest": "c" * 64,
+        "target_binding_digest": "d" * 64,
+        "request_manifest_digest": "e" * 64,
+        "principal_binding_digest": "f" * 64,
+        "principal_profile_ref": "30000000-0000-4000-8000-000000000003",
+        "principal_profile_version": 4,
+        "principal_slot": "primary",
+    }
+    outcome = asyncio.run(execute_replay_plan(
+        _plan(),
+        target=_target(),
+        owner_kind="scan",
+        owner_id="scan-1",
+        worker_id="worker-1",
+        limits={"http_requests": 10},
+        consumed={"http_requests": 0},
+        transport=FakeTransport([_result()]),
+        receipt_context=context,
+        clock=Clock(),
+    ))
+
+    assert {
+        name: outcome.receipt.redacted_execution[name]
+        for name in context
+    } == context
+    rendered = repr(outcome.receipt.public_dict())
+    assert "header-secret" not in rendered
+    assert "body-secret" not in rendered
+
+
 def test_executor_requires_bounded_transport_results():
     with pytest.raises(ReplayExecutionError, match="capture limit"):
         ReplayTransportResult(

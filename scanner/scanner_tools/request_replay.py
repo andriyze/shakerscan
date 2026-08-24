@@ -124,10 +124,22 @@ def _redacted_url(value: str) -> str:
 def _wire_headers(value: Any) -> tuple[tuple[str, str], ...]:
     if value is None:
         return ()
-    if not isinstance(value, Mapping):
-        raise RequestReplayError("request headers must be an object")
+    if isinstance(value, Mapping):
+        raw_rows = list(value.items())
+    elif isinstance(value, (list, tuple)):
+        raw_rows = []
+        for item in value:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise RequestReplayError(
+                    "request header items must contain name/value pairs"
+                )
+            raw_rows.append((item[0], item[1]))
+    else:
+        raise RequestReplayError(
+            "request headers must be an object or ordered name/value pairs"
+        )
     rows: list[tuple[str, str]] = []
-    for raw_name, raw_value in value.items():
+    for raw_name, raw_value in raw_rows:
         name = str(raw_name or "").strip()
         header_value = str(raw_value or "")
         if not name or len(name) > 200 or not _HEADER_NAME_RE.fullmatch(name):
@@ -206,7 +218,11 @@ class ReplayRequest:
             "request_id": self.request_id,
             "method": self.method,
             "url": self.url,
+            # ``headers`` is retained for worker-private compatibility consumers.
+            # ``header_items`` is authoritative because an HTTP collection may
+            # intentionally contain repeated field lines.
             "headers": dict(self.headers),
+            "header_items": list(self.headers),
             "body": self.body,
             "body_mode": self.body_mode,
             "auth_type": self.auth_type,
@@ -296,6 +312,18 @@ class ReplayPlan:
             "allowed_origins": list(self.allowed_origins),
             "default_origin": self.default_origin,
             "authorization": self.authorization.public_dict(),
+            "retry_semantics": {
+                # A queue redelivery reuses the terminal durable receipt. It does
+                # not send the imported request a second time.
+                "durable_redelivery": "reuse_terminal_receipt",
+                # Read failures may be retried only by admitting a new action and
+                # reserving a new attempt; the adapter never retries implicitly.
+                "safe_methods": "new_action_new_reservation",
+                # Writes are never automatically retried because a missing
+                # response cannot prove the target did not commit the mutation.
+                "state_changing_methods": "no_automatic_retry_fresh_approval",
+                "automatic_attempts_per_request": 1,
+            },
             "input_digest": self.input_digest,
             "requests": [request.public_dict() for request in self.requests],
             "secret_values_visible": False,
@@ -354,7 +382,11 @@ def build_replay_plan(
             folder=str(row.get("folder") or "")[:500],
             method=method,
             url=url,
-            headers=_wire_headers(row.get("headers")),
+            headers=_wire_headers(
+                row.get("header_items")
+                if row.get("header_items") is not None
+                else row.get("headers")
+            ),
             body=_body_bytes(row.get("body")),
             body_mode=str(row.get("body_mode") or "none")[:100],
             auth_type=str(row.get("auth_type") or "none")[:200],

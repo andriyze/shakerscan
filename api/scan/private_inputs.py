@@ -131,14 +131,9 @@ def replay_plan_from_private_payload(value: Mapping[str, Any]) -> ReplayPlan:
             not isinstance(item, list) or len(item) != 2 for item in headers
         ):
             raise BrokerPrivateScanInputError("private replay headers are invalid")
-        header_map: dict[str, str] = {}
+        header_items: list[tuple[str, str]] = []
         for name, item in headers:
-            normalized_name = str(name)
-            if normalized_name in header_map:
-                raise BrokerPrivateScanInputError(
-                    "private replay headers contain duplicate names"
-                )
-            header_map[normalized_name] = str(item)
+            header_items.append((str(name), str(item)))
         request_id = str(raw.get("request_id") or "")
         requests.append({
             "id": request_id,
@@ -146,7 +141,8 @@ def replay_plan_from_private_payload(value: Mapping[str, Any]) -> ReplayPlan:
             "folder": str(raw.get("folder") or ""),
             "method": str(raw.get("method") or ""),
             "url": str(raw.get("url") or ""),
-            "headers": header_map,
+            "headers": dict(header_items),
+            "header_items": header_items,
             "body": _decode_body(raw.get("body_b64")),
             "body_mode": str(raw.get("body_mode") or "none"),
             "auth_type": str(raw.get("auth_type") or "none"),
