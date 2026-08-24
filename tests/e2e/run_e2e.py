@@ -568,6 +568,31 @@ def _dast_fixture_authority() -> tuple[str, str, dict[str, dict[str, str]]]:
                     "url": f"{fixture_target}/dast/xss",
                 },
             },
+            {
+                "name": "Exact JSON body",
+                "request": {
+                    "method": "POST",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": {"mode": "raw", "raw": '{"name":"exact-json"}'},
+                    "url": f"{fixture_target}/dast/json",
+                },
+            },
+            {
+                "name": "Owner reads owner order",
+                "request": {
+                    "method": "GET",
+                    "header": [{"key": "Authorization", "value": "Bearer parity-owner"}],
+                    "url": f"{fixture_target}/authz/orders/owner-order",
+                },
+            },
+            {
+                "name": "Attacker reads owner order",
+                "request": {
+                    "method": "GET",
+                    "header": [{"key": "Authorization", "value": "Bearer parity-attacker"}],
+                    "url": f"{fixture_target}/authz/orders/owner-order",
+                },
+            },
         ],
     }
     _, collection = H.post("/request-collections", {
@@ -592,16 +617,24 @@ def _dast_fixture_authority() -> tuple[str, str, dict[str, dict[str, str]]]:
         raise RuntimeError(f"DAST fixture binding rejected: {bound}")
 
     selections: dict[str, dict[str, str]] = {}
-    for family in ("sqli", "xss"):
+    selection_specs = {
+        "sqli": (r"/dast/sqli$", 1),
+        "xss": (r"/dast/xss$", 1),
+        "parity": (
+            r"(/dast/(sqli|xss|json)|/authz/orders/owner-order)$",
+            5,
+        ),
+    }
+    for family, (path_regex, max_requests) in selection_specs.items():
         _, selected = H.post(
             f"/request-collections/{collection_id}/selections",
             {
                 "name": f"e2e-{family}",
                 "binding_id": binding_id,
                 "replay_policy": "confirmed_active",
-                "path_regex": f"/dast/{family}$",
+                "path_regex": path_regex,
                 "safe_methods_only": False,
-                "max_requests": 1,
+                "max_requests": max_requests,
             },
         )
         selection_id = str((selected.get("selection") or {}).get("id") or "")
