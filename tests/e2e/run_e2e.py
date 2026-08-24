@@ -458,7 +458,7 @@ def run_platform() -> H.Scorecard:
             isinstance(workers.get("workers"), list)
             and isinstance(workers.get("stale_count"), int)
             and fleet.get("status") in {
-                "ready", "configured", "disabled", "unsupported", "not_ready",
+                "enabled", "ready", "configured", "disabled", "unsupported", "not_ready",
             },
             f"workers={workers.get('count')} fleet_status={fleet.get('status')}",
         )
