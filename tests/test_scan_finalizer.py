@@ -109,6 +109,52 @@ def test_finalizer_projects_content_free_runtime_destinations_from_observations(
     assert "token" not in str(report["runtime_destinations"])
 
 
+def test_finalizer_projects_pinned_http_header_posture_findings():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "status": 200,
+            "selected_headers": {
+                "content-security-policy": "default-src 'self'",
+                "referrer-policy": "",
+                "permissions-policy": "",
+                "strict-transport-security": "",
+            },
+        },
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert {item["title"] for item in report["findings"]} == {
+        "Missing Referrer Policy header",
+        "Missing Permissions Policy header",
+        "Missing HTTP Strict Transport Security header",
+    }
+    assert all(item["verified"] is True for item in report["findings"])
+    assert all(
+        item["evidence"]["pinned_address"] == "192.0.2.10"
+        for item in report["findings"]
+    )
+
+
 def test_finalizer_promotes_only_deterministic_proof_contracts():
     xss = _action("verify.xss", 0, capability_name="xss.verify")
     sqli = _action(

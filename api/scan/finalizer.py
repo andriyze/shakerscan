@@ -71,6 +71,7 @@ def _findings_for_action(
     findings: list[dict[str, Any]] = []
     receipt = _receipt(result)
     allowed_kinds = {
+        "http.request": {"http_observation"},
         "xss.verify": {"xss_alert"},
         "sqli.verify": {"sqli_finding"},
         "xss.request_verify": {"request_body_verification"},
@@ -84,7 +85,65 @@ def _findings_for_action(
         kind = str(item.get("kind") or "")
         if kind not in allowed_kinds:
             continue
-        if kind == "xss_alert" and item.get("proof_state") == "verified":
+        if kind == "http_observation" and result.action_id == "baseline.http":
+            request = (
+                dict(item.get("request") or {})
+                if isinstance(item.get("request"), Mapping) else {}
+            )
+            response = (
+                dict(item.get("response") or {})
+                if isinstance(item.get("response"), Mapping) else {}
+            )
+            headers = (
+                dict(response.get("selected_headers") or {})
+                if isinstance(response.get("selected_headers"), Mapping) else {}
+            )
+            status = response.get("status")
+            if (
+                headers
+                and isinstance(status, int)
+                and 200 <= status < 400
+            ):
+                origin = request.get("origin") or response.get("final_url")
+                scheme = urllib.parse.urlsplit(str(origin or "")).scheme.lower()
+                expected_headers = [
+                    ("content-security-policy", "Content Security Policy"),
+                    ("referrer-policy", "Referrer Policy"),
+                    ("permissions-policy", "Permissions Policy"),
+                ]
+                if scheme == "https":
+                    expected_headers.append((
+                        "strict-transport-security", "HTTP Strict Transport Security",
+                    ))
+                for header_name, display_name in expected_headers:
+                    if str(headers.get(header_name) or "").strip():
+                        continue
+                    finding = _base_finding(
+                        tool="http_baseline",
+                        title=f"Missing {display_name} header",
+                        severity="low",
+                        cwe="CWE-693",
+                        url=origin,
+                        evidence={
+                            "url": origin,
+                            "status": status,
+                            "header": header_name,
+                            "pinned_address": request.get("pinned_address"),
+                            "canonical_capability": "http.request",
+                            "capability_receipt": receipt,
+                        },
+                    )
+                    finding.update({
+                        "verified": True,
+                        "suspected": False,
+                        "needs_verification": False,
+                        "proof_state": "verified",
+                        "verification_reason": (
+                            "Pinned deterministic HTTP response omitted the header"
+                        ),
+                    })
+                    findings.append(finding)
+        elif kind == "xss_alert" and item.get("proof_state") == "verified":
             finding = _base_finding(
                 tool="dalfox",
                 title="Verified cross-site scripting",
