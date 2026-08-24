@@ -1376,8 +1376,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 361 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 304 | `api/api.py` |
+| Public REST operations | 374 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 317 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1385,14 +1385,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Scanner CLI flags | 161 | `scanner/scanner.py` |
 | Scanner wrapper commands | 28 | `scanner.sh` |
 | Make targets | 14 | `Makefile` |
-| Release gates | 14 | `scripts/release_gates.py` |
-| Runtime environment keys | 355 | Python sources + Compose manifests |
+| Release gates | 17 | `scripts/release_gates.py` |
+| Runtime environment keys | 354 | Python sources + Compose manifests |
 | Scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Slash commands | 15 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 89 | `db/init.sql` + migrations |
+| Durable tables | 94 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1554,7 +1554,15 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
 | `POST` | `/fleet/acceptance/lease-probe` | `run_fleet_acceptance_lease_probe` |
 | `POST` | `/fleet/broker/nodes/{node_id}/lease` | `lease_broker_job` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/heartbeat` | `heartbeat_broker_scan_action` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease` | `lease_broker_scan_action` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/observations` | `get_broker_scan_action_observations` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/result` | `settle_broker_scan_action` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/status` | `get_broker_scan_action_status` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/work-manifest` | `get_broker_scan_action_work_manifest` |
 | `PUT` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/artifacts` | `upload_broker_job_artifact` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/cancel-status` | `get_broker_scan_cancel_status` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/continuation` | `continue_broker_scan_action_plan` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat` | `heartbeat_broker_job` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/result` | `submit_broker_job_result` |
 | `POST` | `/fleet/join-tokens` | `create_fleet_join_token` |
@@ -1682,11 +1690,16 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/scans` | `list_scans` |
 | `POST` | `/scans` | `submit_scan` |
 | `POST` | `/scans/batch` | `submit_batch` |
+| `POST` | `/scans/compat` | `submit_scan_compat` |
+| `POST` | `/scans/compat/batch` | `submit_batch_compat` |
 | `GET` | `/scans/{scan_id}` | `get_scan` |
+| `GET` | `/scans/{scan_id}/actions` | `get_scan_actions` |
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
 | `GET` | `/scans/{scan_id}/artifacts` | `list_scan_artifacts` |
 | `GET` | `/scans/{scan_id}/artifacts/{artifact_id}` | `download_scan_artifact` |
 | `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
+| `GET` | `/scans/{scan_id}/capabilities` | `get_scan_capabilities` |
+| `GET` | `/scans/{scan_id}/coverage` | `get_scan_coverage` |
 | `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
 | `GET` | `/scans/{scan_id}/device-activity` | `get_scan_device_activity` |
 | `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
@@ -2050,7 +2063,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 |---|---|
 | `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `devices`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `research`, `reset`, `restart`, `scale`, `scan`, `scan-full`, `scan-smart`, `shell`, `start`, `status`, `stop` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
-| Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage` |
+| Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory
 
@@ -2344,8 +2357,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_BUILD_NETWORK` | `docker-compose.yml` |
 | `SHAKERSCAN_CALIBRATION_IMPORT_ROOT` | `scripts/device_posture_calibration.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py`, `scanner/scanner_tools/discovery.py` |
+| `SHAKERSCAN_CANONICAL_REPORT_ONLY` | `scanner/scanner_tools/common.py` |
 | `SHAKERSCAN_CANONICAL_SCAN_EXECUTION` | `scanner/scanner.py` |
-| `SHAKERSCAN_CANONICAL_SCAN_PLACEMENTS` | `scanner/scanner.py` |
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2357,7 +2370,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
-| `SHAKERSCAN_DISABLE_LEGACY_SCAN_EXECUTION` | `api/worker.py` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
@@ -2580,8 +2592,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `research_episodes` | `api/retest_contract.py` |
 | `research_events` | `api/retest_contract.py` |
 | `research_observations` | `api/retest_contract.py` |
+| `scan_action_plan_revisions` | `db/init.sql` |
 | `scan_artifacts` | `db/init.sql` |
 | `scan_campaigns` | `db/init.sql` |
+| `scan_capability_actions` | `db/init.sql` |
+| `scan_observation_manifests` | `db/init.sql` |
+| `scan_stage_checkpoints` | `db/init.sql` |
+| `scan_work_manifests` | `db/init.sql` |
 | `scans` | `db/init.sql` |
 | `schedules` | `db/init.sql` |
 | `scope_receipts` | `api/retest_contract.py` |

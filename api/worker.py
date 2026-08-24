@@ -158,7 +158,6 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
-from scan.migration import require_legacy_scan_execution_window
 from scan.authorization import (
     ActionAuthorityDecision,
     revalidate_scan_action_authority,
@@ -2810,7 +2809,10 @@ async def run_scan(
     if is_deterministic_dast(options):
         options, scan_admission = prepare_worker_dispatch(options)
         if not scan_admission.canonical:
-            require_legacy_scan_execution_window()
+            raise ValueError(
+                "digest-less deterministic Scan execution has been removed; "
+                "submit a canonical scan-job/v2"
+            )
         if scan_admission.canonical and scan_admission.plan is not None:
             native_scan_execution = build_native_scan_execution(
                 scan_admission.plan, options,
@@ -13959,8 +13961,10 @@ async def _execute_reserved_deterministic_scan(
     """Execute the persisted immutable Scan action graph on the local backend."""
     normalized, admission = prepare_worker_dispatch(options)
     if not admission.canonical or admission.plan is None:
-        require_legacy_scan_execution_window()
-        return await run_scan(target, dict(options), scan_id=scan_id, job_id=job_id)
+        raise ScanCapabilityContractError(
+            "digest-less deterministic Scan execution has been removed; "
+            "submit a canonical scan-job/v2"
+        )
     action_store = PostgresScanActionStore()
     async with db_pool.acquire() as conn:
         plan = await action_store.load_plan(conn, scan_id=scan_id)

@@ -428,11 +428,12 @@ def test_broker_compose_uses_native_admission_without_data_store_configuration()
     assert "redis:" not in text
 
 
-def test_broker_execution_uses_https_checkpoint_upload_not_local_database_manifest():
+def test_broker_execution_has_no_legacy_local_checkpoint_path():
     source = inspect.getsource(broker_worker.execute_lease)
 
-    assert "persist_checkpoint_artifacts=False" in source
-    assert 'artifact_type="checkpoint"' in source
+    assert "_execute_broker_action_plan" in source
+    assert "persist_checkpoint_artifacts=False" not in source
+    assert 'artifact_type="checkpoint"' not in source
 
 
 def test_broker_heartbeat_survives_a_blocked_scanner_event_loop(tmp_path, monkeypatch):

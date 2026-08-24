@@ -7,7 +7,7 @@ fleet (see docs/dast-asm-architecture.md). The flow is a scatter-gather:
         -> parent scan row (scan_role='parent')
         -> scan_plan job
              -> N child scan rows (scan_role='shard') + N scan_shard jobs
-        -> each shard runs run_scan() with a focused option override
+        -> each shard executes its persisted canonical action graph
         -> last shard to finish enqueues a scan_merge job
         -> scan_merge aggregates child results into the parent report
 

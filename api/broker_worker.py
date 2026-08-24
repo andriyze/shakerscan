@@ -40,7 +40,6 @@ from scan.broker_backend import (
     BrokerScanExecutionBackend,
 )
 from scan.orchestrator import ScanOrchestrator
-from scan.migration import require_legacy_scan_execution_window
 from scan.private_inputs import (
     BrokerPrivateScanInputError,
     BrokerPrivateScanInputs,
@@ -796,14 +795,9 @@ async def execute_lease(
                     private_inputs=private_inputs,
                 )
             else:
-                require_legacy_scan_execution_window()
-                result = await run_scan(
-                    target,
-                    dict(job.get("options") or {}),
-                    scan_id=scan_id,
-                    job_id=job_id,
-                    progress_callback=progress_callback,
-                    persist_checkpoint_artifacts=False,
+                raise BrokerWorkerError(
+                    "digest-less deterministic Scan execution has been removed; "
+                    "submit a canonical scan-job/v2"
                 )
         except Exception as exc:
             result = {
@@ -824,21 +818,6 @@ async def execute_lease(
             result=result,
         )
         broker_artifacts: list[dict[str, Any]] = []
-        checkpoint = RESULTS_DIR / f"{scan_id}_checkpoint.json"
-        if (
-            canonical_action_authority is None
-            and checkpoint.is_file()
-            and not checkpoint.is_symlink()
-        ):
-            receipt = await asyncio.to_thread(
-                upload_artifact,
-                state,
-                lease_id=lease_id,
-                lease_token=lease_token,
-                path=checkpoint,
-                artifact_type="checkpoint",
-            )
-            broker_artifacts.append({"type": "checkpoint", **receipt})
         if result.get("error") or result.get("failure_diagnostics"):
             diagnostic_path = RESULTS_DIR / f"{scan_id}_broker_diagnostic.json"
             diagnostic_path.write_text(
