@@ -209,7 +209,7 @@ def _prepare_browser_base(
         ),
         frozen_addresses=target.allowed_addresses,
     )
-    pinned_address = socket_factory.addresses[0]
+    pinned_address = socket_factory.primary_address
     if _is_ip_literal(target.canonical_host) and str(
         ipaddress.ip_address(str(target.canonical_host))
     ) != pinned_address:

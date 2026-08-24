@@ -11653,7 +11653,7 @@ async def _execute_scan_web_probe_capability(
     ))
     authorized_addresses = list(target.allowed_addresses)
     pinned_address = agent_tools.validate_pinned_scanner_address(
-        authorized_addresses[0], authorized_addresses,
+        None, authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
@@ -11788,7 +11788,7 @@ async def _execute_scan_web_crawl_capability(
     ))
     authorized_addresses = list(target.allowed_addresses)
     pinned_address = agent_tools.validate_pinned_scanner_address(
-        authorized_addresses[0], authorized_addresses,
+        None, authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
@@ -11925,7 +11925,7 @@ async def _execute_scan_content_discovery_capability(
     ))
     authorized_addresses = list(target.allowed_addresses)
     pinned_address = agent_tools.validate_pinned_scanner_address(
-        authorized_addresses[0], authorized_addresses,
+        None, authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
@@ -12079,7 +12079,7 @@ async def _execute_scan_xss_verification_capability(
     ))
     authorized_addresses = list(target.allowed_addresses)
     pinned_address = agent_tools.validate_pinned_scanner_address(
-        authorized_addresses[0], authorized_addresses,
+        None, authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
@@ -12488,7 +12488,7 @@ async def _execute_scan_sqli_verification_capability(
     ))
     authorized_addresses = list(target.allowed_addresses)
     pinned_address = agent_tools.validate_pinned_scanner_address(
-        authorized_addresses[0], authorized_addresses,
+        None, authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
@@ -12590,7 +12590,7 @@ async def _execute_scan_template_capability(
     ))
     authorized_addresses = list(target.allowed_addresses)
     pinned_address = agent_tools.validate_pinned_scanner_address(
-        authorized_addresses[0], authorized_addresses,
+        None, authorized_addresses,
     )
     principal = resolve_scan_http_principal(options, lane="primary")
     template_options = dict(canonical_template_options or {})
@@ -21847,7 +21847,7 @@ async def process_canonical_scanner_capability_job(
                         "Hunt has no frozen target resolution set"
                     )
                 pinned_address = agent_tools.validate_pinned_scanner_address(
-                    authorized_addresses[0],
+                    None,
                     authorized_addresses,
                 )
                 target = TargetBinding(

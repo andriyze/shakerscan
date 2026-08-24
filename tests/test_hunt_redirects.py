@@ -394,10 +394,47 @@ def test_target_bound_http_fails_over_only_before_connect(monkeypatch):
     assert result["ok"] is True
     assert result["connection_attempts"] == 2
     assert result["connected_addresses"] == ["192.0.2.11"]
+    assert result["request"]["address_policy"] == {
+        "schema_version": "frozen-target-address-policy/v1",
+        "family_preference": "ipv4_first",
+        "admitted_address_count": 2,
+        "fallback_attempt_limit": 2,
+        "no_runtime_resolution": True,
+    }
     assert seen == [
         ("192.0.2.10", "shop.test", "shop.test"),
         ("192.0.2.11", "shop.test", "shop.test"),
     ]
+
+
+def test_target_bound_http_never_expands_beyond_the_fallback_limit(monkeypatch):
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url.host))
+        raise httpx.ConnectError("frozen address unavailable", request=request)
+
+    class _MockClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="shop.test",
+        allowed_origins=("https://shop.test",),
+        allowed_addresses=tuple(f"192.0.2.{index}" for index in range(1, 12)),
+        allowed_root_domains=("shop.test",),
+    )
+
+    result = asyncio.run(execute_bound_http_request(
+        "https://shop.test", {"method": "GET", "path": "/"}, target=target,
+    ))
+
+    assert result["ok"] is False
+    assert seen == [f"192.0.2.{index}" for index in range(1, 9)]
 
 
 def test_executor_caps_the_chain_at_three_hops(monkeypatch):

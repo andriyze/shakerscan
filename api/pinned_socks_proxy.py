@@ -38,7 +38,7 @@ class PinnedSocksProxy:
             frozen_addresses=supplied,
         )
         self.pinned_addresses = self.socket_factory.addresses
-        self.pinned_address = self.pinned_addresses[0]
+        self.pinned_address = self.socket_factory.primary_address
         self.max_connections = (
             None if max_connections is None else max(1, int(max_connections))
         )

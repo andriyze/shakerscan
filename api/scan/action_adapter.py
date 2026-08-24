@@ -43,6 +43,7 @@ try:
         resolve_scan_http_principal,
         resolve_scan_interactive_credential,
     )
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
     from scan.private_state import (
         SCAN_AUTH_SESSION_STATE_KIND,
         SCAN_PRIVATE_STATE_KEY_OPTION,
@@ -81,6 +82,7 @@ except (ImportError, ModuleNotFoundError):
         resolve_scan_http_principal,
         resolve_scan_interactive_credential,
     )
+    from ..runtime.target_bound_socket import FrozenTargetSocketFactory
     from .private_state import (
         SCAN_AUTH_SESSION_STATE_KIND,
         SCAN_PRIVATE_STATE_KEY_OPTION,
@@ -878,6 +880,11 @@ class DatabaseNeutralScanActionDispatcher:
         registered_target = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, "", "", "")
         )
+        socket_factory = FrozenTargetSocketFactory(
+            hostname=str(parsed.hostname or self.target.canonical_host),
+            port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+            frozen_addresses=self.target.allowed_addresses,
+        )
         primary = resolve_scan_http_principal(self.options, lane="primary")
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
@@ -924,8 +931,9 @@ class DatabaseNeutralScanActionDispatcher:
                 "scanner_options": scanner_options,
                 "trusted_headers": primary.headers(),
                 "timeout_ms": int(action.requested_budget.get("tool_wall_seconds") or 1) * 1_000,
-                "pinned_address": self.target.allowed_addresses[0],
+                "pinned_address": socket_factory.primary_address,
                 "authorized_addresses": list(self.target.allowed_addresses),
+                "address_policy": socket_factory.policy_receipt,
                 "oob_interactsh_server": None,
                 "oob_interactsh_token": None,
             },

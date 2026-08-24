@@ -60,6 +60,15 @@ def bounded_fallback_addresses(
     return normalize_frozen_addresses(values, preference=preference)[:limit]
 
 
+def primary_frozen_address(
+    values: Iterable[str],
+    *,
+    preference: str = DEFAULT_ADDRESS_FAMILY_PREFERENCE,
+) -> str:
+    """Return the stable primary address selected by the canonical policy."""
+    return normalize_frozen_addresses(values, preference=preference)[0]
+
+
 def address_policy_receipt(
     values: Iterable[str],
     *,

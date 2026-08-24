@@ -99,6 +99,11 @@ class FrozenTargetSocketFactory:
             for address in ordered
         )
 
+    @property
+    def primary_address(self) -> str:
+        """The stable primary address; never dependent on resolver return order."""
+        return self.connection_addresses[0]
+
     def connect(
         self,
         *,

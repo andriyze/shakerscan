@@ -196,8 +196,8 @@ async def execute_bound_http_request(
             ),
             frozen_addresses=target.allowed_addresses,
         )
-        pinned_address = socket_factory.addresses[0]
-    except agent_tools.AgentToolError as exc:
+        pinned_address = socket_factory.primary_address
+    except ValueError as exc:
         return {"ok": False, "error": f"scope: {exc}"}
 
     headers = agent_tools.filter_request_headers(args.get("headers"))
@@ -223,6 +223,7 @@ async def execute_bound_http_request(
             else "form" if form_body is not None else None
         ),
         "pinned_address": pinned_address,
+        "address_policy": socket_factory.policy_receipt,
         "follow_redirects": follow_redirects,
     }
     timeout = max(1, min(60, int(timeout_seconds)))
@@ -247,7 +248,7 @@ async def execute_bound_http_request(
             current_form_body = form_body
             while True:
                 response = None
-                for candidate_address in socket_factory.addresses:
+                for candidate_address in socket_factory.connection_addresses:
                     pinned_url, sni_hostname, host_header = (
                         agent_tools._pinned_scanner_url(
                             current_url, candidate_address,

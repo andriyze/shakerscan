@@ -600,6 +600,9 @@ def test_scanner_execution_is_address_pinned_with_original_host_and_sni():
     assert at.validate_pinned_scanner_address(
         "203.0.113.7", ["203.0.113.7", "2001:db8::7"],
     ) == "203.0.113.7"
+    assert at.validate_pinned_scanner_address(
+        None, ["2001:db8::7", "203.0.113.8", "203.0.113.7"],
+    ) == "203.0.113.7"
     with pytest.raises(at.AgentToolError, match="outside the authorized"):
         at.validate_pinned_scanner_address("127.0.0.1", ["203.0.113.7"])
 

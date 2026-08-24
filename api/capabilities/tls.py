@@ -18,8 +18,10 @@ except ModuleNotFoundError:  # minimal host-side test environments
 
 try:
     from runtime.models import TargetBinding
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
 except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.models import TargetBinding
+    from ..runtime.target_bound_socket import FrozenTargetSocketFactory
 
 
 def _origin(value: str) -> str | None:
@@ -85,8 +87,25 @@ async def inspect_tls_origin(
             },
         }
 
+    port = parsed.port or 443
+    try:
+        socket_factory = FrozenTargetSocketFactory(
+            hostname=parsed.hostname,
+            port=port,
+            frozen_addresses=target.allowed_addresses,
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": f"scope:TLS target address policy is invalid: {exc}",
+            "budget_consumed": {
+                "tcp_ports_attempted": 0,
+                "tool_wall_seconds": 0,
+            },
+        }
     selected_address = str(
-        pinned_address or target.allowed_addresses[0]
+        pinned_address or socket_factory.primary_address
     ).strip()
     if selected_address not in target.allowed_addresses:
         return {
@@ -98,7 +117,6 @@ async def inspect_tls_origin(
                 "tool_wall_seconds": 0,
             },
         }
-    port = parsed.port or 443
     timeout = max(4, min(15, int(timeout_seconds)))
     attempt_timeout = max(1, timeout // 4)
     started = time.perf_counter()
@@ -220,6 +238,9 @@ async def inspect_tls_origin(
                 "origin": normalized_origin,
                 "server_hostname": parsed.hostname,
                 "pinned_address": selected_address,
+                "attempted_addresses": [selected_address],
+                "connected_addresses": [],
+                "address_policy": socket_factory.policy_receipt,
                 "port": port,
                 "status": "failed",
                 "protocol_attempts": protocol_results,
@@ -243,6 +264,9 @@ async def inspect_tls_origin(
         "origin": normalized_origin,
         "server_hostname": parsed.hostname,
         "pinned_address": selected_address,
+        "attempted_addresses": [selected_address],
+        "connected_addresses": [selected_address],
+        "address_policy": socket_factory.policy_receipt,
         "port": port,
         "status": "success",
         "protocol": tls_object.version(),
@@ -438,7 +462,16 @@ async def inspect_tls_binding(
         str(item) for item in target.allowed_origins
         if str(item).lower().startswith("https://")
     ))
-    addresses = tuple(sorted(target.allowed_addresses))
+    try:
+        socket_factory = FrozenTargetSocketFactory(
+            hostname=target.canonical_host,
+            port=443,
+            frozen_addresses=target.allowed_addresses,
+        )
+    except ValueError:
+        addresses = ()
+    else:
+        addresses = socket_factory.addresses
     if not origins or not addresses:
         return {
             "ok": False,

@@ -24,6 +24,7 @@ def test_canonical_socket_factory_connects_only_to_frozen_target_addresses():
 
 
 def test_frozen_address_order_is_stable_and_explicitly_family_preferred():
+    from target_address_policy import primary_frozen_address
     from runtime.target_bound_socket import FrozenTargetSocketFactory
 
     first = FrozenTargetSocketFactory(
@@ -47,6 +48,10 @@ def test_frozen_address_order_is_stable_and_explicitly_family_preferred():
         "192.0.2.10", "192.0.2.20", "2001:db8::20",
     )
     assert ipv6.addresses == ("2001:db8::20", "192.0.2.10")
+    assert first.primary_address == "192.0.2.10"
+    assert primary_frozen_address(
+        ("2001:db8::20", "192.0.2.20", "192.0.2.10")
+    ) == "192.0.2.10"
 
 
 def test_socket_fallback_is_bounded_without_expanding_the_frozen_set():

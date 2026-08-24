@@ -34,6 +34,7 @@ from scan.work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
     canonical_passive_nuclei_request_upper_bound,
 )
+from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
 
 try:
     from scanner_tools.url_redaction import redact_url
@@ -1008,16 +1009,28 @@ def validate_scanner_execution_target(registered_target: str, execution_target: 
 
 
 def validate_pinned_scanner_address(pinned_address: Any, authorized_addresses: Any) -> str:
+    raw_authorized = list(authorized_addresses or [])
+    if len(raw_authorized) > MAX_FROZEN_ADDRESSES:
+        raise AgentToolError("scanner authorized address set exceeds the policy bound")
+    authorized: list[str] = []
+    for raw in raw_authorized:
+        try:
+            address = str(ipaddress.ip_address(str(raw).strip()))
+        except ValueError:
+            continue
+        if address not in authorized:
+            authorized.append(address)
+    if not authorized:
+        raise AgentToolError("scanner job has no authorized address")
+    if pinned_address is None:
+        try:
+            return primary_frozen_address(authorized)
+        except ValueError as exc:
+            raise AgentToolError("scanner job has no valid pinned address") from exc
     try:
         pinned = str(ipaddress.ip_address(str(pinned_address or "").strip()))
     except ValueError as exc:
         raise AgentToolError("scanner job has no valid pinned address") from exc
-    authorized: set[str] = set()
-    for raw in list(authorized_addresses or [])[:32]:
-        try:
-            authorized.add(str(ipaddress.ip_address(str(raw).strip())))
-        except ValueError:
-            continue
     if pinned not in authorized:
         raise AgentToolError("scanner pinned address is outside the authorized resolution set")
     return pinned

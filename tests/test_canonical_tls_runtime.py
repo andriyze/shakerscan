@@ -71,11 +71,40 @@ def test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes(monkeypa
     ]
     assert result["observation"]["certificate_trust"] == "trusted"
     assert result["observation"]["certificate_sha256"]
+    assert result["observation"]["attempted_addresses"] == ["192.0.2.10"]
+    assert result["observation"]["connected_addresses"] == ["192.0.2.10"]
+    assert result["observation"]["address_policy"]["no_runtime_resolution"] is True
     assert result["budget_consumed"] == {
         "tcp_ports_attempted": 3,
         "tool_wall_seconds": 1,
     }
     assert writer.closed is True
+
+
+def test_tls_default_address_is_stable_not_resolver_order(monkeypatch):
+    calls = []
+
+    async def fake_open_connection(**kwargs):
+        calls.append(kwargs)
+        return object(), _Writer()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",),
+        allowed_addresses=("2001:db8::20", "192.0.2.20", "192.0.2.10"),
+        allowed_root_domains=("example.test",),
+    )
+
+    result = asyncio.run(inspect_tls_origin(
+        "https://app.example.test", target=target, timeout_seconds=15,
+    ))
+
+    assert result["status"] == "success"
+    assert {call["host"] for call in calls} == {"192.0.2.10"}
+    assert result["observation"]["pinned_address"] == "192.0.2.10"
 
 
 def test_tls_binding_inspects_every_frozen_origin_and_address(monkeypatch):

@@ -37544,7 +37544,7 @@ async def _agent_tool_run_tool(
         if not frozen_addresses:
             raise agent_tools.AgentToolError("hunt has no frozen target resolution set")
         pinned_address = agent_tools.validate_pinned_scanner_address(
-            frozen_addresses[0], frozen_addresses,
+            None, frozen_addresses,
         )
     except agent_tools.AgentToolError as exc:
         return {"ok": False, "error": f"scope: {exc}"}
