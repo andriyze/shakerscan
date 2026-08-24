@@ -160,6 +160,7 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
                 auth_kind="bearer_token",
                 principal_slot="primary",
                 target_kind="web",
+                allowed_capabilities=(),
             )
             yield types.SimpleNamespace(
                 profile=profile,

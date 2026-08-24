@@ -746,10 +746,10 @@ try:
         request_collection_selection_digest,
     )
     from runtime.scan_credentials import (
-        SCAN_CREDENTIAL_CAPABILITY,
         ScanCredentialError,
         admit_scan_credential_profiles,
         bind_resolved_scan_credential,
+        scan_credential_resolution_capability,
     )
     from runtime.sealed_inputs import (
         SealedInputError,
@@ -791,10 +791,10 @@ except ModuleNotFoundError:
         request_collection_selection_digest,
     )
     from api.runtime.scan_credentials import (
-        SCAN_CREDENTIAL_CAPABILITY,
         ScanCredentialError,
         admit_scan_credential_profiles,
         bind_resolved_scan_credential,
+        scan_credential_resolution_capability,
     )
     from api.runtime.sealed_inputs import (
         SealedInputError,
@@ -10783,11 +10783,26 @@ async def _hydrate_broker_generic_scan_credentials(
                 raise ScanCredentialError(
                     "generic Scan credential profile version is invalid"
                 )
+            expected_allowed = tuple(
+                str(item) for item in ref.get("allowed_capabilities") or ()
+                if str(item)
+            )
+            resolution_capability = str(
+                ref.get("credential_resolution_capability")
+                or scan_credential_resolution_capability(
+                    expected_allowed, auth_kind=str(ref.get("auth_kind") or ""),
+                )
+                or ""
+            )
+            if not resolution_capability:
+                raise ScanCredentialError(
+                    "generic Scan credential has no semantic execution authority"
+                )
             async with resolver.resolve(
                 conn,
                 profile_id=ref["profile_id"],
                 target=target,
-                capability=SCAN_CREDENTIAL_CAPABILITY,
+                capability=resolution_capability,
                 authority=authority,
             ) as resolved:
                 profile = resolved.profile
@@ -10797,6 +10812,7 @@ async def _hydrate_broker_generic_scan_credentials(
                     or profile.principal_slot
                     != str(ref.get("principal_slot") or "")
                     or profile.target_kind != target_kind
+                    or tuple(profile.allowed_capabilities) != expected_allowed
                 ):
                     raise ScanCredentialError(
                         "generic Scan credential changed after admission"
@@ -10809,6 +10825,8 @@ async def _hydrate_broker_generic_scan_credentials(
                 resolved_refs.append({
                     **resolved.receipt_metadata(),
                     "scan_lane": str(ref["scan_lane"]),
+                    "allowed_capabilities": list(expected_allowed),
+                    "credential_resolution_capability": resolution_capability,
                 })
         hydrated["resolved_credential_profiles"] = resolved_refs
         return hydrated

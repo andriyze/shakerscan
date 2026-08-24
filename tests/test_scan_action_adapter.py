@@ -955,7 +955,7 @@ def test_database_neutral_authz_uses_only_bound_endpoint_manifest(monkeypatch):
     monkeypatch.setattr(
         action_adapter_module,
         "resolve_scan_http_principal",
-        lambda _options, *, lane: _principal(lane),
+        lambda _options, *, lane, capability_name=None: _principal(lane),
     )
 
     async def verify(_target_url, routes, **_kwargs):

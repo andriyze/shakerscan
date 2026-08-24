@@ -313,12 +313,12 @@ class DatabaseNeutralScanActionDispatcher:
                 "primary" if action.action_id.endswith("primary") else "secondary"
             )
             credential = resolve_scan_interactive_credential(
-                self.options, lane=lane,
+                self.options, lane=lane, capability_name=action.capability_name,
             )
             if credential is None:
                 return True
             if resolve_scan_http_principal(
-                self.options, lane=lane,
+                self.options, lane=lane, capability_name=action.capability_name,
             ).authenticated:
                 return True
             checkpoints = [
@@ -344,7 +344,7 @@ class DatabaseNeutralScanActionDispatcher:
             except (ScanPrivateStateError, ValueError, TypeError):
                 return False
             return resolve_scan_http_principal(
-                self.options, lane=lane,
+                self.options, lane=lane, capability_name=action.capability_name,
             ).authenticated
         if action.action_id.startswith("inputs.collection_"):
             plan = await self._private_replay_plan(action)
@@ -352,6 +352,7 @@ class DatabaseNeutralScanActionDispatcher:
                 return False
             principal = resolve_scan_http_principal(
                 self.options, lane="primary",
+                capability_name=action.capability_name,
             )
             primary_profile_bound = any(
                 isinstance(item, Mapping)
@@ -502,7 +503,9 @@ class DatabaseNeutralScanActionDispatcher:
         )
         follow = action.action_id == "baseline.http_redirect"
         args = {"method": "GET", "path": path, "follow_redirects": follow}
-        primary = resolve_scan_http_principal(self.options, lane="primary")
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
 
         async def operation() -> Mapping[str, Any]:
             result = dict(await execute_bound_http_request(
@@ -673,7 +676,9 @@ class DatabaseNeutralScanActionDispatcher:
         self, action: ScanAction, heartbeat: ActionHeartbeat,
     ) -> CapabilityReceipt:
         lane = "primary" if action.action_id.endswith("primary") else "secondary"
-        credential = resolve_scan_interactive_credential(self.options, lane=lane)
+        credential = resolve_scan_interactive_credential(
+            self.options, lane=lane, capability_name=action.capability_name,
+        )
         if credential is None:
             return self._skip(action, "not_applicable")
 
@@ -731,7 +736,9 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError(
                 "private replay plan exceeds its immutable action reservation"
             )
-        principal = resolve_scan_http_principal(self.options, lane="primary")
+        principal = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
         primary_profile_bound = any(
             isinstance(item, Mapping)
             and str(item.get("scan_lane") or item.get("auth_state") or "")
@@ -885,7 +892,9 @@ class DatabaseNeutralScanActionDispatcher:
             port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
             frozen_addresses=self.target.allowed_addresses,
         )
-        primary = resolve_scan_http_principal(self.options, lane="primary")
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
         if tool == "nuclei":
@@ -946,8 +955,12 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     async def _authz(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
-        primary = resolve_scan_http_principal(self.options, lane="primary")
-        secondary = resolve_scan_http_principal(self.options, lane="secondary")
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
+        secondary = resolve_scan_http_principal(
+            self.options, lane="secondary", capability_name=action.capability_name,
+        )
         if not primary.authenticated or not secondary.authenticated:
             return self._skip(action, "not_applicable")
         endpoint_manifest = await self._work_manifest(

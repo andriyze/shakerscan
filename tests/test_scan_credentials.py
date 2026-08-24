@@ -14,6 +14,7 @@ from api.runtime.scan_credentials import (
     bind_resolved_scan_credential,
     resolve_scan_http_principal,
     resolve_scan_interactive_credential,
+    scan_credential_resolution_capability,
 )
 
 
@@ -70,6 +71,37 @@ def test_scan_admission_freezes_distinct_target_bound_principals_without_secrets
     assert [row["profile_version"] for row in rows] == [3, 3]
     assert all(row["secret_values_visible"] is False for row in rows)
     assert "primary-secret" not in repr(rows)
+
+
+def test_scan_admission_accepts_semantic_static_capability_and_freezes_it():
+    profile = _profile(
+        "primary", slot="primary", capabilities=("http.request",),
+    )
+
+    rows = admit_scan_credential_profiles(
+        [profile.profile_id], [profile],
+        target_id=TARGET_ID, target_kind="web", now=NOW,
+    )
+
+    assert rows[0]["allowed_capabilities"] == ["http.request"]
+    assert rows[0]["credential_resolution_capability"] == "http.request"
+
+
+def test_scan_admission_requires_session_capability_for_interactive_profile():
+    profile = _profile(
+        "primary", slot="primary", kind="form_login",
+        capabilities=("http.request",),
+    )
+
+    with pytest.raises(ScanCredentialError, match="semantic capability"):
+        admit_scan_credential_profiles(
+            [profile.profile_id], [profile],
+            target_id=TARGET_ID, target_kind="web", now=NOW,
+        )
+
+    assert scan_credential_resolution_capability(
+        ("auth.session.establish", "http.request"), auth_kind="form_login",
+    ) == "auth.session.establish"
 
 
 @pytest.mark.parametrize(
@@ -212,6 +244,32 @@ def test_scan_immediate_primary_principal_is_secret_free_and_digest_bound():
     }
     assert "primary-secret" not in repr(principal)
     assert "primary-secret" not in repr(principal.public_dict())
+
+
+def test_scan_principal_applies_profile_only_to_allowed_semantic_action():
+    options = {
+        "auth_header": "Bearer primary-secret",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "allowed_capabilities": ["http.request"],
+        }],
+    }
+
+    allowed = resolve_scan_http_principal(
+        options, capability_name="http.request",
+    )
+    denied = resolve_scan_http_principal(
+        options, capability_name="templates.scan",
+    )
+
+    assert allowed.authenticated is True
+    assert denied.authenticated is False
+    assert denied.headers() == {}
+    assert denied.public_dict()["reason"] == "credential_capability_not_allowed"
 
 
 def test_scan_interactive_primary_is_explicitly_not_applied_without_session_capability():

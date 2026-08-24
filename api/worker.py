@@ -120,6 +120,7 @@ from runtime.scan_credentials import (
     bind_scan_session_headers,
     resolve_scan_http_principal,
     resolve_scan_interactive_credential,
+    scan_credential_resolution_capability,
 )
 from scan.collection_replay import (
     EXECUTABLE_REPLAY_POLICIES,
@@ -1925,11 +1926,26 @@ async def _hydrate_generic_scan_credentials(
                 ) from exc
             if expected_version < 1:
                 raise ScanCredentialError("generic Scan credential profile version is invalid")
+            expected_allowed = tuple(
+                str(item) for item in ref.get("allowed_capabilities") or ()
+                if str(item)
+            )
+            resolution_capability = str(
+                ref.get("credential_resolution_capability")
+                or scan_credential_resolution_capability(
+                    expected_allowed, auth_kind=str(ref.get("auth_kind") or ""),
+                )
+                or ""
+            )
+            if not resolution_capability:
+                raise ScanCredentialError(
+                    "generic Scan credential has no semantic execution authority"
+                )
             async with resolver.resolve(
                 conn,
                 profile_id=ref["profile_id"],
                 target=target,
-                capability=SCAN_CREDENTIAL_CAPABILITY,
+                capability=resolution_capability,
                 authority=authority,
             ) as resolved:
                 profile = resolved.profile
@@ -1938,6 +1954,7 @@ async def _hydrate_generic_scan_credentials(
                     or profile.auth_kind != str(ref.get("auth_kind") or "")
                     or profile.principal_slot != str(ref.get("principal_slot") or "")
                     or profile.target_kind != target_kind
+                    or tuple(profile.allowed_capabilities) != expected_allowed
                 ):
                     raise ScanCredentialError(
                         "generic Scan credential changed after admission"
@@ -1948,6 +1965,8 @@ async def _hydrate_generic_scan_credentials(
                 resolved_refs.append({
                     **resolved.receipt_metadata(),
                     "scan_lane": str(ref["scan_lane"]),
+                    "allowed_capabilities": list(expected_allowed),
+                    "credential_resolution_capability": resolution_capability,
                 })
     hydrated["resolved_credential_profiles"] = resolved_refs
     return hydrated
@@ -14200,6 +14219,7 @@ async def _execute_reserved_deterministic_scan(
             runtime_request_grant=runtime_request_grant,
             trusted_primary_headers=resolve_scan_http_principal(
                 runtime_options, lane="primary",
+                capability_name=action.capability_name,
             ).headers(),
             canonical_action=action,
             canonical_request_manifest=manifest,

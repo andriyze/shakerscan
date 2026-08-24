@@ -16,6 +16,25 @@ from .credentials import HTTP_CREDENTIAL_KINDS, IMMEDIATE_HTTP_HEADER_KINDS
 
 
 SCAN_CREDENTIAL_CAPABILITY = "scan.execute"
+SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
+    "auth.session.establish",
+    "http.request",
+    "web.probe",
+    "web.crawl",
+    "web.content_discover",
+    "templates.passive_scan",
+    "templates.scan",
+    "collections.replay_safe",
+    "collections.replay_active",
+    "xss.verify",
+    "sqli.verify",
+    "authz.verify",
+    "xss.request_verify",
+    "sqli.request_verify",
+})
+_INTERACTIVE_HTTP_KINDS = frozenset({
+    "form_login", "oauth_client_credentials", "oauth_password",
+})
 MAX_SCAN_CREDENTIAL_PROFILES = 2
 _PRIMARY_SLOTS = frozenset({"primary", "service"})
 _SECONDARY_KINDS = frozenset({
@@ -29,6 +48,43 @@ _SECONDARY_KINDS = frozenset({
 
 class ScanCredentialError(ValueError):
     """A Scan credential selection is ambiguous, unsupported, or no longer valid."""
+
+
+def scan_credential_resolution_capability(
+    allowed_capabilities: Sequence[str], *, auth_kind: str,
+) -> str | None:
+    """Select one semantic custody receipt without expanding profile authority."""
+    allowed = tuple(dict.fromkeys(
+        str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
+    ))
+    if not allowed:
+        return (
+            "auth.session.establish"
+            if auth_kind in _INTERACTIVE_HTTP_KINDS else "http.request"
+        )
+    if SCAN_CREDENTIAL_CAPABILITY in allowed:
+        return SCAN_CREDENTIAL_CAPABILITY
+    if auth_kind in _INTERACTIVE_HTTP_KINDS:
+        return (
+            "auth.session.establish"
+            if "auth.session.establish" in allowed else None
+        )
+    compatible = sorted(set(allowed) & SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES)
+    return compatible[0] if compatible else None
+
+
+def scan_credential_allows_capability(
+    allowed_capabilities: Sequence[str], capability_name: str,
+) -> bool:
+    """Apply a profile's semantic allowlist at the actual action boundary."""
+    allowed = {
+        str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
+    }
+    return (
+        not allowed
+        or SCAN_CREDENTIAL_CAPABILITY in allowed
+        or str(capability_name or "").strip() in allowed
+    )
 
 
 @dataclass(frozen=True, repr=False)
@@ -168,6 +224,7 @@ def _safe_scan_http_headers(values: Mapping[str, Any]) -> dict[str, str]:
 
 def resolve_scan_http_principal(
     options: Mapping[str, Any], *, lane: str = "primary",
+    capability_name: str | None = None,
 ) -> ScanHTTPPrincipal:
     """Resolve an already-hydrated immediate identity without exposing its values."""
     normalized_lane = str(lane or "").strip().lower()
@@ -207,6 +264,7 @@ def resolve_scan_http_principal(
 
     safe_headers = _safe_scan_http_headers(headers) if headers else {}
     refs = []
+    lane_refs = []
     for item in options.get("resolved_credential_profiles") or []:
         if not isinstance(item, Mapping):
             continue
@@ -219,13 +277,25 @@ def resolve_scan_http_principal(
         )
         if not lane_matches:
             continue
+        lane_refs.append(item)
+        if capability_name and not scan_credential_allows_capability(
+            item.get("allowed_capabilities") or (), capability_name,
+        ):
+            continue
         refs.append({
             "profile_id": str(item.get("profile_id") or ""),
             "profile_version": int(item.get("profile_version") or 0),
             "auth_kind": str(item.get("auth_kind") or ""),
             "principal_slot": str(item.get("principal_slot") or ""),
             "lane": normalized_lane,
+            "allowed_capabilities": sorted(
+                str(value) for value in item.get("allowed_capabilities") or ()
+                if str(value)
+            ),
         })
+    capability_denied = bool(capability_name and lane_refs and not refs)
+    if capability_denied:
+        safe_headers = {}
     binding = {
         "schema_version": "scan-http-principal-binding/v1",
         "lane": normalized_lane,
@@ -234,6 +304,7 @@ def resolve_scan_http_principal(
         ),
         "header_names": sorted(name.lower() for name in safe_headers),
         "source": "credential_profiles" if refs else "legacy_worker_private",
+        "capability_name": str(capability_name or "") or None,
     }
     digest = (
         hashlib.sha256(json.dumps(
@@ -241,9 +312,9 @@ def resolve_scan_http_principal(
         ).encode()).hexdigest()
         if safe_headers else None
     )
-    reason = None
+    reason = "credential_capability_not_allowed" if capability_denied else None
     source = binding["source"] if safe_headers else "anonymous"
-    if interactive and not safe_headers:
+    if interactive and not safe_headers and not capability_denied:
         source = "interactive_profile"
         reason = "interactive_session_not_established"
     return ScanHTTPPrincipal(
@@ -272,6 +343,7 @@ def _public_session_endpoint_path(endpoint_url: str) -> str:
 
 def resolve_scan_interactive_credential(
     options: Mapping[str, Any], *, lane: str = "primary",
+    capability_name: str | None = None,
 ) -> ScanInteractiveCredential | None:
     """Resolve hydrated form/OAuth values into one worker-private session contract."""
     normalized_lane = str(lane or "").strip().lower()
@@ -342,6 +414,7 @@ def resolve_scan_interactive_credential(
         raise ScanCredentialError("OAuth Scan credential requires a client ID")
 
     refs: list[dict[str, Any]] = []
+    lane_refs: list[Mapping[str, Any]] = []
     for item in options.get("resolved_credential_profiles") or []:
         if not isinstance(item, Mapping):
             continue
@@ -354,13 +427,24 @@ def resolve_scan_interactive_credential(
         )
         if not lane_matches:
             continue
+        lane_refs.append(item)
+        if capability_name and not scan_credential_allows_capability(
+            item.get("allowed_capabilities") or (), capability_name,
+        ):
+            continue
         refs.append({
             "profile_id": str(item.get("profile_id") or ""),
             "profile_version": int(item.get("profile_version") or 0),
             "auth_kind": str(item.get("auth_kind") or ""),
             "principal_slot": str(item.get("principal_slot") or ""),
             "lane": normalized_lane,
+            "allowed_capabilities": sorted(
+                str(value) for value in item.get("allowed_capabilities") or ()
+                if str(value)
+            ),
         })
+    if capability_name and lane_refs and not refs:
+        return None
     ref_kinds = {item["auth_kind"] for item in refs if item["auth_kind"]}
     if ref_kinds and ref_kinds != {selected["auth_kind"]}:
         raise ScanCredentialError(
@@ -505,9 +589,12 @@ def admit_scan_credential_profiles(
         ):
             raise ScanCredentialError("OAuth password Scan credentials require a client ID")
         allowed = tuple(profile.allowed_capabilities)
-        if allowed and SCAN_CREDENTIAL_CAPABILITY not in allowed:
+        resolution_capability = scan_credential_resolution_capability(
+            allowed, auth_kind=profile.auth_kind,
+        )
+        if resolution_capability is None:
             raise ScanCredentialError(
-                f"Scan credential profile does not allow {SCAN_CREDENTIAL_CAPABILITY}"
+                "Scan credential profile does not allow a compatible semantic capability"
             )
         lanes.add(lane)
         rows.append({
@@ -518,6 +605,7 @@ def admit_scan_credential_profiles(
             "scan_lane": lane,
             "auth_kind": profile.auth_kind,
             "allowed_capabilities": list(allowed),
+            "credential_resolution_capability": resolution_capability,
             "source": "credential_profiles",
             "secret_values_visible": False,
         })
