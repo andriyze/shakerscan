@@ -1888,6 +1888,44 @@ def test_normalize_dast_scan_options_explicit_type_syncs_legacy_flags():
     assert options.thorough is False
 
 
+def test_canonical_scan_request_accepts_only_credential_profile_references():
+    request = api_module.ScanRequest(
+        target="https://api.example.test",
+        credential_profile_ids=["11111111-1111-4111-8111-111111111111"],
+    )
+
+    assert request.credential_profile_ids == ["11111111-1111-4111-8111-111111111111"]
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        api_module.ScanRequest(
+            target="https://api.example.test",
+            authentication={"auth_header": "Bearer never-echo-this"},
+        )
+    with pytest.raises(ValidationError, match="canonical Scan rejects inline authentication"):
+        api_module.ScanRequest(
+            target="https://api.example.test",
+            options=api_module.ScanOptions(auth_header="Bearer never-echo-this"),
+        )
+
+
+def test_legacy_scan_request_is_an_explicit_compatibility_boundary():
+    request = api_module.LegacyScanRequest(
+        target="https://api.example.test",
+        authentication={"auth_header": "Bearer compatibility-only"},
+        options=api_module.ScanOptions(user2_header="Bearer secondary"),
+    )
+
+    assert request.authentication == {"auth_header": "Bearer compatibility-only"}
+    assert request.options.user2_header == "Bearer secondary"
+
+
+def test_canonical_batch_rejects_inline_authentication():
+    with pytest.raises(ValidationError, match="canonical Scan batch rejects inline authentication"):
+        api_module.BatchRequest(
+            targets=["https://api.example.test"],
+            options=api_module.ScanOptions(auth_cookies="session=never-echo-this"),
+        )
+
+
 def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission():
     with open(api_module.__file__, encoding="utf-8") as handle:
         source = handle.read()

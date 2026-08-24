@@ -194,7 +194,7 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     receipt = b.submit_target("crapi", "http://scanner.test", True)
 
     options = captured["body"]["options"]
-    assert captured["url"] == "http://scanner.test/scans"
+    assert captured["url"] == "http://scanner.test/scans/compat"
     assert options["require_current_workers"] is True
     assert options["auth_header"] == f"Bearer {user1_token}"
     assert options["user2_header"] == f"Bearer {user2_token}"

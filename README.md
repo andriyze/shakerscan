@@ -143,26 +143,40 @@ After a scan is queued, ShakerScan returns a scan ID. On a default install, foll
 
 ### Scan with authentication
 
-Use **New Scan → Authentication** for bearer tokens, cookies, custom headers, form login, or two-user
-BOLA/IDOR testing. The REST API supports the same options:
+Use **New Scan → Authentication** to create encrypted, exact-target credential profiles for bearer
+tokens, cookies, custom headers, form login, or two-user BOLA/IDOR testing. The canonical REST API
+accepts profile IDs only; reusable secret values never enter a Scan request or queue payload.
 
 ```bash
+# Create this once after registering the target. The response contains profile.id.
+curl -X POST http://localhost:8080/credential-profiles \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_kind": "api",
+    "target_id": "TARGET_UUID",
+    "name": "Primary test principal",
+    "auth_kind": "bearer_token",
+    "principal_slot": "primary",
+    "secret": "REDACTED_TOKEN",
+    "allowed_capabilities": ["scan.execute"]
+  }'
+
+# Submit only the opaque reference. Credential use requires a current,
+# target-bound approval receipt.
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.test",
     "budget_profile": "thorough",
     "policy": {"active_testing": true},
-    "authentication": {
-      "auth_header": "Bearer REDACTED",
-      "user2_header": "Bearer REDACTED"
-    },
+    "credential_profile_ids": ["PROFILE_UUID"],
     "approval_receipt_id": "TARGET_BOUND_APPROVAL_UUID"
   }'
 ```
 
-Treat authentication values as secrets. API responses redact stored credentials; ShakerScan can
-also use managed credential profiles for Interactive Testing and Hunt.
+Add a distinct `secondary` profile ID for differential BOLA/IDOR testing. The worker decrypts a
+profile only after target, capability, version, expiry, and approval validation. The deprecated
+`/scans/compat` route exists only for migration and sunsets on 31 December 2026.
 
 ### Review and retest findings
 

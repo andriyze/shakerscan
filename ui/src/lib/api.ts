@@ -4418,7 +4418,6 @@ export interface ScanV2Request {
     network_discovery?: boolean
     approval_receipt_id?: string
   }
-  authentication?: Record<string, unknown>
   request_collections?: Array<Record<string, unknown>>
   credential_profile_ids?: string[]
   advanced?: Record<string, unknown>

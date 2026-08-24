@@ -974,106 +974,45 @@ Gungnir watches Certificate Transparency logs and automatically discovers new su
 
 ### Authenticated Scanning
 
-Run scans with authentication to test protected endpoints:
+Create encrypted, exact-target credential profiles, then submit only their opaque IDs. Normal Scan
+requests must never contain bearer tokens, cookies, passwords, client secrets, or custom secret
+headers.
 
 ```bash
-# Bearer token auth (JWT, API keys)
+# Register or reuse the exact target first; retain the returned id.
+curl -X POST http://localhost:8080/targets \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://api.example.com","name":"Authorized API"}'
+
+# Store a primary bearer token once. The response contains profile.id.
+curl -X POST http://localhost:8080/credential-profiles \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_kind":"api",
+    "target_id":"TARGET_UUID",
+    "name":"Primary test principal",
+    "auth_kind":"bearer_token",
+    "principal_slot":"primary",
+    "secret":"REDACTED_TOKEN",
+    "allowed_capabilities":["scan.execute"]
+  }'
+
+# Submit only the profile reference. Credential use always requires a current,
+# exact-target approval receipt.
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{
     "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_header": "Bearer eyJhbGciOiJIUzI1NiIs..."
-    }
-  }'
-
-# Cookie-based auth (session cookies)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_cookies": "session_id=abc123; csrf_token=xyz789"
-    }
-  }'
-
-# Form-based login (scanner auto-authenticates)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "login_username": "testuser@example.com",
-      "login_password": "password123"
-    }
-  }'
-
-# Custom headers (API keys, etc.)
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_headers_json": "{\"X-API-Key\": \"your-api-key\", \"X-Custom\": \"value\"}"
-    }
-  }'
-
-# Focused SQLi-only scan with auth
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "sqli": true,
-      "auth_header": "Bearer eyJhbGciOiJIUzI1NiIs..."
-    }
-  }'
-
-# Focused XSS-only scan with session cookies
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://example.com",
-    "options": {
-      "scan_type": "smart",
-      "xss": true,
-      "auth_cookies": "session_id=abc123; csrf_token=xyz789"
-    }
-  }'
-
-# Multi-user auth for BOLA/IDOR testing
-curl -X POST http://localhost:8080/scans \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.example.com",
-    "options": {
-      "scan_type": "smart",
-      "auth_header": "Bearer user1_token",
-      "user2_header": "Bearer user2_token"
-    }
+    "budget_profile":"thorough",
+    "credential_profile_ids":["PRIMARY_PROFILE_UUID"],
+    "approval_receipt_id":"TARGET_BOUND_APPROVAL_UUID"
   }'
 ```
 
-**Authentication Options:**
-| Option | Description |
-|--------|-------------|
-| `auth_header` | Authorization header value (e.g., "Bearer token" or "Basic base64") |
-| `auth_cookies` | Session cookies (e.g., "session=abc; token=xyz") |
-| `auth_headers_json` | Custom headers as JSON object |
-| `login_username` | Username for form-based login |
-| `login_password` | Password for form-based login |
-| `login_url` | Login page URL (auto-detected if not provided) |
-| `login_extra_fields` | Extra form fields as JSON (e.g., '{"remember": "true"}') |
-| `auth_scenario_json` | Auth scenario JSON DSL for custom login flow/success checks/TOTP |
-| `user2_cookies` | Second user cookies for BOLA/IDOR comparison testing |
-| `user2_header` | Second user auth header for BOLA/IDOR comparison testing |
-
-Auth is propagated to Playwright crawl, Nuclei, Dalfox, SQLmap, and custom checks. Long scans will attempt re-authentication when a session expires.
+For BOLA/IDOR, create a distinct profile with `principal_slot:"secondary"` and pass both IDs. The
+worker resolves profiles only after target, capability, version, expiry, and approval validation;
+the values remain worker-private. `/scans/compat` is a deprecated migration-only raw-auth bridge
+with a 31 December 2026 sunset. Agents must not use it for new work.
 
 **Active Check Filters (API options):**
 | Option | Description |
@@ -1462,8 +1401,8 @@ When AI is enabled, the report also includes `ai_correlations` (cross-finding co
 
 **User**: "Test for BOLA vulnerabilities on api.example.com"
 1. **Ask permission** for active testing first
-2. Ask user for two different user auth tokens
-3. Submit smart scan with `auth_header` and `user2_header`
+2. Ask the user to create/select two distinct exact-target credential profiles
+3. Submit the canonical Scan with both `credential_profile_ids` and a target-bound approval receipt
 4. Report scan ID and UI link - done (don't poll/wait)
 
 **User**: "Let's do interactive security testing"

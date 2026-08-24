@@ -327,14 +327,10 @@ For OWASP-mapped coverage and intentional gaps, see [`docs/owasp-coverage-matrix
 Auth is propagated to the Playwright crawl, Nuclei, Dalfox, SQLmap, and custom checks; long scans
 re-authenticate when sessions expire (`auth_session.py`, `form_login.py`, `oauth_auth.py`).
 
-| Option | Purpose |
-|--------|---------|
-| `auth_header` | Authorization header value (`Bearer …` / `Basic …`) |
-| `auth_cookies` | Session cookies (`session=abc; token=xyz`) |
-| `auth_headers_json` | Arbitrary custom headers as a JSON object (API keys, etc.) |
-| `login_username` / `login_password` | Form-based login (scanner auto-authenticates) |
-| `login_url` / `login_extra_fields` | Login page + extra form fields (auto-detected if omitted) |
-| `user2_header` / `user2_cookies` | Second user context for BOLA/IDOR comparison |
+Canonical Scan submission accepts up to two `credential_profile_ids`, bound to the exact Web/API
+target. Profiles hold bearer tokens, cookies, custom headers, basic auth, or interactive login/OAuth
+material in the encrypted credential store. `primary`/`service` selects the first identity and
+`secondary` selects the differential identity. Profiles may explicitly allow `scan.execute`.
 
 OAuth 2.0/OIDC (client-credentials and auth-code grants, refresh handling, optional TOTP) is
 supported. The scanner tracks `auth_state` per request (`anonymous` / `user1` / `user2`) so coverage
@@ -345,8 +341,11 @@ server-observed accepted authentication, family attempts, and cross-principal pr
 BOLA result requires distinct accepted principals and a deterministic owner/attacker differential;
 two configured or merely attempted lanes do not satisfy that gate.
 
-**Workflow:** create a test account → log in and capture token/cookies → pass via scan `options` →
-the scanner uses the credentials for all authenticated requests, and re-auths on expiry.
+**Workflow:** create a test account → create an encrypted, target-bound profile → obtain a
+target-bound approval receipt → pass only `credential_profile_ids` to `/scans`. The worker validates
+the frozen profile version and resolves it in memory immediately before execution. Reusable secret
+values do not enter canonical Scan requests, rows, logs, or queue payloads. `/scans/compat` is the
+explicitly deprecated raw-auth migration bridge and sunsets on 31 December 2026.
 
 ---
 

@@ -724,7 +724,12 @@ def submit_target(name, api, do_auth):
                 "validation_method": "jwt_stable_claim",
             })
     opts["benchmark_principal_validation"] = principal_validation
-    resp = _post(f"{api}/scans", {"target": fx["target_url"], "options": opts})
+    # The benchmark harness mints disposable fixture users immediately before a
+    # run. Keep that legacy raw-token flow visibly isolated on the deprecated
+    # bridge until the fixture setup can mint target-bound profile approvals.
+    # Unauthenticated scorecards use the canonical secret-free route.
+    submission_path = "/scans/compat" if do_auth and auth_cfg else "/scans"
+    resp = _post(f"{api}{submission_path}", {"target": fx["target_url"], "options": opts})
     scan_id = resp.get("id") or resp.get("scan_id")
     if not scan_id:
         raise RuntimeError("benchmark scan submission returned no scan id")

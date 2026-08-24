@@ -4649,7 +4649,10 @@ async def _request_validation_error_handler(
     # FastAPI's default 422 body includes rejected input. That is useful for ordinary
     # forms but unsafe for credential creation, where the rejected value may be a key,
     # token, password, or private key. Preserve the standard handler everywhere else.
-    if request.url.path.startswith("/credential-profiles"):
+    if (
+        request.url.path.startswith("/credential-profiles")
+        or request.url.path.startswith("/scans")
+    ):
         return JSONResponse(
             status_code=422,
             content={"detail": public_credential_validation_errors(exc.errors())},
@@ -4940,18 +4943,48 @@ class ScanAdvancedLimits(BaseModel):
     force_single_worker: bool = False
 
 
-class ScanRequest(BaseModel):
+def _scan_authentication_value_present(value: Any) -> bool:
+    """Return whether an auth field carries executable private material."""
+    if isinstance(value, bool):
+        return value
+    return value not in (None, "", [], {})
+
+
+class _ScanRequestBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target: str
     name: Optional[str] = None
     target_kind: Literal["web", "api"] = "web"
     budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
     policy: Optional[dict[str, Any]] = None
-    authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
+
+
+class ScanRequest(_ScanRequestBase):
+    """Canonical secret-free Scan submission using only durable references."""
+
+    @model_validator(mode="after")
+    def reject_inline_authentication(self):
+        if any(
+            _scan_authentication_value_present(getattr(self.options, key, None))
+            for key in SCAN_AUTHENTICATION_KEYS
+        ):
+            raise ValueError(
+                "canonical Scan rejects inline authentication; create an encrypted "
+                "credential profile and pass credential_profile_ids"
+            )
+        return self
+
+
+class LegacyScanRequest(_ScanRequestBase):
+    """Deprecated compatibility request that may carry inline authentication."""
+
+    authentication: Optional[dict[str, Any]] = None
 
 
 class DeviceTargetCreate(BaseModel):
@@ -5161,17 +5194,40 @@ class DeviceAgentShellConfirmRequest(BaseModel):
     confirm_remote_device_effects: bool = False
 
 
-class BatchRequest(BaseModel):
+class _BatchRequestBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     targets: list[str] = Field(min_length=1, max_length=50)
     target_kind: Literal["web", "api"] = "web"
     budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
     policy: Optional[dict[str, Any]] = None
-    authentication: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
     options: ScanOptions = Field(default_factory=ScanOptions)
+
+
+class BatchRequest(_BatchRequestBase):
+    """Canonical secret-free batch submission."""
+
+    @model_validator(mode="after")
+    def reject_inline_authentication(self):
+        if any(
+            _scan_authentication_value_present(getattr(self.options, key, None))
+            for key in SCAN_AUTHENTICATION_KEYS
+        ):
+            raise ValueError(
+                "canonical Scan batch rejects inline authentication; use "
+                "credential_profile_ids"
+            )
+        return self
+
+
+class LegacyBatchRequest(_BatchRequestBase):
+    """Deprecated batch compatibility request for inline authentication."""
+
+    authentication: Optional[dict[str, Any]] = None
 
 
 class RequestCollectionCreate(BaseModel):
@@ -30249,7 +30305,25 @@ def normalize_dast_scan_options(options: ScanOptions) -> str:
 
 @app.post("/scans")
 async def submit_scan(request: ScanRequest):
-    """Submit a new scan job."""
+    """Submit one canonical secret-free Scan job."""
+    return await _submit_scan(request, allow_inline_authentication=False)
+
+
+@app.post("/scans/compat", deprecated=True)
+async def submit_scan_compat(request: LegacyScanRequest, response: Response):
+    """Deprecated raw-auth bridge; new clients must use credential profiles."""
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Thu, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = '</credential-profiles>; rel="successor-version"'
+    return await _submit_scan(request, allow_inline_authentication=True)
+
+
+async def _submit_scan(
+    request: _ScanRequestBase,
+    *,
+    allow_inline_authentication: bool,
+):
+    """Shared admission with an explicit, route-owned compatibility boundary."""
     scheme_inferred = "://" not in (request.target or "")
     try:
         normalized_target, target_note = normalize_target_url(request.target)
@@ -30321,13 +30395,33 @@ async def submit_scan(request: ScanRequest):
         scan_contract,
         defer_family_preconditions=True,
     )
+    raw_authentication = getattr(request, "authentication", None)
+    inline_option_authentication = {
+        key: options_payload.get(key)
+        for key in SCAN_AUTHENTICATION_KEYS
+        if _scan_authentication_value_present(options_payload.get(key))
+    }
+    if not allow_inline_authentication and (
+        raw_authentication not in (None, "", [], {})
+        or inline_option_authentication
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "canonical Scan rejects inline authentication; create an "
+                "encrypted credential profile and pass credential_profile_ids"
+            ),
+        )
     try:
-        authentication = normalize_scan_authentication(request.authentication)
+        authentication = normalize_scan_authentication(raw_authentication)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if request.credential_profile_ids and (
         authentication
-        or any(options_payload.get(key) not in (None, "", [], {}) for key in SCAN_AUTHENTICATION_KEYS)
+        or any(
+            _scan_authentication_value_present(options_payload.get(key))
+            for key in SCAN_AUTHENTICATION_KEYS
+        )
     ):
         raise HTTPException(
             status_code=422,
@@ -30336,10 +30430,15 @@ async def submit_scan(request: ScanRequest):
                 "use only encrypted generic profiles"
             ),
         )
-    options_payload["authentication"] = authentication
+    if authentication:
+        options_payload["authentication"] = authentication
+    else:
+        options_payload.pop("authentication", None)
     for key, value in authentication.items():
         if value not in (None, "", [], {}):
             options_payload[key] = value
+    if authentication or inline_option_authentication:
+        options_payload["inline_auth_compatibility"] = True
     options_payload["network_discovery"] = bool(scan_contract.policy.network_discovery)
     options_payload["request_collections"] = [dict(item) for item in request.request_collections]
     options_payload["scan_policy"]["approval_receipt_id"] = approval_receipt_id
@@ -30775,6 +30874,15 @@ async def submit_scan(request: ScanRequest):
     }
     if scan_contract.deprecations:
         response['deprecations'] = [dict(item) for item in scan_contract.deprecations]
+    if allow_inline_authentication:
+        response.setdefault("deprecations", []).append({
+            "code": "inline_auth_compatibility_route",
+            "message": (
+                "Move authentication into /credential-profiles and submit only "
+                "credential_profile_ids to /scans."
+            ),
+            "sunset": "2026-12-31T23:59:59Z",
+        })
     if parallel_enabled:
         response['parallel'] = True
         if options_payload.get("auto_sharded"):
@@ -30795,16 +30903,40 @@ async def submit_scan(request: ScanRequest):
 @app.post("/scans/batch")
 async def submit_batch(request: BatchRequest):
     """Submit a bounded batch and report every accepted and rejected target."""
+    return await _submit_batch(request, allow_inline_authentication=False)
+
+
+@app.post("/scans/compat/batch", deprecated=True)
+async def submit_batch_compat(request: LegacyBatchRequest, response: Response):
+    """Deprecated batch bridge for raw inline authentication."""
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Thu, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = '</credential-profiles>; rel="successor-version"'
+    return await _submit_batch(request, allow_inline_authentication=True)
+
+
+async def _submit_batch(
+    request: _BatchRequestBase,
+    *,
+    allow_inline_authentication: bool,
+):
+    """Submit a batch through the selected canonical or compatibility boundary."""
     jobs: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     targets = list(dict.fromkeys(str(target).strip() for target in request.targets if str(target).strip()))
     for target in targets:
-        req = ScanRequest(
+        request_type = LegacyScanRequest if allow_inline_authentication else ScanRequest
+        req = request_type(
             target=target,
             target_kind=request.target_kind,
             budget_profile=request.budget_profile,
             policy=dict(request.policy or {}),
-            authentication=dict(request.authentication or {}),
+            **(
+                {"authentication": dict(
+                    getattr(request, "authentication", None) or {}
+                )}
+                if allow_inline_authentication else {}
+            ),
             request_collections=[dict(item) for item in request.request_collections],
             credential_profile_ids=list(request.credential_profile_ids),
             advanced=(
@@ -30815,7 +30947,11 @@ async def submit_batch(request: BatchRequest):
             options=request.options.model_copy(deep=True),
         )
         try:
-            jobs.append(await submit_scan(req))
+            jobs.append(
+                await _submit_scan(req, allow_inline_authentication=True)
+                if allow_inline_authentication
+                else await submit_scan(req)
+            )
         except HTTPException as exc:
             errors.append({"target": target, "status_code": exc.status_code, "error": exc.detail})
         except Exception:
