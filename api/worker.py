@@ -20407,7 +20407,7 @@ _AGENT_TOOL_OUTPUT_BYTES = max(
 _AGENT_TOOL_RESULT_TTL_SECONDS = max(
     60, min(86_400, int(os.environ.get("SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS", "3600")))
 )
-_DIRECT_ADDRESS_SCANNERS = frozenset({"httpx", "nmap", "naabu"})
+_DIRECT_ADDRESS_SCANNERS = frozenset({"nmap", "naabu"})
 
 
 def _agent_scanner_network_binding(name: str | None) -> str:
@@ -20591,7 +20591,7 @@ async def _execute_agent_scanner_process(
         if name not in _DIRECT_ADDRESS_SCANNERS:
             pinned_proxy = await PinnedSocksProxy(
                 hostname=str(parsed_execution.hostname or ""),
-                pinned_address=pinned_address,
+                pinned_addresses=job_data.get("authorized_addresses") or (),
                 port=target_port,
                 max_connections=connection_ceiling,
             ).start()
@@ -20778,6 +20778,18 @@ async def _execute_agent_scanner_process(
         "connections_rejected": (
             int(getattr(pinned_proxy, "connections_rejected", 0))
             if pinned_proxy is not None else 0
+        ),
+        "upstream_connection_attempts": (
+            int(getattr(pinned_proxy, "upstream_connection_attempts", 0))
+            if pinned_proxy is not None else 0
+        ),
+        "address_attempts": (
+            dict(getattr(pinned_proxy, "address_attempts", {}))
+            if pinned_proxy is not None else {}
+        ),
+        "address_connections": (
+            dict(getattr(pinned_proxy, "address_connections", {}))
+            if pinned_proxy is not None else {}
         ),
         "bytes_to_target": (
             int(getattr(pinned_proxy, "bytes_to_target", 0))

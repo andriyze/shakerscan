@@ -113,3 +113,45 @@ def test_pinned_socks_proxy_closes_and_signals_at_connection_ceiling():
         await upstream.wait_closed()
 
     asyncio.run(scenario())
+
+
+def test_pinned_socks_proxy_uses_stable_preconnect_address_fallback():
+    async def scenario():
+        observed = []
+
+        async def echo(reader, writer):
+            observed.append(await reader.readexactly(4))
+            writer.write(b"PONG")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        try:
+            upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        upstream_port = upstream.sockets[0].getsockname()[1]
+        async with PinnedSocksProxy(
+            hostname="fallback.local",
+            pinned_addresses=("127.0.0.1", "127.0.0.0"),
+            port=upstream_port,
+        ) as proxy:
+            reader, writer, code = await _socks_connect(
+                proxy.proxy_url, "fallback.local", upstream_port,
+            )
+            assert code == 0
+            writer.write(b"ping")
+            await writer.drain()
+            assert await reader.readexactly(4) == b"PONG"
+            writer.close()
+            await writer.wait_closed()
+            assert proxy.pinned_addresses == ("127.0.0.0", "127.0.0.1")
+            assert proxy.upstream_connection_attempts == 2
+            assert proxy.address_attempts == {"127.0.0.0": 1, "127.0.0.1": 1}
+            assert proxy.address_connections == {"127.0.0.0": 0, "127.0.0.1": 1}
+
+        upstream.close()
+        await upstream.wait_closed()
+        assert observed == [b"ping"]
+
+    asyncio.run(scenario())

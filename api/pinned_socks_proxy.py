@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import ipaddress
 import struct
-from typing import Any
+from typing import Any, Iterable
+
+from runtime.target_bound_socket import FrozenTargetSocketFactory
 
 
 class PinnedSocksProxy:
@@ -17,16 +19,26 @@ class PinnedSocksProxy:
     """
 
     def __init__(
-        self, *, hostname: str, pinned_address: str, port: int,
+        self, *, hostname: str, pinned_address: str | None = None,
+        pinned_addresses: Iterable[str] | None = None, port: int,
         max_connections: int | None = None,
     ) -> None:
         self.hostname = str(hostname or "").strip().lower().rstrip(".")
-        self.pinned_address = str(ipaddress.ip_address(str(pinned_address or "").strip()))
         self.port = int(port)
         if not self.hostname:
             raise ValueError("pinned SOCKS proxy requires a hostname")
         if not 1 <= self.port <= 65535:
             raise ValueError("pinned SOCKS proxy requires a valid port")
+        supplied = list(pinned_addresses or ())
+        if pinned_address is not None:
+            supplied.append(str(pinned_address))
+        self.socket_factory = FrozenTargetSocketFactory(
+            hostname=self.hostname,
+            port=self.port,
+            frozen_addresses=supplied,
+        )
+        self.pinned_addresses = self.socket_factory.addresses
+        self.pinned_address = self.pinned_addresses[0]
         self.max_connections = (
             None if max_connections is None else max(1, int(max_connections))
         )
@@ -35,6 +47,13 @@ class PinnedSocksProxy:
         self.connection_attempts = 0
         self.connections_opened = 0
         self.connections_rejected = 0
+        self.upstream_connection_attempts = 0
+        self.address_attempts = {
+            address: 0 for address in self.socket_factory.connection_addresses
+        }
+        self.address_connections = {
+            address: 0 for address in self.socket_factory.connection_addresses
+        }
         self.bytes_to_target = 0
         self.bytes_from_target = 0
         self.limit_exceeded = asyncio.Event()
@@ -120,15 +139,36 @@ class PinnedSocksProxy:
                 return
             destination = await asyncio.wait_for(self._read_destination(reader, atyp), timeout=3)
             requested_port = struct.unpack("!H", await reader.readexactly(2))[0]
-            allowed_hosts = {self.hostname, self.pinned_address}
+            allowed_hosts = {self.hostname, *self.pinned_addresses}
             if destination not in allowed_hosts or requested_port != self.port:
                 await self._reply(writer, 2)
                 return
-            try:
-                upstream_reader, upstream_writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.pinned_address, self.port), timeout=5,
+            candidate_addresses = (
+                (destination,)
+                if destination in self.pinned_addresses
+                else self.socket_factory.connection_addresses
+            )
+            deadline = asyncio.get_running_loop().time() + 5.0
+            connected_address = None
+            for address in candidate_addresses:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                self.upstream_connection_attempts += 1
+                self.address_attempts[address] = self.address_attempts.get(address, 0) + 1
+                try:
+                    upstream_reader, upstream_writer = await asyncio.wait_for(
+                        asyncio.open_connection(address, self.port),
+                        timeout=min(2.0, remaining),
+                    )
+                except (OSError, asyncio.TimeoutError):
+                    continue
+                connected_address = address
+                self.address_connections[address] = (
+                    self.address_connections.get(address, 0) + 1
                 )
-            except (OSError, asyncio.TimeoutError):
+                break
+            if connected_address is None:
                 await self._reply(writer, 5)
                 return
             self.connections_opened += 1

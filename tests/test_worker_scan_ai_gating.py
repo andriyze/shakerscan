@@ -3243,9 +3243,25 @@ def test_run_scan_rejects_invalid_explicit_scan_type():
 
 
 def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypatch):
+    proxy_options = {}
+
     class _PinnedProxy:
-        def __init__(self, **_kwargs):
-            raise AssertionError("httpx must use its exact-address binding")
+        def __init__(self, **kwargs):
+            proxy_options.update(kwargs)
+            self.limit_exceeded = asyncio.Event()
+            self.connection_attempts = 0
+            self.connections_opened = 0
+            self.connections_rejected = 0
+            self.upstream_connection_attempts = 0
+            self.address_attempts = {}
+            self.address_connections = {}
+            self.bytes_to_target = 0
+            self.bytes_from_target = 0
+
+        @property
+        def proxy_url(self): return "socks5://127.0.0.1:41000"
+        async def start(self): return self
+        async def close(self): return None
 
     monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
     class _Redis:
@@ -3316,13 +3332,12 @@ def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypat
     assert "-no-stdin" in captured["cmd"]
     assert captured["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL
     assert captured["kwargs"]["start_new_session"] is True
-    assert "https://203.0.113.7/admin?token=secret" in captured["cmd"]
-    assert "Host: example.test" in captured["cmd"]
-    assert "-sni-name" in captured["cmd"]
-    assert "example.test" in captured["cmd"]
-    assert "-http-proxy" not in captured["cmd"]
+    assert "https://example.test/admin?token=secret" in captured["cmd"]
+    assert "-http-proxy" in captured["cmd"]
+    assert "socks5://127.0.0.1:41000" in captured["cmd"]
+    assert proxy_options["pinned_addresses"] == ["203.0.113.7"]
     result = json.loads(redis.values["agent_tool_result:agent-job-1"])
-    assert result["network_binding"] == "exact_address_subset"
+    assert result["network_binding"] == "hostname_preserving_pinned_socks5"
     assert result["status"] == "success"
     assert result["settlement"]["mode"] == "exact"
     assert result["settlement"]["actual"] == 1
@@ -3420,7 +3435,20 @@ def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch)
 def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch):
     class _PinnedProxy:
         def __init__(self, **_kwargs):
-            raise AssertionError("httpx must use its exact-address binding")
+            self.limit_exceeded = asyncio.Event()
+            self.connection_attempts = 0
+            self.connections_opened = 0
+            self.connections_rejected = 0
+            self.upstream_connection_attempts = 0
+            self.address_attempts = {}
+            self.address_connections = {}
+            self.bytes_to_target = 0
+            self.bytes_from_target = 0
+
+        @property
+        def proxy_url(self): return "socks5://127.0.0.1:41000"
+        async def start(self): return self
+        async def close(self): return None
 
     monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
     class _Redis:
