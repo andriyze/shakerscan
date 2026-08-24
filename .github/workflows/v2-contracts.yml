@@ -228,7 +228,7 @@ jobs:
             tests/test_scanner_fixed_budget_adapter.py \
             tests/test_pinned_socks_proxy.py \
             tests/test_subprocess_receipts.py \
-            tests/test_worker_scan_ai_gating.py::test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan \
+            tests/test_worker_scan_ai_gating.py::test_run_scan_rejects_monolithic_deterministic_execution \
             tests/test_worker_scan_ai_gating.py::test_canonical_shard_builder_emits_secret_free_v2_queue_authority
 
       - name: Validate fleet and broker Scan authority
@@ -423,6 +423,21 @@ jobs:
         run: |
           npm --prefix ui ci
           npm --prefix ui run build
+
+      - name: Run deterministic Model Intake V2 gate
+        run: |
+          mkdir -p artifacts
+          python tests/e2e/run_e2e.py \
+            --area model_intake \
+            --scorecard artifacts/v2-model-intake-scorecard.json
+
+      - name: Upload Model Intake scorecard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-model-intake-e2e
+          path: artifacts/v2-model-intake-scorecard.json
+          if-no-files-found: error
 
       - name: Dump stack logs on failure
         if: failure()

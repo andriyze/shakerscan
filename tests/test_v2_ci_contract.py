@@ -92,7 +92,7 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "tests/test_parallel_scan.py",
         "test_canonical_options_builder_erases_legacy_identity_and_uses_plan_budget",
         "test_canonical_schedule_queues_scan_job_v2_without_legacy_identity",
-        "test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan",
+        "test_run_scan_rejects_monolithic_deterministic_execution",
         "test_canonical_shard_builder_emits_secret_free_v2_queue_authority",
         "test_primary_api_parses_typed_native_hunt_start",
         "test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitted",
@@ -121,6 +121,10 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "docker compose build" in text
     assert "scripts/docker_api_overlay_smoke.sh" in text
     assert "npm --prefix ui run build" in text
+    assert "python tests/e2e/run_e2e.py" in text
+    assert "--area model_intake" in text
+    assert "--scorecard artifacts/v2-model-intake-scorecard.json" in text
+    assert "name: v2-model-intake-e2e" in text
 
 
 def test_package_native_and_legacy_scan_contracts_run_in_isolated_processes():

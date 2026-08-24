@@ -824,6 +824,11 @@ AREAS = {
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--area", default="all", choices=["all", *AREAS.keys()])
+    ap.add_argument(
+        "--scorecard",
+        default=os.environ.get("SHAKERSCAN_E2E_SCORECARD"),
+        help="write the complete machine-readable scorecard to this path",
+    )
     args = ap.parse_args()
 
     H.preflight()
@@ -840,6 +845,19 @@ def main() -> int:
         s = c.summary()
         print(f"  {s['area']}: {s['passed']}/{s['total']} — gate {s['gate'].upper()}", flush=True)
         failed = failed or not c.passed
+    if args.scorecard:
+        scorecard = {
+            "schema_version": "shakerscan-e2e-scorecard/v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "gate": "fail" if failed else "pass",
+            "areas": [card.summary() for card in cards],
+        }
+        scorecard_path = os.path.abspath(args.scorecard)
+        os.makedirs(os.path.dirname(scorecard_path), exist_ok=True)
+        with open(scorecard_path, "w", encoding="utf-8") as handle:
+            json.dump(scorecard, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        print(f"scorecard written to {scorecard_path}", flush=True)
     print(("\nE2E GATE: FAIL" if failed else "\nE2E GATE: PASS"), flush=True)
     return 1 if failed else 0
 
