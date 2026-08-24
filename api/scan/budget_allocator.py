@@ -22,6 +22,14 @@ MANDATORY_ACTION_IDS = frozenset({
     "finalize.report",
 })
 
+TARGET_TRAFFIC_DIMENSIONS = frozenset({
+    "http_requests",
+    "state_changing_requests",
+    "browser_actions",
+    "tcp_ports_attempted",
+    "hosts_attempted",
+})
+
 
 class ScanBudgetAllocationError(ValueError):
     """A required action graph cannot fit inside its immutable Scan budget."""
@@ -42,6 +50,11 @@ class ScanBudgetAllocation:
     residual_scan_execute_budget: Mapping[str, int]
     skipped_action_ids: tuple[str, ...]
 
+    @property
+    def unallocated_budget(self) -> Mapping[str, int]:
+        """Authority not assigned to any action in this immutable plan."""
+        return self.residual_scan_execute_budget
+
 
 class ScanBudgetLimits(Protocol):
     def ledger_limits(self) -> Mapping[str, int]: ...
@@ -61,7 +74,7 @@ def allocate_scan_action_plan(
     plan: ScanActionPlan,
     budget: ScanBudget | ScanBudgetLimits,
     *,
-    assign_residual_to_finalizer: bool = True,
+    assign_residual_to_finalizer: bool = False,
     require_finalizer: bool = True,
 ) -> ScanBudgetAllocation:
     """Admit the complete worst-case graph before any action may execute.
@@ -69,8 +82,8 @@ def allocate_scan_action_plan(
     Registry maximums are retained unless a capability declares reviewed process
     tiers. A selected smaller tier is frozen into the returned action digest before
     traffic. Required work fails admission when no tier fits; optional work remains
-    in the immutable plan with a stable skip reason. The residual authority is
-    assigned once to the finalizer so legacy internal checks cannot expand.
+    in the immutable plan with a stable skip reason. Residual authority remains
+    visibly unallocated; the pure finalizer never receives target-traffic authority.
     """
     limits = budget.ledger_limits()
     allocated = {name: 0 for name in limits}
@@ -151,11 +164,23 @@ def allocate_scan_action_plan(
         raise ScanBudgetAllocationError(
             "finalize.report", {"unexpected_action": 1},
         )
+    if finalizer is not None and finalizer.capability_name == "scan.finalize":
+        forbidden = {
+            name: int(finalizer.requested_budget.get(name, 0))
+            for name in TARGET_TRAFFIC_DIMENSIONS
+            if int(finalizer.requested_budget.get(name, 0)) > 0
+        }
+        if forbidden:
+            raise ScanBudgetAllocationError(finalizer.action_id, forbidden)
 
     residual = {name: limits[name] - allocated[name] for name in limits}
     if assign_residual_to_finalizer:
         if finalizer is None:
             raise ScanBudgetAllocationError("finalize.report", {"action": 1})
+        if finalizer.capability_name != "scan.execute":
+            raise ScanBudgetAllocationError(
+                "finalize.report", {"legacy_residual_assignment": 1},
+            )
         final_budget = dict(finalizer.requested_budget)
         for name, amount in residual.items():
             if amount:

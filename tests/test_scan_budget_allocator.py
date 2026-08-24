@@ -61,13 +61,18 @@ def _compile(budget: ScanBudget, *, include=(), active=True):
     )
 
 
-def test_allocator_admits_whole_plan_and_assigns_only_precomputed_residual():
+def test_allocator_admits_whole_plan_and_leaves_residual_unallocated():
     budget = ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25)
     allocation = allocate_scan_action_plan(_compile(budget, active=False), budget)
 
-    assert allocation.allocated == budget.ledger_limits()
+    assert allocation.allocated != budget.ledger_limits()
     assert allocation.residual_scan_execute_budget["http_requests"] > 0
     assert allocation.residual_scan_execute_budget["tool_wall_seconds"] > 0
+    assert allocation.unallocated_budget == allocation.residual_scan_execute_budget
+    assert all(
+        allocation.allocated[name] + allocation.unallocated_budget[name] == limit
+        for name, limit in budget.ledger_limits().items()
+    )
     assert all(
         sum(
             action.requested_budget.get(name, 0)
@@ -78,7 +83,21 @@ def test_allocator_admits_whole_plan_and_assigns_only_precomputed_residual():
     )
     finalizer = allocation.plan.actions[-1]
     assert finalizer.action_id == "finalize.report"
-    assert finalizer.requested_budget["http_requests"] > 0
+    assert finalizer.capability_name == "scan.finalize"
+    assert finalizer.requested_budget == {"tool_wall_seconds": 1}
+
+
+def test_allocator_rejects_legacy_residual_assignment_for_pure_finalizer():
+    budget = ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25)
+
+    with pytest.raises(
+        ScanBudgetAllocationError, match="legacy_residual_assignment"
+    ):
+        allocate_scan_action_plan(
+            _compile(budget, active=False),
+            budget,
+            assign_residual_to_finalizer=True,
+        )
 
 
 def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
