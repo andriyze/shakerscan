@@ -201,6 +201,8 @@ def test_passive_nuclei_plan_uses_exact_reviewed_get_only_allowlist():
     assert "-tags" not in plan.argv
     assert "-disable-redirects" in plan.argv
     assert "-no-interactsh" in plan.argv
+    assert "-omit-raw" in plan.argv
+    assert "-omit-template" in plan.argv
     assert plan.budget_proof["accounting_mode"] == "exact"
     assert plan.budget_proof["method"] == "reviewed_template_allowlist"
     assert plan.hard_budget_dict["http_requests"] == 7

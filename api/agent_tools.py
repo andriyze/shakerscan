@@ -211,7 +211,11 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     if template_ids:
         if template_ids != _CANONICAL_PASSIVE_NUCLEI_IDS:
             raise AgentToolError("nuclei template allowlist is not canonical")
-        args += ["-id", template_ids]
+        # The reviewed passive pack needs only typed match metadata. Nuclei's
+        # default JSONL embeds the complete request/response and encoded
+        # template in every matcher result, which can exceed the worker's hard
+        # output ceiling even for this six-template, seven-request profile.
+        args += ["-id", template_ids, "-omit-raw", "-omit-template"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
         args += ["-tags", tags]
