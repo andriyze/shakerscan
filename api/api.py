@@ -493,6 +493,7 @@ try:
         build_request_candidate_manifest,
         build_request_manifest,
         route_id as scan_manifest_route_id,
+        unique_work_manifest_reference_dicts,
         work_manifest_references_in,
     )
     from scan.budget_allocator import (
@@ -503,6 +504,8 @@ try:
         ContinuationBudgetCeiling,
         ScanContinuationAllocation,
         ScanContinuationError,
+        ScanPlanRevision,
+        amended_scan_plan_revision,
         build_discovery_continuation_manifests,
         merge_scan_action_continuation,
     )
@@ -595,6 +598,7 @@ except ModuleNotFoundError:
         build_request_candidate_manifest,
         build_request_manifest,
         route_id as scan_manifest_route_id,
+        unique_work_manifest_reference_dicts,
         work_manifest_references_in,
     )
     from api.scan.budget_allocator import (
@@ -605,6 +609,8 @@ except ModuleNotFoundError:
         ContinuationBudgetCeiling,
         ScanContinuationAllocation,
         ScanContinuationError,
+        ScanPlanRevision,
+        amended_scan_plan_revision,
         build_discovery_continuation_manifests,
         merge_scan_action_continuation,
     )
@@ -11625,6 +11631,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     durable_scan_execution: dict[str, Any] | None = None
     durable_scan_terminal = None
     scan_action_plan_payload: dict[str, Any] | None = None
+    scan_action_plan_revision_payload: dict[str, Any] | None = None
     action_worker_id: str | None = None
     private_scan_inputs: dict[str, Any] | None = None
     row = None
@@ -11650,7 +11657,11 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                     detail="broker Scan lost canonical execution authority",
                 )
             try:
-                persisted_action_plan = await PostgresScanActionStore().load_plan(
+                action_store = PostgresScanActionStore()
+                persisted_action_plan = await action_store.load_plan(
+                    conn, scan_id=str(payload.get("scan_id") or ""),
+                )
+                persisted_plan_revision = await action_store.load_plan_revision(
                     conn, scan_id=str(payload.get("scan_id") or ""),
                 )
             except Exception as exc:
@@ -11660,6 +11671,9 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             )
             if (
                 persisted_action_plan is None
+                or persisted_plan_revision is None
+                or persisted_plan_revision.plan_digest
+                != persisted_action_plan.plan_digest
                 or persisted_action_plan.execution_plan_digest
                 != native_execution.execution_plan.digest
                 or persisted_action_plan.target_binding_digest
@@ -11671,6 +11685,9 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 )
             broker_candidate_plan = persisted_action_plan
             scan_action_plan_payload = persisted_action_plan.canonical_dict()
+            scan_action_plan_revision_payload = (
+                persisted_plan_revision.canonical_dict()
+            )
             action_worker_id = f"broker:{body.worker_id}"
         if budget_reservation is not None:
             await conn.execute(
@@ -11912,6 +11929,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             "job": payload,
             "scan_execution": durable_scan_execution,
             "scan_action_plan": scan_action_plan_payload,
+            "scan_action_plan_revision": scan_action_plan_revision_payload,
             "action_worker_id": action_worker_id,
             "private_scan_inputs": private_scan_inputs,
         },
@@ -12058,7 +12076,7 @@ async def _materialize_broker_scan_continuation(
     options: Mapping[str, Any],
     allocation: ScanContinuationAllocation,
     worker_id: str,
-) -> tuple[ScanActionPlan, dict[str, Any]]:
+) -> tuple[ScanActionPlan, ScanPlanRevision, dict[str, Any]]:
     """Compile the broker continuation only from control-plane receipts."""
     backend = PostgresScanExecutionBackend(
         pool=db_pool,
@@ -12219,6 +12237,16 @@ async def _materialize_broker_scan_continuation(
             continuation_plan=continuation_plan,
             allocation=allocation,
         )
+        revision = amended_scan_plan_revision(
+            parent_plan=parent_plan,
+            continuation_plan=continuation_plan,
+            amended_plan=amended,
+            allocation=allocation,
+            discovery_results=results,
+            work_manifest_references=unique_work_manifest_reference_dicts(
+                action.capability_args for action in continuation_plan.actions
+            ),
+        )
     except (
         ScanActionPlanError,
         ScanBudgetAllocationError,
@@ -12237,6 +12265,7 @@ async def _materialize_broker_scan_continuation(
         parent_plan=parent_plan,
         amended_plan=amended,
         allocation=allocation,
+        revision=revision,
     )
     continuation_options = {
         "endpoint_manifest_id": str(endpoints.manifest_id),
@@ -12248,6 +12277,7 @@ async def _materialize_broker_scan_continuation(
             else None
         ),
         "scan_continuation_plan_digest": amended.plan_digest,
+        "scan_plan_revision": revision.canonical_dict(),
     }
     await conn.execute(
         """
@@ -12257,7 +12287,7 @@ async def _materialize_broker_scan_continuation(
         uuid.UUID(parent_plan.scan_id),
         json.dumps(continuation_options),
     )
-    return amended, continuation_options
+    return amended, revision, continuation_options
 
 
 @app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease")
@@ -12662,7 +12692,7 @@ async def continue_broker_scan_action_plan(
                 raise HTTPException(
                     status_code=409, detail="broker Scan target is inactive",
                 )
-            amended, continuation_options = (
+            amended, revision, continuation_options = (
                 await _materialize_broker_scan_continuation(
                     conn,
                     parent_plan=current_plan,
@@ -12686,12 +12716,21 @@ async def continue_broker_scan_action_plan(
                     detail="broker Scan plan changed outside continuation authority",
                 )
             amended = current_plan
+            revision = await action_store.load_plan_revision(
+                conn, scan_id=scan_id,
+            )
+            if revision is None or revision.plan_digest != amended.plan_digest:
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker Scan continuation revision is unavailable",
+                )
             continuation_options = {
                 key: options[key]
                 for key in (
                     "endpoint_manifest_id", "endpoint_manifest_ref",
                     "candidate_manifest_ref", "request_candidate_manifest_ref",
                     "scan_continuation_plan_digest",
+                    "scan_plan_revision",
                 )
                 if key in options
             }
@@ -12699,6 +12738,7 @@ async def continue_broker_scan_action_plan(
         "plan": amended.canonical_dict(),
         "options": continuation_options,
         "allocation_digest": allocation.allocation_digest,
+        "plan_revision": revision.canonical_dict(),
     }
 
 
@@ -31309,6 +31349,7 @@ _PUBLIC_SCAN_ACTIONS_SQL = """
 def _public_scan_execution_explanation(
     scan: Mapping[str, Any],
     action_rows: Sequence[Mapping[str, Any]],
+    plan_revision: ScanPlanRevision | None = None,
 ) -> dict[str, Any]:
     report = _decode_json_value(scan.get("result"))
     return build_scan_execution_explanation(
@@ -31317,6 +31358,9 @@ def _public_scan_execution_explanation(
         plan_payload=_json_object(scan.get("scan_action_plan_json")),
         action_rows=tuple(dict(row) for row in action_rows),
         report=report if isinstance(report, Mapping) else {},
+        plan_revision=(
+            plan_revision.canonical_dict() if plan_revision is not None else None
+        ),
     )
 
 
@@ -31337,7 +31381,18 @@ async def _load_public_scan_execution_explanation(
     if scan is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     action_rows = await conn.fetch(_PUBLIC_SCAN_ACTIONS_SQL, parsed_scan_id)
-    return _public_scan_execution_explanation(scan, action_rows)
+    try:
+        plan_revision = await PostgresScanActionStore().load_plan_revision(
+            conn, scan_id=str(parsed_scan_id),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scan plan revision is invalid: {exc}",
+        ) from exc
+    return _public_scan_execution_explanation(
+        scan, action_rows, plan_revision,
+    )
 
 
 @app.get("/scans/{scan_id}/actions")

@@ -15,6 +15,7 @@ from api.scan.action_store import (
     ACTION_CONTINUATION_MIGRATION_NAME,
     ACTION_BUDGET_LINK_MIGRATION_NAME,
     ACTION_LEASE_MIGRATION_NAME,
+    ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME,
     MIGRATION_NAME,
     PostgresScanActionStore,
     SCAN_ACTION_SCHEMA_SQL,
@@ -23,6 +24,7 @@ from api.scan.action_store import (
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
     ScanContinuationAllocation,
+    ScanPlanRevision,
     merge_scan_action_continuation,
 )
 from api.scan.execution import ScanExecutionPlan
@@ -69,6 +71,7 @@ class FakeConn:
         self.executed = []
         self.plan_row = None
         self.actions = {}
+        self.revisions = {}
         self.fail_action_id = None
 
     class _Transaction:
@@ -80,12 +83,17 @@ class FakeConn:
             self.snapshot = (
                 copy.deepcopy(self.conn.plan_row),
                 copy.deepcopy(self.conn.actions),
+                copy.deepcopy(self.conn.revisions),
             )
             return self
 
         async def __aexit__(self, exc_type, exc, traceback):
             if exc_type is not None:
-                self.conn.plan_row, self.conn.actions = self.snapshot
+                (
+                    self.conn.plan_row,
+                    self.conn.actions,
+                    self.conn.revisions,
+                ) = self.snapshot
             return False
 
     def transaction(self):
@@ -96,6 +104,66 @@ class FakeConn:
         return "OK"
 
     async def fetchrow(self, query, *args):
+        if query.lstrip().startswith("INSERT INTO scan_action_plan_revisions"):
+            if "VALUES ($1,0" in query:
+                scan_id, plan_digest, schema, revision_digest, raw_plan = args
+                incoming = {
+                    "scan_id": scan_id,
+                    "revision": 0,
+                    "plan_digest": plan_digest,
+                    "parent_plan_digest": None,
+                    "continuation_allocation_digest": None,
+                    "revision_schema": schema,
+                    "discovery_result_digest": None,
+                    "work_manifest_refs_json": [],
+                    "continuation_plan_digest": None,
+                    "revision_digest": revision_digest,
+                    "plan_json": json.loads(raw_plan),
+                }
+            else:
+                (
+                    scan_id, plan_digest, parent_digest, allocation_digest,
+                    schema, discovery_digest, raw_refs, continuation_digest,
+                    revision_digest, raw_plan,
+                ) = args
+                incoming = {
+                    "scan_id": scan_id,
+                    "revision": 1,
+                    "plan_digest": plan_digest,
+                    "parent_plan_digest": parent_digest,
+                    "continuation_allocation_digest": allocation_digest,
+                    "revision_schema": schema,
+                    "discovery_result_digest": discovery_digest,
+                    "work_manifest_refs_json": json.loads(raw_refs),
+                    "continuation_plan_digest": continuation_digest,
+                    "revision_digest": revision_digest,
+                    "plan_json": json.loads(raw_plan),
+                }
+            existing = self.revisions.get(incoming["revision"])
+            if existing and (
+                existing["plan_digest"] != incoming["plan_digest"]
+                or existing.get("revision_digest") not in {
+                    None, incoming["revision_digest"],
+                }
+            ):
+                return None
+            self.revisions[incoming["revision"]] = incoming
+            return incoming
+        if query.lstrip().startswith("UPDATE scan_action_plan_revisions"):
+            scan_id, plan_digest, allocation_digest = args
+            root = self.revisions.get(0)
+            if (
+                root is None
+                or root["scan_id"] != scan_id
+                or root["plan_digest"] != plan_digest
+                or root.get("continuation_allocation_digest")
+                not in {None, allocation_digest}
+            ):
+                return None
+            root["continuation_allocation_digest"] = allocation_digest
+            return root
+        if "FROM scan_action_plan_revisions" in query:
+            return self.revisions[max(self.revisions)] if self.revisions else None
         if "SET scan_continuation_allocation_json=" in query:
             scan_id, digest, raw, parent_digest = args
             if (
@@ -200,6 +268,7 @@ def test_action_store_rolls_back_header_and_index_on_mid_plan_failure():
 
     assert conn.plan_row is None
     assert conn.actions == {}
+    assert conn.revisions == {}
 
 
 def test_action_store_rejects_changed_plan_and_incomplete_or_tampered_index():
@@ -230,6 +299,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     assert ACTION_LEASE_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_CONTINUATION_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_BUDGET_LINK_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES budget_reservations(id)" in SCAN_ACTION_SCHEMA_SQL
     assert "idx_scan_capability_actions_reservation" in SCAN_ACTION_SCHEMA_SQL
@@ -250,6 +320,9 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     budget_link_repair_sql = Path(
         "db/repairs/2026-08-24_v2_scan_action_budget_link.sql"
     ).read_text(encoding="utf-8")
+    revision_repair_sql = Path(
+        "db/repairs/2026-08-24_v2_scan_plan_revision_chain.sql"
+    ).read_text(encoding="utf-8")
     for source in (init_sql, repair_sql):
         assert "scan_action_plan_json" in source
         assert "CREATE TABLE" in source and "scan_capability_actions" in source
@@ -269,6 +342,10 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "scan_capability_actions_reservation_fk" in source
         assert "REFERENCES budget_reservations(id)" in source
         assert "r.action_digest=a.action_digest" in source
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, revision_repair_sql):
+        assert "revision_digest" in source
+        assert "discovery_result_digest" in source
+        assert "work_manifest_refs_json" in source
 
 
 def test_action_store_applies_one_idempotent_continuation_revision():
@@ -309,6 +386,21 @@ def test_action_store_applies_one_idempotent_continuation_revision():
         continuation_plan=continuation,
         allocation=allocation,
     )
+    template = build_canonical_scan_nuclei_template_manifest(
+        scan_id=parent.scan_id,
+        target_binding_digest=parent.target_binding_digest,
+        include_active=False,
+    )
+    revision = ScanPlanRevision(
+        scan_id=amended.scan_id,
+        revision=1,
+        plan_digest=amended.plan_digest,
+        parent_plan_digest=parent.plan_digest,
+        continuation_allocation_digest=allocation.allocation_digest,
+        discovery_result_digest="d" * 64,
+        work_manifest_references=(template.reference().canonical_dict(),),
+        continuation_plan_digest=continuation.plan_digest,
+    )
     conn = FakeConn()
     store = PostgresScanActionStore()
 
@@ -324,17 +416,20 @@ def test_action_store_applies_one_idempotent_continuation_revision():
         parent_plan=parent,
         amended_plan=amended,
         allocation=allocation,
+        revision=revision,
     ))
     second = asyncio.run(store.amend_plan(
         conn,
         parent_plan=parent,
         amended_plan=amended,
         allocation=allocation,
+        revision=revision,
     ))
 
     assert loaded_allocation == allocation
     assert len(first) == len(second) == len(amended.actions)
     assert asyncio.run(store.load_plan(conn, scan_id=SCAN_ID)) == amended
+    assert asyncio.run(store.load_plan_revision(conn, scan_id=SCAN_ID)) == revision
 
 
 def test_action_store_persists_precomputed_optional_skips_as_unsettled_actions():

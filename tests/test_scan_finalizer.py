@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 
 from api.runtime.observation_manifests import ObservationManifest
@@ -11,6 +12,7 @@ from api.scan.capability_result import (
     CapabilityResultStatus,
 )
 from api.scan.finalizer import finalize_scan_report
+from api.scan.continuation import ScanPlanRevision
 from tests.test_scan_orchestrator import SCAN_ID, _action, _plan, _result
 
 
@@ -66,6 +68,60 @@ def test_finalizer_is_a_pure_deterministic_projection_of_receipts():
     assert first["schema_version"] == "canonical-scan-report/v2"
     assert first["coverage"]["status"] == "complete"
     assert first["scan_metadata"]["finalizer"] == "pure_receipt_projection/v1"
+    assert first["canonical_action_execution"]["plan_revision"]["revision"] == 0
+    asserted_digest = first["report_digest"]
+    digest_material = dict(first)
+    digest_material.pop("report_digest")
+    assert asserted_digest == hashlib.sha256(json.dumps(
+        digest_material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def test_finalizer_digest_binds_complete_plan_revision_chain():
+    plan = _plan()
+    results = _results(plan)
+    observations = {action.action_id: () for action in plan.actions}
+    amendment = ScanPlanRevision(
+        scan_id=plan.scan_id,
+        revision=1,
+        plan_digest=plan.plan_digest,
+        parent_plan_digest="a" * 64,
+        continuation_allocation_digest="b" * 64,
+        discovery_result_digest="c" * 64,
+        work_manifest_references=({
+            "schema_version": "scan-work-manifest-reference/v1",
+            "manifest_id": "55555555-5555-4555-8555-555555555555",
+            "kind": "candidate",
+            "content_schema": "candidate-manifest/v1",
+            "manifest_digest": "d" * 64,
+            "entry_count": 1,
+            "status": "complete",
+        },),
+        continuation_plan_digest="e" * 64,
+    )
+
+    root_report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+    amended_report = finalize_scan_report(
+        plan=plan,
+        plan_revision=amendment,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert amended_report["report_digest"] != root_report["report_digest"]
+    assert amended_report["canonical_action_execution"]["plan_revision"] == (
+        amendment.canonical_dict()
+    )
 
 
 def test_finalizer_projects_content_free_runtime_destinations_from_observations():

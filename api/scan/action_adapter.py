@@ -113,6 +113,11 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .continuation import (
+    ScanContinuationError,
+    ScanPlanRevision,
+    root_scan_plan_revision,
+)
 from .capability_execution import (
     CANONICAL_SCAN_NETWORK_PORTS,
     fit_prepared_scan_capability,
@@ -172,6 +177,7 @@ class DatabaseNeutralScanActionDispatcher:
         job_id: str,
         worker_id: str,
         plan: ScanActionPlan,
+        plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
         backend: ObservationBackend,
         process_runner: ScannerProcessRunner,
         cancelled: Cancelled,
@@ -180,6 +186,22 @@ class DatabaseNeutralScanActionDispatcher:
     ) -> None:
         if not isinstance(plan, ScanActionPlan) or target.digest != plan.target_binding_digest:
             raise ScanActionAdapterError("action dispatcher authority is inconsistent")
+        try:
+            revision = (
+                plan_revision
+                if isinstance(plan_revision, ScanPlanRevision)
+                else ScanPlanRevision.from_dict(plan_revision)
+                if isinstance(plan_revision, Mapping)
+                else root_scan_plan_revision(plan)
+            )
+        except (ScanContinuationError, TypeError, ValueError) as exc:
+            raise ScanActionAdapterError(
+                "action dispatcher plan revision is invalid"
+            ) from exc
+        if revision.scan_id != plan.scan_id or revision.plan_digest != plan.plan_digest:
+            raise ScanActionAdapterError(
+                "action dispatcher plan revision differs from its plan"
+            )
         if private_inputs is not None and (
             private_inputs.plan_digest != plan.plan_digest
             or private_inputs.target_binding_digest != plan.target_binding_digest
@@ -198,6 +220,7 @@ class DatabaseNeutralScanActionDispatcher:
         self.job_id = str(job_id)
         self.worker_id = str(worker_id)
         self.plan = plan
+        self.plan_revision = revision
         self.backend = backend
         self.process_runner = process_runner
         self.cancelled = cancelled
@@ -963,6 +986,7 @@ class DatabaseNeutralScanActionDispatcher:
             observations[planned.action_id] = await self._observations(planned.action_id)
         report = finalize_scan_report(
             plan=self.plan,
+            plan_revision=self.plan_revision,
             target_url=self.target_url,
             action_results=results,
             observations=observations,

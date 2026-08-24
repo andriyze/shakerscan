@@ -176,6 +176,8 @@ from scan.continuation import (
     ContinuationBudgetCeiling,
     ScanContinuationAllocation,
     ScanContinuationError,
+    ScanPlanRevision,
+    amended_scan_plan_revision,
     build_discovery_continuation_manifests,
     merge_scan_action_continuation,
 )
@@ -13968,7 +13970,7 @@ async def _materialize_local_scan_continuation(
     parent_results: Mapping[str, CapabilityResultReference],
     dispatcher: DatabaseNeutralScanActionDispatcher,
     execution_plan: Any,
-) -> ScanActionPlan:
+) -> tuple[ScanActionPlan, ScanPlanRevision]:
     observations = {
         action.action_id: await dispatcher._observations(action.action_id)
         for action in parent_plan.actions
@@ -14062,6 +14064,16 @@ async def _materialize_local_scan_continuation(
         continuation_plan=continuation_plan,
         allocation=allocation,
     )
+    revision = amended_scan_plan_revision(
+        parent_plan=parent_plan,
+        continuation_plan=continuation_plan,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=parent_results,
+        work_manifest_references=unique_work_manifest_reference_dicts(
+            action.capability_args for action in continuation_plan.actions
+        ),
+    )
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             manifest_store = PostgresScanManifestStore()
@@ -14074,6 +14086,7 @@ async def _materialize_local_scan_continuation(
                 parent_plan=parent_plan,
                 amended_plan=amended,
                 allocation=allocation,
+                revision=revision,
             )
             await conn.execute(
                 """
@@ -14092,6 +14105,7 @@ async def _materialize_local_scan_continuation(
                         else None
                     ),
                     "scan_continuation_plan_digest": amended.plan_digest,
+                    "scan_plan_revision": revision.canonical_dict(),
                 }),
             )
     dispatcher.options.update({
@@ -14104,8 +14118,9 @@ async def _materialize_local_scan_continuation(
             else None
         ),
         "scan_continuation_plan_digest": amended.plan_digest,
+        "scan_plan_revision": revision.canonical_dict(),
     })
-    return amended
+    return amended, revision
 
 
 async def _execute_reserved_deterministic_scan(
@@ -14127,6 +14142,9 @@ async def _execute_reserved_deterministic_scan(
     action_store = PostgresScanActionStore()
     async with db_pool.acquire() as conn:
         plan = await action_store.load_plan(conn, scan_id=scan_id)
+        plan_revision = await action_store.load_plan_revision(
+            conn, scan_id=scan_id,
+        )
     if plan is None:
         raise ScanCapabilityContractError(
             "canonical Scan has no persisted immutable action plan"
@@ -14193,6 +14211,7 @@ async def _execute_reserved_deterministic_scan(
         job_id=job_id,
         worker_id=worker_id,
         plan=plan,
+        plan_revision=plan_revision,
         backend=backend,
         process_runner=_execute_agent_scanner_process,
         cancelled=lambda: _scan_cancel_requested(scan_id),
@@ -14226,7 +14245,7 @@ async def _execute_reserved_deterministic_scan(
                 "active Scan has no upfront continuation allocation"
             )
         try:
-            plan = await _materialize_local_scan_continuation(
+            plan, plan_revision = await _materialize_local_scan_continuation(
                 parent_plan=plan,
                 allocation=continuation_allocation,
                 parent_results=orchestration.action_results,
@@ -14242,6 +14261,7 @@ async def _execute_reserved_deterministic_scan(
             backend_name="local",
         )
         dispatcher.plan = plan
+        dispatcher.plan_revision = plan_revision
         dispatcher.backend = backend
         executor = ReceiptScanActionExecutor(
             scan_id=scan_id,
@@ -14277,9 +14297,6 @@ async def _execute_reserved_deterministic_scan(
             "canonical Scan report observation is invalid"
         )
     report = dict(final_observations[0]["report"])
-    report["canonical_action_execution"]["status_matrix"] = dict(
-        orchestration.status_matrix
-    )
     return report
 
 

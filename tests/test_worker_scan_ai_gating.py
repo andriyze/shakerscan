@@ -2096,6 +2096,12 @@ class _FakePlanConn:
                 "ordinal": args[3],
                 "status": args[17],
             }
+        if "INSERT INTO scan_action_plan_revisions" in query:
+            return {
+                "scan_id": args[0],
+                "revision": 0,
+                "plan_digest": args[1],
+            }
         if "INSERT INTO scan_work_manifests" in query:
             self.persisted_manifest_rows.append((str(args[1]), args[2]))
             return {"content_json": json.loads(args[11])}
@@ -2281,9 +2287,17 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
 
 
 def test_local_continuation_compiles_discovery_receipts_into_appended_actions(monkeypatch):
+    import hashlib
+
     from runtime.models import TargetBinding
+    from runtime.observation_manifests import ObservationManifest
     from scan.action_plan import ScanActionPlanCompiler
     from scan.budget_allocator import allocate_scan_action_plan
+    from scan.capability_result import (
+        CapabilityReceiptReference,
+        CapabilityResultReference,
+        CapabilityResultStatus,
+    )
     from scan.continuation import ScanContinuationAllocation
     from scan.contracts import resolve_scan_contract
 
@@ -2327,9 +2341,41 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
         allowed_capabilities=("xss.verify",),
     )
     results = {
-        action.action_id: types.SimpleNamespace(
-            status=types.SimpleNamespace(value="success"),
+        action.action_id: CapabilityResultReference(
+            action_id=action.action_id,
+            action_digest=action.action_digest,
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            output_schema=action.output_schema,
+            status=CapabilityResultStatus.SUCCESS,
+            partial=False,
+            timed_out=False,
             reason_code=None,
+            receipt_ref=CapabilityReceiptReference(
+                receipt_id=str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"continuation:{action.action_id}",
+                )),
+                receipt_hash=hashlib.sha256(
+                    action.action_id.encode()
+                ).hexdigest(),
+            ),
+            observation_manifest_ref=ObservationManifest(
+                manifest_id=str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"continuation-manifest:{action.action_id}",
+                )),
+                owner_id=scan_id,
+                action_id=action.action_id,
+                capability_name=action.capability_name,
+                output_schema=action.output_schema,
+                observation_count=0,
+                content_sha256=hashlib.sha256(b"").hexdigest(),
+                size_bytes=0,
+                object_key=f"scans/{scan_id}/{action.action_id}.jsonl",
+            ).reference(),
+            budget_reserved=action.requested_budget,
+            budget_consumed={},
         )
         for action in parent.actions
     }
@@ -2372,11 +2418,12 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
     monkeypatch.setattr(worker, "PostgresScanManifestStore", ManifestStore)
     monkeypatch.setattr(worker, "PostgresScanActionStore", ActionStore)
 
-    continued = asyncio.run(worker._materialize_local_scan_continuation(
+    continued, revision = asyncio.run(worker._materialize_local_scan_continuation(
         parent_plan=parent,
         allocation=allocation,
         parent_results=results,
         dispatcher=Dispatcher(),
+        execution_plan=contract.execution_plan,
     ))
 
     assert [manifest.kind.value for manifest in persisted] == [
@@ -2384,6 +2431,8 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
     ]
     assert amended[0]["parent_plan"] == parent
     assert amended[0]["amended_plan"] == continued
+    assert amended[0]["revision"] == revision
+    assert revision.plan_digest == continued.plan_digest
     assert continued.actions[:len(parent.actions)] == parent.actions
     assert continued.actions[-1].action_id == "finalize.report"
     assert any(

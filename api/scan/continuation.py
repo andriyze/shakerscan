@@ -20,6 +20,7 @@ from .capability_result import CapabilityResultReference
 from .surface_manifest import build_scan_surface_manifest
 from .work_manifests import (
     ScanWorkManifest,
+    ScanWorkManifestReference,
     build_candidate_manifest,
     build_endpoint_manifest,
 )
@@ -31,6 +32,8 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1 = "scan-continuation-allocation/v1"
 SCAN_CONTINUATION_ALLOCATION_SCHEMA = "scan-continuation-allocation/v2"
+SCAN_PLAN_REVISION_SCHEMA = "scan-plan-revision/v1"
+SCAN_DISCOVERY_RESULT_SET_SCHEMA = "scan-discovery-result-set/v1"
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_ACTIONS = 512
 _LEGACY_CONTINUATION_CAPABILITIES = (
@@ -211,6 +214,206 @@ class ScanContinuationAllocation:
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ScanContinuationError("continuation allocation fields are invalid")
         return cls(**dict(value))
+
+
+@dataclass(frozen=True)
+class ScanPlanRevision:
+    """Content-free identity of the root plan or its sole amendment."""
+
+    scan_id: str
+    revision: int
+    plan_digest: str
+    parent_plan_digest: str | None = None
+    continuation_allocation_digest: str | None = None
+    discovery_result_digest: str | None = None
+    work_manifest_references: tuple[Mapping[str, Any], ...] = ()
+    continuation_plan_digest: str | None = None
+    schema_version: str = SCAN_PLAN_REVISION_SCHEMA
+    revision_digest: str | None = field(default=None, compare=True)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCAN_PLAN_REVISION_SCHEMA:
+            raise ScanContinuationError("unsupported Scan plan revision")
+        try:
+            scan_id = str(uuid.UUID(str(self.scan_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ScanContinuationError("revision scan_id must be a UUID") from exc
+        if isinstance(self.revision, bool) or self.revision not in {0, 1}:
+            raise ScanContinuationError("Scan plan revision must be zero or one")
+        references: list[Mapping[str, Any]] = []
+        for raw in self.work_manifest_references:
+            try:
+                reference = ScanWorkManifestReference.from_dict(raw)
+            except (TypeError, ValueError) as exc:
+                raise ScanContinuationError(
+                    "plan revision work manifest reference is invalid"
+                ) from exc
+            references.append(MappingProxyType(reference.canonical_dict()))
+        references.sort(key=lambda item: (
+            str(item["kind"]), str(item["manifest_digest"]),
+            str(item["manifest_id"]),
+        ))
+        if len(references) > _MAX_ACTIONS or len({
+            (item["kind"], item["manifest_digest"], item["manifest_id"])
+            for item in references
+        }) != len(references):
+            raise ScanContinuationError(
+                "plan revision work manifest references are invalid"
+            )
+        parent = (
+            _hex(self.parent_plan_digest, name="parent_plan_digest")
+            if self.parent_plan_digest is not None else None
+        )
+        allocation = (
+            _hex(
+                self.continuation_allocation_digest,
+                name="continuation_allocation_digest",
+            )
+            if self.continuation_allocation_digest is not None else None
+        )
+        discovery = (
+            _hex(self.discovery_result_digest, name="discovery_result_digest")
+            if self.discovery_result_digest is not None else None
+        )
+        continuation = (
+            _hex(self.continuation_plan_digest, name="continuation_plan_digest")
+            if self.continuation_plan_digest is not None else None
+        )
+        if self.revision == 0:
+            if parent is not None or discovery is not None or continuation is not None or references:
+                raise ScanContinuationError(
+                    "root Scan plan revision cannot contain amendment evidence"
+                )
+        elif not all((parent, allocation, discovery, continuation)) or not references:
+            raise ScanContinuationError(
+                "amended Scan plan revision is missing its immutable chain"
+            )
+        object.__setattr__(self, "scan_id", scan_id)
+        object.__setattr__(self, "plan_digest", _hex(
+            self.plan_digest, name="plan_digest",
+        ))
+        object.__setattr__(self, "parent_plan_digest", parent)
+        object.__setattr__(self, "continuation_allocation_digest", allocation)
+        object.__setattr__(self, "discovery_result_digest", discovery)
+        object.__setattr__(self, "continuation_plan_digest", continuation)
+        object.__setattr__(self, "work_manifest_references", tuple(references))
+        expected = _digest(self.digest_material())
+        if self.revision_digest is not None and _hex(
+            self.revision_digest, name="revision_digest",
+        ) != expected:
+            raise ScanContinuationError(
+                "revision_digest does not match the Scan plan revision"
+            )
+        object.__setattr__(self, "revision_digest", expected)
+
+    def digest_material(self) -> dict[str, Any]:
+        material: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "scan_id": self.scan_id,
+            "revision": self.revision,
+            "plan_digest": self.plan_digest,
+        }
+        if self.revision == 1:
+            material.update({
+                "parent_plan_digest": self.parent_plan_digest,
+                "continuation_allocation_digest": (
+                    self.continuation_allocation_digest
+                ),
+                "discovery_result_digest": self.discovery_result_digest,
+                "work_manifest_references": [
+                    dict(item) for item in self.work_manifest_references
+                ],
+                "continuation_plan_digest": self.continuation_plan_digest,
+            })
+        return material
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "scan_id": self.scan_id,
+            "revision": self.revision,
+            "plan_digest": self.plan_digest,
+            "parent_plan_digest": self.parent_plan_digest,
+            "continuation_allocation_digest": (
+                self.continuation_allocation_digest
+            ),
+            "discovery_result_digest": self.discovery_result_digest,
+            "work_manifest_references": [
+                dict(item) for item in self.work_manifest_references
+            ],
+            "continuation_plan_digest": self.continuation_plan_digest,
+            "revision_digest": self.revision_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ScanPlanRevision":
+        expected = {
+            "schema_version", "scan_id", "revision", "plan_digest",
+            "parent_plan_digest", "continuation_allocation_digest",
+            "discovery_result_digest", "work_manifest_references",
+            "continuation_plan_digest", "revision_digest",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ScanContinuationError("Scan plan revision fields are invalid")
+        return cls(**dict(value))
+
+
+def root_scan_plan_revision(
+    plan: ScanActionPlan,
+    *,
+    continuation_allocation_digest: str | None = None,
+) -> ScanPlanRevision:
+    return ScanPlanRevision(
+        scan_id=plan.scan_id,
+        revision=0,
+        plan_digest=str(plan.plan_digest),
+        continuation_allocation_digest=continuation_allocation_digest,
+    )
+
+
+def scan_discovery_result_digest(
+    results: Mapping[str, CapabilityResultReference],
+) -> str:
+    if not results:
+        raise ScanContinuationError("discovery result set is empty")
+    return _digest({
+        "schema_version": SCAN_DISCOVERY_RESULT_SET_SCHEMA,
+        "results": [
+            results[action_id].canonical_dict()
+            for action_id in sorted(results)
+        ],
+    })
+
+
+def amended_scan_plan_revision(
+    *,
+    parent_plan: ScanActionPlan,
+    continuation_plan: ScanActionPlan,
+    amended_plan: ScanActionPlan,
+    allocation: ScanContinuationAllocation,
+    discovery_results: Mapping[str, CapabilityResultReference],
+    work_manifest_references: tuple[Mapping[str, Any], ...],
+) -> ScanPlanRevision:
+    if (
+        allocation.parent_plan_digest != parent_plan.plan_digest
+        or amended_plan.scan_id != parent_plan.scan_id
+        or set(discovery_results) != set(allocation.parent_action_ids)
+        or tuple(amended_plan.actions[:len(parent_plan.actions)])
+        != parent_plan.actions
+    ):
+        raise ScanContinuationError(
+            "Scan plan revision differs from its immutable amendment inputs"
+        )
+    return ScanPlanRevision(
+        scan_id=amended_plan.scan_id,
+        revision=1,
+        plan_digest=str(amended_plan.plan_digest),
+        parent_plan_digest=str(parent_plan.plan_digest),
+        continuation_allocation_digest=allocation.allocation_digest,
+        discovery_result_digest=scan_discovery_result_digest(discovery_results),
+        work_manifest_references=work_manifest_references,
+        continuation_plan_digest=str(continuation_plan.plan_digest),
+    )
 
 
 def merge_scan_action_continuation(
@@ -437,6 +640,10 @@ __all__ = [
     "SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1",
     "ScanContinuationAllocation",
     "ScanContinuationError",
+    "ScanPlanRevision",
+    "amended_scan_plan_revision",
     "build_discovery_continuation_manifests",
     "merge_scan_action_continuation",
+    "root_scan_plan_revision",
+    "scan_discovery_result_digest",
 ]

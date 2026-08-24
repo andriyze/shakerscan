@@ -10,6 +10,11 @@ from typing import Any, Mapping, Sequence
 
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus
+from .continuation import (
+    ScanContinuationError,
+    ScanPlanRevision,
+    root_scan_plan_revision,
+)
 
 
 SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
@@ -479,8 +484,21 @@ def finalize_scan_report(
     action_results: Mapping[str, CapabilityResultReference],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     work_manifest_references: Sequence[Mapping[str, Any]] = (),
+    plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the final report without network, process, filesystem, or clock access."""
+    try:
+        revision = (
+            plan_revision
+            if isinstance(plan_revision, ScanPlanRevision)
+            else ScanPlanRevision.from_dict(plan_revision)
+            if isinstance(plan_revision, Mapping)
+            else root_scan_plan_revision(plan)
+        )
+    except (ScanContinuationError, TypeError, ValueError) as exc:
+        raise ScanFinalizationError("plan revision is invalid") from exc
+    if revision.scan_id != plan.scan_id or revision.plan_digest != plan.plan_digest:
+        raise ScanFinalizationError("plan revision differs from finalization plan")
     finalization_actions = tuple(
         action for action in plan.actions
         if action.action_id == "finalize.report"
@@ -654,7 +672,7 @@ def finalize_scan_report(
         coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
-    return {
+    report = {
         "schema_version": SCAN_REPORT_SCHEMA,
         "target": str(target_url),
         "runtime_destinations": runtime_destinations,
@@ -689,7 +707,14 @@ def finalize_scan_report(
             "plan_digest": plan.plan_digest,
             "execution_plan_digest": plan.execution_plan_digest,
             "target_binding_digest": plan.target_binding_digest,
+            "plan_revision": revision.canonical_dict(),
             "actions": action_rows,
+            "status_matrix": {
+                **{
+                    row["action_id"]: row["status"] for row in action_rows
+                },
+                finalization_action.action_id: "success",
+            },
             "finalization_action": {
                 "action_id": finalization_action.action_id,
                 "action_digest": finalization_action.action_digest,
@@ -707,3 +732,11 @@ def finalize_scan_report(
             "grade_reliability_reasons": reliability_reasons,
         },
     }
+    report["report_digest"] = hashlib.sha256(json.dumps(
+        report,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    return report

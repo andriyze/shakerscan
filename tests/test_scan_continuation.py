@@ -13,16 +13,21 @@ from api.scan.continuation import (
     SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
     ScanContinuationAllocation,
     ScanContinuationError,
+    ScanPlanRevision,
+    amended_scan_plan_revision,
     build_discovery_continuation_manifests,
     merge_scan_action_continuation,
 )
+from api.scan.capability_result import CapabilityResultStatus
 from api.scan.contracts import resolve_scan_contract
 from api.scan.work_manifests import (
     ScanWorkManifestReference,
     build_candidate_manifest,
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
+    unique_work_manifest_reference_dicts,
 )
+from tests.test_scan_orchestrator import _result
 
 
 SCAN_ID = "70000000-0000-4000-8000-000000000001"
@@ -183,6 +188,63 @@ def test_continuation_append_preserves_parent_and_binds_one_finalizer():
         and action.capability_args["candidate_manifest_ref"]["manifest_digest"]
         for action in amended.actions
     )
+
+
+def test_plan_revision_chain_is_reproducible_and_binds_discovery_receipts():
+    parent, continuation, allocation = _plans()
+    amended = merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        allocation=allocation,
+    )
+    results = {
+        action.action_id: _result(
+            action,
+            status=CapabilityResultStatus.SUCCESS,
+            namespace="revision-a",
+        )
+        for action in parent.actions
+    }
+    refs = unique_work_manifest_reference_dicts(
+        action.capability_args for action in continuation.actions
+    )
+
+    first = amended_scan_plan_revision(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=results,
+        work_manifest_references=refs,
+    )
+    shuffled = amended_scan_plan_revision(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=dict(reversed(tuple(results.items()))),
+        work_manifest_references=tuple(reversed(refs)),
+    )
+    changed_results = dict(results)
+    changed_action = parent.actions[0]
+    changed_results[changed_action.action_id] = _result(
+        changed_action,
+        status=CapabilityResultStatus.SUCCESS,
+        namespace="revision-b",
+    )
+    changed = amended_scan_plan_revision(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=changed_results,
+        work_manifest_references=refs,
+    )
+
+    assert first == shuffled
+    assert first.revision_digest != changed.revision_digest
+    assert first.continuation_plan_digest == continuation.plan_digest
+    assert ScanPlanRevision.from_dict(first.canonical_dict()) == first
 
 
 def test_continuation_request_verifier_binds_parent_collection_replay():

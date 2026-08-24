@@ -190,6 +190,7 @@ def build_scan_execution_explanation(
     plan_payload: Mapping[str, Any] | None,
     action_rows: Sequence[Mapping[str, Any]],
     report: Mapping[str, Any] | None = None,
+    plan_revision: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge immutable plan, durable action index, and final report metadata.
 
@@ -199,6 +200,32 @@ def build_scan_execution_explanation(
     plan = _object(plan_payload)
     report_payload = _object(report)
     execution = _object(report_payload.get("canonical_action_execution"))
+    raw_revision = _object(
+        plan_revision or execution.get("plan_revision")
+    )
+    public_revision = {
+        "schema_version": _text(raw_revision.get("schema_version"), maximum=80),
+        "revision": _integer(raw_revision.get("revision")),
+        "plan_digest": _text(raw_revision.get("plan_digest"), maximum=64),
+        "parent_plan_digest": _text(
+            raw_revision.get("parent_plan_digest"), maximum=64,
+        ) or None,
+        "continuation_allocation_digest": _text(
+            raw_revision.get("continuation_allocation_digest"), maximum=64,
+        ) or None,
+        "discovery_result_digest": _text(
+            raw_revision.get("discovery_result_digest"), maximum=64,
+        ) or None,
+        "work_manifest_references": _work_manifests({
+            "work_manifests": raw_revision.get("work_manifest_references") or [],
+        }),
+        "continuation_plan_digest": _text(
+            raw_revision.get("continuation_plan_digest"), maximum=64,
+        ) or None,
+        "revision_digest": _text(
+            raw_revision.get("revision_digest"), maximum=64,
+        ) or None,
+    } if raw_revision else {}
     report_actions = {
         str(item.get("action_id")): item
         for item in (_object(raw) for raw in _array(execution.get("actions")))
@@ -468,6 +495,7 @@ def build_scan_execution_explanation(
         "scan_id": str(scan_id),
         "scan_status": str(scan_status or "unknown"),
         "plan_digest": plan_digest,
+        "plan_revision": public_revision,
         "execution_plan_digest": _text(
             plan.get("execution_plan_digest") or execution.get("execution_plan_digest"),
             maximum=64,
@@ -514,6 +542,7 @@ def action_list_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": ACTION_LIST_SCHEMA,
         "scan_id": explanation.get("scan_id"),
         "plan_digest": explanation.get("plan_digest"),
+        "plan_revision": dict(explanation.get("plan_revision") or {}),
         "stage_timeline": list(explanation.get("stage_timeline") or []),
         "actions": list(explanation.get("actions") or []),
         "transport_parity": dict(explanation.get("transport_parity") or {}),
@@ -525,6 +554,7 @@ def capability_list_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": CAPABILITY_LIST_SCHEMA,
         "scan_id": explanation.get("scan_id"),
         "plan_digest": explanation.get("plan_digest"),
+        "plan_revision": dict(explanation.get("plan_revision") or {}),
         "capabilities": list(explanation.get("capabilities") or []),
         "capability_coverage": dict(
             _object(explanation.get("coverage")).get("capability_coverage") or {}
@@ -537,6 +567,7 @@ def coverage_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": COVERAGE_SCHEMA,
         "scan_id": explanation.get("scan_id"),
         "plan_digest": explanation.get("plan_digest"),
+        "plan_revision": dict(explanation.get("plan_revision") or {}),
         **dict(explanation.get("coverage") or {}),
         "transport_parity": dict(explanation.get("transport_parity") or {}),
     }

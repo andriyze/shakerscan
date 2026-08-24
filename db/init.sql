@@ -247,10 +247,30 @@ CREATE INDEX idx_scan_capability_actions_reservation
 
 CREATE TABLE scan_action_plan_revisions (
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL CHECK (revision >= 0),
+    revision INTEGER NOT NULL CHECK (revision IN (0,1)),
     plan_digest CHAR(64) NOT NULL CHECK (plan_digest ~ '^[0-9a-f]{64}$'),
-    parent_plan_digest CHAR(64),
-    continuation_allocation_digest CHAR(64),
+    parent_plan_digest CHAR(64) CHECK (
+        parent_plan_digest IS NULL OR parent_plan_digest ~ '^[0-9a-f]{64}$'
+    ),
+    continuation_allocation_digest CHAR(64) CHECK (
+        continuation_allocation_digest IS NULL
+        OR continuation_allocation_digest ~ '^[0-9a-f]{64}$'
+    ),
+    revision_schema TEXT,
+    discovery_result_digest CHAR(64) CHECK (
+        discovery_result_digest IS NULL
+        OR discovery_result_digest ~ '^[0-9a-f]{64}$'
+    ),
+    work_manifest_refs_json JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+        jsonb_typeof(work_manifest_refs_json) = 'array'
+    ),
+    continuation_plan_digest CHAR(64) CHECK (
+        continuation_plan_digest IS NULL
+        OR continuation_plan_digest ~ '^[0-9a-f]{64}$'
+    ),
+    revision_digest CHAR(64) CHECK (
+        revision_digest IS NULL OR revision_digest ~ '^[0-9a-f]{64}$'
+    ),
     plan_json JSONB NOT NULL CHECK (jsonb_typeof(plan_json) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (scan_id, revision),

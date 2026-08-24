@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **kwargs: None))
 from scan.action_plan import ScanAction, ScanActionPlan  # noqa: E402
+from scan.continuation import ScanPlanRevision, root_scan_plan_revision  # noqa: E402
 import broker_worker  # noqa: E402
 sys.path.pop(0)
 
@@ -121,6 +122,9 @@ def _canonical_broker_action_lease():
     lease = {
         "scan_execution": None,
         "scan_action_plan": plan.canonical_dict(),
+        "scan_action_plan_revision": root_scan_plan_revision(
+            plan
+        ).canonical_dict(),
         "action_worker_id": "broker:node-1:container-a",
     }
     return job, lease, plan
@@ -149,9 +153,12 @@ def test_noncanonical_broker_job_rejects_injected_scan_authority():
 def test_broker_scan_requires_complete_immutable_action_plan():
     job, lease, plan = _canonical_broker_action_lease()
 
-    parsed, worker_id = broker_worker._broker_scan_action_plan(job, lease)
+    parsed, revision, worker_id = broker_worker._broker_scan_action_plan(
+        job, lease,
+    )
 
     assert parsed.plan_digest == plan.plan_digest
+    assert revision.plan_digest == plan.plan_digest
     assert worker_id == "broker:node-1:container-a"
 
     changed = json.loads(json.dumps(lease))
@@ -255,12 +262,31 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
         target_binding_digest=parent.target_binding_digest,
         actions=(*parent.actions, finalizer),
     )
+    revision = ScanPlanRevision(
+        scan_id=amended.scan_id,
+        revision=1,
+        plan_digest=amended.plan_digest,
+        parent_plan_digest=parent.plan_digest,
+        continuation_allocation_digest="d" * 64,
+        discovery_result_digest="e" * 64,
+        work_manifest_references=({
+            "schema_version": "scan-work-manifest-reference/v1",
+            "manifest_id": "44444444-4444-4444-8444-444444444444",
+            "kind": "candidate",
+            "content_schema": "candidate-manifest/v1",
+            "manifest_digest": "f" * 64,
+            "entry_count": 1,
+            "status": "complete",
+        },),
+        continuation_plan_digest="c" * 64,
+    )
     calls = []
 
     def fake_api_request(_state, method, path, payload, **_kwargs):
         calls.append((method, path, payload))
         return {
             "plan": amended.canonical_dict(),
+            "plan_revision": revision.canonical_dict(),
             "options": {"candidate_manifest_ref": {"kind": "candidate"}},
             "allocation_digest": "d" * 64,
         }
@@ -271,7 +297,15 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
 
         async def load_observations(self, action_id):
             assert action_id == "finalize.report"
-            return ({"kind": "scan_report", "report": {"result": {}}},)
+            return ({
+                "kind": "scan_report",
+                "report": {
+                    "result": {},
+                    "canonical_action_execution": {
+                        "status_matrix": {"finalize.report": "success"},
+                    },
+                },
+            },)
 
     class Dispatcher:
         def __init__(self, **kwargs):
@@ -321,6 +355,7 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
         {"lease_id": "lease-1", "lease_token": "token-1"},
         job,
         plan=parent,
+        plan_revision=root_scan_plan_revision(parent),
         worker_id="broker:node-1:container-a",
     ))
 

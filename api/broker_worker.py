@@ -35,6 +35,7 @@ from runtime.sealed_inputs import (
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_plan import ScanActionPlan, ScanActionPlanError
+from scan.continuation import ScanContinuationError, ScanPlanRevision
 from scan.broker_backend import (
     BrokerActionHTTPError,
     BrokerScanExecutionBackend,
@@ -80,14 +81,15 @@ _SCAN_RUNTIME_BUDGET_DIMENSIONS = frozenset({
 
 def _broker_scan_action_plan(
     job: dict[str, Any], lease: dict[str, Any],
-) -> tuple[ScanActionPlan, str] | None:
+) -> tuple[ScanActionPlan, ScanPlanRevision, str] | None:
     """Validate the complete immutable plan issued to this broker worker."""
     options = job.get("options") if isinstance(job.get("options"), dict) else {}
     execution_digest = str(options.get("scan_execution_plan_digest") or "").lower()
     raw_plan = lease.get("scan_action_plan")
+    raw_revision = lease.get("scan_action_plan_revision")
     worker_id = str(lease.get("action_worker_id") or "").strip()
     if not execution_digest:
-        if raw_plan is not None or worker_id:
+        if raw_plan is not None or raw_revision is not None or worker_id:
             raise BrokerWorkerError(
                 "non-canonical broker job carried Scan action authority"
             )
@@ -104,6 +106,12 @@ def _broker_scan_action_plan(
         plan = ScanActionPlan.from_dict(raw_plan)
     except (ScanActionPlanError, TypeError, ValueError) as exc:
         raise BrokerWorkerError("canonical broker Scan action plan is invalid") from exc
+    try:
+        revision = ScanPlanRevision.from_dict(raw_revision)
+    except (ScanContinuationError, TypeError, ValueError) as exc:
+        raise BrokerWorkerError(
+            "canonical broker Scan plan revision is invalid"
+        ) from exc
     target_binding = options.get("_canonical_target_binding")
     if not isinstance(target_binding, dict):
         raise BrokerWorkerError(
@@ -132,11 +140,13 @@ def _broker_scan_action_plan(
         plan.scan_id != str(job.get("scan_id") or "")
         or plan.execution_plan_digest != execution_digest
         or plan.target_binding_digest != target.digest
+        or revision.scan_id != plan.scan_id
+        or revision.plan_digest != plan.plan_digest
     ):
         raise BrokerWorkerError(
             "canonical broker Scan action authority does not match the job"
         )
-    return plan, worker_id
+    return plan, revision, worker_id
 
 
 def _broker_scan_runtime_budget(
@@ -510,6 +520,7 @@ async def _execute_broker_action_plan(
     job: dict[str, Any],
     *,
     plan: ScanActionPlan,
+    plan_revision: ScanPlanRevision,
     worker_id: str,
     private_inputs: BrokerPrivateScanInputs | None = None,
 ) -> dict[str, Any]:
@@ -565,6 +576,7 @@ async def _execute_broker_action_plan(
         job_id=str(job.get("job_id") or ""),
         worker_id=worker_id,
         plan=plan,
+        plan_revision=plan_revision,
         backend=backend,
         process_runner=_execute_agent_scanner_process,
         cancelled=lambda: _scan_cancel_requested(scan_id),
@@ -595,6 +607,7 @@ async def _execute_broker_action_plan(
             raise BrokerWorkerError(
                 "active broker Scan has no continuation allocation"
             )
+        parent_plan_digest = plan.plan_digest
         response = await request(
             "POST",
             f"{base_path}/continuation",
@@ -617,9 +630,23 @@ async def _execute_broker_action_plan(
             raise BrokerWorkerError(
                 "broker continuation action plan is invalid"
             ) from exc
+        try:
+            plan_revision = ScanPlanRevision.from_dict(
+                response.get("plan_revision")
+            )
+        except (ScanContinuationError, TypeError, ValueError) as exc:
+            raise BrokerWorkerError(
+                "broker continuation plan revision is invalid"
+            ) from exc
         if (
             plan.scan_id != scan_id
             or plan.actions[-1].action_id != "finalize.report"
+            or plan_revision.scan_id != scan_id
+            or plan_revision.revision != 1
+            or plan_revision.plan_digest != plan.plan_digest
+            or plan_revision.parent_plan_digest != parent_plan_digest
+            or plan_revision.continuation_allocation_digest
+            != allocation_digest
             or str(response.get("allocation_digest") or "")
             != allocation_digest
         ):
@@ -640,6 +667,7 @@ async def _execute_broker_action_plan(
         # in-memory exact requests were authenticated by collection replay in
         # the parent plan and must never be reloaded from public storage.
         dispatcher.plan = plan
+        dispatcher.plan_revision = plan_revision
         dispatcher.backend = backend
         dispatcher.options = {
             **dict(getattr(dispatcher, "options", {}) or {}),
@@ -668,9 +696,6 @@ async def _execute_broker_action_plan(
     ):
         raise BrokerWorkerError("broker Scan final report observation is invalid")
     report = dict(observations[0]["report"])
-    report.setdefault("canonical_action_execution", {})["status_matrix"] = dict(
-        orchestration.status_matrix
-    )
     return report
 
 
@@ -736,7 +761,7 @@ async def execute_lease(
         private_inputs = _open_broker_private_scan_inputs(
             lease,
             plan=canonical_action_authority[0],
-            worker_id=canonical_action_authority[1],
+            worker_id=canonical_action_authority[2],
             private_input_key=private_input_key,
         )
     node_id = str(state["node_id"])
@@ -785,12 +810,15 @@ async def execute_lease(
     try:
         try:
             if canonical_action_authority is not None:
-                action_plan, action_worker_id = canonical_action_authority
+                action_plan, plan_revision, action_worker_id = (
+                    canonical_action_authority
+                )
                 result = await _execute_broker_action_plan(
                     state,
                     lease,
                     job,
                     plan=action_plan,
+                    plan_revision=plan_revision,
                     worker_id=action_worker_id,
                     private_inputs=private_inputs,
                 )
