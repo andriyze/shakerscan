@@ -59,6 +59,7 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "tests/test_scan_fault_injection.py",
         "tests/test_scan_detection_parity.py",
         "tests/test_scan_security_invariants.py",
+        "tests/test_scan_secret_surface_canary.py",
         "tests/test_scan_action_resume.py",
         "tests/test_worker_action_executor.py",
         "tests/test_scan_authorization_revalidation.py",
