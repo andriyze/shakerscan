@@ -19,11 +19,6 @@ GENERIC_CREDENTIAL_REF_KEYS = frozenset({
     "cookie_credential_id",
     "oauth_credential_profile_id",
 })
-LEGACY_DEVICE_CREDENTIAL_REF_KEYS = frozenset({
-    "web_credential_profile_id", "ssh_credential_profile_id",
-})
-
-
 class CredentialReferenceError(ValueError):
     """A submitted opaque reference is missing, expired, misbound, or ambiguous."""
 
@@ -103,7 +98,6 @@ def validate_generic_credential_references(
     *,
     target_kind: str,
     now: datetime | None = None,
-    allow_missing_legacy_device_refs: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     unknown = sorted(set(refs) - GENERIC_CREDENTIAL_REF_KEYS)
     if unknown:
@@ -120,13 +114,6 @@ def validate_generic_credential_references(
         profile_id = str(raw_profile_id or "").strip()
         profile = by_id.get(profile_id)
         if profile is None:
-            if (
-                allow_missing_legacy_device_refs
-                and target_kind == "device"
-                and role in LEGACY_DEVICE_CREDENTIAL_REF_KEYS
-            ):
-                missing[role] = profile_id
-                continue
             raise CredentialReferenceError(
                 f"{role} is unavailable or bound to another target"
             )

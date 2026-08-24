@@ -112,24 +112,13 @@ def test_role_target_status_and_expiry_are_fail_closed(role, profile, message):
         )
 
 
-def test_missing_device_legacy_refs_are_returned_only_for_two_migration_keys():
-    rows, missing = validate_generic_credential_references(
-        {"ssh_credential_profile_id": "legacy-ssh"},
-        [],
-        target_kind="device",
-        now=NOW,
-        allow_missing_legacy_device_refs=True,
-    )
-    assert rows == []
-    assert missing == {"ssh_credential_profile_id": "legacy-ssh"}
-
+def test_missing_device_refs_fail_closed_after_generic_profile_migration():
     with pytest.raises(CredentialReferenceError, match="unavailable"):
         validate_generic_credential_references(
-            {"primary_credential_profile_id": "missing"},
+            {"ssh_credential_profile_id": "legacy-ssh"},
             [],
             target_kind="device",
             now=NOW,
-            allow_missing_legacy_device_refs=True,
         )
 
 

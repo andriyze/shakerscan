@@ -425,15 +425,13 @@ Profiles are `inventory` (top 100 TCP plus a small UDP set), `posture` (all TCP 
 and `thorough` (all TCP with deeper fingerprinting plus curated UDP). After queueing, report the scan
 ID and `/devices/{device_id}?scan={scan_id}` UI link, then stop; do not poll.
 
-**Device Hunt** is the agentic workflow for one registered connected device. Route “Device Hunt” and
-requests to autonomously investigate a TV, camera, printer, router, NAS, or appliance to the
-`device-hunt` skill, `POST /devices/{device_id}/agent/session`, and `/device-agent/session/*`. Do not
-route them to web-focused Deep Hunt or ordinary DAST. The internal API retains `device-agent` for
-compatibility. Scope, safety profile, credentials, traffic budgets, health circuit breaker, evidence
-authority, imported-request binding, and explicit SSH shell confirmation remain server-enforced.
-`inspect_request_collections` exposes only redacted structure. Device Hunt may set
-`include_imported_requests=true` only for collections the user bound and confirmed when creating the
-session; it cannot enable state-changing replay itself.
+**Device Hunt** is the canonical target-kind-aware Hunt workflow for one registered connected
+device. Route autonomous investigation of a TV, camera, printer, router, NAS, or appliance through
+`POST /hunts` with `target_kind:"device"`; use only the capabilities returned by that run. The old
+`/devices/{device_id}/agent/session` and `/device-agent/session/*` write APIs are retired and return
+410, while historical reads and cancellation remain available during migration. Scope, credentials,
+traffic budgets, fragility, evidence authority, imported-request binding, and explicit immutable SSH
+plan confirmation remain server-enforced.
 
 ### Continuous ASM
 

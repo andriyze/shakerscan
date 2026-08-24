@@ -274,37 +274,6 @@ class HuntStartContract:
             "secret_values_visible": False,
         }
 
-    def legacy_payload(self, _original: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Return only fields accepted by the old route.
-
-        This method exists for emergency downgrade tooling. It deliberately refuses contracts whose
-        authority cannot be represented by the old request model; normal V2 traffic must use the
-        native V2 handler in the primary API.
-        """
-        unsupported_credentials = set(self.credential_refs) - {"ssh_credential_profile_id"}
-        if (
-            self.budgets
-            or self.capabilities
-            or unsupported_credentials
-            or self.policy.network_discovery
-            or self.policy.allow_state_changing_http
-            or self.policy.scope_receipt_id
-        ):
-            raise HuntStartContractError(
-                "this Hunt V2 contract cannot be represented by the legacy start route"
-            )
-        return {
-            "target_id": self.target_id,
-            "objective": self.goal,
-            "budget_profile": self.budget_profile,
-            "approval_receipt_id": self.policy.approval_receipt_id,
-            "request_collection_ids": list(self.request_collection_ids),
-            "ssh_credential_profile_id": self.credential_refs.get(
-                "ssh_credential_profile_id"
-            ),
-        }
-
-
 def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
     if not isinstance(value, Mapping):
         raise HuntStartContractError("Hunt request body must be an object")

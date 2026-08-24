@@ -168,21 +168,7 @@ def test_goal_and_objective_aliases_cannot_conflict():
     assert contract.goal == "Inspect the API"
 
 
-def test_legacy_downgrade_contains_only_fields_the_old_route_accepts():
-    source = _payload(budgets={}, request_collection_ids=[])
-    contract = normalize_hunt_start_payload(source)
-    forwarded = contract.legacy_payload(source)
-    assert set(forwarded) == {
-        "target_id",
-        "objective",
-        "budget_profile",
-        "approval_receipt_id",
-        "request_collection_ids",
-        "ssh_credential_profile_id",
-    }
-    assert "policy" not in forwarded
-    assert "target_kind" not in forwarded
-    assert "capabilities" not in forwarded
+def test_v2_contract_has_no_legacy_downgrade_path():
+    contract = normalize_hunt_start_payload(_payload())
 
-    with pytest.raises(HuntStartContractError, match="cannot be represented"):
-        normalize_hunt_start_payload(_payload(capabilities=["web.probe"])).legacy_payload()
+    assert not hasattr(contract, "legacy_payload")

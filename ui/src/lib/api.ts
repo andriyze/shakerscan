@@ -3913,21 +3913,6 @@ export interface HuntV2 {
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
 }
 
-export async function startHuntV2(request: {
-  target_id: string
-  objective: string
-  budget_profile: 'fast' | 'balanced' | 'thorough'
-  approval_receipt_id?: string
-  request_collection_ids?: string[]
-  ssh_credential_profile_id?: string
-}): Promise<HuntV2> {
-  const res = await fetch(`${API_URL}/hunts`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Hunt'))
-  return res.json()
-}
-
 export async function getHuntV2(huntId: string): Promise<HuntV2> {
   const res = await fetch(`${API_URL}/hunts/${huntId}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Hunt'))
@@ -3953,73 +3938,6 @@ export async function confirmHuntShellPlan(huntId: string, plan: DeviceAgentShel
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to confirm Hunt SSH shell plan'))
   return res.json()
-}
-
-// Legacy Deep Hunt compatibility API (/agent/hunt/*).
-// The current coding-agent session plans each turn; ShakerScan owns scope,
-// active-tool authorization, budgets, evidence, and deterministic promotion.
-// ---------------------------------------------------------------------------
-
-export type AgentHuntStatus = 'awaiting_planner' | 'planning' | 'completed' | 'cancelled' | 'failed'
-
-export interface AgentHuntTranscriptMessage {
-  role: 'system' | 'user' | 'assistant'
-  content: string
-}
-
-export interface AgentHuntResult {
-  target_id: string
-  objective: string
-  iterations: number
-  stop_reason: string
-  tool_calls_made: number
-  request_units_used: number
-  wire_requests_reserved?: number
-  wire_request_budget_limit?: number | null
-  wire_requests_actual?: number | null
-  wire_requests_actual_confirmed?: number
-  wire_requests_observed_minimum?: number
-  wire_request_unsettled_tools?: number
-  request_accounting?: 'exact' | 'mixed_conservative'
-  active_actions_used: number
-  model_tokens_used: number
-  elapsed_seconds: number
-  http_evidence_count: number
-  abstained: boolean
-  net_new_count: number
-  verified_count: number
-  persisted: Array<{ id: string; persisted: string; net_new: boolean; title: string; url: string | null }>
-}
-
-export interface AgentHuntSession {
-  run_id: string | null
-  target_id: string | null
-  target_url: string | null
-  target_origins: string[]
-  objective: string
-  status: AgentHuntStatus
-  awaiting_planner: boolean
-  iterations: number
-  max_iterations: number
-  stop_reason: string | null
-  mode: 'read_only' | 'deep_hunt'
-  tool_surface: { allow_write: boolean; allow_active: boolean; note: string }
-  transcript: AgentHuntTranscriptMessage[]
-  next_action: string
-  result: AgentHuntResult | null
-}
-
-export interface AgentHuntRunSummary {
-  id: string
-  target_id: string
-  objective: string
-  status: AgentHuntStatus
-  stop_reason: string | null
-  max_iterations: number
-  iterations: string | null
-  created_by: string | null
-  created_at: string
-  updated_at: string
 }
 
 export interface AgentVerifiedFinding {
@@ -4062,63 +3980,6 @@ export interface AgentVerifyResult {
   superseded_suspected?: boolean
   family_proof?: { verdict: string | null; promotable: boolean | null; novelty_gate: unknown }
   error?: string
-}
-
-export async function startAgentHuntSession(
-  targetId: string,
-  payload: {
-    objective?: string
-    max_iterations?: number
-    token_budget?: number
-    mode?: 'read_only' | 'deep_hunt'
-    approval_receipt_id?: string
-    origin_url?: string
-  },
-): Promise<AgentHuntSession> {
-  const res = await fetch(`${API_URL}/agent/hunt/${encodeURIComponent(targetId)}/session`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Deep Hunt'))
-  return res.json()
-}
-
-export async function getAgentHuntSession(runId: string): Promise<AgentHuntSession> {
-  const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Deep Hunt'))
-  return res.json()
-}
-
-export async function replyAgentHuntSession(runId: string, reply: string): Promise<AgentHuntSession> {
-  const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}/reply`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reply }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit planner turn'))
-  return res.json()
-}
-
-export async function cancelAgentHuntSession(runId: string): Promise<AgentHuntSession> {
-  const res = await fetch(`${API_URL}/agent/hunt/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Deep Hunt'))
-  return res.json()
-}
-
-export async function listAgentHuntRuns(params?: {
-  target_id?: string
-  status?: AgentHuntStatus
-  limit?: number
-}): Promise<{ runs: AgentHuntRunSummary[]; count: number }> {
-  const query = new URLSearchParams()
-  if (params?.target_id) query.set('target_id', params.target_id)
-  if (params?.status) query.set('status', params.status)
-  if (params?.limit) query.set('limit', String(params.limit))
-  const qs = query.toString()
-  const res = await fetch(`${API_URL}/agent/hunt/runs${qs ? `?${qs}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Deep Hunt runs'))
-  return res.json()
 }
 
 export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTwoTierFindings> {
@@ -5533,28 +5394,6 @@ export async function getDeviceScanActivity(scanId: string): Promise<DeviceScanA
   return res.json()
 }
 
-export async function startDeviceAgentSession(deviceId: string, payload: {
-  objective: string
-  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
-  max_turns: number
-  confirm_authorized: boolean
-  approval_receipt_id?: string
-  ssh_credential_profile_id?: string
-  web_credential_profile_id?: string
-  request_collection_ids?: string[]
-  confirm_request_replay?: boolean
-  allow_state_changing_requests?: boolean
-  allow_untrusted_tls_credentials?: boolean
-}): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/agent/session`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start Device Hunt'))
-  return res.json()
-}
-
 export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Device Hunt'))
@@ -5576,34 +5415,9 @@ export async function listDeviceAgentSessions(params: {
   return res.json()
 }
 
-export async function replyDeviceAgentSession(runId: string, reply: string): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/reply`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reply }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit Device Hunt planner turn'))
-  return res.json()
-}
-
 export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Device Hunt'))
-  return res.json()
-}
-
-export async function confirmDeviceAgentShellPlan(runId: string, plan: DeviceAgentShellPlan): Promise<DeviceAgentSession> {
-  const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/shell-plans/${encodeURIComponent(plan.plan_id)}/confirm`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      plan_digest: plan.plan_digest,
-      confirmation_phrase: plan.confirmation_phrase,
-      confirm_exact_commands: true,
-      confirm_remote_device_effects: true,
-    }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to confirm remote-device SSH shell plan'))
   return res.json()
 }
 

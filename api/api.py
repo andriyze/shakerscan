@@ -39611,9 +39611,6 @@ def _hunt_nonexecuting_actual(
 
 
 _HUNT_NETWORK_CAPABILITIES = frozenset({"ports.discover", "service.fingerprint"})
-_HUNT_DEVICE_CREDENTIAL_KEYS = frozenset({
-    "ssh_credential_profile_id", "web_credential_profile_id",
-})
 
 
 def _hunt_capability_public(spec: Any) -> dict[str, Any]:
@@ -39978,28 +39975,6 @@ async def _hunt_replay_safe_collection(
     }
 
 
-async def _validate_legacy_device_hunt_credentials(
-    conn: Any,
-    refs: Mapping[str, str],
-    device_id: uuid.UUID,
-) -> list[dict[str, Any]]:
-    unsupported = sorted(set(refs) - _HUNT_DEVICE_CREDENTIAL_KEYS)
-    if unsupported:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "device Hunt currently supports only ssh_credential_profile_id and "
-                f"web_credential_profile_id; unsupported: {', '.join(unsupported)}"
-            ),
-        )
-    return await _validate_device_credential_refs(
-        conn,
-        device_id,
-        ssh_profile_id=refs.get("ssh_credential_profile_id"),
-        web_profile_id=refs.get("web_credential_profile_id"),
-    )
-
-
 async def _validate_hunt_credential_references(
     conn: Any,
     contract: HuntStartContract,
@@ -40014,23 +39989,14 @@ async def _validate_hunt_credential_references(
         include_inactive=True,
     )
     try:
-        generic, missing_legacy = validate_generic_credential_references(
+        generic, _missing = validate_generic_credential_references(
             contract.credential_refs,
             profiles,
             target_kind=contract.target_kind,
-            allow_missing_legacy_device_refs=contract.target_kind == "device",
         )
     except CredentialReferenceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    legacy: list[dict[str, Any]] = []
-    if missing_legacy:
-        legacy = await _validate_legacy_device_hunt_credentials(
-            conn, missing_legacy, target_id,
-        )
-        for item in legacy:
-            item["source"] = "legacy_device_credential_profiles"
-            item["secret_values_visible"] = False
-    return [*generic, *legacy]
+    return generic
 
 
 async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:

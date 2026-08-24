@@ -186,13 +186,16 @@ def test_device_hunt_compatibility_routes_to_unified_hunt():
 
 def test_unified_hunt_client_and_device_redirect_are_wired():
     api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    hunt_client = (ROOT / "ui" / "src" / "lib" / "huntV2.ts").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
 
     generic_hunt = (ROOT / "ui" / "src" / "app" / "hunt" / "page.tsx").read_text()
-    assert "export async function startHunt" in api_client
-    assert "export async function getHunt" in api_client
+    assert "export async function startHuntV2Native" in hunt_client
+    assert "startAgentHuntSession" not in api_client
+    assert "startDeviceAgentSession" not in api_client
+    assert "export async function getHuntV2" in api_client
     assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
-    assert "startHunt" in generic_hunt
+    assert "startHuntV2Native" in generic_hunt
     assert "target_id" in generic_hunt
 
 
