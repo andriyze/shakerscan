@@ -178,3 +178,50 @@ def test_nuclei_enforced_plan_disables_redirects_retries_and_oob():
     assert "-disable-redirects" in plan.argv
     assert "-no-interactsh" in plan.argv
     assert "-interactsh-server" not in plan.argv
+
+
+def test_passive_nuclei_plan_uses_exact_reviewed_get_only_allowlist():
+    template_ids = ",".join(sorted(
+        row[0] for row in agent_tools.CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    ))
+    plan = agent_tools.build_enforced_scanner_plan(
+        "nuclei",
+        TARGET,
+        {
+            "severity": "critical,high,medium,low,info",
+            "template_ids": template_ids,
+            "template_request_cost_upper_bound": 7,
+        },
+        reserved_budget={"http_requests": 7, "tool_wall_seconds": 30},
+        pinned_address=PIN,
+        pinned_proxy_url=PROXY,
+    )
+
+    assert plan.argv[plan.argv.index("-id") + 1] == template_ids
+    assert "-tags" not in plan.argv
+    assert "-disable-redirects" in plan.argv
+    assert "-no-interactsh" in plan.argv
+    assert plan.budget_proof["accounting_mode"] == "exact"
+    assert plan.budget_proof["method"] == "reviewed_template_allowlist"
+    assert plan.hard_budget_dict["http_requests"] == 7
+
+
+def test_passive_nuclei_plan_rejects_a_forged_request_ceiling():
+    template_ids = ",".join(sorted(
+        row[0] for row in agent_tools.CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    ))
+    with pytest.raises(
+        agent_tools.AgentToolError,
+        match="request ceiling is not canonical",
+    ):
+        agent_tools.build_enforced_scanner_plan(
+            "nuclei",
+            TARGET,
+            {
+                "template_ids": template_ids,
+                "template_request_cost_upper_bound": 1,
+            },
+            reserved_budget={"http_requests": 7, "tool_wall_seconds": 30},
+            pinned_address=PIN,
+            pinned_proxy_url=PROXY,
+        )

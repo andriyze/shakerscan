@@ -38,6 +38,7 @@ from scan.execution_backend import ActionLease
 from scan.work_manifests import (
     build_candidate_manifest,
     build_canonical_nuclei_template_manifest,
+    build_canonical_passive_nuclei_template_manifest,
     build_endpoint_manifest,
     build_request_candidate_manifest,
     build_request_manifest,
@@ -996,3 +997,70 @@ def test_database_neutral_nuclei_uses_only_digest_checked_template_pack(monkeypa
     assert captured["scanner_options"]["template_pack_digest"] == (
         template_manifest.entries[0]["template_digest"]
     )
+
+
+def test_database_neutral_passive_nuclei_uses_exact_reviewed_allowlist(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    template_manifest = build_canonical_passive_nuclei_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+    )
+    action = _action(
+        "passive.templates",
+        "templates.passive_scan",
+        0,
+        capability_args={
+            "template_manifest_ref": (
+                template_manifest.reference().canonical_dict()
+            ),
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class ExternalAdapter:
+        manages_cancellation = True
+
+        def __init__(
+            self, *, specification, process_payload, requested_budget, **kwargs,
+        ):
+            del kwargs
+            self.capability_name = specification.name
+            self.adapter_name = specification.adapter
+            self.adapter_version = specification.adapter_version
+            self.requested_budget = dict(requested_budget)
+            captured.update(process_payload)
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={"http_requests": 7, "tool_wall_seconds": 1},
+                execution_started=True,
+                parser_version="nuclei-jsonl/v1",
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "ScannerExecutionAdapter", ExternalAdapter,
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            template_manifest.manifest_id: template_manifest,
+        }),
+        policy=ScanPolicy(active_testing=False),
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    options = captured["scanner_options"]
+    assert options["template_request_cost_upper_bound"] == 7
+    assert set(options["template_ids"].split(",")) == {
+        entry["template_id"] for entry in template_manifest.entries
+    }
+    assert "tags" not in options

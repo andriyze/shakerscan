@@ -94,8 +94,20 @@ class CapabilityRegistry:
                 raise ValueError(f"duplicate capability: {spec.name}")
             by_name[spec.name] = spec
             if spec.process_tool_name:
-                if spec.process_tool_name in by_process_tool:
-                    raise ValueError(f"duplicate process tool: {spec.process_tool_name}")
+                existing = by_process_tool.get(spec.process_tool_name)
+                if existing is not None:
+                    if (
+                        spec.planner_visible
+                        or spec.binary != existing.binary
+                        or spec.adapter != existing.adapter
+                    ):
+                        raise ValueError(
+                            f"ambiguous process tool: {spec.process_tool_name}"
+                        )
+                    # A server-only fixed profile may reuse the same binary
+                    # adapter. Tool-name lookup remains bound to the public
+                    # canonical capability registered first.
+                    continue
                 by_process_tool[spec.process_tool_name] = spec
         self._by_name = MappingProxyType(by_name)
         self._by_process_tool = MappingProxyType(by_process_tool)
@@ -211,6 +223,32 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "nuclei-jsonl/v1", ("template_match", "request_response"),
             "nuclei", "nuclei", 300_000, ("-version",), ("/opt/tools/nuclei",),
             retest_contract="rerun-template-or-family-on-same-surface",
+        ),
+        CapabilitySpec(
+            "templates.passive_scan",
+            "Reviewed target-bound GET-only Nuclei template allowlist.",
+            "external_tool", "read_only", _HTTP_TARGETS, "nuclei", "1",
+            None, {"http_requests": 7, "tool_wall_seconds": 30},
+            {"network_reachability": True, "binary": "nuclei"},
+            _http_principal_schema({
+                "severity": {
+                    "type": "string",
+                    "enum": ["critical,high,medium,low,info"],
+                },
+                "template_ids": {
+                    "type": "string", "pattern": "^[a-z0-9,-]{1,512}$",
+                },
+                "template_pack_digest": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "template_request_cost_upper_bound": {
+                    "type": "integer", "enum": [7],
+                },
+            }),
+            "nuclei-jsonl/v1", ("template_match", "request_response"),
+            "nuclei", "nuclei", 30_000, ("-version",), ("/opt/tools/nuclei",),
+            retest_contract="rerun-template-on-same-surface",
+            planner_visible=False,
         ),
         CapabilitySpec(
             "web.crawl", "Bounded same-host crawl and JavaScript endpoint discovery.",

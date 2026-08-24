@@ -78,6 +78,7 @@ def _findings_for_action(
         "sqli.request_verify": {"request_body_verification"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
+        "templates.passive_scan": {"template_match"},
         "tls.inspect": {"tls_protocol"},
     }.get(result.capability_name, set())
     for raw in observations:
@@ -357,7 +358,7 @@ def _findings_for_action(
                     "template_id": item.get("template_id"),
                     "matcher_name": item.get("matcher_name"),
                     "matched_at": item.get("matched_at") or item.get("url"),
-                    "canonical_capability": "templates.scan",
+                    "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
             )

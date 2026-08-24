@@ -25,7 +25,7 @@ from api.scan.continuation import (
     merge_scan_action_continuation,
 )
 from api.scan.execution import ScanExecutionPlan
-from api.scan.work_manifests import build_canonical_nuclei_template_manifest
+from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest
 
 
 SCAN_ID = "20000000-0000-4000-8000-000000000001"
@@ -48,20 +48,16 @@ def _plan(*, active=False, defer=False):
         allowed_addresses=("192.0.2.10",),
         allowed_root_domains=("example.test",),
     )
-    template = (
-        build_canonical_nuclei_template_manifest(
-            scan_id=SCAN_ID,
-            target_binding_digest=target.digest,
-        )
-        if active else None
+    template = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=target.digest,
+        include_active=active,
     )
     return ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
         execution_plan=execution,
         target_binding=target,
-        template_manifest_ref=(
-            template.reference().canonical_dict() if template is not None else None
-        ),
+        template_manifest_ref=template.reference().canonical_dict(),
         defer_manifest_actions=defer,
         include_finalizer=not defer,
     )

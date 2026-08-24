@@ -15,17 +15,21 @@ from api.scan.manifest_store import (
 from api.scan.work_manifests import (
     CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
     CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
+    CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
     ScanWorkManifest,
     ScanWorkManifestError,
     ScanWorkManifestKind,
     ScanWorkManifestReference,
     build_candidate_manifest,
+    build_canonical_passive_nuclei_template_manifest,
+    build_canonical_scan_nuclei_template_manifest,
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
     build_request_candidate_manifest,
     build_request_manifest,
     build_template_manifest,
     canonical_nuclei_options_for_manifest,
+    canonical_passive_nuclei_request_upper_bound,
     execution_url_for_endpoint,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
@@ -352,6 +356,49 @@ def test_canonical_nuclei_pack_freezes_pinned_bundle_filters_and_action_authorit
         )
 
 
+def test_passive_nuclei_pack_freezes_exact_get_only_template_allowlist():
+    manifest = build_canonical_passive_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+    )
+
+    assert manifest.status == "complete"
+    assert {entry["template_id"] for entry in manifest.entries} == {
+        row[0] for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    }
+    assert all(entry["risk"] == "passive" for entry in manifest.entries)
+    assert all("method-get" in entry["tags"] for entry in manifest.entries)
+    options = canonical_nuclei_options_for_manifest(
+        manifest, action_id="passive.templates",
+    )
+    assert set(options["template_ids"].split(",")) == {
+        row[0] for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    }
+    assert options["template_request_cost_upper_bound"] == 7
+    assert options["template_request_cost_upper_bound"] == (
+        canonical_passive_nuclei_request_upper_bound()
+    )
+    assert "tags" not in options
+
+
+def test_combined_nuclei_manifest_authorizes_passive_and_active_packs_separately():
+    manifest = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        include_active=True,
+    )
+
+    passive = canonical_nuclei_options_for_manifest(
+        manifest, action_id="passive.templates.00001",
+    )
+    active = canonical_nuclei_options_for_manifest(
+        manifest, action_id="active.templates.00001",
+    )
+    assert passive["template_request_cost_upper_bound"] == 7
+    assert active["severity"] == "high,critical"
+    assert active["tags"] == "exposure,misconfig,auth-bypass,default-login"
+
+
 def test_canonical_nuclei_pack_matches_the_image_pinned_template_bundle():
     dockerfile = (Path(__file__).parents[1] / "scanner" / "Dockerfile").read_text()
 
@@ -363,6 +410,10 @@ def test_canonical_nuclei_pack_matches_the_image_pinned_template_bundle():
         f"ARG NUCLEI_TEMPLATES_SHA256={CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256}"
         in dockerfile
     )
+    for _template_id, digest, _requests, _severity, _tags in (
+        CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    ):
+        assert digest in dockerfile
 
 
 def test_manifests_reject_secret_fields_and_sensitive_concrete_paths():

@@ -123,6 +123,14 @@ RUN set -e && \
         -o /tmp/nuclei-templates.tar.gz && \
     echo "${NUCLEI_TEMPLATES_SHA256}  /tmp/nuclei-templates.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/nuclei-templates.tar.gz -C /opt/nuclei-templates --strip-components=1 && \
+    printf '%s\n' \
+        'bd8bdfa0b5ed5bf4d3712edb793adfd0987d9282e51c6f7d673bf14b9e4dd524  /opt/nuclei-templates/http/exposures/configs/git-config.yaml' \
+        'cd11b069ef6cddca723a38d44b932b9042d5f22a34a5d1bd8bb2423e9b85a9a4  /opt/nuclei-templates/http/exposures/configs/git-credentials-disclosure.yaml' \
+        '7f45803f73ac6810b9b302df6be2c472a82d9164a7807328614efa83e6eac275  /opt/nuclei-templates/http/misconfiguration/http-missing-security-headers.yaml' \
+        '1a5541ec8f60d5a5fe56cc15a20b95e7609ebec177ec0ac910b99df8d114981b  /opt/nuclei-templates/http/exposures/apis/openapi.yaml' \
+        '540d4cc923eb76f1291b5f2e33a4aabda9c2c1f44ad2c58576bcbd4cfe755950  /opt/nuclei-templates/http/misconfiguration/server-status.yaml' \
+        '5c1080c77d065d3eb5eeffeaad9ada85c619a15011f2da6c8f00c787aa7316b0  /opt/nuclei-templates/http/exposures/configs/web-config.yaml' \
+        | sha256sum -c - && \
     rm /tmp/nuclei-templates.tar.gz && \
     TEMPLATE_COUNT=$(find /opt/nuclei-templates -name "*.yaml" -type f 2>/dev/null | wc -l) && \
     echo "Templates found: $TEMPLATE_COUNT" && \

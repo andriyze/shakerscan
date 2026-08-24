@@ -11,7 +11,7 @@ from api.scan.budget_allocator import (
     allocate_scan_action_plan,
 )
 from api.scan.execution import ScanExecutionPlan
-from api.scan.work_manifests import build_canonical_nuclei_template_manifest
+from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest
 
 
 SCAN_ID = "30000000-0000-4000-8000-000000000001"
@@ -44,11 +44,12 @@ def _compile(budget: ScanBudget, *, include=(), active=True):
         budget=budget,
     )
     template = (
-        build_canonical_nuclei_template_manifest(
+        build_canonical_scan_nuclei_template_manifest(
             scan_id=SCAN_ID,
             target_binding_digest=_target().digest,
+            include_active=active,
         )
-        if active and (not include or "nuclei" in include) else None
+        if not include or "nuclei" in include else None
     )
     return ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -118,13 +119,14 @@ def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
     rows = {action.action_id: action for action in allocation.plan.actions}
 
     assert rows["discover.web_crawl"].admission_status == "planned"
-    assert rows["active.templates"].requested_budget == {
-        "http_requests": 61, "tool_wall_seconds": 30,
+    assert rows["passive.templates"].requested_budget == {
+        "http_requests": 7, "tool_wall_seconds": 30,
     }
-    assert rows["active.templates"].action_digest != maximum_digest
-    assert rows["verify.xss"].requested_budget == {
+    assert rows["active.templates"].requested_budget == {
         "http_requests": 11, "tool_wall_seconds": 10,
     }
+    assert rows["active.templates"].action_digest != maximum_digest
+    assert rows["verify.xss"].reason_code == "insufficient_plan_budget"
     assert rows["verify.sqli"].reason_code == "insufficient_plan_budget"
     assert rows["finalize.report"].admission_status == "planned"
 
@@ -148,16 +150,23 @@ def test_allocator_result_is_independent_of_override_mapping_order():
         "baseline.http": {"http_requests": 1, "tool_wall_seconds": 15},
         "discover.web_probe": {"http_requests": 4, "tool_wall_seconds": 30},
     }
+    templates = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=_target().digest,
+        include_active=False,
+    )
     first = compiler.compile(
         scan_id=SCAN_ID,
         execution_plan=execution,
         target_binding=_target(),
+        template_manifest_ref=templates.reference().canonical_dict(),
         action_budgets=overrides,
     )
     second = compiler.compile(
         scan_id=SCAN_ID,
         execution_plan=execution,
         target_binding=_target(),
+        template_manifest_ref=templates.reference().canonical_dict(),
         action_budgets=dict(reversed(tuple(overrides.items()))),
     )
     assert allocate_scan_action_plan(first, budget).plan == allocate_scan_action_plan(

@@ -1638,6 +1638,7 @@ def _stored_network_capability(
         "ports.discover": ("naabu", "naabu-jsonl/v1"),
         "service.fingerprint": ("nmap", "nmap-xml/v1"),
         "templates.scan": ("nuclei", "nuclei-typed-v1"),
+        "templates.passive_scan": ("nuclei", "nuclei-typed-v1"),
         "web.probe": ("httpx", "httpx-typed-v1"),
         "web.crawl": ("katana", "katana-typed-v1"),
         "web.content_discover": ("ffuf", "ffuf-typed-v1"),
@@ -2089,6 +2090,57 @@ def test_template_stage_never_runs_without_active_permission(monkeypatch):
 
     assert summary["status"] == "skipped"
     assert summary["reason"] == "active_testing_not_authorized"
+
+
+def test_passive_template_stage_runs_exact_read_only_profile_without_approval(
+    monkeypatch,
+):
+    _plan, target, options = _authority(enabled=True, network=False)
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "templates.passive_scan", observations=[],
+            amounts={"http_requests": 7, "tool_wall_seconds": 1},
+        ), False
+
+    monkeypatch.setattr(
+        worker, "_execute_reserved_scan_capability", execute_capability,
+    )
+    action = SimpleNamespace(
+        action_id="passive.templates",
+        capability_name="templates.passive_scan",
+        requested_budget={"http_requests": 7, "tool_wall_seconds": 30},
+    )
+    template_options = {
+        "severity": "critical,high,medium,low,info",
+        "template_ids": (
+            "git-config,git-credentials-disclosure,"
+            "http-missing-security-headers,openapi,server-status,web-config"
+        ),
+        "template_pack_digest": "a" * 64,
+        "template_request_cost_upper_bound": 7,
+    }
+
+    summary = asyncio.run(worker._execute_scan_template_capability(
+        "https://app.example.test",
+        options,
+        scan_id="00000000-0000-0000-0000-000000000001",
+        job_id="job-1",
+        canonical_action=action,
+        canonical_template_options=template_options,
+    ))
+
+    assert summary["status"] == "success"
+    assert summary["capability_name"] == "templates.passive_scan"
+    assert len(calls) == 1
+    assert calls[0]["capability_name"] == "templates.passive_scan"
+    assert calls[0]["reservation_limits"] == action.requested_budget
+    assert calls[0]["target_binding"].digest == target.digest
+    assert calls[0]["scanner_process_payload"]["scanner_options"] == (
+        template_options
+    )
 
 
 def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch):

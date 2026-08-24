@@ -30,6 +30,10 @@ from scan.external_process import (
     ExternalProcessContractError,
     PROCESS_BUDGET_PROOF_SCHEMA,
 )
+from scan.work_manifests import (
+    CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
+    canonical_passive_nuclei_request_upper_bound,
+)
 
 try:
     from scanner_tools.url_redaction import redact_url
@@ -177,6 +181,9 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 _SEV_RE = re.compile(r"^(critical|high|medium|low|info)(,(critical|high|medium|low|info))*$")
 _TAGS_RE = re.compile(r"^[a-z0-9][a-z0-9,\-]{0,80}$")
+_CANONICAL_PASSIVE_NUCLEI_IDS = ",".join(sorted(
+    row[0] for row in CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+))
 # nmap -oN - human output: one row per scanned port, e.g. "8443/tcp open  https  nginx 1.25.3".
 _NMAP_SERVICE_LINE_RE = re.compile(r"^(\d{1,5}/(?:tcp|udp))\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
 _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
@@ -200,10 +207,15 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
             "-timeout", "5", "-retries", "0", "-no-color", "-disable-update-check",
             "-disable-redirects", "-no-interactsh", "-type", "http"]
     args += ["-rate-limit", "10", "-bulk-size", "10", "-concurrency", "10"]
+    template_ids = str(opts.get("template_ids") or "").strip().lower()
+    if template_ids:
+        if template_ids != _CANONICAL_PASSIVE_NUCLEI_IDS:
+            raise AgentToolError("nuclei template allowlist is not canonical")
+        args += ["-id", template_ids]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
         args += ["-tags", tags]
-    else:
+    elif not template_ids:
         # All High/Critical HTTP templates exceed the bounded agent turn on the
         # pinned bundle. The default remains useful but finite; callers may ask
         # for broader explicit tags and receive honestly labeled partial output
@@ -710,7 +722,40 @@ def build_enforced_scanner_plan(
         }
     elif scanner == "nuclei":
         http = int(reservation.get("http_requests") or 0)
-        if http >= 4_000 and wall >= 300:
+        passive_cost = internal_options.get(
+            "template_request_cost_upper_bound"
+        )
+        if passive_cost is not None:
+            if (
+                isinstance(passive_cost, bool)
+                or not isinstance(passive_cost, int)
+                or passive_cost != canonical_passive_nuclei_request_upper_bound()
+                or internal_options.get("template_ids")
+                != _CANONICAL_PASSIVE_NUCLEI_IDS
+                or passive_cost > http
+            ):
+                raise AgentToolError(
+                    "nuclei passive template request ceiling is not canonical"
+                )
+            _replace_argv_value(argv, "-rate-limit", min(10, passive_cost))
+            _replace_argv_value(argv, "-bulk-size", 1)
+            _replace_argv_value(argv, "-concurrency", 1)
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            hard = {
+                "http_requests": passive_cost,
+                "tool_wall_seconds": wall,
+            }
+            mode, method = "exact", "reviewed_template_allowlist"
+            proof_inputs = {
+                "profile": "passive_read_only",
+                "template_count": len(CANONICAL_PASSIVE_NUCLEI_TEMPLATES),
+                "template_request_upper_bound": passive_cost,
+                "methods": ["GET"],
+                "retries": 0,
+                "redirects": 0,
+                "public_oob": False,
+            }
+        elif http >= 4_000 and wall >= 300:
             hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
             timeout_seconds, timeout_ms = 300, 300_000
             mode, method = "conservative", "fixed_conservative_profile"

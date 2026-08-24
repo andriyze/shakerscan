@@ -1543,7 +1543,10 @@ def _plan_scope(
             "param_discovery_max_params": 4,
             "nuclei_max_targets": 120,
             "phase4_max_seconds": 20,
-            "active_max_seconds": min(120, max(60, 30 * endpoint_count)),
+            # Canonical full shards require 90 seconds of tool authority for
+            # the fixed HTTP/TLS/probe/passive-template backbone before any
+            # optional breadth is considered.
+            "active_max_seconds": min(120, max(90, 30 * endpoint_count)),
             "active_max_endpoints": endpoint_count,
             "active_params_per_endpoint": 2,
             "smart_bola_max_endpoints": endpoint_count,

@@ -482,12 +482,12 @@ def test_run_tool_unknown_rejected():
         pass
 
 
-def test_discovery_scanners_present_and_active_gated():
-    # katana + ffuf are part of the arsenal and classified active (deep_hunt-gated), never read_only,
-    # so they cannot run in a passive (no-approval) session.
+def test_discovery_scanners_present_as_fixed_read_only_capabilities():
+    # Katana disables form fill and FFUF uses only a bundled exact GET wordlist,
+    # so both canonical adapters are safe in a passive Scan.
     assert {"katana", "ffuf"}.issubset(at.RUN_TOOL_NAMES)
     for name in ("katana", "ffuf"):
-        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "active"
+        assert at.SCANNER_ARG_TEMPLATES[name]["risk"] == "read_only"
 
 
 def test_katana_argv_is_bounded_and_same_host():

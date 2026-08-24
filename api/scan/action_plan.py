@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .execution import ScanExecutionPlan
 from .work_manifests import (
+    CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
     ScanWorkManifestError,
     ScanWorkManifestKind,
     ScanWorkManifestReference,
@@ -677,20 +678,26 @@ class ScanActionPlanCompiler:
 
         policy = execution_plan.policy
         active = policy.active_testing
+        passive_nuclei = self._family_enabled(execution_plan, "nuclei")
         xss = active and self._family_enabled(execution_plan, "xss")
         sqli = active and self._family_enabled(execution_plan, "sqli")
-        nuclei = active and self._family_enabled(execution_plan, "nuclei")
+        nuclei = active and passive_nuclei
         bola = active and self._family_enabled(execution_plan, "bola")
-        if scope != "discovery" and nuclei and not defer_manifest_actions and (
+        template_actions_expected = (
+            (scope == "full" and passive_nuclei)
+            or (scope != "discovery" and nuclei and not defer_manifest_actions)
+        )
+        if template_actions_expected and (
             not template_ref
-            or int(template_ref.get("entry_count") or 0) != 1
+            or int(template_ref.get("entry_count") or 0)
+            < len(CANONICAL_PASSIVE_NUCLEI_TEMPLATES)
             or template_ref.get("status") != "complete"
         ):
             raise ScanActionPlanError(
-                "Nuclei actions require one complete immutable template manifest"
+                "Nuclei actions require an immutable template manifest with the complete passive pack"
             )
         explicitly_requested = set(policy.include_families)
-        needs_candidates = xss or sqli or nuclei
+        needs_candidates = xss or sqli or nuclei or passive_nuclei
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
         blueprints: list[_ActionBlueprint] = []
@@ -1055,6 +1062,26 @@ class ScanActionPlanCompiler:
             and bola
             and {"primary", "secondary"} <= set(lane_refs)
         )
+        if scope == "full" and passive_nuclei:
+            add_manifest_breadth(
+                "passive.templates",
+                "deterministic_baseline",
+                "templates.passive_scan",
+                {
+                    "target_manifest_ref": endpoint_ref or "discover.web_crawl",
+                    "template_manifest_ref": template_ref,
+                },
+                manifest_ref=endpoint_ref,
+                index_name="endpoint_index",
+                dependencies=discovery_dependencies,
+                required=True,
+                reserve_dependency_slots=(
+                    int(nuclei and not defer_manifest_actions)
+                    + int(has_manifest_work(xss, candidate_ref))
+                    + int(has_manifest_work(sqli, candidate_ref))
+                    + int(authz_will_run)
+                ),
+            )
         if scope != "discovery" and nuclei and not defer_manifest_actions:
             add_manifest_breadth(
                 "active.templates",

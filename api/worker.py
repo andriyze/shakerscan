@@ -186,7 +186,7 @@ from scan.work_manifests import (
     ScanWorkManifestKind,
     ScanWorkManifestReference,
     build_candidate_manifest,
-    build_canonical_nuclei_template_manifest,
+    build_canonical_scan_nuclei_template_manifest,
     build_endpoint_manifest,
     build_request_candidate_manifest,
     canonical_nuclei_options_for_manifest,
@@ -10797,10 +10797,12 @@ async def _execute_scan_auth_session_capability(
     )
 
 
-def _skipped_scan_template_summary(reason: str) -> dict[str, Any]:
+def _skipped_scan_template_summary(
+    reason: str, *, capability_name: str = "templates.scan",
+) -> dict[str, Any]:
     return {
         "schema_version": "canonical-scan-template-execution/v1",
-        "capability_name": "templates.scan",
+        "capability_name": capability_name,
         "enabled": False,
         "status": "skipped",
         "reason": str(reason)[:200],
@@ -11491,6 +11493,7 @@ def _scan_template_summary_from_stored(
     stored: Any,
     *,
     idempotent_redelivery: bool,
+    capability_name: str = "templates.scan",
 ) -> dict[str, Any]:
     receipt = dict(stored.receipt or {})
     receipt_status = str(receipt.get("status") or "failed").strip().lower()
@@ -11509,7 +11512,7 @@ def _scan_template_summary_from_stored(
     ][:200]
     return {
         "schema_version": "canonical-scan-template-execution/v1",
-        "capability_name": "templates.scan",
+        "capability_name": capability_name,
         "enabled": True,
         "status": status,
         "reason": None,
@@ -12506,39 +12509,52 @@ async def _execute_scan_template_capability(
     scan_id: str,
     job_id: str,
     canonical_action: Any | None = None,
-    canonical_template_options: Mapping[str, str] | None = None,
+    canonical_template_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run canonical Nuclei once, outside the compatibility scanner process."""
+    capability_name = (
+        str(canonical_action.capability_name)
+        if canonical_action is not None else "templates.scan"
+    )
+    passive = capability_name == "templates.passive_scan"
+
+    def skipped(reason: str) -> dict[str, Any]:
+        return _skipped_scan_template_summary(
+            reason, capability_name=capability_name,
+        )
+
     _normalized, admission = prepare_worker_dispatch(options)
     if not admission.canonical or admission.plan is None:
-        return _skipped_scan_template_summary("legacy_scan")
+        return skipped("legacy_scan")
     execution = build_native_scan_execution(admission.plan, options)
     policy = admission.plan.policy
     if execution.discovery_manifest_only:
-        return _skipped_scan_template_summary("discovery_manifest_only")
+        return skipped("discovery_manifest_only")
     if execution.skip_global_checks:
-        return _skipped_scan_template_summary("global_checks_skipped")
+        return skipped("global_checks_skipped")
     if execution.focused_endpoints_only or execution.zero_rediscovery:
-        return _skipped_scan_template_summary("assigned_endpoint_scope")
+        return skipped("assigned_endpoint_scope")
     if execution.focused_family and execution.focused_family != "nuclei":
-        return _skipped_scan_template_summary("focused_other_family")
+        return skipped("focused_other_family")
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
     if "nuclei" in exclude:
-        return _skipped_scan_template_summary("policy_excluded")
+        return skipped("policy_excluded")
     if include and "nuclei" not in include:
-        return _skipped_scan_template_summary("policy_not_included")
-    if not policy.active_testing:
-        return _skipped_scan_template_summary("active_testing_not_authorized")
-    if not policy.approval_receipt_id:
-        return _skipped_scan_template_summary("active_approval_missing")
-    allocation = scan_template_capability_allocation(
-        execution.payload()["execution_budget"]
+        return skipped("policy_not_included")
+    if not passive and not policy.active_testing:
+        return skipped("active_testing_not_authorized")
+    if not passive and not policy.approval_receipt_id:
+        return skipped("active_approval_missing")
+    allocation = (
+        dict(canonical_action.requested_budget)
+        if passive and canonical_action is not None
+        else scan_template_capability_allocation(
+            execution.payload()["execution_budget"]
+        )
     )
     if allocation is None:
-        return _skipped_scan_template_summary(
-            "insufficient_fixed_profile_budget"
-        )
+        return skipped("insufficient_fixed_profile_budget")
 
     target = execution.target_binding
     execution_target = scan_external_execution_target(
@@ -12565,14 +12581,14 @@ async def _execute_scan_template_capability(
         execution=execution,
         scan_id=scan_id,
         job_id=job_id,
-        capability_name="templates.scan",
+        capability_name=capability_name,
         capability_args=capability_args,
         action_id=(canonical_action.action_id if canonical_action is not None
                    else "deterministic_baseline.templates.scan"),
         target_binding=target,
         reservation_limits=allocation,
         scanner_process_payload={
-            "job_id": f"{job_id}:templates.scan",
+            "job_id": f"{job_id}:{capability_name}",
             "tool_name": "nuclei",
             "execution_target": execution_target,
             "registered_target": registered_target,
@@ -12592,6 +12608,7 @@ async def _execute_scan_template_capability(
     return _scan_template_summary_from_stored(
         stored,
         idempotent_redelivery=idempotent_redelivery,
+        capability_name=capability_name,
     )
 
 
@@ -13813,7 +13830,9 @@ class _CanonicalLocalScanDispatcher:
             )
         elif action.action_id in {"discover.ports", "discover.services"}:
             return await self._network_action(action, lease)
-        elif action.capability_name == "templates.scan":
+        elif action.capability_name in {
+            "templates.scan", "templates.passive_scan",
+        }:
             execution_target = await self._manifest_endpoint(action)
             if (
                 isinstance(action.capability_args.get("target_manifest_ref"), Mapping)
@@ -17183,14 +17202,11 @@ def _compile_parallel_child_work_manifests(
     policy = parent_job.execution_plan.policy
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
-    if (
-        policy.active_testing
-        and "nuclei" not in exclude
-        and (not include or "nuclei" in include)
-    ):
-        template_manifest = build_canonical_nuclei_template_manifest(
+    if "nuclei" not in exclude and (not include or "nuclei" in include):
+        template_manifest = build_canonical_scan_nuclei_template_manifest(
             scan_id=child_scan_id,
             target_binding_digest=parent_job.target.digest,
+            include_active=policy.active_testing,
         )
         options["template_manifest_ref"] = (
             template_manifest.reference().canonical_dict()

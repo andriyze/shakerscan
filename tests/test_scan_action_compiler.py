@@ -16,7 +16,8 @@ from api.scan.action_plan import (
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.work_manifests import (
     ScanWorkManifestReference,
-    build_canonical_nuclei_template_manifest,
+    build_canonical_passive_nuclei_template_manifest,
+    build_canonical_scan_nuclei_template_manifest,
 )
 from api.scan.execution import ScanExecutionPlan
 
@@ -210,10 +211,15 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
 
 
 def test_passive_scan_compiles_bounded_read_only_surface_discovery():
+    template_manifest = build_canonical_passive_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=_target().digest,
+    )
     plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
         execution_plan=_execution(active=False),
         target_binding=_target(),
+        template_manifest_ref=template_manifest.reference().canonical_dict(),
     )
     by_id = {action.action_id: action for action in plan.actions}
 
@@ -221,6 +227,9 @@ def test_passive_scan_compiles_bounded_read_only_surface_discovery():
         by_id
     )
     assert "active.templates" not in by_id
+    assert by_id["passive.templates"].capability_name == (
+        "templates.passive_scan"
+    )
     assert "verify.xss" not in by_id
     assert "verify.sqli" not in by_id
     assert by_id["discover.web_crawl"].capability_args["read_only"] is True
@@ -241,9 +250,10 @@ def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
             target_binding=_target(),
         )
 
-    manifest = build_canonical_nuclei_template_manifest(
+    manifest = build_canonical_scan_nuclei_template_manifest(
         scan_id=SCAN_ID,
         target_binding_digest=_target().digest,
+        include_active=True,
     )
     plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -324,11 +334,18 @@ def test_compiler_binds_opaque_inputs_and_is_independent_of_reference_order():
 
 def test_compiler_fails_closed_on_missing_placement_or_untrusted_reference_fields():
     all_capabilities = {spec.name for spec in CAPABILITY_REGISTRY.list()}
+    passive_templates = build_canonical_passive_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=_target().digest,
+    )
     with pytest.raises(ScanActionPlacementError, match="web.probe"):
         ScanActionPlanCompiler().compile(
             scan_id=SCAN_ID,
             execution_plan=_execution(active=False),
             target_binding=_target(),
+            template_manifest_ref=(
+                passive_templates.reference().canonical_dict()
+            ),
             available_placement_capabilities=all_capabilities - {"web.probe"},
         )
 

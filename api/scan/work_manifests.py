@@ -39,6 +39,55 @@ CANONICAL_NUCLEI_TEMPLATE_SEVERITIES = ("high", "critical")
 CANONICAL_NUCLEI_TEMPLATE_TAGS = (
     "exposure", "misconfig", "auth-bypass", "default-login",
 )
+CANONICAL_PASSIVE_NUCLEI_TEMPLATE_PACK_ID = "nuclei-passive-read-only-v1"
+# Exact files reviewed from the pinned bundle above.  Every row is
+# (template id, file sha256, maximum requests, severity, tags).  These
+# templates contain HTTP GET requests only and no raw requests, payload
+# expansion, scripting, mutation, or OOB interaction.
+CANONICAL_PASSIVE_NUCLEI_TEMPLATES = (
+    (
+        "git-config",
+        "bd8bdfa0b5ed5bf4d3712edb793adfd0987d9282e51c6f7d673bf14b9e4dd524",
+        1,
+        "medium",
+        ("config", "git", "exposure", "vuln"),
+    ),
+    (
+        "git-credentials-disclosure",
+        "cd11b069ef6cddca723a38d44b932b9042d5f22a34a5d1bd8bb2423e9b85a9a4",
+        1,
+        "medium",
+        ("exposure", "config", "vuln"),
+    ),
+    (
+        "http-missing-security-headers",
+        "7f45803f73ac6810b9b302df6be2c472a82d9164a7807328614efa83e6eac275",
+        1,
+        "info",
+        ("misconfig", "headers", "generic"),
+    ),
+    (
+        "openapi",
+        "1a5541ec8f60d5a5fe56cc15a20b95e7609ebec177ec0ac910b99df8d114981b",
+        1,
+        "info",
+        ("exposure", "api", "discovery"),
+    ),
+    (
+        "server-status",
+        "540d4cc923eb76f1291b5f2e33a4aabda9c2c1f44ad2c58576bcbd4cfe755950",
+        1,
+        "info",
+        ("apache", "status", "exposure"),
+    ),
+    (
+        "web-config",
+        "5c1080c77d065d3eb5eeffeaad9ada85c619a15011f2da6c8f00c787aa7316b0",
+        2,
+        "info",
+        ("config", "exposure"),
+    ),
+)
 _MAX_ENTRIES = MappingProxyType({
     "endpoint": 100_000,
     "candidate": 20_000,
@@ -1039,6 +1088,102 @@ def canonical_nuclei_template_pack_digest() -> str:
     })
 
 
+def canonical_passive_nuclei_template_pack_digest() -> str:
+    """Identify the exact reviewed GET-only template allowlist."""
+    return _digest({
+        "schema_version": "canonical-passive-nuclei-template-pack/v1",
+        "template_bundle_commit": CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
+        "template_bundle_sha256": CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
+        "template_pack_id": CANONICAL_PASSIVE_NUCLEI_TEMPLATE_PACK_ID,
+        "protocol_types": ["http"],
+        "methods": ["GET"],
+        "interactsh": False,
+        "redirects": False,
+        "templates": [
+            {
+                "template_id": template_id,
+                "template_digest": template_digest,
+                "max_requests": max_requests,
+                "severity": severity,
+                "tags": list(tags),
+            }
+            for template_id, template_digest, max_requests, severity, tags
+            in CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+        ],
+    })
+
+
+def canonical_passive_nuclei_request_upper_bound() -> int:
+    return sum(
+        max_requests
+        for _template_id, _digest_value, max_requests, _severity, _tags
+        in CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    )
+
+
+def _canonical_passive_nuclei_manifest_rows() -> tuple[dict[str, Any], ...]:
+    return tuple({
+        "template_id": template_id,
+        "template_digest": template_digest,
+        "risk": "passive",
+        # Template manifest v1 has a bounded tag vocabulary.  Preserve the
+        # reviewed method and request-cost metadata in that signed material.
+        "tags": [
+            *tags,
+            "read-only",
+            "method-get",
+            f"max-requests-{max_requests}",
+        ],
+    } for template_id, template_digest, max_requests, _severity, tags in (
+        CANONICAL_PASSIVE_NUCLEI_TEMPLATES
+    ))
+
+
+def build_canonical_passive_nuclei_template_manifest(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+) -> ScanWorkManifest:
+    """Freeze the reviewed passive allowlist for one target binding."""
+    return build_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target_binding_digest,
+        source_action_ids=("passive.templates",),
+        templates=_canonical_passive_nuclei_manifest_rows(),
+        batch_size=len(CANONICAL_PASSIVE_NUCLEI_TEMPLATES),
+        maximum=len(CANONICAL_PASSIVE_NUCLEI_TEMPLATES),
+    )
+
+
+def build_canonical_scan_nuclei_template_manifest(
+    *,
+    scan_id: str,
+    target_binding_digest: str,
+    include_active: bool,
+) -> ScanWorkManifest:
+    """Freeze the passive pack and, when authorized, the active pack together."""
+    templates: list[Mapping[str, Any]] = list(
+        _canonical_passive_nuclei_manifest_rows()
+    )
+    source_action_ids = ["passive.templates"]
+    if include_active:
+        templates.append({
+            "template_id": CANONICAL_NUCLEI_TEMPLATE_PACK_ID,
+            "template_digest": canonical_nuclei_template_pack_digest(),
+            "risk": "safe_active",
+            "tags": list(CANONICAL_NUCLEI_TEMPLATE_TAGS),
+        })
+        source_action_ids.append("active.templates")
+    return build_template_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target_binding_digest,
+        source_action_ids=tuple(source_action_ids),
+        templates=templates,
+        batch_size=max(1, len(templates)),
+        maximum=len(templates),
+    )
+
+
 def build_canonical_nuclei_template_manifest(
     *,
     scan_id: str,
@@ -1064,12 +1209,12 @@ def canonical_nuclei_options_for_manifest(
     manifest: ScanWorkManifest,
     *,
     action_id: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Resolve fixed Nuclei options only from the reviewed immutable pack."""
     if (
         manifest.kind is not ScanWorkManifestKind.TEMPLATE
         or manifest.status != "complete"
-        or len(manifest.entries) != 1
+        or not manifest.entries
     ):
         raise ScanWorkManifestError(
             "canonical Nuclei execution requires one complete template pack"
@@ -1083,11 +1228,50 @@ def canonical_nuclei_options_for_manifest(
         raise ScanWorkManifestError(
             "template manifest does not authorize this Nuclei action"
         )
-    entry = manifest.entries[0]
+    entries_by_id = {
+        str(entry.get("template_id") or ""): entry for entry in manifest.entries
+    }
+    passive_rows = _canonical_passive_nuclei_manifest_rows()
+    expected_passive = {
+        str(row["template_id"]): row for row in passive_rows
+    }
+    allowed_ids = {
+        *expected_passive,
+        CANONICAL_NUCLEI_TEMPLATE_PACK_ID,
+    }
+    if set(entries_by_id) - allowed_ids:
+        raise ScanWorkManifestError(
+            "template manifest contains an unreviewed Nuclei selection"
+        )
+
+    if normalized_action_id == "passive.templates" or normalized_action_id.startswith(
+        "passive.templates."
+    ):
+        for template_id, expected in expected_passive.items():
+            entry = entries_by_id.get(template_id)
+            if (
+                entry is None
+                or entry.get("template_digest") != expected["template_digest"]
+                or entry.get("batch_index") != 0
+                or entry.get("risk") != "passive"
+                or tuple(entry.get("tags") or ()) != tuple(expected["tags"])
+            ):
+                raise ScanWorkManifestError(
+                    "template manifest is not the reviewed passive Nuclei pack"
+                )
+        return {
+            "severity": "critical,high,medium,low,info",
+            "template_ids": ",".join(sorted(expected_passive)),
+            "template_pack_digest": canonical_passive_nuclei_template_pack_digest(),
+            "template_request_cost_upper_bound": (
+                canonical_passive_nuclei_request_upper_bound()
+            ),
+        }
+
+    entry = entries_by_id.get(CANONICAL_NUCLEI_TEMPLATE_PACK_ID)
     if (
-        entry.get("template_id") != CANONICAL_NUCLEI_TEMPLATE_PACK_ID
-        or entry.get("template_digest")
-        != canonical_nuclei_template_pack_digest()
+        entry is None
+        or entry.get("template_digest") != canonical_nuclei_template_pack_digest()
         or entry.get("batch_index") != 0
         or entry.get("risk") != "safe_active"
         or tuple(entry.get("tags") or ()) != CANONICAL_NUCLEI_TEMPLATE_TAGS

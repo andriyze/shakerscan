@@ -32,6 +32,7 @@ _PROOF_METHODS = frozenset({
     "exact_request_count",
     "rate_time_upper_bound",
     "exact_wordlist",
+    "reviewed_template_allowlist",
     "fixed_conservative_profile",
     "exact_port_set",
     "port_retry_upper_bound",

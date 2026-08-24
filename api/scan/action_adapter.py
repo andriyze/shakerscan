@@ -794,12 +794,15 @@ class DatabaseNeutralScanActionDispatcher:
             "web.crawl": "katana",
             "web.content_discover": "ffuf",
             "templates.scan": "nuclei",
+            "templates.passive_scan": "nuclei",
             "xss.verify": "dalfox",
             "sqli.verify": "sqlmap",
         }
         tool = tool_by_capability[action.capability_name]
         execution_target = self.target_url
-        if action.capability_name == "templates.scan":
+        if action.capability_name in {
+            "templates.scan", "templates.passive_scan",
+        }:
             manifest_endpoint = await self._manifest_endpoint(action)
             if (
                 isinstance(action.capability_args.get("target_manifest_ref"), Mapping)
@@ -985,6 +988,7 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._network(action, heartbeat)
         if action.capability_name in {
             "web.probe", "web.crawl", "web.content_discover", "templates.scan",
+            "templates.passive_scan",
             "xss.verify", "sqli.verify",
         }:
             return await self._external(action, heartbeat)

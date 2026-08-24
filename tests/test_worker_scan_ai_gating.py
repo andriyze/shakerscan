@@ -2263,7 +2263,7 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
         endpoints=("GET /v1/items?account=must-not-persist",),
     )
 
-    endpoint, candidates = manifests
+    endpoint, candidates, templates = manifests
     assert options["endpoint_manifest_ref"] == endpoint.reference().canonical_dict()
     assert options["candidate_manifest_ref"] == candidates.reference().canonical_dict()
     parameterized = next(
@@ -2271,6 +2271,10 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
     )
     assert parameterized["query_parameter_names"] == ("account",)
     assert candidates.entries[0]["parameter_name"] == "account"
+    assert options["template_manifest_ref"] == (
+        templates.reference().canonical_dict()
+    )
+    assert all(entry["risk"] == "passive" for entry in templates.entries)
     assert "must-not-persist" not in json.dumps([
         endpoint.canonical_dict(), candidates.canonical_dict(),
     ])
@@ -2503,9 +2507,9 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
     assert conn.persisted_action_scan_ids == {
         str(uuid.UUID(str(args[0]))) for args in conn.inserted_children
     }
-    assert len(conn.persisted_manifest_rows) == 4
+    assert len(conn.persisted_manifest_rows) == 6
     assert {kind for _scan_id, kind in conn.persisted_manifest_rows} == {
-        "endpoint", "candidate",
+        "endpoint", "candidate", "template",
     }
 
 

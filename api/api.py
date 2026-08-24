@@ -487,7 +487,7 @@ try:
         ScanWorkManifestError,
         ScanWorkManifestReference,
         build_candidate_manifest,
-        build_canonical_nuclei_template_manifest,
+        build_canonical_scan_nuclei_template_manifest,
         build_endpoint_manifest,
         build_request_candidate_manifest,
         build_request_manifest,
@@ -588,7 +588,7 @@ except ModuleNotFoundError:
         ScanWorkManifestError,
         ScanWorkManifestReference,
         build_candidate_manifest,
-        build_canonical_nuclei_template_manifest,
+        build_canonical_scan_nuclei_template_manifest,
         build_endpoint_manifest,
         build_request_candidate_manifest,
         build_request_manifest,
@@ -30277,19 +30277,16 @@ def _compile_scan_template_work_manifest(
     scan_contract: ResolvedScanContract,
     target_binding: TargetBinding,
 ) -> ScanWorkManifest | None:
-    """Freeze the reviewed Nuclei pack exactly when policy enables that family."""
+    """Freeze passive templates and the active pack allowed by policy."""
     policy = scan_contract.execution_plan.policy
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
-    if not (
-        policy.active_testing
-        and "nuclei" not in exclude
-        and (not include or "nuclei" in include)
-    ):
+    if "nuclei" in exclude or (include and "nuclei" not in include):
         return None
-    return build_canonical_nuclei_template_manifest(
+    return build_canonical_scan_nuclei_template_manifest(
         scan_id=scan_id,
         target_binding_digest=target_binding.digest,
+        include_active=policy.active_testing,
     )
 
 
