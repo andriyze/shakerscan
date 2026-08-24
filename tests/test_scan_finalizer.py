@@ -240,6 +240,8 @@ def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
                 "candidate_id": "candidate-xss",
                 "request_ref_id": "request-xss",
                 "method": "POST",
+                "origin": "https://app.example.test",
+                "resolved_ips": ["192.0.2.10"],
                 "field_path": "comment",
                 "proof_contract": "xss_reflection_differential/v1",
                 "proof_status": "reflected_candidate_only",
@@ -259,6 +261,8 @@ def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
             "candidate_id": "candidate-sqli",
             "request_ref_id": "request-sqli",
             "method": "POST",
+            "origin": "https://app.example.test",
+            "resolved_ips": ["192.0.2.10"],
             "field_path": "id",
             "proof_contract": "sqli_error_differential/v1",
             "proof_status": "db_error_candidate_only",
@@ -278,6 +282,21 @@ def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
     assert set(by_tool) == {
         "request_xss_differential", "request_sqli_differential",
     }
+    assert report["runtime_destinations"] == [{
+        "label": "verify.request_xss.0:0:0",
+        "url": "https://app.example.test",
+        "final_url": "https://app.example.test",
+        "source": "xss.request_verify",
+        "resolved_host": "app.example.test",
+        "resolved_ips": ["192.0.2.10"],
+    }, {
+        "label": "verify.request_sqli.0:0:0",
+        "url": "https://app.example.test",
+        "final_url": "https://app.example.test",
+        "source": "sqli.request_verify",
+        "resolved_host": "app.example.test",
+        "resolved_ips": ["192.0.2.10"],
+    }]
     assert all(item["suspected"] is True for item in by_tool.values())
     assert all(item["verified"] is False for item in by_tool.values())
     assert by_tool["request_xss_differential"]["evidence"][

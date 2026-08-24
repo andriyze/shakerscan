@@ -133,6 +133,8 @@ def test_xss_request_verifier_emits_value_free_differential_evidence():
     assert result.actual_budget["http_requests"] == 2
     assert result.actual_budget["state_changing_requests"] == 2
     assert result.observations[0]["proof_status"] == "reflected_candidate_only"
+    assert result.observations[0]["origin"] == "https://api.example.test"
+    assert result.observations[0]["resolved_ips"] == ["192.0.2.10"]
     public = json.dumps({
         "observations": result.observations,
         "execution": result.redacted_execution,
@@ -188,3 +190,5 @@ def test_sqli_request_verifier_uses_error_differential_without_extraction():
     assert result.status == "success"
     assert result.observations[0]["proof_status"] == "db_error_candidate_only"
     assert result.observations[0]["finding_verdict"] == "suspected"
+    assert result.observations[0]["origin"] == "https://api.example.test"
+    assert result.observations[0]["resolved_ips"] == ["192.0.2.10"]

@@ -72,6 +72,26 @@ def _content_type(request: ReplayRequest) -> str:
     return ""
 
 
+def _content_free_origin(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        scheme = parsed.scheme.lower()
+        host = str(parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError as exc:
+        raise RequestMutationVerificationError(
+            "request verifier URL authority is invalid"
+        ) from exc
+    if scheme not in {"http", "https"} or not host:
+        raise RequestMutationVerificationError(
+            "request verifier URL authority is invalid"
+        )
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    authority = display_host if port in {None, default_port} else f"{display_host}:{port}"
+    return urllib.parse.urlunsplit((scheme, authority, "", "", ""))
+
+
 def _json_paths(
     value: Any,
     *,
@@ -333,6 +353,12 @@ class RequestMutationVerificationAdapter:
                 proof_status = "db_error_candidate_only"
         observation = {
             "kind": "request_body_verification",
+            "origin": _content_free_origin(self.request.url),
+            "resolved_ips": list(dict.fromkeys(
+                address for address in (
+                    control.connected_address, changed.connected_address,
+                ) if address
+            )),
             "family": self.family,
             "candidate_id": candidate_id,
             "request_ref_id": self.request.request_id,
