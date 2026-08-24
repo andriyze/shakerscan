@@ -206,7 +206,7 @@ export default function CredentialsPage() {
   [targetKind, devices, targets])
 
   useEffect(() => {
-    if (!choices.some((item) => item.id === targetId)) setTargetId(choices[0]?.id || '')
+    if (targetId && !choices.some((item) => item.id === targetId)) setTargetId('')
   }, [choices, targetId])
 
   const loadProfiles = useCallback(async () => {
@@ -361,7 +361,7 @@ export default function CredentialsPage() {
           </Field>
           <Field label="Bound target">
             <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-              {!choices.length && <option value="">No active targets</option>}
+              <option value="">{choices.length ? 'Choose a target…' : 'No active targets'}</option>
               {choices.map((item) => <option key={item.id} value={item.id}>{item.label} — {item.detail}</option>)}
             </Select>
           </Field>
@@ -377,8 +377,10 @@ export default function CredentialsPage() {
         <Card className="p-6 text-sm text-gray-400">Loading profiles…</Card>
       ) : !profiles.length ? (
         <EmptyState
-          message="No credential profiles"
-          hint="Create a profile for this exact target. Workers decrypt it only after approval and destination checks pass."
+          message={targetId ? 'No credential profiles' : 'Choose a bound target'}
+          hint={targetId
+            ? 'Create a profile for this exact target. Workers decrypt it only after approval and destination checks pass.'
+            : 'Select the exact asset that will be allowed to use this credential. ShakerScan never shares profiles across targets.'}
           action={targetId ? { label: 'Create profile', onClick: openCreate } : undefined}
         />
       ) : (

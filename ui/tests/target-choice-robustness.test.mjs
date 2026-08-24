@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import test from 'node:test'
 
 import { usableWebTargets } from '../src/lib/targetChoices.ts'
+
+const credentialsPage = fs.readFileSync(new URL('../src/app/credentials/page.tsx', import.meta.url), 'utf8')
+const collectionsPage = fs.readFileSync(new URL('../src/app/request-collections/page.tsx', import.meta.url), 'utf8')
 
 test('target-bound forms hide inactive and unnamed web targets', () => {
   const usable = usableWebTargets([
@@ -13,4 +17,13 @@ test('target-bound forms hide inactive and unnamed web targets', () => {
     { id: 'ready', url: 'https://ready.example', is_active: true },
   ])
   assert.deepEqual(usable.map((target) => target.id), ['ready'])
+})
+
+test('secret-bearing forms require an explicit target choice', () => {
+  for (const page of [credentialsPage, collectionsPage]) {
+    assert.match(page, /targetId && !choices\.some/)
+    assert.match(page, /Choose a target…/)
+  }
+  assert.match(credentialsPage, /Choose a bound target/)
+  assert.match(collectionsPage, /Choose a collection owner/)
 })

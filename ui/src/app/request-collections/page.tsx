@@ -147,8 +147,8 @@ export default function RequestCollectionsPage() {
   const selectedChoice = choices.find((choice) => choice.id === targetId)
 
   useEffect(() => {
-    if (!choices.some((choice) => choice.id === targetId)) {
-      setTargetId(choices[0]?.id || '')
+    if (targetId && !choices.some((choice) => choice.id === targetId)) {
+      setTargetId('')
     }
   }, [choices, targetId])
 
@@ -365,7 +365,7 @@ export default function RequestCollectionsPage() {
         </Field>
         <Field label="Collection owner">
           <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-            {!choices.length && <option value="">No active targets</option>}
+            <option value="">{choices.length ? 'Choose a target…' : 'No active targets'}</option>
             {choices.map((choice) => (
               <option key={choice.id} value={choice.id}>{choice.label} · {choice.detail}</option>
             ))}
@@ -377,9 +377,11 @@ export default function RequestCollectionsPage() {
 
       {!collections.length ? (
         <EmptyState
-          message="No shared request collections for this target"
-          hint="Upload a Postman, HAR, OpenAPI, or Swagger JSON document to begin."
-          action={{ label: 'Upload collection', onClick: openUploader }}
+          message={targetId ? 'No shared request collections for this target' : 'Choose a collection owner'}
+          hint={targetId
+            ? 'Upload a Postman, HAR, OpenAPI, or Swagger JSON document to begin.'
+            : 'Select the exact asset that owns this collection. Every imported request stays bound to approved origins on that target.'}
+          action={targetId ? { label: 'Upload collection', onClick: openUploader } : undefined}
         />
       ) : (
         <div className="grid gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
