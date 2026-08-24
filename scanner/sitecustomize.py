@@ -22,6 +22,11 @@ import sys
 from typing import Any, Mapping, MutableMapping
 from urllib.parse import urlsplit
 
+try:
+    from target_address_policy import normalize_frozen_addresses
+except ModuleNotFoundError:  # source-checkout host tests
+    from api.target_address_policy import normalize_frozen_addresses
+
 
 _ENV_NAME = "SHAKERSCAN_CANONICAL_SCAN_EXECUTION"
 _ACTIVE_ENV_NAME = "SHAKERSCAN_FROZEN_DNS_ACTIVE"
@@ -145,7 +150,7 @@ def _configuration_from_environment(
             )
     return FrozenResolverConfig(
         target_host=target_host,
-        allowed_addresses=tuple(addresses),
+        allowed_addresses=normalize_frozen_addresses(addresses),
         target_binding_digest=digest,
     )
 

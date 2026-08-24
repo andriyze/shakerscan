@@ -137,6 +137,19 @@ def test_address_family_filter_and_legacy_lookup_helpers_remain_frozen():
     )
 
 
+def test_compatibility_resolver_uses_the_same_stable_family_policy():
+    config = module._configuration_from_environment({
+        module._ENV_NAME: _envelope(addresses=[
+            "2001:db8::20", "192.0.2.20", "192.0.2.10",
+        ]),
+    })
+
+    assert config is not None
+    assert config.allowed_addresses == (
+        "192.0.2.10", "192.0.2.20", "2001:db8::20",
+    )
+
+
 def test_digest_mismatch_and_origin_mismatch_fail_closed():
     payload = json.loads(_envelope())
     payload["target_binding_digest"] = "0" * 64

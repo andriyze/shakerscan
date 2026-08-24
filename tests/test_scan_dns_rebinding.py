@@ -14,6 +14,55 @@ def test_canonical_socket_factory_connects_only_to_frozen_target_addresses():
     )
     assert factory.resolves_during_connect is False
     assert factory.addresses == ("192.0.2.10", "2001:db8::10")
+    assert factory.policy_receipt == {
+        "schema_version": "frozen-target-address-policy/v1",
+        "family_preference": "ipv4_first",
+        "admitted_address_count": 2,
+        "fallback_attempt_limit": 2,
+        "no_runtime_resolution": True,
+    }
+
+
+def test_frozen_address_order_is_stable_and_explicitly_family_preferred():
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
+
+    first = FrozenTargetSocketFactory(
+        hostname="target.test",
+        port=443,
+        frozen_addresses=("2001:db8::20", "192.0.2.20", "192.0.2.10"),
+    )
+    repeated = FrozenTargetSocketFactory(
+        hostname="target.test",
+        port=443,
+        frozen_addresses=("192.0.2.10", "192.0.2.20", "2001:db8::20"),
+    )
+    ipv6 = FrozenTargetSocketFactory(
+        hostname="target.test",
+        port=443,
+        frozen_addresses=("192.0.2.10", "2001:db8::20"),
+        family_preference="ipv6_first",
+    )
+
+    assert first.addresses == repeated.addresses == (
+        "192.0.2.10", "192.0.2.20", "2001:db8::20",
+    )
+    assert ipv6.addresses == ("2001:db8::20", "192.0.2.10")
+
+
+def test_socket_fallback_is_bounded_without_expanding_the_frozen_set():
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
+
+    factory = FrozenTargetSocketFactory(
+        hostname="target.test",
+        port=443,
+        frozen_addresses=tuple(f"192.0.2.{index}" for index in range(1, 12)),
+        max_fallback_attempts=3,
+    )
+
+    assert len(factory.addresses) == 11
+    assert [item.address for item in factory.endpoints()] == [
+        "192.0.2.1", "192.0.2.2", "192.0.2.3",
+    ]
 
 
 def test_socket_factory_fails_over_without_dns(monkeypatch):

@@ -7,6 +7,23 @@ import ipaddress
 import socket
 from typing import Any, Callable, Iterable
 
+try:
+    from target_address_policy import (
+        DEFAULT_ADDRESS_FAMILY_PREFERENCE,
+        MAX_FALLBACK_ATTEMPTS,
+        address_policy_receipt,
+        bounded_fallback_addresses,
+        normalize_frozen_addresses,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..target_address_policy import (
+        DEFAULT_ADDRESS_FAMILY_PREFERENCE,
+        MAX_FALLBACK_ATTEMPTS,
+        address_policy_receipt,
+        bounded_fallback_addresses,
+        normalize_frozen_addresses,
+    )
+
 
 class FrozenTargetSocketError(OSError):
     """No authorized frozen address could be connected."""
@@ -37,26 +54,37 @@ class FrozenTargetSocketFactory:
         hostname: str,
         port: int,
         frozen_addresses: Iterable[str],
+        family_preference: str = DEFAULT_ADDRESS_FAMILY_PREFERENCE,
+        max_fallback_attempts: int = MAX_FALLBACK_ATTEMPTS,
     ) -> None:
         normalized_host = str(hostname or "").strip().lower().rstrip(".")
         if not normalized_host or any(character.isspace() for character in normalized_host):
             raise ValueError("hostname is invalid")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65_535:
             raise ValueError("port must be between 1 and 65535")
-        addresses: list[str] = []
-        for raw in frozen_addresses:
-            address = str(ipaddress.ip_address(str(raw or "").strip()))
-            if address not in addresses:
-                addresses.append(address)
-        if not addresses:
-            raise ValueError("at least one frozen address is required")
         self.hostname = normalized_host
         self.port = port
-        self.addresses = tuple(addresses)
+        self.family_preference = str(family_preference)
+        self.addresses = normalize_frozen_addresses(
+            frozen_addresses, preference=self.family_preference,
+        )
+        self.connection_addresses = bounded_fallback_addresses(
+            self.addresses,
+            preference=self.family_preference,
+            max_attempts=max_fallback_attempts,
+        )
+        self.policy_receipt = address_policy_receipt(
+            self.addresses,
+            preference=self.family_preference,
+            max_attempts=max_fallback_attempts,
+        )
 
     def endpoints(self, *, start_index: int = 0) -> tuple[FrozenSocketEndpoint, ...]:
-        offset = int(start_index) % len(self.addresses)
-        ordered = self.addresses[offset:] + self.addresses[:offset]
+        offset = int(start_index) % len(self.connection_addresses)
+        ordered = (
+            self.connection_addresses[offset:]
+            + self.connection_addresses[:offset]
+        )
         return tuple(
             FrozenSocketEndpoint(
                 hostname=self.hostname,
