@@ -16,6 +16,7 @@ from api.runtime.request_replay_executor import (
 from api.scan.collection_replay import (
     ScanCollectionReplayContractError,
     merge_scan_budget_usage,
+    narrow_replay_plan_to_request_manifest,
     remaining_scan_replay_capacity,
     scan_replay_authorization,
     scan_replay_ledger_limits,
@@ -69,6 +70,80 @@ def test_decrypted_replay_plan_must_match_immutable_request_manifest():
         ScanCollectionReplayContractError, match="immutable request manifest",
     ):
         validate_scan_replay_request_manifest(substituted, manifest)
+
+
+def test_private_replay_plan_is_narrowed_to_child_manifest_and_reindexed():
+    document = {
+        "info": {"name": "Partitioned replay", "schema": "v2.1"},
+        "item": [
+            {"name": "one", "request": {
+                "method": "GET", "url": "https://api.example.test/one",
+            }},
+            {"name": "two", "request": {
+                "method": "GET", "url": "https://api.example.test/two",
+            }},
+            {"name": "three", "request": {
+                "method": "GET", "url": "https://api.example.test/three",
+            }},
+        ],
+    }
+    payload, _summary, rows = validate_and_index(document)
+    selector = scan_replay_selector(
+        RequestCollectionSelection(max_requests=3),
+        "safe_reads",
+        runtime_limit=3,
+    )
+    plan = build_selected_replay_plan(
+        payload,
+        selector,
+        allowed_origins=["https://api.example.test"],
+        default_origin="https://api.example.test",
+    )
+    assigned = (plan.requests[2], plan.requests[0])
+    manifest = build_request_manifest(
+        scan_id="40000000-0000-4000-8000-000000000001",
+        target_binding_digest="a" * 64,
+        source_action_ids=("inputs.collection_00",),
+        requests=tuple({
+            "request_ref_id": request.request_id,
+            "route_id": ("b" if index == 0 else "c") * 64,
+            "method": request.method,
+            "auth_lane": "anonymous",
+            "selected_shard": 1,
+            "safe_method": True,
+            "body_schema_digest": None,
+        } for index, request in enumerate(assigned)),
+    )
+
+    narrowed = narrow_replay_plan_to_request_manifest(plan, manifest)
+
+    assert tuple(request.request_id for request in narrowed.requests) == tuple(
+        request.request_id for request in assigned
+    )
+    assert tuple(request.ordinal for request in narrowed.requests) == (0, 1)
+    assert narrowed.input_digest != plan.input_digest
+
+
+def test_private_replay_narrowing_fails_when_child_reference_is_absent():
+    plan = SimpleNamespace(requests=())
+    manifest = build_request_manifest(
+        scan_id="40000000-0000-4000-8000-000000000001",
+        target_binding_digest="a" * 64,
+        source_action_ids=("inputs.collection_00",),
+        requests=({
+            "request_ref_id": "missing",
+            "route_id": "b" * 64,
+            "method": "GET",
+            "auth_lane": "anonymous",
+            "selected_shard": 0,
+            "safe_method": True,
+            "body_schema_digest": None,
+        },),
+    )
+    with pytest.raises(
+        ScanCollectionReplayContractError, match="missing child request authority",
+    ):
+        narrow_replay_plan_to_request_manifest(plan, manifest)
 
 
 def test_database_json_fields_decode_serialized_arrays_and_objects():

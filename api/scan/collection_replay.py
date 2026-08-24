@@ -7,7 +7,7 @@ Scan policy/budget plus one saved collection selection into the contracts consum
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 try:
@@ -17,10 +17,10 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 try:
     from scanner_tools.request_collections import RequestSelector
-    from scanner_tools.request_replay import ReplayAuthorization
+    from scanner_tools.request_replay import ReplayAuthorization, ReplayPlan
 except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.request_collections import RequestSelector
-    from scanner.scanner_tools.request_replay import ReplayAuthorization
+    from scanner.scanner_tools.request_replay import ReplayAuthorization, ReplayPlan
 
 from .capability_execution import scan_budget_ledger_limits
 from .work_manifests import ScanWorkManifest
@@ -58,6 +58,50 @@ def validate_scan_replay_request_manifest(
         raise ScanCollectionReplayContractError(
             "decrypted replay plan differs from its immutable request manifest"
         )
+
+
+def narrow_replay_plan_to_request_manifest(
+    plan: ReplayPlan,
+    manifest: ScanWorkManifest,
+) -> ReplayPlan:
+    """Project a decrypted saved selection onto one child's exact authority.
+
+    Parallel children may resolve the same encrypted selection artifact, but
+    they may execute only the opaque request references assigned to their own
+    immutable manifest.  Rebuilding ordinals makes the resulting private plan
+    independently sealable for a broker lease.
+    """
+    if manifest.kind.value != "request":
+        raise ScanCollectionReplayContractError(
+            "exact replay authority requires a request manifest"
+        )
+    by_id = {request.request_id: request for request in plan.requests}
+    if len(by_id) != len(plan.requests):
+        raise ScanCollectionReplayContractError(
+            "decrypted replay plan contains ambiguous request references"
+        )
+    expected_ids = [str(entry["request_ref_id"]) for entry in manifest.entries]
+    if len(set(expected_ids)) != len(expected_ids):
+        raise ScanCollectionReplayContractError(
+            "immutable request manifest contains ambiguous references"
+        )
+    missing = [request_id for request_id in expected_ids if request_id not in by_id]
+    if missing:
+        raise ScanCollectionReplayContractError(
+            "decrypted replay plan is missing child request authority"
+        )
+    narrowed = ReplayPlan(
+        requests=tuple(
+            replace(by_id[request_id], ordinal=index)
+            for index, request_id in enumerate(expected_ids)
+        ),
+        allowed_origins=plan.allowed_origins,
+        default_origin=plan.default_origin,
+        authorization=plan.authorization,
+        schema_version=plan.schema_version,
+    )
+    validate_scan_replay_request_manifest(narrowed, manifest)
+    return narrowed
 
 
 def _positive_integer(value: Any, *, name: str) -> int:
