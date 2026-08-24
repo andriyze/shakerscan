@@ -12,6 +12,7 @@ sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *_args, **_kwargs: None))
 
 import agent_tools
+import external_wire_acceptance
 import worker
 
 
@@ -135,4 +136,25 @@ def test_external_adapter_refuses_to_start_below_provable_minimum(tool, reservat
                 else "socks5://127.0.0.1:41000"
             ),
             runtime_paths={"sqlmap_output_dir": "/tmp/sqlmap"},
+        )
+
+
+def test_wire_gate_rejects_a_failed_or_zero_traffic_http_adapter():
+    base_result = {
+        "status": "success",
+        "process_enforcement": {
+            "schema_version": "external-process-enforcement/v1",
+            "hard_budget": {"http_requests": 1, "tool_wall_seconds": 10},
+        },
+    }
+    with pytest.raises(RuntimeError, match="did not execute successfully"):
+        external_wire_acceptance._assert_wire_bound(
+            tool="nuclei",
+            result={**base_result, "status": "failed", "error": "no templates"},
+            traffic={"traffic": [], "connections": 0},
+        )
+    with pytest.raises(RuntimeError, match="no target-observed HTTP traffic"):
+        external_wire_acceptance._assert_wire_bound(
+            tool="nuclei", result=base_result,
+            traffic={"traffic": [], "connections": 0},
         )

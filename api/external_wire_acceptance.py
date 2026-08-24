@@ -85,6 +85,9 @@ def _assert_wire_bound(
         raise RuntimeError(f"{tool} is absent from the release worker image")
     if str(result.get("error") or "").startswith("contract:"):
         raise RuntimeError(f"{tool} process contract failed: {result.get('error')}")
+    status = str(result.get("status") or "failed")
+    if status not in {"success", "timeout"}:
+        raise RuntimeError(f"{tool} did not execute successfully: {result.get('error')}")
     request_count = len([
         item for item in traffic.get("traffic") or []
         if isinstance(item, Mapping)
@@ -100,6 +103,8 @@ def _assert_wire_bound(
             f"{tool} exceeded its target-observed HTTP ceiling "
             f"({request_count}>{http_limit})"
         )
+    if http_limit and request_count < 1:
+        raise RuntimeError(f"{tool} produced no target-observed HTTP traffic")
     if connection_limit and connections > connection_limit:
         raise RuntimeError(
             f"{tool} exceeded its target-observed connection ceiling "
@@ -107,7 +112,7 @@ def _assert_wire_bound(
         )
     return {
         "tool": tool,
-        "status": str(result.get("status") or "failed"),
+        "status": status,
         "error": str(result.get("error") or "") or None,
         "hard_budget": hard,
         "target_observed_http_requests": request_count,
@@ -172,6 +177,8 @@ async def _run_browser_case(origin: str, address: str) -> dict[str, Any]:
         cancelled=lambda: False,
     )
     observed = _traffic(origin)
+    if result.status != "success":
+        raise RuntimeError(f"browser did not execute successfully: {result.errors}")
     request_count = len(observed.get("traffic") or [])
     consumed = dict(result.actual_budget or {})
     if request_count > 3 or int(consumed.get("http_requests") or 0) > 3:

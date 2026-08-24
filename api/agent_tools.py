@@ -199,15 +199,17 @@ def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
 
 def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded template scan. Severity + tags are the ONLY tunables, both regex-gated.
+    template_ids = str(opts.get("template_ids") or "").strip().lower()
     severity = str(opts.get("severity") or "").strip().lower()
     if not _SEV_RE.match(severity):
         severity = "high,critical"
-    args = ["-target", url, "-severity", severity, "-silent", "-jsonl",
+    args = ["-target", url, "-silent", "-jsonl",
             "-stats", "-stats-json", "-stats-interval", "5",
             "-timeout", "5", "-retries", "0", "-no-color", "-disable-update-check",
             "-disable-redirects", "-no-interactsh", "-type", "http"]
+    if not template_ids:
+        args += ["-severity", severity]
     args += ["-rate-limit", "10", "-bulk-size", "10", "-concurrency", "10"]
-    template_ids = str(opts.get("template_ids") or "").strip().lower()
     if template_ids:
         if template_ids != _CANONICAL_PASSIVE_NUCLEI_IDS:
             raise AgentToolError("nuclei template allowlist is not canonical")
@@ -215,6 +217,8 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
         # default JSONL embeds the complete request/response and encoded
         # template in every matcher result, which can exceed the worker's hard
         # output ceiling even for this six-template, seven-request profile.
+        # The reviewed IDs include info/medium templates, so an independently
+        # supplied severity filter would silently select an empty intersection.
         args += ["-id", template_ids, "-omit-raw", "-omit-template"]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):

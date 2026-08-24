@@ -198,6 +198,7 @@ def test_passive_nuclei_plan_uses_exact_reviewed_get_only_allowlist():
     )
 
     assert plan.argv[plan.argv.index("-id") + 1] == template_ids
+    assert "-severity" not in plan.argv
     assert "-tags" not in plan.argv
     assert "-disable-redirects" in plan.argv
     assert "-no-interactsh" in plan.argv
