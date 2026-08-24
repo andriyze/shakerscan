@@ -871,7 +871,7 @@ CREATE TABLE hunt_runs (
         status IN ('created','active','awaiting_planner','completed','cancelled','failed','budget_exhausted')
     ),
     budget_profile TEXT NOT NULL DEFAULT 'balanced' CHECK (budget_profile IN ('fast','balanced','thorough')),
-    policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    policy_json JSONB NOT NULL DEFAULT '{"allow_oob_interactions":false}'::jsonb,
     budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     context_pack JSONB NOT NULL DEFAULT '{}'::jsonb,

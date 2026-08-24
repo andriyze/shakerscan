@@ -880,6 +880,13 @@ controller remains available for specialized guided verification and is not a Hu
 `/agent/hunt/*` and `/device-agent/*` writes return `410 Gone` by default; reads and cancellation remain
 temporarily available with deprecation headers.
 
+`HuntStartContract` is the sole Hunt policy and budget authority. The server publishes the same
+dimension/profile schema used to generate UI types at `GET /hunts/contract`. Zero is valid for risk
+dimensions: disabled mutation, network discovery, out-of-band interaction, and non-device fragility
+are persisted as hard zero ceilings, and an explicit positive override that contradicts policy is
+rejected. Duration, capability calls, HTTP traffic, candidates, and verification counts remain
+strictly positive runtime ceilings.
+
 Web target identity is host-level: scheme and port variants share one target record and durable
 security history, while each scan and hunt retains the exact concrete origin it executes against.
 The target APIs return `origins` ordered by recent DAST use. Hunt binds the target and its known
@@ -1410,8 +1417,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 379 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 321 | `api/api.py` |
+| Public REST operations | 380 | `api/api.py` FastAPI decorators |
+| Unique REST paths | 322 | `api/api.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1624,6 +1631,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/health` | `health` |
 | `GET` | `/hunts` | `list_hunts` |
 | `POST` | `/hunts` | `start_hunt` |
+| `GET` | `/hunts/contract` | `get_hunt_contract` |
 | `GET` | `/hunts/{hunt_id}` | `get_hunt` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |

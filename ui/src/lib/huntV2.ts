@@ -1,7 +1,11 @@
 import { API_URL, type HuntV2 } from './api'
+import {
+  HUNT_START_CONTRACT,
+  type HuntBudgetProfile,
+  type HuntTargetKind,
+} from './huntContract.generated'
 
-export type HuntTargetKind = 'web' | 'api' | 'device' | 'network'
-export type HuntBudgetProfile = 'fast' | 'balanced' | 'thorough'
+export type { HuntBudgetProfile, HuntTargetKind } from './huntContract.generated'
 
 export interface HuntStartV2Request {
   targetId: string
@@ -13,6 +17,7 @@ export interface HuntStartV2Request {
     activeTesting: boolean
     allowStateChangingHttp: boolean
     networkDiscovery: boolean
+    allowOobInteractions: boolean
     authorizationConfirmed: boolean
     approvalReceiptId?: string
     scopeReceiptId?: string
@@ -42,7 +47,7 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      schema_version: 'hunt-start/v2',
+      schema_version: HUNT_START_CONTRACT.schema_version,
       target_id: request.targetId,
       target_kind: request.targetKind,
       goal: request.goal,
@@ -52,6 +57,7 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
         active_testing: request.policy.activeTesting,
         allow_state_changing_http: request.policy.allowStateChangingHttp,
         network_discovery: request.policy.networkDiscovery,
+        allow_oob_interactions: request.policy.allowOobInteractions,
         authorization_confirmed: request.policy.authorizationConfirmed,
         approval_receipt_id: request.policy.approvalReceiptId || undefined,
         scope_receipt_id: request.policy.scopeReceiptId || undefined,

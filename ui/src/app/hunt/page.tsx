@@ -23,6 +23,11 @@ import {
   type HuntBudgetProfile,
   type HuntTargetKind,
 } from '@/lib/huntV2'
+import {
+  HUNT_BUDGET_DIMENSIONS,
+  HUNT_BUDGET_PROFILES,
+  type HuntZeroableBudgetDimension,
+} from '@/lib/huntContract.generated'
 import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 
@@ -46,9 +51,12 @@ function splitIds(value: string): string[] {
 
 function positiveInteger(value: string): number | undefined {
   if (!value.trim()) return undefined
-  const parsed = Number.parseInt(value, 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  if (!/^\d+$/.test(value.trim())) return undefined
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
 }
+
+const ZEROABLE_BUDGETS = HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)
 
 function HuntContent() {
   const searchParams = useSearchParams()
@@ -63,9 +71,13 @@ function HuntContent() {
   const [budget, setBudget] = useState<HuntBudgetProfile>('balanced')
   const [maxDurationSeconds, setMaxDurationSeconds] = useState('')
   const [maxHttpRequests, setMaxHttpRequests] = useState('')
+  const [zeroableBudgets, setZeroableBudgets] = useState<
+    Partial<Record<HuntZeroableBudgetDimension, string>>
+  >({})
   const [activeTesting, setActiveTesting] = useState(false)
   const [networkDiscovery, setNetworkDiscovery] = useState(false)
   const [allowStateChanging, setAllowStateChanging] = useState(false)
+  const [allowOobInteractions, setAllowOobInteractions] = useState(false)
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
   const [scopeReceipt, setScopeReceipt] = useState('')
   const [approvalReceipt, setApprovalReceipt] = useState('')
@@ -180,7 +192,7 @@ function HuntContent() {
   }, [hunt?.context_pack])
 
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
-  const privileged = activeTesting || networkDiscovery || allowStateChanging || selectedCredentialCount > 0
+  const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
   const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network'
     ? ['ssh']
     : targetKind === 'device'
@@ -202,6 +214,9 @@ function HuntContent() {
       if (allowStateChanging && !activeTesting) {
         throw new Error('State-changing HTTP requires active testing.')
       }
+      if (allowOobInteractions && !activeTesting) {
+        throw new Error('Out-of-band interactions require active testing.')
+      }
       if (privileged && !authorizationConfirmed) {
         throw new Error('Confirm that you own or are authorized to test this target.')
       }
@@ -211,9 +226,27 @@ function HuntContent() {
 
       const duration = positiveInteger(maxDurationSeconds)
       const requests = positiveInteger(maxHttpRequests)
-      const budgets = {
+      if (maxDurationSeconds.trim() && duration === undefined) {
+        throw new Error('Maximum duration must be a positive whole number.')
+      }
+      if (maxHttpRequests.trim() && requests === undefined) {
+        throw new Error('Maximum HTTP requests must be a positive whole number.')
+      }
+      const budgets: Record<string, number> = {
         ...(duration ? { max_duration_seconds: duration } : {}),
         ...(requests ? { max_http_requests: requests } : {}),
+      }
+      for (const definition of ZEROABLE_BUDGETS) {
+        const raw = zeroableBudgets[definition.name]
+        if (!raw?.trim()) continue
+        if (!/^\d+$/.test(raw.trim())) {
+          throw new Error(`${definition.label} must be zero or a positive whole number.`)
+        }
+        const parsed = Number(raw)
+        if (!Number.isSafeInteger(parsed) || parsed > HUNT_BUDGET_PROFILES[budget][definition.name]) {
+          throw new Error(`${definition.label} exceeds the ${budget} profile ceiling.`)
+        }
+        budgets[definition.name] = parsed
       }
       const credentialRefs: Record<string, string> = {
         ...(credentialIds.primary
@@ -239,6 +272,7 @@ function HuntContent() {
           activeTesting,
           allowStateChangingHttp: allowStateChanging,
           networkDiscovery,
+          allowOobInteractions,
           authorizationConfirmed,
           approvalReceiptId: approvalReceipt.trim() || undefined,
           scopeReceiptId: scopeReceipt.trim() || undefined,
@@ -360,6 +394,31 @@ function HuntContent() {
                 </label>
               </div>
 
+              <details className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+                <summary className="cursor-pointer text-sm font-medium text-white">
+                  Optional hard ceilings (zero disables a dimension)
+                </summary>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  {ZEROABLE_BUDGETS.map((definition) => (
+                    <label key={definition.name} className="text-sm text-gray-300">
+                      {definition.label}
+                      <input
+                        type="number"
+                        min="0"
+                        max={HUNT_BUDGET_PROFILES[budget][definition.name]}
+                        value={zeroableBudgets[definition.name] ?? ''}
+                        onChange={(event) => setZeroableBudgets((current) => ({
+                          ...current,
+                          [definition.name]: event.target.value,
+                        }))}
+                        placeholder={`Profile ceiling: ${HUNT_BUDGET_PROFILES[budget][definition.name]}`}
+                        className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </details>
+
               <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-4">
                 <div>
                   <h2 className="text-sm font-medium text-white">Runtime authority</h2>
@@ -377,6 +436,7 @@ function HuntContent() {
                       if (!event.target.checked) {
                         setNetworkDiscovery(false)
                         setAllowStateChanging(false)
+                        setAllowOobInteractions(false)
                         setRequestCollectionIds([])
                       }
                     }}
@@ -405,6 +465,16 @@ function HuntContent() {
                     }}
                   />
                   <span>Allow explicitly selected state-changing HTTP requests</span>
+                </label>
+                <label className={`flex items-start gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}>
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    disabled={!activeTesting}
+                    checked={allowOobInteractions}
+                    onChange={(event) => setAllowOobInteractions(event.target.checked)}
+                  />
+                  <span>Allow bounded out-of-band callbacks when a registered verifier requires them</span>
                 </label>
                 {privileged && (
                   <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">

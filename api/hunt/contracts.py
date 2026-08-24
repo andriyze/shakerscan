@@ -1,115 +1,127 @@
-"""Pure Hunt V2 policy, budget, and capability resolution.
+"""Pure capability resolution for the canonical Hunt V2 authority contract.
 
-The external coding agent owns technique sequencing. This module only computes server authority;
-it contains no planner or model reasoning loop.
+The external coding agent owns technique sequencing. ``HuntStartContract`` is the only policy
+and budget model; this module projects that authority onto the canonical capability registry.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any
 
 try:
     from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilitySpec
 except ModuleNotFoundError:
     from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilitySpec
 
-
-@dataclass(frozen=True)
-class HuntBudget:
-    max_duration_seconds: int
-    max_capability_calls: int
-    max_http_requests: int
-    max_active_actions: int
-    max_candidates: int
-    max_verifications: int
-    max_tcp_ports: int
-    max_browser_actions: int
-    max_state_changing_requests: int
-    max_device_fragility_points: int
-    max_hosts: int
-    max_udp_ports: int
-    max_oob_interactions: int
-
-    def ledger_limits(self) -> dict[str, int]:
-        return {
-            "agent_actions": self.max_capability_calls,
-            "active_actions": self.max_active_actions,
-            "http_requests": self.max_http_requests,
-            "tcp_ports_attempted": self.max_tcp_ports,
-            "browser_actions": self.max_browser_actions,
-            "state_changing_requests": self.max_state_changing_requests,
-            "tool_wall_seconds": self.max_duration_seconds,
-            "device_fragility_points": self.max_device_fragility_points,
-            "hosts_attempted": self.max_hosts,
-            "udp_ports_attempted": self.max_udp_ports,
-            "oob_interactions": self.max_oob_interactions,
-        }
+from .start_contract import HuntStartContract, HuntStartContractError
 
 
-HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
-    "fast": HuntBudget(900, 20, 500, 4, 20, 4, 100, 20, 4, 20, 50, 100, 10),
-    "balanced": HuntBudget(3_600, 80, 5_000, 20, 100, 20, 1_200, 200, 20, 100, 500, 1_000, 50),
-    "thorough": HuntBudget(14_400, 300, 20_000, 80, 500, 100, 10_000, 1_000, 80, 500, 5_000, 5_000, 200),
-}
+_APPROVAL_POLICIES = frozenset({
+    "active_testing",
+    "credential_use",
+    "network_discovery",
+    "oob_interactions",
+    "state_changing_http",
+})
 
 
-@dataclass(frozen=True)
-class HuntPolicy:
-    target_kind: str
-    active_testing: bool
-    credential_access: bool
-    mutation_allowed: bool
-    approval_receipt_id: str | None
-    device_fragility_profile: str | None
-    budget_profile: str
-    budget: HuntBudget
-
-    def public(self) -> dict[str, Any]:
-        result = asdict(self)
-        result["budget"] = asdict(self.budget)
-        return result
-
-
-def resolve_hunt_policy(
+def capability_is_allowed(
+    spec: CapabilitySpec,
+    contract: HuntStartContract,
     *,
-    target_kind: str,
-    budget_profile: str | None,
-    approval_receipt_id: str | None,
-    approval_validated: bool,
-    credentials_available: bool = False,
-    device_fragility_profile: str | None = None,
-) -> HuntPolicy:
-    kind = str(target_kind or "").strip().lower()
-    if kind not in {"web", "api", "device", "network"}:
-        raise ValueError("unsupported Hunt target kind")
-    profile = str(budget_profile or "balanced").strip().lower()
-    try:
-        budget = HUNT_BUDGET_PROFILES[profile]
-    except KeyError as exc:
-        raise ValueError("budget_profile must be fast, balanced, or thorough") from exc
-    receipt = str(approval_receipt_id or "").strip() or None
-    active = bool(receipt and approval_validated)
-    return HuntPolicy(
-        target_kind=kind,
-        active_testing=active,
-        credential_access=bool(active and credentials_available),
-        mutation_allowed=False,
-        approval_receipt_id=receipt,
-        device_fragility_profile=(str(device_fragility_profile).strip() or None)
-        if kind == "device" and device_fragility_profile else None,
-        budget_profile=profile,
-        budget=budget,
-    )
+    credentials_available: bool,
+) -> bool:
+    """Return whether one registry capability fits the exact authority envelope."""
+    if not spec.planner_visible or spec.hunt_executor is None:
+        return False
+    if contract.target_kind not in spec.target_kinds:
+        return False
+    policy = contract.policy
+    if spec.risk_tier == "active" and not policy.active_testing:
+        return False
+    if spec.risk_tier == "credential" and not credentials_available:
+        return False
+    if spec.risk_tier == "mutation" and not policy.allow_state_changing_http:
+        return False
+    required = spec.required_approval
+    if required is not None and required not in _APPROVAL_POLICIES:
+        return False
+    if required == "active_testing" and not policy.active_testing:
+        return False
+    if required == "credential_use" and not credentials_available:
+        return False
+    if required == "network_discovery" and not policy.network_discovery:
+        return False
+    if required == "oob_interactions" and not policy.allow_oob_interactions:
+        return False
+    if required == "state_changing_http" and not policy.allow_state_changing_http:
+        return False
+
+    ledger_limits = contract.resolved_budget_object.ledger_limits()
+    if int(ledger_limits["active_actions"]) == 0 and (
+        spec.risk_tier in {"active", "credential", "mutation"}
+        or required in {
+            "active_testing", "credential_use", "network_discovery",
+            "oob_interactions", "state_changing_http",
+        }
+    ):
+        return False
+    if any(
+        int(amount) > 0 and int(ledger_limits.get(dimension, 0)) == 0
+        for dimension, amount in spec.budget_cost.items()
+    ):
+        return False
+    return True
 
 
-def capability_manifest(policy: HuntPolicy) -> list[dict[str, Any]]:
+def allowed_capability_names(
+    contract: HuntStartContract,
+    *,
+    credentials_available: bool,
+) -> tuple[str, ...]:
+    available = {
+        spec.name: spec
+        for spec in CAPABILITY_REGISTRY.list(
+            target_kind=contract.target_kind,
+            include_active=True,
+        )
+        if capability_is_allowed(
+            spec,
+            contract,
+            credentials_available=credentials_available,
+        )
+    }
+    if not contract.capabilities:
+        return tuple(available)
+    result: list[str] = []
+    for name in contract.capabilities:
+        try:
+            CAPABILITY_REGISTRY.require(name)
+        except KeyError as exc:
+            raise HuntStartContractError(str(exc)) from exc
+        if name not in available:
+            raise HuntStartContractError(
+                f"capability {name} is outside this target, budget, or Hunt policy"
+            )
+        if name not in result:
+            result.append(name)
+    return tuple(result)
+
+
+def capability_manifest(
+    contract: HuntStartContract,
+    *,
+    credentials_available: bool,
+) -> list[dict[str, Any]]:
+    allowed = set(allowed_capability_names(
+        contract,
+        credentials_available=credentials_available,
+    ))
     return [
         spec.planner_contract()
         for spec in CAPABILITY_REGISTRY.list(
-            target_kind=policy.target_kind,
-            include_active=policy.active_testing,
+            target_kind=contract.target_kind,
+            include_active=True,
         )
-        if spec.planner_visible
-        and (spec.risk_tier != "credential" or policy.credential_access)
+        if spec.name in allowed
     ]

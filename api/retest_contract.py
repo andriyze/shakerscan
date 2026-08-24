@@ -2921,6 +2921,22 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
             await conn.execute("""
+                ALTER TABLE hunt_runs
+                ALTER COLUMN policy_json
+                SET DEFAULT '{"allow_oob_interactions":false}'::jsonb
+            """)
+            await conn.execute("""
+                UPDATE hunt_runs
+                SET policy_json = jsonb_set(
+                    COALESCE(policy_json, '{}'::jsonb),
+                    '{allow_oob_interactions}',
+                    'false'::jsonb,
+                    true
+                )
+                WHERE NOT COALESCE(policy_json, '{}'::jsonb)
+                    ? 'allow_oob_interactions'
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hunt_runs_web
                 ON hunt_runs(target_id, created_at DESC) WHERE target_id IS NOT NULL
             """)

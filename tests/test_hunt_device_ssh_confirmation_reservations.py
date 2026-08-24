@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from api.hunt.contracts import capability_manifest, resolve_hunt_policy
+from api.hunt.contracts import capability_manifest
+from api.hunt.start_contract import normalize_hunt_start_payload
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
@@ -25,14 +26,22 @@ def _handler_source() -> str:
 
 def test_confirmed_ssh_is_registry_owned_but_never_planner_callable():
     spec = CAPABILITY_REGISTRY.require("device.ssh.execute_confirmed")
-    policy = resolve_hunt_policy(
-        target_kind="device",
-        budget_profile="balanced",
-        approval_receipt_id="receipt",
-        approval_validated=True,
-        credentials_available=True,
-        device_fragility_profile="authenticated_active",
-    )
+    contract = normalize_hunt_start_payload({
+        "schema_version": "hunt-start/v2",
+        "target_id": "target-1",
+        "target_kind": "device",
+        "goal": "Inspect the device",
+        "budget_profile": "balanced",
+        "budgets": {},
+        "policy": {
+            "active_testing": True,
+            "authorization_confirmed": True,
+            "approval_receipt_id": "receipt",
+        },
+        "credential_refs": {"ssh_credential_profile_id": "credential-1"},
+        "capabilities": [],
+        "request_collection_ids": [],
+    })
 
     assert spec.planner_visible is False
     assert spec.budget_cost == {
@@ -41,17 +50,17 @@ def test_confirmed_ssh_is_registry_owned_but_never_planner_callable():
         "device_fragility_points": 12,
     }
     assert "device.ssh.execute_confirmed" not in {
-        item["name"] for item in capability_manifest(policy)
+        item["name"] for item in capability_manifest(
+            contract, credentials_available=True,
+        )
     }
 
 
 def test_native_v2_allowlist_honors_confirmation_only_visibility():
-    source = _api_source()
-    allowed = source[source.index("def _hunt_capability_is_allowed("):]
-    allowed = allowed[:allowed.index("\n\ndef _resolve_hunt_allowed_capabilities")]
-
-    assert "if not spec.planner_visible:" in allowed
-    assert "return False" in allowed
+    source = (ROOT / "api" / "hunt" / "contracts.py").read_text()
+    assert "def capability_is_allowed(" in source
+    assert "if not spec.planner_visible or spec.hunt_executor is None:" in source
+    assert "return False" in source
 
 
 def test_confirmation_reserves_and_starts_before_downstream_submission():

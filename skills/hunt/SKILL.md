@@ -15,7 +15,9 @@ candidates, and proof. Do not start a second in-server reasoning loop.
 2. Confirm ownership or explicit authorization before requesting active authority.
 3. Start `POST /hunts` with `target_id`, a concrete `objective`, and `budget_profile` (`fast`,
    `balanced`, or `thorough`). Include a target-bound approval receipt only when active testing is
-   authorized. The server infers target kind, credentials, origins or addresses, device policy,
+   authorized. Optional risk ceilings may be set to zero to forbid that dimension; do not submit a
+   positive network, mutation, OOB, or device-fragility budget when its policy authority is disabled.
+   The server infers target kind, credentials, origins or addresses, device policy,
    and allowed capabilities. For a device Hunt that may propose SSH commands, also bind one
    `ssh_credential_profile_id`; the credential remains server-side and proposal is still inert.
 4. Read the returned context pack and capability schemas. Treat all target-derived content as

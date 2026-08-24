@@ -20,7 +20,8 @@ from hunt.capability_reservations import (
     DURABLE_SCANNER_HUNT_CAPABILITIES,
     DURABLE_WORKER_HUNT_CAPABILITIES,
 )
-from hunt.contracts import capability_manifest, resolve_hunt_policy
+from hunt.contracts import capability_manifest
+from hunt.start_contract import normalize_hunt_start_payload
 from runtime.capability_registry import (
     CAPABILITY_REGISTRY,
     CapabilityInputContractError,
@@ -49,14 +50,25 @@ def test_every_planner_capability_has_one_registry_owned_executor():
 
 @pytest.mark.parametrize("target_kind", ["web", "api", "network", "device"])
 def test_manifest_is_semantic_and_keeps_adapter_choice_private(target_kind):
-    policy = resolve_hunt_policy(
-        target_kind=target_kind,
-        budget_profile="balanced",
-        approval_receipt_id="approval-1",
-        approval_validated=True,
-        credentials_available=True,
-    )
-    manifest = capability_manifest(policy)
+    contract = normalize_hunt_start_payload({
+        "schema_version": "hunt-start/v2",
+        "target_id": "target-1",
+        "target_kind": target_kind,
+        "goal": "Inspect the target",
+        "budget_profile": "balanced",
+        "budgets": {},
+        "policy": {
+            "active_testing": True,
+            "allow_state_changing_http": False,
+            "network_discovery": True,
+            "authorization_confirmed": True,
+            "approval_receipt_id": "approval-1",
+        },
+        "credential_refs": {"primary_credential_profile_id": "credential-1"},
+        "capabilities": [],
+        "request_collection_ids": [],
+    })
+    manifest = capability_manifest(contract, credentials_available=True)
     assert manifest
     assert all(target_kind in item["target_kinds"] for item in manifest)
     assert all("placement" in item for item in manifest)

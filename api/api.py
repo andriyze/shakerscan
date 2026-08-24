@@ -669,13 +669,15 @@ try:
     )
     from capabilities.http import execute_bound_http_request
     from capabilities.tls import inspect_tls_origin
-    from hunt.contracts import HuntBudget, capability_manifest, resolve_hunt_policy
+    from hunt.contracts import allowed_capability_names
     from hunt.start_contract import (
+        HUNT_BUDGET_SCHEMA,
         HUNT_START_SCHEMA,
         MAX_HUNT_BODY_BYTES,
         HuntStartContract,
         HuntStartContractError,
         bind_validated_receipts,
+        hunt_start_public_contract,
         normalize_hunt_start_payload,
     )
     from hunt.legacy import LegacyHuntIsolationMiddleware
@@ -705,13 +707,15 @@ except ModuleNotFoundError:
     )
     from api.capabilities.http import execute_bound_http_request
     from api.capabilities.tls import inspect_tls_origin
-    from api.hunt.contracts import HuntBudget, capability_manifest, resolve_hunt_policy
+    from api.hunt.contracts import allowed_capability_names
     from api.hunt.start_contract import (
+        HUNT_BUDGET_SCHEMA,
         HUNT_START_SCHEMA,
         MAX_HUNT_BODY_BYTES,
         HuntStartContract,
         HuntStartContractError,
         bind_validated_receipts,
+        hunt_start_public_contract,
         normalize_hunt_start_payload,
     )
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
@@ -39501,6 +39505,7 @@ class HuntStartV2PolicyRequest(BaseModel):
     active_testing: bool = False
     allow_state_changing_http: bool = False
     network_discovery: bool = False
+    allow_oob_interactions: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: Optional[str] = Field(default=None, max_length=256)
     scope_receipt_id: Optional[str] = Field(default=None, max_length=256)
@@ -39965,57 +39970,15 @@ def _hunt_capability_public(spec: Any) -> dict[str, Any]:
     return spec.planner_contract()
 
 
-def _hunt_capability_is_allowed(
-    spec: Any,
-    contract: HuntStartContract,
-    *,
-    credential_access: bool,
-) -> bool:
-    if not spec.planner_visible:
-        return False
-    if contract.target_kind not in spec.target_kinds:
-        return False
-    if spec.risk_tier == "credential" and not credential_access:
-        return False
-    if spec.risk_tier == "mutation" and not contract.policy.allow_state_changing_http:
-        return False
-    if spec.required_approval == "network_discovery" and not contract.policy.network_discovery:
-        return False
-    if spec.risk_tier == "active" and not contract.policy.active_testing:
-        return False
-    if spec.required_approval == "active_testing" and not contract.policy.active_testing:
-        return False
-    return True
-
-
 def _resolve_hunt_allowed_capabilities(
     contract: HuntStartContract,
     *,
     credential_access: bool,
 ) -> tuple[str, ...]:
-    registry = agent_tools.CAPABILITY_REGISTRY
-    available = {
-        spec.name: spec
-        for spec in registry.list(target_kind=contract.target_kind, include_active=True)
-        if _hunt_capability_is_allowed(
-            spec, contract, credential_access=credential_access,
-        )
-    }
-    if not contract.capabilities:
-        return tuple(available)
-    result: list[str] = []
-    for name in contract.capabilities:
-        try:
-            spec = registry.require(name)
-        except KeyError as exc:
-            raise HuntStartContractError(str(exc)) from exc
-        if name not in available:
-            raise HuntStartContractError(
-                f"capability {name} is outside this target or Hunt policy"
-            )
-        if spec.name not in result:
-            result.append(spec.name)
-    return tuple(result)
+    return allowed_capability_names(
+        contract,
+        credentials_available=credential_access,
+    )
 
 
 def _hunt_public(row: Any, *, include_context: bool = True) -> dict[str, Any]:
@@ -40034,14 +39997,9 @@ def _hunt_public(row: Any, *, include_context: bool = True) -> dict[str, Any]:
             except KeyError:
                 continue
     else:
-        capabilities = capability_manifest(resolve_hunt_policy(
-            target_kind=str(item.get("target_kind") or "web"),
-            budget_profile=str(item.get("budget_profile") or "balanced"),
-            approval_receipt_id=policy.get("approval_receipt_id"),
-            approval_validated=bool(policy.get("active_testing")),
-            credentials_available=bool(policy.get("credential_access")),
-            device_fragility_profile=policy.get("device_fragility_profile"),
-        ))
+        # Pre-V2 rows do not carry a persisted semantic allowlist. Never infer executable
+        # authority from stale booleans; legacy history remains readable but non-executable.
+        capabilities = []
     result = {
         "hunt_id": str(item.get("id")) if item.get("id") else None,
         "target_kind": item.get("target_kind"),
@@ -40341,7 +40299,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     target_uuid = _uuid_or_400(contract.target_id, "target id")
     approval_validated = False
     approval_context: Mapping[str, Any] | None = None
-    budget = HuntBudget(**contract.resolved_budget)
+    budget = contract.resolved_budget_object
 
     async with db_pool.acquire() as conn:
         web = await conn.fetchrow(
@@ -40448,6 +40406,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             contract.policy.active_testing
             or contract.policy.network_discovery
             or contract.policy.allow_state_changing_http
+            or contract.policy.allow_oob_interactions
             or credential_rows
         )
         if contract.policy.approval_receipt_id:
@@ -40511,6 +40470,9 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             "network_discovery": bool(
                 contract.policy.network_discovery and approval_validated
             ),
+            "allow_oob_interactions": bool(
+                contract.policy.allow_oob_interactions and approval_validated
+            ),
             "authorization_confirmed": contract.policy.authorization_confirmed,
             "approval_receipt_id": validated_approval_id,
             "scope_receipt_id": validated_scope_id,
@@ -40520,6 +40482,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 else "safe_remote" if contract.target_kind == "device" else None
             ),
             "budget_profile": contract.budget_profile,
+            "budget_schema_version": HUNT_BUDGET_SCHEMA,
             "budget": asdict(budget),
             "allowed_capabilities": list(allowed_capabilities),
         }
@@ -40618,6 +40581,12 @@ async def start_hunt(request: Request, response: Response):
         ) from exc
     response.headers["x-shakerscan-hunt-contract"] = "v2"
     return result
+
+
+@app.get("/hunts/contract", tags=["Hunt"])
+async def get_hunt_contract():
+    """Publish the exact policy and budget schema used by API and generated UI types."""
+    return hunt_start_public_contract()
 
 
 @app.get("/hunts/{hunt_id}")

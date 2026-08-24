@@ -12,10 +12,9 @@ from dataclasses import asdict, dataclass
 import re
 from typing import Any, Mapping, Sequence
 
-from .contracts import HUNT_BUDGET_PROFILES
-
 
 HUNT_START_SCHEMA = "hunt-start/v2"
+HUNT_BUDGET_SCHEMA = "hunt-budget/v3"
 MAX_HUNT_BODY_BYTES = 1_048_576
 MAX_GOAL_CHARS = 20_000
 MAX_CAPABILITIES = 128
@@ -58,14 +57,115 @@ _ALLOWED_POLICY_KEYS = frozenset({
     "active_testing",
     "allow_state_changing_http",
     "network_discovery",
+    "allow_oob_interactions",
     "authorization_confirmed",
     "approval_receipt_id",
     "scope_receipt_id",
 })
 
 
+@dataclass(frozen=True)
+class HuntBudget:
+    max_duration_seconds: int
+    max_capability_calls: int
+    max_http_requests: int
+    max_active_actions: int
+    max_candidates: int
+    max_verifications: int
+    max_tcp_ports: int
+    max_browser_actions: int
+    max_state_changing_requests: int
+    max_device_fragility_points: int
+    max_hosts: int
+    max_udp_ports: int
+    max_oob_interactions: int
+
+    def ledger_limits(self) -> dict[str, int]:
+        return {
+            "agent_actions": self.max_capability_calls,
+            "active_actions": self.max_active_actions,
+            "http_requests": self.max_http_requests,
+            "tcp_ports_attempted": self.max_tcp_ports,
+            "browser_actions": self.max_browser_actions,
+            "state_changing_requests": self.max_state_changing_requests,
+            "tool_wall_seconds": self.max_duration_seconds,
+            "device_fragility_points": self.max_device_fragility_points,
+            "hosts_attempted": self.max_hosts,
+            "udp_ports_attempted": self.max_udp_ports,
+            "oob_interactions": self.max_oob_interactions,
+        }
+
+
+HUNT_BUDGET_PROFILES: Mapping[str, HuntBudget] = {
+    "fast": HuntBudget(900, 20, 500, 4, 20, 4, 100, 20, 4, 20, 50, 100, 10),
+    "balanced": HuntBudget(
+        3_600, 80, 5_000, 20, 100, 20, 1_200, 200, 20, 100, 500, 1_000, 50,
+    ),
+    "thorough": HuntBudget(
+        14_400, 300, 20_000, 80, 500, 100, 10_000, 1_000, 80, 500, 5_000,
+        5_000, 200,
+    ),
+}
+
+ZEROABLE_HUNT_BUDGET_DIMENSIONS = frozenset({
+    "max_active_actions",
+    "max_browser_actions",
+    "max_device_fragility_points",
+    "max_hosts",
+    "max_oob_interactions",
+    "max_state_changing_requests",
+    "max_tcp_ports",
+    "max_udp_ports",
+})
+MANDATORY_HUNT_BUDGET_DIMENSIONS = _ALLOWED_BUDGET_KEYS - ZEROABLE_HUNT_BUDGET_DIMENSIONS
+HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
+    "max_duration_seconds": "Maximum duration (seconds)",
+    "max_capability_calls": "Maximum capability calls",
+    "max_http_requests": "Maximum HTTP requests",
+    "max_active_actions": "Maximum approval-gated actions",
+    "max_candidates": "Maximum candidates",
+    "max_verifications": "Maximum deterministic verifications",
+    "max_tcp_ports": "Maximum TCP ports",
+    "max_browser_actions": "Maximum browser actions",
+    "max_state_changing_requests": "Maximum state-changing requests",
+    "max_device_fragility_points": "Maximum device fragility points",
+    "max_hosts": "Maximum hosts",
+    "max_udp_ports": "Maximum UDP ports",
+    "max_oob_interactions": "Maximum out-of-band interactions",
+}
+
+
 class HuntStartContractError(ValueError):
     """The submitted Hunt request is outside the V2 authority contract."""
+
+
+def hunt_start_public_contract() -> dict[str, Any]:
+    """Return the API/UI contract generated from the server's authority constants."""
+    return {
+        "schema_version": HUNT_START_SCHEMA,
+        "budget_schema_version": HUNT_BUDGET_SCHEMA,
+        "target_kinds": sorted(_ALLOWED_TARGET_KINDS),
+        "policy_fields": sorted(_ALLOWED_POLICY_KEYS),
+        "budget_profiles": {
+            name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
+        },
+        "budget_dimensions": [
+            {
+                "name": name,
+                "label": HUNT_BUDGET_DIMENSION_LABELS[name],
+                "minimum": 0 if name in ZEROABLE_HUNT_BUDGET_DIMENSIONS else 1,
+                "zeroable": name in ZEROABLE_HUNT_BUDGET_DIMENSIONS,
+            }
+            for name in sorted(_ALLOWED_BUDGET_KEYS)
+        ],
+        "policy_derived_zeros": {
+            "mutation_disabled": ["max_state_changing_requests"],
+            "network_disabled": ["max_hosts", "max_tcp_ports", "max_udp_ports"],
+            "oob_disabled": ["max_oob_interactions"],
+            "non_device_target": ["max_device_fragility_points"],
+            "passive_without_credentials": ["max_active_actions"],
+        },
+    }
 
 
 def _object(value: Any, name: str, *, required: bool = False) -> dict[str, Any]:
@@ -128,10 +228,13 @@ def _budget_overrides(value: Any, profile: str) -> dict[str, int]:
     result: dict[str, int] = {}
     for key, raw_amount in raw.items():
         if isinstance(raw_amount, bool) or not isinstance(raw_amount, int):
-            raise HuntStartContractError(f"{key} must be a positive integer")
+            qualifier = "a non-negative" if key in ZEROABLE_HUNT_BUDGET_DIMENSIONS else "a positive"
+            raise HuntStartContractError(f"{key} must be {qualifier} integer")
         amount = int(raw_amount)
-        if amount < 1:
-            raise HuntStartContractError(f"{key} must be a positive integer")
+        minimum = 0 if key in ZEROABLE_HUNT_BUDGET_DIMENSIONS else 1
+        if amount < minimum:
+            qualifier = "a non-negative" if minimum == 0 else "a positive"
+            raise HuntStartContractError(f"{key} must be {qualifier} integer")
         if amount > int(defaults[key]):
             raise HuntStartContractError(
                 f"{key} exceeds the {profile} Hunt profile ceiling ({defaults[key]})"
@@ -166,6 +269,7 @@ class HuntStartPolicy:
     active_testing: bool = False
     allow_state_changing_http: bool = False
     network_discovery: bool = False
+    allow_oob_interactions: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = None
     scope_receipt_id: str | None = None
@@ -183,26 +287,46 @@ class HuntStartPolicy:
             raise HuntStartContractError("state-changing HTTP requires active_testing")
         if self.network_discovery and not self.active_testing:
             raise HuntStartContractError("network discovery requires active_testing")
+        if self.allow_oob_interactions and not self.active_testing:
+            raise HuntStartContractError("OOB interactions require active_testing")
         privileged = bool(
             self.active_testing
             or self.allow_state_changing_http
             or self.network_discovery
+            or self.allow_oob_interactions
             or credentials_requested
         )
         if privileged and not self.authorization_confirmed:
             raise HuntStartContractError(
-                "active, network, mutation, and credential use require authorization_confirmed=true"
+                "active, network, mutation, OOB, and credential use require authorization_confirmed=true"
             )
         if privileged and not self.approval_receipt_id:
             raise HuntStartContractError(
-                "active, network, mutation, and credential use require a target-bound approval receipt"
+                "active, network, mutation, OOB, and credential use require a target-bound approval receipt"
             )
+
+    def forbidden_budget_dimensions(
+        self, *, target_kind: str, credentials_requested: bool,
+    ) -> frozenset[str]:
+        forbidden: set[str] = set()
+        if not self.allow_state_changing_http:
+            forbidden.add("max_state_changing_requests")
+        if not self.network_discovery:
+            forbidden.update({"max_tcp_ports", "max_udp_ports", "max_hosts"})
+        if not self.allow_oob_interactions:
+            forbidden.add("max_oob_interactions")
+        if target_kind != "device":
+            forbidden.add("max_device_fragility_points")
+        if not self.active_testing and not credentials_requested:
+            forbidden.add("max_active_actions")
+        return frozenset(forbidden)
 
     def public_dict(self) -> dict[str, Any]:
         return {
             "active_testing": self.active_testing,
             "allow_state_changing_http": self.allow_state_changing_http,
             "network_discovery": self.network_discovery,
+            "allow_oob_interactions": self.allow_oob_interactions,
             "authorization_confirmed": self.authorization_confirmed,
             "approval_receipt_id": self.approval_receipt_id,
             "scope_receipt_id": self.scope_receipt_id,
@@ -256,7 +380,16 @@ class HuntStartContract:
     def resolved_budget(self) -> dict[str, int]:
         result = asdict(HUNT_BUDGET_PROFILES[self.budget_profile])
         result.update({key: int(value) for key, value in self.budgets.items()})
+        for key in self.policy.forbidden_budget_dimensions(
+            target_kind=self.target_kind,
+            credentials_requested=bool(self.credential_refs),
+        ):
+            result[key] = 0
         return result
+
+    @property
+    def resolved_budget_object(self) -> HuntBudget:
+        return HuntBudget(**self.resolved_budget)
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -265,6 +398,7 @@ class HuntStartContract:
             "target_kind": self.target_kind,
             "goal": self.goal,
             "budget_profile": self.budget_profile,
+            "budget_schema_version": HUNT_BUDGET_SCHEMA,
             "budgets": dict(self.budgets),
             "resolved_budget": self.resolved_budget,
             "policy": self.policy.public_dict(),
@@ -273,6 +407,7 @@ class HuntStartContract:
             "request_collection_ids": list(self.request_collection_ids),
             "secret_values_visible": False,
         }
+
 
 def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
     if not isinstance(value, Mapping):
@@ -319,6 +454,9 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         network_discovery=_boolean(
             policy_raw.get("network_discovery"), "network_discovery"
         ),
+        allow_oob_interactions=_boolean(
+            policy_raw.get("allow_oob_interactions"), "allow_oob_interactions"
+        ),
         authorization_confirmed=_boolean(
             policy_raw.get("authorization_confirmed"), "authorization_confirmed"
         ),
@@ -333,13 +471,27 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
     )
     credential_refs = _credential_refs(payload.get("credential_refs"))
     policy.validate(credentials_requested=bool(credential_refs))
+    budget_overrides = _budget_overrides(payload.get("budgets"), requested_profile)
+    contradictions = sorted(
+        key
+        for key in policy.forbidden_budget_dimensions(
+            target_kind=target_kind,
+            credentials_requested=bool(credential_refs),
+        )
+        if int(budget_overrides.get(key, 0)) > 0
+    )
+    if contradictions:
+        raise HuntStartContractError(
+            "budget fields contradict disabled Hunt authority: "
+            + ", ".join(contradictions)
+        )
 
     return HuntStartContract(
         target_id=target_id or "",
         target_kind=target_kind,
         goal=goal,
         budget_profile=requested_profile,
-        budgets=_budget_overrides(payload.get("budgets"), requested_profile),
+        budgets=budget_overrides,
         policy=policy,
         credential_refs=credential_refs,
         capabilities=_string_list(

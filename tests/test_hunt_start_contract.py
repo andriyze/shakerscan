@@ -42,6 +42,13 @@ def test_passive_hunt_contract_is_explicit_and_resolves_lowered_budget():
     assert contract.resolved_budget["max_duration_seconds"] == 900
     assert contract.resolved_budget["max_http_requests"] == 500
     assert contract.resolved_budget["max_capability_calls"] == 80
+    assert contract.resolved_budget["max_active_actions"] == 0
+    assert contract.resolved_budget["max_state_changing_requests"] == 0
+    assert contract.resolved_budget["max_tcp_ports"] == 0
+    assert contract.resolved_budget["max_udp_ports"] == 0
+    assert contract.resolved_budget["max_hosts"] == 0
+    assert contract.resolved_budget["max_oob_interactions"] == 0
+    assert contract.resolved_budget["max_device_fragility_points"] == 0
     assert contract.policy.active_testing is False
     assert contract.request_collection_ids == ("collection-1",)
 
@@ -71,12 +78,14 @@ def test_active_network_and_mutation_authority_requires_confirmation_and_receipt
         "active_testing": True,
         "network_discovery": True,
         "allow_state_changing_http": True,
+        "allow_oob_interactions": True,
         "authorization_confirmed": True,
         "approval_receipt_id": "approval-1",
     }))
     assert contract.policy.authorized is True
     assert contract.policy.network_discovery is True
     assert contract.policy.allow_state_changing_http is True
+    assert contract.policy.allow_oob_interactions is True
 
 
 def test_network_and_state_change_cannot_be_enabled_without_active_testing():
@@ -89,6 +98,12 @@ def test_network_and_state_change_cannot_be_enabled_without_active_testing():
     with pytest.raises(HuntStartContractError, match="state-changing HTTP requires active_testing"):
         normalize_hunt_start_payload(_payload(policy={
             "allow_state_changing_http": True,
+            "authorization_confirmed": True,
+            "approval_receipt_id": "approval-1",
+        }))
+    with pytest.raises(HuntStartContractError, match="OOB interactions require active_testing"):
+        normalize_hunt_start_payload(_payload(policy={
+            "allow_oob_interactions": True,
             "authorization_confirmed": True,
             "approval_receipt_id": "approval-1",
         }))
@@ -142,6 +157,66 @@ def test_budget_overrides_can_lower_but_not_raise_profile_limits():
     ))
     assert contract.resolved_budget["max_http_requests"] == 250
     assert contract.resolved_budget["max_duration_seconds"] == 900
+
+
+def test_zeroable_hunt_dimensions_accept_zero_but_mandatory_dimensions_do_not():
+    contract = normalize_hunt_start_payload(_payload(budgets={
+        "max_browser_actions": 0,
+        "max_state_changing_requests": 0,
+        "max_tcp_ports": 0,
+        "max_udp_ports": 0,
+        "max_hosts": 0,
+        "max_oob_interactions": 0,
+        "max_device_fragility_points": 0,
+        "max_active_actions": 0,
+    }))
+    assert all(value == 0 for value in contract.budgets.values())
+
+    for dimension in (
+        "max_duration_seconds",
+        "max_capability_calls",
+        "max_http_requests",
+        "max_candidates",
+        "max_verifications",
+    ):
+        with pytest.raises(HuntStartContractError, match="positive integer"):
+            normalize_hunt_start_payload(_payload(budgets={dimension: 0}))
+
+
+def test_budget_cannot_restore_authority_disabled_by_policy_or_target_kind():
+    for dimension in (
+        "max_state_changing_requests",
+        "max_tcp_ports",
+        "max_udp_ports",
+        "max_hosts",
+        "max_oob_interactions",
+        "max_device_fragility_points",
+        "max_active_actions",
+    ):
+        with pytest.raises(HuntStartContractError, match="contradict disabled Hunt authority"):
+            normalize_hunt_start_payload(_payload(budgets={dimension: 1}))
+
+    active = normalize_hunt_start_payload(_payload(
+        budgets={
+            "max_state_changing_requests": 1,
+            "max_tcp_ports": 1,
+            "max_udp_ports": 1,
+            "max_hosts": 1,
+            "max_oob_interactions": 1,
+            "max_active_actions": 1,
+        },
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+            "network_discovery": True,
+            "allow_oob_interactions": True,
+            "authorization_confirmed": True,
+            "approval_receipt_id": "approval-1",
+        },
+    ))
+    assert active.resolved_budget["max_state_changing_requests"] == 1
+    assert active.resolved_budget["max_tcp_ports"] == 1
+    assert active.resolved_budget["max_oob_interactions"] == 1
 
 
 def test_unknown_top_level_policy_budget_and_credential_fields_fail_closed():

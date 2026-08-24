@@ -1,17 +1,18 @@
 """Target-kind-aware Hunt V2 contracts."""
 
-from .contracts import (
+from .contracts import allowed_capability_names, capability_manifest
+from .start_contract import (
     HUNT_BUDGET_PROFILES,
     HuntBudget,
-    HuntPolicy,
-    capability_manifest,
-    resolve_hunt_policy,
+    HuntStartContract,
+    HuntStartPolicy,
 )
 
 __all__ = [
     "HUNT_BUDGET_PROFILES",
     "HuntBudget",
-    "HuntPolicy",
+    "HuntStartContract",
+    "HuntStartPolicy",
+    "allowed_capability_names",
     "capability_manifest",
-    "resolve_hunt_policy",
 ]
