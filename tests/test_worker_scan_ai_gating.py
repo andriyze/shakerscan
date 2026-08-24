@@ -1,6 +1,4 @@
-"""
-Tests for scan-time AI command/env gating in worker.run_scan.
-"""
+"""Worker tests for canonical Scan and AI execution policy boundaries."""
 
 import asyncio
 import copy
@@ -2944,7 +2942,7 @@ def test_parallel_shard_waits_when_domain_endpoint_budget_exhausted(monkeypatch)
 
     monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
     monkeypatch.setattr(worker, "DOMAIN_RATE_REQUEUE_DELAY_SECONDS", 0)
     monkeypatch.setattr(worker, "_reserve_target_domain_endpoint_budget", fake_reserve)
 
@@ -3320,13 +3318,12 @@ def test_finalize_ai_finding_retest_marks_reproduced_finding(monkeypatch):
     assert finding_update[1] == "exploited"
 
 
-def test_run_scan_rejects_invalid_explicit_scan_type():
-    try:
-        asyncio.run(worker.run_scan("https://example.com", {"scan_type": "standard-ish"}))
-    except ValueError as exc:
-        assert "scan_type must be one of" in str(exc)
-    else:
-        raise AssertionError("invalid scan_type should be rejected before scanner subprocess starts")
+def test_run_scan_rejects_monolithic_deterministic_execution():
+    with pytest.raises(
+        ValueError,
+        match="monolithic deterministic Scan execution has been removed",
+    ):
+        asyncio.run(worker.run_scan("https://example.com", {"scan_type": "standard"}))
 
 
 def test_agent_scanner_tool_job_rebuilds_argv_and_publishes_settlement(monkeypatch):
@@ -4063,376 +4060,28 @@ def test_device_http_request_is_pinned_bounded_and_rate_limited():
     assert "_device_agent_add_evidence" in branch
 
 
-def test_run_scan_maps_explicit_standard_to_standard_flag(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["kwargs"] = dict(kwargs)
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan("https://example.com", {"scan_type": "standard"}))
-
-    assert result.get("ok") is True
-    assert "--standard" in captured["cmd"]
-    assert "--quick" not in captured["cmd"]
-    if worker.os.name == "posix":
-        assert captured["kwargs"]["start_new_session"] is True
-
-
-def test_run_scan_only_passes_network_discovery_when_policy_enabled(monkeypatch):
-    commands = []
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        commands.append(list(cmd))
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    asyncio.run(worker.run_scan("https://example.com", {"scan_type": "deep"}))
-    asyncio.run(worker.run_scan(
-        "https://example.com", {"scan_type": "full", "network_discovery": True},
-    ))
-
-    assert "--network-discovery" not in commands[0]
-    assert "--network-discovery" in commands[1]
-
-
-def test_run_scan_passes_auth_config_file_without_raw_auth_secrets(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = dict(kwargs.get("env") or {})
-        auth_path = captured["cmd"][captured["cmd"].index("--auth-config-file") + 1]
-        captured["auth_path"] = auth_path
-        captured["auth_mode"] = os.stat(auth_path).st_mode & 0o777
-        with open(auth_path, encoding="utf-8") as f:
-            captured["auth_config"] = json.load(f)
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    options = {
-        "scan_type": "smart",
-        "auth_cookies": "session=secret-cookie",
-        "auth_header": "Bearer secret-token",
-        "auth_headers_json": '{"X-API-Key":"secret-key"}',
-        "login_url": "https://example.com/login",
-        "login_username": "alice",
-        "login_password": "secret-password",
-        "login_extra_fields": '{"tenant":"acme"}',
-        "auto_auth": True,
-        "user2_header": "Bearer secret-user2",
-        "auth_scenario_json": '{"credentials":{"password":"secret-scenario"}}',
-    }
-
-    result = asyncio.run(worker.run_scan("https://example.com", options))
-    cmd = captured["cmd"]
-    cmd_text = " ".join(cmd)
-
-    assert result.get("ok") is True
-    assert "--auth-config-file" in cmd
-    assert "--auth-header" not in cmd
-    assert "--auth-cookies" not in cmd
-    assert "--login-password" not in cmd
-    assert "--auth-scenario-json" not in cmd
-    for secret in (
-        "secret-cookie",
-        "secret-token",
-        "secret-key",
-        "secret-password",
-        "secret-user2",
-        "secret-scenario",
-    ):
-        assert secret not in cmd_text
-    assert captured["auth_mode"] == 0o600
-    assert captured["auth_config"]["auth_header"] == "Bearer secret-token"
-    assert captured["auth_config"]["login_password"] == "secret-password"
-    assert captured["auth_config"]["auto_auth"] is True
-    assert not os.path.exists(captured["auth_path"])
-
-
-def test_run_scan_maps_asm_check_family_to_scanner_flag(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {"scan_type": "smart", "asm_check_family": "sqli", "sqli": True, "xss": False},
-    ))
-
-    assert result.get("ok") is True
-    assert "--check-family" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--check-family") + 1] == "sqli"
-    assert "--sqli" in captured["cmd"]
-    assert "--xss" not in captured["cmd"]
-
-
-def test_run_scan_terminates_subprocess_when_scan_cancel_flag_is_set(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        proc = _CancellableFakeProcess()
-        captured["proc"] = proc
-        return proc
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-    monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=True))
-    monkeypatch.setattr(worker, "SCAN_CANCEL_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(worker, "SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS", 0.01)
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {"scan_type": "standard"},
-        scan_id="00000000-0000-0000-0000-000000000123",
-        job_id="job-cancel-test",
-    ))
-
-    proc = captured["proc"]
-    assert proc.terminated is True
-    assert proc.killed is False
-    assert result["error"] == "Cancelled by user"
-
-
-def test_run_scan_external_cancellation_reaps_subprocess(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        proc = _CancellableFakeProcess()
-        captured["proc"] = proc
-        return proc
-
-    async def scenario():
-        task = asyncio.create_task(worker.run_scan(
-            "https://example.com",
-            {"scan_type": "standard"},
-            scan_id="00000000-0000-0000-0000-000000000125",
-            job_id="job-lease-fence-cancel",
-        ))
-        while "proc" not in captured:
-            await asyncio.sleep(0)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            return
-        raise AssertionError("run_scan should propagate external cancellation")
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-    monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=False))
-
-    asyncio.run(scenario())
-
-    assert captured["proc"].terminated is True
-    assert captured["proc"].returncode == -15
-
-
-def test_run_scan_sets_cooperative_cancel_file_env_and_signal(monkeypatch, tmp_path):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        proc = _CancellableFakeProcess()
-        captured["proc"] = proc
-        captured["env"] = kwargs.get("env") or {}
-        return proc
-
-    monkeypatch.setattr(worker, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-    monkeypatch.setattr(worker, "get_redis", lambda: _FakeCancelRedis(cancelled=True))
-    monkeypatch.setattr(worker, "SCAN_CANCEL_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(worker, "SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS", 0.01)
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {"scan_type": "standard"},
-        scan_id="00000000-0000-0000-0000-000000000124",
-        job_id="job-cancel-file-test",
-    ))
-
-    cancel_file = captured["env"].get("SHAKERSCAN_CANCEL_FILE")
-    assert result["error"] == "Cancelled by user"
-    assert cancel_file
-    assert os.path.exists(cancel_file)
-    assert open(cancel_file, encoding="utf-8").read().strip() == "1"
-
-
-def test_run_scan_maps_skip_global_checks_flag(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {
-            "scan_type": "smart",
-            "skip_global_checks": True,
-            "focused_endpoints_only": True,
-            "zero_rediscovery": True,
-            "parallel_discovery": True,
-        },
-    ))
-
-    assert result.get("ok") is True
-    assert "--skip-global-checks" in captured["cmd"]
-    assert "--focused-endpoints-only" in captured["cmd"]
-    assert "--zero-rediscovery" in captured["cmd"]
-    assert "--discovery-manifest-only" in captured["cmd"]
-
-
-def test_run_scan_maps_explicit_inventory_only_policy(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {"scan_type": "smart", "discovery_manifest_only": True},
-    ))
-
-    assert result.get("ok") is True
-    assert "--smart" in captured["cmd"]
-    assert "--discovery-manifest-only" in captured["cmd"]
-
-
-def test_run_scan_uses_native_fixed_stage_contract_for_canonical_plan(monkeypatch):
-    from runtime.models import ScanBudget, ScanPolicy, TargetBinding
-    from scan.execution import ScanExecutionPlan
-    from scan.executor import validate_native_scan_execution_payload
-
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = kwargs.get("env") or {}
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    plan = ScanExecutionPlan(
-        policy=ScanPolicy(
-            active_testing=True,
-            allow_state_changing_http=False,
-            network_discovery=False,
-            include_families=("sqli",),
-            approval_receipt_id="approval-1",
-        ),
-        budget_profile="balanced",
-        budget=ScanBudget(1200, 5000, 2000, 200, 5000, 900, 4),
-    )
-    options = plan.option_metadata()
-    options.update({
-        "active": True,
-        "network_discovery": False,
-        "subfinder": False,
-        "asm_check_family": "sqli",
-        "auth_header": "Bearer worker-only-secret",
-        "login_password": "worker-only-password",
-        "_canonical_target_binding": TargetBinding(
-            target_id="target-1",
-            target_kind="web",
-            canonical_host="example.com",
-            allowed_origins=("https://example.com",),
-            allowed_addresses=("93.184.216.34",),
-            allowed_root_domains=("example.com",),
-        ).canonical_dict(),
-    })
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan("https://example.com", options))
-
-    assert result.get("ok") is True
-    assert "--canonical-scan" in captured["cmd"]
-    assert not {"--smart", "--full", "--deep", "--standard", "--quick"} & set(captured["cmd"])
-    assert "--active" not in captured["cmd"]
-    assert "--auth-config-file" not in captured["cmd"]
-    assert "worker-only-secret" not in " ".join(captured["cmd"])
-    assert "worker-only-password" not in " ".join(captured["cmd"])
-    assert "worker-only-secret" not in json.dumps(captured["env"])
-    assert "worker-only-password" not in json.dumps(captured["env"])
-    assert captured["env"]["SHAKERSCAN_CANONICAL_REPORT_ONLY"] == "true"
-    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] == "0"
-    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] == "0"
-    assert captured["env"]["AI_SCAN_CLASSIFICATION_ENABLED"] == "false"
-    assert "--budget-profile" not in captured["cmd"]
-    assert not any(item.startswith("--budget-") for item in captured["cmd"])
-    execution = validate_native_scan_execution_payload(json.loads(
-        captured["env"]["SHAKERSCAN_CANONICAL_SCAN_EXECUTION"]
-    ))
-    assert execution["execution_plan_digest"] == plan.digest
-    assert execution["focused_family"] == "sqli"
-    assert result["scan_execution"]["executor"]["name"] == "native_fixed_stage"
-
-
-def test_run_scan_maps_active_worklist_budget_flag(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {"scan_type": "smart", "custom_budget": {"active_worklist_max": 50000}},
-    ))
-
-    assert result.get("ok") is True
-    assert "--budget-active-worklist-max" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--budget-active-worklist-max") + 1] == "50000"
-
-
-def test_run_scan_passes_enforcing_request_budget_contract(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = kwargs.get("env") or {}
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(worker, "_load_runtime_ai_settings", lambda: {})
-
-    result = asyncio.run(worker.run_scan(
-        "https://example.com",
-        {
-            "scan_type": "smart",
-            "request_budget_mode": "enforce",
-            "request_budget_reserved": 50,
-            "custom_budget": {"request_max": 77},
-        },
-    ))
-
-    assert result.get("ok") is True
-    assert captured["cmd"][captured["cmd"].index("--budget-request-max") + 1] == "77"
-    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_MODE"] == "enforce"
-    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_LIMIT"] == "77"
-    assert captured["env"]["SHAKERSCAN_REQUEST_BUDGET_RESERVED"] == "50"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_standalone_scan_rate_reservation_uses_resolved_active_budget():
@@ -4729,7 +4378,7 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
 
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
@@ -4812,7 +4461,7 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
 
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
@@ -5216,7 +4865,7 @@ def test_dynamic_coverage_batch_records_parent_attempts_and_reconciles(monkeypat
     monkeypatch.setattr(worker, "db_pool", _FakeAsmPool())
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
     monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
     monkeypatch.setattr(worker, "save_findings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("parent merge owns findings")))
     monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
     monkeypatch.setattr(worker, "_record_endpoint_telemetry_attempts", fake_record_endpoint_telemetry_attempts)
@@ -5329,7 +4978,7 @@ def test_dynamic_bola_batch_preserves_phase4_budget_and_comparator(monkeypatch):
     monkeypatch.setattr(worker, "db_pool", _FakeAsmPool())
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
     monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
     monkeypatch.setattr(worker, "save_findings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("parent merge owns findings")))
     monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
     monkeypatch.setattr(worker, "_record_endpoint_telemetry_attempts", fake_record_endpoint_telemetry_attempts)
@@ -5452,7 +5101,7 @@ def test_exploit_batch_partial_domain_rate_grant_releases_ungranted_endpoints(mo
     monkeypatch.setattr(worker, "save_result_file", lambda result, job_id: f"/tmp/{job_id}.json")
     monkeypatch.setattr(worker.asm_inventory, "claim_test_batch", fake_claim_test_batch)
     monkeypatch.setattr(worker, "_reserve_target_domain_endpoint_budget", fake_reserve)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
     monkeypatch.setattr(worker, "_record_endpoint_telemetry_attempts", fake_record_endpoint_telemetry_attempts)
     monkeypatch.setattr(worker.asm_inventory, "mark_tested", fake_mark_tested)
     monkeypatch.setattr(worker.asm_inventory, "upsert_endpoints", fake_upsert_endpoints)
@@ -5677,126 +5326,10 @@ def test_dynamic_coverage_batch_missing_campaign_id_fails_without_claim(monkeypa
     assert redis.values[worker.parallel_scan.shards_remaining_key(parent_id)] == 0
 
 
-def test_run_scan_disables_scan_ai_when_classification_disabled(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = dict(kwargs.get("env") or {})
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(
-        worker,
-        "_load_runtime_ai_settings",
-        lambda: {
-            "ai_url": "https://ai.example/v1/chat/completions",
-            "ai_api_key": "secret",
-            "ai_model": "model-a",
-            "ai_model_fallback": "model-b",
-            "ai_mask_host": "masked.example",
-            "ai_scan_classification_enabled": False,
-            "ai_classify_min_severity": "medium",
-            "ai_verify_min_severity": "medium",
-        },
-    )
-
-    result = asyncio.run(worker.run_scan("https://example.com", {"scan_type": "smart"}))
-    cmd = captured["cmd"]
-    env = captured["env"]
-
-    assert result.get("ok") is True
-    assert "--ai" not in cmd
-    assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "false"
-    assert env["AI_CLASSIFY_MIN_SEVERITY"] == "medium"
-    assert env["AI_VERIFY_MIN_SEVERITY"] == "medium"
 
 
-def test_run_scan_enables_scan_ai_when_classification_enabled(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = dict(kwargs.get("env") or {})
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(
-        worker,
-        "_load_runtime_ai_settings",
-        lambda: {
-            "ai_url": "https://ai.example/v1/chat/completions",
-            "ai_api_key": "secret",
-            "ai_model": "model-a",
-            "ai_model_fallback": "model-b",
-            "ai_mask_host": "masked.example",
-            "ai_scan_classification_enabled": False,
-            "ai_classify_min_severity": "high",
-            "ai_verify_min_severity": "high",
-        },
-    )
-
-    options = {
-        "scan_type": "smart",
-        "ai_scan_classification_enabled": True,
-        "ai_classify_min_severity": "low",
-        "ai_verify_min_severity": "critical",
-    }
-
-    result = asyncio.run(worker.run_scan("https://example.com", options))
-    cmd = captured["cmd"]
-    env = captured["env"]
-
-    assert result.get("ok") is True
-    assert "--ai" in cmd
-    assert "--ai-url" in cmd
-    assert "--ai-api-key" not in cmd
-    assert "secret" not in " ".join(cmd)
-    assert "--model" in cmd
-    assert env["AI_API_KEY"] == "secret"
-    assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "true"
-    assert env["AI_CLASSIFY_MIN_SEVERITY"] == "low"
-    assert env["AI_VERIFY_MIN_SEVERITY"] == "critical"
 
 
-def test_run_scan_null_classification_option_uses_runtime_setting(monkeypatch):
-    captured = {}
-
-    async def _fake_create_subprocess_exec(*cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["env"] = dict(kwargs.get("env") or {})
-        return _FakeProcess(b'{"ok": true, "findings": []}')
-
-    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(
-        worker,
-        "_load_runtime_ai_settings",
-        lambda: {
-            "ai_url": "https://ai.example/v1/chat/completions",
-            "ai_api_key": "secret",
-            "ai_model": "model-a",
-            "ai_model_fallback": "model-b",
-            "ai_mask_host": "masked.example",
-            "ai_scan_classification_enabled": True,
-            "ai_classify_min_severity": "medium",
-            "ai_verify_min_severity": "medium",
-        },
-    )
-
-    # Simulates persisted scan options that include the key with null value.
-    options = {
-        "scan_type": "smart",
-        "ai_scan_classification_enabled": None,
-    }
-
-    result = asyncio.run(worker.run_scan("https://example.com", options))
-    cmd = captured["cmd"]
-    env = captured["env"]
-
-    assert result.get("ok") is True
-    assert "--ai" in cmd
-    assert env["AI_SCAN_CLASSIFICATION_ENABLED"] == "true"
-    assert env["AI_CLASSIFY_MIN_SEVERITY"] == "medium"
 
 
 def test_focused_parent_result_recomputed_from_merged_bola_findings():
