@@ -3,6 +3,7 @@ Tests for scan-time AI command/env gating in worker.run_scan.
 """
 
 import asyncio
+import copy
 from contextlib import asynccontextmanager
 import json
 import os
@@ -200,10 +201,11 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
     )
 
     assert hydrated["auth_header"] == "Bearer worker-only-secret"
-    assert "credential_profile_refs" not in hydrated
-    assert "credential_target_kind" not in hydrated
-    assert "credential_action_name" not in hydrated
+    assert hydrated["credential_profile_refs"] == queued["credential_profile_refs"]
+    assert hydrated["credential_target_kind"] == "web"
+    assert hydrated["credential_action_name"] == "scan.submit"
     assert hydrated["resolved_credential_profiles"][0]["secret_values_visible"] is False
+    assert "worker-only-secret" not in json.dumps(hydrated["credential_profile_refs"])
     assert "worker-only-secret" not in json.dumps(queued)
 
 
@@ -533,6 +535,41 @@ def test_runtime_scope_guard_blocks_private_runtime_dns_resolution():
 
     assert checked["findings"] == []
     assert "runtime_dns_private_range" in checked["error"]
+
+
+def test_runtime_scope_guard_allows_exact_frozen_private_address_and_blocks_drift():
+    result = {
+        "runtime_destinations": [{
+            "label": "baseline.http:0:0",
+            "url": "http://juice-shop:3000",
+            "final_url": "http://juice-shop:3000",
+            "source": "http.request",
+            "resolved_host": "juice-shop",
+            "resolved_ips": ["172.19.0.15"],
+        }],
+        "findings": [],
+        "result": {"score": 100, "grade": "A"},
+    }
+    guard = {
+        **_runtime_scope_guard_with_dns(),
+        "allowed_hosts": ["juice-shop"],
+        "allowed_root_domains": ["juice-shop"],
+        "normalized_scope": {"host": "juice-shop"},
+        "allowed_addresses": ["172.19.0.15"],
+    }
+
+    allowed = worker._apply_runtime_scope_guard_to_result(
+        copy.deepcopy(result), {"runtime_scope_guard": guard},
+    )
+    assert allowed.get("error") is None
+    assert allowed["scan_metadata"]["runtime_scope_check"]["status"] == "allowed"
+
+    drifted = copy.deepcopy(result)
+    drifted["runtime_destinations"][0]["resolved_ips"] = ["172.19.0.16"]
+    blocked = worker._apply_runtime_scope_guard_to_result(
+        drifted, {"runtime_scope_guard": guard},
+    )
+    assert "runtime_dns_address_drift" in blocked["error"]
 
 
 class _RuntimeScopeCommandResultConn:

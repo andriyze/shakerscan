@@ -316,6 +316,7 @@ def _evaluate_runtime_dns_observations(
     observations: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
     *,
     environment: str,
+    allowed_addresses: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     expected_hosts: list[str] = []
     for url in urls:
@@ -339,6 +340,12 @@ def _evaluate_runtime_dns_observations(
     results: list[dict[str, Any]] = []
     blocked: list[str] = []
     warnings: list[str] = []
+    frozen_addresses: set[str] = set()
+    for raw_address in allowed_addresses or ():
+        try:
+            frozen_addresses.add(str(ipaddress.ip_address(str(raw_address).strip())))
+        except ValueError:
+            continue
     for host in expected_hosts:
         try:
             ipaddress.ip_address(host)
@@ -353,12 +360,20 @@ def _evaluate_runtime_dns_observations(
         result: dict[str, Any] = {"host": host, "ips": ips, "verdict": "allowed"}
         for ip in ips:
             try:
-                ipaddress.ip_address(ip)
+                normalized_ip = str(ipaddress.ip_address(ip))
             except ValueError:
                 blocked.append("runtime_dns_invalid")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_invalid"})
                 continue
-            if _ip_scope_block_reason(ip, environment):
+            # A canonical Scan freezes exact addresses at admission. Matching
+            # those addresses is stronger authority than generic private-range
+            # policy and permits explicitly admitted local/lab targets without
+            # making arbitrary RFC1918 destinations reachable. Any DNS drift
+            # from the frozen set still fails closed.
+            if frozen_addresses and normalized_ip not in frozen_addresses:
+                blocked.append("runtime_dns_address_drift")
+                result.update({"verdict": "blocked", "reason": "runtime_dns_address_drift"})
+            elif not frozen_addresses and _ip_scope_block_reason(ip, environment):
                 blocked.append("runtime_dns_private_range")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_private_range"})
         results.append(result)
@@ -436,6 +451,11 @@ def evaluate_runtime_destination_scope(
             (raw_destination, *(str(item or "") for item in (redirect_urls or ()))),
             resolution_observations,
             environment=str(runtime_scope_guard.get("environment") or "production"),
+            allowed_addresses=(
+                runtime_scope_guard.get("allowed_addresses")
+                if isinstance(runtime_scope_guard.get("allowed_addresses"), list)
+                else None
+            ),
         )
         if dns_blocked:
             payload.setdefault("checks", []).append({
