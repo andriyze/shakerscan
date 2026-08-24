@@ -36,6 +36,11 @@ _SCHEMA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/-]{0,127}$")
 _MAX_CANONICAL_BYTES = 512 * 1024
 _MAX_ACTIONS = 512
 _MAX_DEPENDENCIES = 511
+_FORBIDDEN_ACTION_KEYS = frozenset({
+    "password", "passwd", "secret", "token", "authorization", "cookie", "cookies",
+    "private_key", "client_secret", "api_key", "auth_header", "auth_cookies",
+    "headers", "body", "raw_request", "command", "argv", "shell",
+})
 
 
 class ScanActionPlanError(ValueError):
@@ -92,6 +97,10 @@ def _canonical_value(value: Any, *, depth: int = 0) -> Any:
         for raw_key, item in value.items():
             if not isinstance(raw_key, str) or not raw_key or len(raw_key) > 128:
                 raise ScanActionPlanError("action input keys must be bounded strings")
+            if raw_key.strip().lower() in _FORBIDDEN_ACTION_KEYS:
+                raise ScanActionPlanError(
+                    f"secret-bearing action input key is forbidden: {raw_key}"
+                )
             if raw_key in normalized:
                 raise ScanActionPlanError("action input contains duplicate keys")
             normalized[raw_key] = _canonical_value(item, depth=depth + 1)

@@ -105,3 +105,17 @@ def test_input_binding_digest_is_order_independent_and_rejects_ambiguous_values(
     assert left == right
     with pytest.raises(ScanActionPlanError, match="unsupported value type"):
         digest_input_bindings({"unstable": 1.25})
+
+
+@pytest.mark.parametrize(
+    "secret_input",
+    (
+        {"authorization": "Bearer canary"},
+        {"nested": {"cookie": "session=canary"}},
+        {"request": {"body": "canary"}},
+        {"argv": ["curl", "https://outside.test"]},
+    ),
+)
+def test_action_contract_rejects_secret_and_untrusted_execution_material(secret_input):
+    with pytest.raises(ScanActionPlanError, match="action input key is forbidden"):
+        _action("verify.canary", 0, args=secret_input)
