@@ -1488,9 +1488,10 @@ function ModelIntakeSettingsContent() {
         </div>
       </Modal>
 
-      <div className="inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1" aria-label="Model Intake workflow mode">
+      <div role="group" className="inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1" aria-label="Model Intake workflow mode">
         <button
           type="button"
+          aria-pressed={workflowMode === 'automatic'}
           onClick={() => setWorkflowMode('automatic')}
           className={`rounded-md px-4 py-2 text-sm font-medium ${workflowMode === 'automatic' ? 'bg-cyan-700 text-white' : 'text-gray-400 hover:text-white'}`}
         >
@@ -1498,6 +1499,7 @@ function ModelIntakeSettingsContent() {
         </button>
         <button
           type="button"
+          aria-pressed={workflowMode === 'advanced'}
           onClick={() => setWorkflowMode('advanced')}
           className={`rounded-md px-4 py-2 text-sm font-medium ${workflowMode === 'advanced' ? 'bg-cyan-700 text-white' : 'text-gray-400 hover:text-white'}`}
         >
