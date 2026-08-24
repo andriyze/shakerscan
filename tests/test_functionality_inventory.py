@@ -52,7 +52,15 @@ def test_functionality_reference_covers_every_product_surface():
 
 
 def test_inventory_extractors_cover_known_authoritative_surfaces():
-    assert len(inventory.api_operations()) >= 190
+    operations = inventory.api_operations()
+    assert len(operations) >= 190
+    paths = {row.path for row in operations}
+    assert {
+        "/scan/contracts",
+        "/scans/{scan_id}/actions",
+        "/credential-profiles",
+        "/credential-profiles/{profile_id}/rotate",
+    } <= paths
     assert {"scan", "help", "rebuild"} <= set(inventory.scanner_wrapper_commands())
     assert "scan-smart" not in inventory.scanner_wrapper_commands()
     assert {"scan-full", "scan-smart"} == set(

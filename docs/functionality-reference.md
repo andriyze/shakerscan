@@ -1417,8 +1417,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 381 | `api/api.py` FastAPI decorators |
-| Unique REST paths | 323 | `api/api.py` |
+| Public REST operations | 396 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 332 | `api/**/*.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1535,6 +1535,12 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/arsenal/tools` | `arsenal_tools` |
 | `GET` | `/artifacts/storage/health` | `get_artifact_storage_health` |
 | `GET` | `/asm/check-families` | `asm_check_families` |
+| `GET` | `/credential-profiles` | `list_credential_profiles` |
+| `POST` | `/credential-profiles` | `create_credential_profile` |
+| `DELETE` | `/credential-profiles/{profile_id}` | `delete_credential_profile` |
+| `GET` | `/credential-profiles/{profile_id}` | `get_credential_profile` |
+| `PATCH` | `/credential-profiles/{profile_id}` | `patch_credential_profile` |
+| `POST` | `/credential-profiles/{profile_id}/rotate` | `rotate_credential_profile` |
 | `GET` | `/dashboard` | `dashboard` |
 | `GET` | `/device-agent/runs` | `list_device_agent_runs` |
 | `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
@@ -1629,6 +1635,9 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/gungnir/status` | `gungnir_status` |
 | `POST` | `/gungnir/stop` | `gungnir_stop` |
 | `GET` | `/health` | `health` |
+| `GET` | `/health` | `health` |
+| `GET` | `/health` | `health` |
+| `GET` | `/health` | `health` |
 | `GET` | `/hunts` | `list_hunts` |
 | `POST` | `/hunts` | `start_hunt` |
 | `GET` | `/hunts/contract` | `get_hunt_contract` |
@@ -1641,6 +1650,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/hunts/{hunt_id}/query` | `query_hunt` |
 | `POST` | `/hunts/{hunt_id}/resume` | `resume_hunt` |
 | `POST` | `/hunts/{hunt_id}/shell-plans/{plan_id}/confirm` | `confirm_hunt_shell_plan` |
+| `POST` | `/internal/model-intake/admissions/issue` | `issue` |
+| `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
+| `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |
+| `GET` | `/internal/model-intake/runner/storage` | `get_storage` |
+| `POST` | `/internal/model-intake/runner/storage/cleanup` | `cleanup_runner_storage` |
 | `GET` | `/investigation/candidates` | `list_investigation_candidates` |
 | `GET` | `/investigation/candidates/{candidate_id}` | `get_investigation_candidate` |
 | `GET` | `/metrics/v2` | `get_v2_operational_metrics` |
@@ -1820,6 +1834,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/targets/{target_id}/principals/{principal_id}` | `update_target_principal` |
 | `POST` | `/targets/{target_id}/scan` | `scan_target` |
 | `GET` | `/timeline` | `mission_timeline` |
+| `POST` | `/validate` | `validate` |
 | `GET` | `/workers` | `get_workers` |
 | `POST` | `/workers` | `scale_workers` |
 

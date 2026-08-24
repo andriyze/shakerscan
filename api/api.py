@@ -435,7 +435,6 @@ try:
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
         normalize_scan_authentication,
-        public_scan_contract,
         resolve_scan_contract,
     )
     from scan.collection_replay import (
@@ -525,13 +524,6 @@ try:
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
     )
-    from scan.explanation import (
-        action_list_response as scan_action_list_response,
-        build_scan_execution_explanation,
-        capability_list_response as scan_capability_list_response,
-        coverage_response as scan_coverage_response,
-    )
-    from scan.parity import build_scan_semantic_parity_artifact
     from scan.surface_manifest import build_scan_surface_manifest
     from scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -547,13 +539,24 @@ try:
         reserve_broker_scan_execution,
         settle_broker_scan_execution,
     )
+    from scan.read_router import (
+        PUBLIC_SCAN_ACTIONS_SQL as _PUBLIC_SCAN_ACTIONS_SQL,
+        configure_scan_read_router,
+        get_scan_actions,
+        get_scan_capabilities,
+        get_scan_coverage,
+        get_scan_parity_artifact,
+        get_scan_public_contract,
+        load_public_scan_execution_explanation as _load_public_scan_execution_explanation,
+        public_scan_execution_explanation as _public_scan_execution_explanation,
+        router as scan_read_router,
+    )
 except ModuleNotFoundError:
     from api.scan.contracts import (
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
         normalize_scan_authentication,
-        public_scan_contract,
         resolve_scan_contract,
     )
     from api.scan.collection_replay import (
@@ -643,13 +646,6 @@ except ModuleNotFoundError:
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
     )
-    from api.scan.explanation import (
-        action_list_response as scan_action_list_response,
-        build_scan_execution_explanation,
-        capability_list_response as scan_capability_list_response,
-        coverage_response as scan_coverage_response,
-    )
-    from api.scan.parity import build_scan_semantic_parity_artifact
     from api.scan.surface_manifest import build_scan_surface_manifest
     from api.scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -664,6 +660,18 @@ except ModuleNotFoundError:
         heartbeat_broker_scan_execution,
         reserve_broker_scan_execution,
         settle_broker_scan_execution,
+    )
+    from api.scan.read_router import (
+        PUBLIC_SCAN_ACTIONS_SQL as _PUBLIC_SCAN_ACTIONS_SQL,
+        configure_scan_read_router,
+        get_scan_actions,
+        get_scan_capabilities,
+        get_scan_coverage,
+        get_scan_parity_artifact,
+        get_scan_public_contract,
+        load_public_scan_execution_explanation as _load_public_scan_execution_explanation,
+        public_scan_execution_explanation as _public_scan_execution_explanation,
+        router as scan_read_router,
     )
 try:
     from hunt.capability_reservations import (
@@ -4564,6 +4572,8 @@ except ModuleNotFoundError:
     from api.credential_api import public_credential_validation_errors
 
 app.include_router(credential_router)
+configure_scan_read_router(lambda: db_pool)
+app.include_router(scan_read_router)
 
 # CORS for UI.
 #
@@ -31268,12 +31278,6 @@ async def _submit_scan(
     return response
 
 
-@app.get("/scan/contracts")
-async def get_scan_public_contract():
-    """Expose the canonical Scan vocabulary consumed by UI and CLI clients."""
-    return public_scan_contract()
-
-
 @app.post("/scans/batch")
 async def submit_batch(request: BatchRequest):
     """Submit a bounded batch and report every accepted and rejected target."""
@@ -31479,123 +31483,6 @@ async def list_scans(
         'limit': limit,
         'offset': offset
     }
-
-
-_PUBLIC_SCAN_ACTIONS_SQL = """
-    SELECT a.action_id, a.stage, a.ordinal, a.capability_name, a.adapter_name,
-           a.adapter_version, a.output_schema, a.action_digest, a.requested_budget,
-           a.placement_json, a.dependencies_json, a.required, a.supporting, a.status,
-           a.reason_code, a.reservation_id, a.receipt_id, a.receipt_hash,
-           a.observation_manifest_id, a.result_digest, a.result_json, a.receipt_json,
-           a.backend_name, a.worker_id, a.attempt, a.started_at, a.finished_at,
-           r.status AS reservation_status,
-           r.hold_applied AS reservation_hold_applied,
-           r.requested_json AS reservation_requested,
-           r.actual_json AS reservation_actual,
-           r.execution_uncertain
-      FROM scan_capability_actions a
-      LEFT JOIN budget_reservations r ON r.id=a.reservation_id
-     WHERE a.scan_id=$1
-     ORDER BY a.ordinal
-"""
-
-
-def _public_scan_execution_explanation(
-    scan: Mapping[str, Any],
-    action_rows: Sequence[Mapping[str, Any]],
-    plan_revision: ScanPlanRevision | None = None,
-) -> dict[str, Any]:
-    report = _decode_json_value(scan.get("result"))
-    return build_scan_execution_explanation(
-        scan_id=str(scan.get("id") or ""),
-        scan_status=str(scan.get("status") or "unknown"),
-        plan_payload=_json_object(scan.get("scan_action_plan_json")),
-        action_rows=tuple(dict(row) for row in action_rows),
-        report=report if isinstance(report, Mapping) else {},
-        plan_revision=(
-            plan_revision.canonical_dict() if plan_revision is not None else None
-        ),
-        plan_budget_limits=_json_object(scan.get("budget_json")),
-    )
-
-
-async def _load_public_scan_execution_explanation(
-    conn: Any,
-    scan_id: str,
-) -> dict[str, Any]:
-    try:
-        parsed_scan_id = uuid.UUID(str(scan_id))
-    except (TypeError, ValueError, AttributeError) as exc:
-        raise HTTPException(status_code=404, detail="Scan not found") from exc
-    scan = await conn.fetchrow(
-        """SELECT id, status, result, budget_json, scan_action_plan_json,
-                  scan_action_plan_digest, scan_action_plan_schema
-             FROM scans WHERE id=$1""",
-        parsed_scan_id,
-    )
-    if scan is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    action_rows = await conn.fetch(_PUBLIC_SCAN_ACTIONS_SQL, parsed_scan_id)
-    try:
-        plan_revision = await PostgresScanActionStore().load_plan_revision(
-            conn, scan_id=str(parsed_scan_id),
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Scan plan revision is invalid: {exc}",
-        ) from exc
-    return _public_scan_execution_explanation(
-        scan, action_rows, plan_revision,
-    )
-
-
-@app.get("/scans/{scan_id}/actions")
-async def get_scan_actions(scan_id: str):
-    """Explain the immutable stage/action timeline without private inputs."""
-    async with db_pool.acquire() as conn:
-        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
-    return scan_action_list_response(explanation)
-
-
-@app.get("/scans/{scan_id}/capabilities")
-async def get_scan_capabilities(scan_id: str):
-    """Summarize planned and executed capability coverage for one Scan."""
-    async with db_pool.acquire() as conn:
-        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
-    return scan_capability_list_response(explanation)
-
-
-@app.get("/scans/{scan_id}/coverage")
-async def get_scan_coverage(scan_id: str):
-    """Explain coverage gaps, grade reliability, and transport parity."""
-    async with db_pool.acquire() as conn:
-        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
-    return scan_coverage_response(explanation)
-
-
-@app.get("/scans/{scan_id}/parity-artifact")
-async def get_scan_parity_artifact(scan_id: str):
-    """Return a content-free semantic artifact for placement certification."""
-    try:
-        parsed_scan_id = uuid.UUID(str(scan_id))
-    except (TypeError, ValueError, AttributeError) as exc:
-        raise HTTPException(status_code=404, detail="Scan not found") from exc
-    async with db_pool.acquire() as conn:
-        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
-        findings = await conn.fetch(
-            """
-            SELECT fingerprint, tool, url, title
-              FROM findings
-             WHERE scan_id=$1
-             ORDER BY fingerprint, id
-            """,
-            parsed_scan_id,
-        )
-    return build_scan_semantic_parity_artifact(
-        explanation,
-        tuple(dict(row) for row in findings),
-    )
 
 
 @app.get("/scans/{scan_id}")

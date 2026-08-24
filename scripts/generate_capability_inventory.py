@@ -74,22 +74,51 @@ class ApiOperation:
 
 
 def api_operations() -> list[ApiOperation]:
-    path = ROOT / "api" / "api.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
     rows: list[ApiOperation] = []
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+    for path in sorted((ROOT / "api").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        router_prefix = ""
+        for candidate in tree.body:
+            if not isinstance(candidate, (ast.Assign, ast.AnnAssign)):
                 continue
-            owner = decorator.func.value
-            method = decorator.func.attr.upper()
-            if not isinstance(owner, ast.Name) or owner.id != "app" or method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            targets = (
+                candidate.targets
+                if isinstance(candidate, ast.Assign)
+                else [candidate.target]
+            )
+            if not any(
+                isinstance(target, ast.Name) and target.id == "router"
+                for target in targets
+            ):
                 continue
-            route = literal(decorator.args[0]) if decorator.args else None
-            if isinstance(route, str):
-                rows.append(ApiOperation(method, route, node.name))
+            value = candidate.value
+            if (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "APIRouter"
+            ):
+                router_prefix = str(keyword(value, "prefix", "") or "").rstrip("/")
+            break
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+                    continue
+                owner = decorator.func.value
+                method = decorator.func.attr.upper()
+                if (
+                    not isinstance(owner, ast.Name)
+                    or owner.id not in {"app", "router"}
+                    or method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+                ):
+                    continue
+                route = literal(decorator.args[0]) if decorator.args else None
+                if isinstance(route, str):
+                    resolved_route = (
+                        f"{router_prefix}{route}" if owner.id == "router" else route
+                    )
+                    rows.append(ApiOperation(method, resolved_route, node.name))
     return sorted(rows, key=lambda row: (row.path, row.method, row.handler))
 
 
@@ -357,8 +386,8 @@ def render() -> str:
         "### Inventory Summary",
         "",
         *table(["Surface", "Count", "Source"], [
-            ["Public REST operations", len(api), "`api/api.py` FastAPI decorators"],
-            ["Unique REST paths", len({row.path for row in api}), "`api/api.py`"],
+            ["Public REST operations", len(api), "`api/**/*.py` FastAPI decorators"],
+            ["Unique REST paths", len({row.path for row in api}), "`api/**/*.py`"],
             ["Check families", len(families), "`api/check_registry.py`"],
             ["Command Arsenal commands", len(commands), "`api/command_arsenal.py`"],
             ["Tool adapters", len(adapters), "`api/command_arsenal.py`"],
