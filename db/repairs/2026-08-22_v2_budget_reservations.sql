@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT budget_reservations_action_unique UNIQUE (owner_kind, owner_id, action_id),
+    CONSTRAINT budget_reservations_identity_unique UNIQUE (
+        id, owner_kind, owner_id, action_id, action_digest
+    ),
     CONSTRAINT budget_reservations_runtime_state_check CHECK (
         (status = 'requested' AND hold_applied = false AND worker_id IS NULL
             AND lease_expires_at IS NULL AND started_at IS NULL AND finished_at IS NULL)
@@ -72,6 +75,15 @@ BEGIN
         ADD CONSTRAINT budget_reservations_action_digest_check
         CHECK (action_digest ~ '^[0-9a-f]{64}$');
     END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'budget_reservations_identity_unique'
+          AND conrelid = 'budget_reservations'::regclass
+    ) THEN
+        ALTER TABLE budget_reservations
+        ADD CONSTRAINT budget_reservations_identity_unique
+        UNIQUE (id, owner_kind, owner_id, action_id, action_digest);
+    END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_owner
     ON budget_reservations(owner_kind, owner_id, updated_at DESC);
@@ -83,7 +95,8 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO app_schema_migrations(name)
-VALUES ('v2_budget_reservations_v1'), ('v2_budget_reservations_v2')
+VALUES ('v2_budget_reservations_v1'), ('v2_budget_reservations_v2'),
+       ('v2_budget_reservation_identity_v1')
 ON CONFLICT (name) DO NOTHING;
 
 COMMIT;

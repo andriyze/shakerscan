@@ -432,6 +432,23 @@ jobs:
           path: artifacts/v2-scan-cancellation-race.json
           if-no-files-found: error
 
+      - name: Prove Scan action reservation identity in PostgreSQL
+        run: |
+          docker compose cp \
+            tests/e2e/run_scan_reservation_identity.py \
+            api:/tmp/run_scan_reservation_identity.py
+          docker compose exec -T -w /app api \
+            python /tmp/run_scan_reservation_identity.py --json \
+            > artifacts/v2-scan-reservation-identity.json
+
+      - name: Upload Scan reservation identity receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-scan-reservation-identity
+          path: artifacts/v2-scan-reservation-identity.json
+          if-no-files-found: error
+
       - name: Type-check and build the production UI
         run: |
           npm --prefix ui ci

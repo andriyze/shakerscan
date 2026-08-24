@@ -24,6 +24,7 @@ MIGRATION_NAME = "v2_scan_capability_actions_v1"
 ACTION_LEASE_MIGRATION_NAME = "v2_scan_action_leases_v1"
 ACTION_CONTINUATION_MIGRATION_NAME = "v2_scan_action_continuations_v1"
 ACTION_BUDGET_LINK_MIGRATION_NAME = "v2_scan_action_budget_link_v1"
+ACTION_BUDGET_IDENTITY_MIGRATION_NAME = "v2_scan_action_budget_identity_v1"
 ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME = "v2_scan_plan_revision_chain_v1"
 ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME = (
     "v2_scan_plan_revision_immutability_v1"
@@ -62,6 +63,8 @@ CREATE TABLE IF NOT EXISTS scan_capability_actions (
     )),
     reason_code TEXT,
     reservation_id TEXT,
+    reservation_owner_kind TEXT GENERATED ALWAYS AS ('scan'::text) STORED,
+    reservation_owner_id TEXT GENERATED ALWAYS AS (scan_id::text) STORED,
     receipt_id TEXT,
     receipt_hash CHAR(64),
     observation_manifest_id UUID,
@@ -94,6 +97,10 @@ ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS worker_id TEXT;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_id UUID;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_token_hash CHAR(64);
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS reservation_owner_kind
+    TEXT GENERATED ALWAYS AS ('scan'::text) STORED;
+ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS reservation_owner_id
+    TEXT GENERATED ALWAYS AS (scan_id::text) STORED;
 CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_lease_expiry
     ON scan_capability_actions(lease_expires_at)
     WHERE status IN ('leased','running');
@@ -111,6 +118,15 @@ BEGIN
            AND r.owner_id=a.scan_id::text
            AND r.action_id=a.action_id
            AND r.action_digest=a.action_digest;
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conname='scan_capability_actions_reservation_fk'
+               AND conrelid='scan_capability_actions'::regclass
+               AND array_length(conkey, 1) <> 5
+        ) THEN
+            ALTER TABLE scan_capability_actions
+            DROP CONSTRAINT scan_capability_actions_reservation_fk;
+        END IF;
         IF NOT EXISTS (
             SELECT 1 FROM pg_constraint
              WHERE conname='scan_capability_actions_reservation_fk'
@@ -118,7 +134,12 @@ BEGIN
         ) THEN
             ALTER TABLE scan_capability_actions
             ADD CONSTRAINT scan_capability_actions_reservation_fk
-            FOREIGN KEY (reservation_id) REFERENCES budget_reservations(id)
+            FOREIGN KEY (
+                reservation_id, reservation_owner_kind,
+                reservation_owner_id, action_id, action_digest
+            ) REFERENCES budget_reservations (
+                id, owner_kind, owner_id, action_id, action_digest
+            )
             ON DELETE RESTRICT;
         END IF;
     END IF;
@@ -203,7 +224,8 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
 );
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_capability_actions_v1'),
-       ('v2_scan_action_budget_link_v1')
+       ('v2_scan_action_budget_link_v1'),
+       ('v2_scan_action_budget_identity_v1')
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_action_leases_v1')

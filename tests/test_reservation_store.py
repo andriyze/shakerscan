@@ -161,7 +161,10 @@ async def test_schema_is_idempotent_and_records_migration_marker():
     sql = conn.executed[0][0]
     assert "CREATE TABLE IF NOT EXISTS budget_reservations" in sql
     assert "UNIQUE (owner_kind, owner_id, action_id)" in sql
+    assert "budget_reservations_identity_unique" in sql
+    assert "id, owner_kind, owner_id, action_id, action_digest" in sql
     assert "v2_budget_reservations_v2" in sql
+    assert "v2_budget_reservation_identity_v1" in sql
     assert BUDGET_RESERVATION_SCHEMA_SQL == sql
 
 

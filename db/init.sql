@@ -213,6 +213,8 @@ CREATE TABLE scan_capability_actions (
     )),
     reason_code TEXT,
     reservation_id TEXT,
+    reservation_owner_kind TEXT GENERATED ALWAYS AS ('scan'::text) STORED,
+    reservation_owner_id TEXT GENERATED ALWAYS AS (scan_id::text) STORED,
     receipt_id TEXT,
     receipt_hash CHAR(64),
     observation_manifest_id UUID,

@@ -14,6 +14,7 @@ from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.action_store import (
     ACTION_CONTINUATION_MIGRATION_NAME,
     ACTION_BUDGET_LINK_MIGRATION_NAME,
+    ACTION_BUDGET_IDENTITY_MIGRATION_NAME,
     ACTION_LEASE_MIGRATION_NAME,
     ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME,
     ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME,
@@ -305,10 +306,11 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     assert ACTION_LEASE_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_CONTINUATION_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_BUDGET_LINK_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_BUDGET_IDENTITY_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
-    assert "REFERENCES budget_reservations(id)" in SCAN_ACTION_SCHEMA_SQL
+    assert ") REFERENCES budget_reservations (" in SCAN_ACTION_SCHEMA_SQL
     assert "idx_scan_capability_actions_reservation" in SCAN_ACTION_SCHEMA_SQL
 
     init_sql = Path("db/init.sql").read_text(encoding="utf-8")
@@ -347,7 +349,9 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "scan_action_plan_revisions" in source
     for source in (SCAN_ACTION_SCHEMA_SQL, budget_link_repair_sql):
         assert "scan_capability_actions_reservation_fk" in source
-        assert "REFERENCES budget_reservations(id)" in source
+        assert "reservation_owner_kind" in source
+        assert "reservation_owner_id" in source
+        assert "id, owner_kind, owner_id, action_id, action_digest" in source
         assert "r.action_digest=a.action_digest" in source
     for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, revision_repair_sql):
         assert "revision_digest" in source
