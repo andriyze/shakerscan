@@ -4107,6 +4107,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     )
                     continue
 
+            if canonical_job is None or scan_action_plan is None:
+                raise RuntimeError(
+                    "normal schedule did not compile canonical Scan authority"
+                )
+
             async with conn.transaction():
                 await conn.execute("""
                     INSERT INTO scans (
@@ -4116,59 +4121,46 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, $11, $12,
                               $13, $14)
                 """, uuid.UUID(scan_id), target_id, target_url, job_id,
-                     json.dumps(scan_options), "scan" if canonical_schedule else scan_type, scan_role,
-                     "v2" if canonical_schedule else "legacy",
+                     json.dumps(scan_options), "scan", scan_role,
+                     "v2",
                      json.dumps(scan_options.get("scan_policy") or {}),
                      json.dumps(scan_options.get("resolved_scan_budget") or {}),
-                     "pending" if canonical_schedule else None,
-                     json.dumps({"status": "pending", "reasons": []}) if canonical_schedule else json.dumps({}),
-                     json.dumps(canonical_job.payload()) if canonical_job else None,
-                     canonical_job.payload_digest if canonical_job else None)
-                if scan_action_plan is not None:
-                    action_store = PostgresScanActionStore()
-                    await action_store.persist_plan(
-                        conn, plan=scan_action_plan,
+                     "pending",
+                     json.dumps({"status": "pending", "reasons": []}),
+                     json.dumps(canonical_job.payload()),
+                     canonical_job.payload_digest)
+                action_store = PostgresScanActionStore()
+                await action_store.persist_plan(
+                    conn, plan=scan_action_plan,
+                )
+                if scan_continuation_allocation is not None:
+                    await action_store.persist_continuation_allocation(
+                        conn,
+                        allocation=scan_continuation_allocation,
+                        parent_plan=scan_action_plan,
                     )
-                    if scan_continuation_allocation is not None:
-                        await action_store.persist_continuation_allocation(
-                            conn,
-                            allocation=scan_continuation_allocation,
-                            parent_plan=scan_action_plan,
-                        )
-                    for manifest in request_work_manifests:
+                for manifest in request_work_manifests:
+                    await PostgresScanManifestStore().persist(
+                        conn, manifest=manifest,
+                    )
+                for manifest in (
+                    endpoint_work_manifest, candidate_work_manifest,
+                    request_candidate_work_manifest,
+                ):
+                    if manifest is not None:
                         await PostgresScanManifestStore().persist(
                             conn, manifest=manifest,
                         )
-                    for manifest in (
-                        endpoint_work_manifest, candidate_work_manifest,
-                        request_candidate_work_manifest,
-                    ):
-                        if manifest is not None:
-                            await PostgresScanManifestStore().persist(
-                                conn, manifest=manifest,
-                            )
-                    if template_work_manifest is not None:
-                        await PostgresScanManifestStore().persist(
-                            conn, manifest=template_work_manifest,
-                        )
+                if template_work_manifest is not None:
+                    await PostgresScanManifestStore().persist(
+                        conn, manifest=template_work_manifest,
+                    )
 
-        job_data = (
-            canonical_job.queue_payload(
-                placement=(
-                    scan_options.get("placement")
-                    if isinstance(scan_options.get("placement"), Mapping) else None
-                ),
-            )
-            if canonical_job is not None
-            else {
-                'job_id': job_id,
-                'scan_id': scan_id,
-                'target': target_url,
-                'options': scan_options,
-                'submitted_at': utc_now_iso(),
-                'scheduled': True,
-                'schedule_id': str(schedule_id),
-            }
+        job_data = canonical_job.queue_payload(
+            placement=(
+                scan_options.get("placement")
+                if isinstance(scan_options.get("placement"), Mapping) else None
+            ),
         )
         if parallel_enabled:
             _configure_scan_plan_job(job_data, parallel_worker_count)
@@ -4214,7 +4206,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 WHERE id = $3
             """, now, next_run, schedule_id)
 
-        print(f"[scheduler] Triggered {'Scan' if canonical_schedule else scan_type} {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url})", flush=True)
+        print(f"[scheduler] Triggered Scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url})", flush=True)
 
 
 async def schedule_runner(pool: asyncpg.Pool):
