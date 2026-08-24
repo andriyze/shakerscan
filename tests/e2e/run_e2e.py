@@ -655,12 +655,31 @@ def run_dast() -> H.Scorecard:
                 action for action in canonical.get("actions") or []
                 if action.get("action_id") == "baseline.http"
             ), {})
+            passive_template_receipt = next((
+                action for action in canonical.get("actions") or []
+                if action.get("action_id") == "passive.templates"
+            ), {})
             sc.check(
                 "D-1 canonical action receipt persisted",
                 res.get("schema_version") == "canonical-scan-report/v2"
                 and baseline_receipt.get("status") == "success"
                 and bool(baseline_receipt.get("receipt")),
                 f"schema={res.get('schema_version')} baseline={baseline_receipt.get('status')}",
+            )
+            sc.check(
+                "D-1 reviewed passive template pack completes",
+                passive_template_receipt.get("status") == "success"
+                and bool(passive_template_receipt.get("receipt"))
+                and passive_template_receipt.get("budget_reserved") == {
+                    "http_requests": 7,
+                    "tool_wall_seconds": 30,
+                },
+                (
+                    "status="
+                    f"{passive_template_receipt.get('status')} "
+                    "reserved="
+                    f"{passive_template_receipt.get('budget_reserved')}"
+                ),
             )
             # D-4: the 3 removed phantom attack chains must never be reported.
             chains = json.dumps((res.get("attack_chains") or {}))
