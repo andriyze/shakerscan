@@ -75,13 +75,13 @@ for relative_path in "${required_files[@]}"; do
   fi
 done
 
-for source_path in "$ROOT_DIR"/skills/*/SKILL.md; do
+while IFS= read -r source_path; do
   relative_path="${source_path#"$ROOT_DIR"/}"
   if [[ ! -f "$SHAKERSCAN_HOME/$relative_path" ]]; then
-    echo "installer smoke: missing skill $relative_path" >&2
+    echo "installer smoke: missing skill asset $relative_path" >&2
     exit 1
   fi
-done
+done < <(find "$ROOT_DIR/skills" -type f -print | sort)
 
 for source_path in "$ROOT_DIR"/.claude/commands/*.md; do
   relative_path="${source_path#"$ROOT_DIR"/}"
