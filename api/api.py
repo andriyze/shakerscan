@@ -4660,6 +4660,7 @@ async def _request_validation_error_handler(
     if (
         request.url.path.startswith("/credential-profiles")
         or request.url.path.startswith("/scans")
+        or request.url.path == "/api/v1/scan"
     ):
         return JSONResponse(
             status_code=422,
@@ -4719,6 +4720,7 @@ class ScanOptions(BaseModel):
     skip_global_checks: bool = False
     focused_endpoints_only: bool = False
     zero_rediscovery: bool = False
+    no_browser: bool = False
     placement: Optional[dict[str, Any]] = Field(
         default=None,
         description="Execution placement constraints: use node_scope='remote' for any fleet node, node_id='local' for control-plane workers, a fleet node UUID for one remote node, or region/egress/network/tool constraints.",
@@ -4993,6 +4995,17 @@ class LegacyScanRequest(_ScanRequestBase):
     """Deprecated compatibility request that may carry inline authentication."""
 
     authentication: Optional[dict[str, Any]] = None
+
+
+class CliV1ScanRequest(BaseModel):
+    """Installed CLI wire shape; translated into the canonical Scan request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: str
+    scan_type: Optional[str] = None
+    options: dict[str, Any] = Field(default_factory=dict)
+    source_control: Optional[dict[str, Any]] = None
 
 
 class DeviceTargetCreate(BaseModel):
@@ -30318,6 +30331,101 @@ def normalize_dast_scan_options(options: ScanOptions) -> str:
 
     options.scan_type = scan_type
     return scan_type
+
+
+_CLI_V1_SCAN_TYPE_ALIASES = {
+    "preview": ("quick", False),
+    "sandbox": ("quick", True),
+    "complete": ("smart", False),
+}
+
+
+def _translate_cli_v1_scan_request(request: CliV1ScanRequest) -> ScanRequest:
+    """Map the installed CLI shape without accepting its inline-secret flags."""
+    if request.source_control:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "source-control binding is not supported by the local V2 Scan API; "
+                "submit the Scan without commit/repository flags"
+            ),
+        )
+    options = dict(request.options or {})
+    inline_keys = sorted(
+        key for key in options
+        if key in SCAN_AUTHENTICATION_KEYS
+        and _scan_authentication_value_present(options.get(key))
+    )
+    if inline_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "the local V2 CLI bridge rejects inline authentication; create "
+                "an encrypted credential profile and submit through /scans"
+            ),
+        )
+    unknown = sorted(set(options) - set(ScanOptions.model_fields))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unsupported local V2 CLI Scan option(s): {', '.join(unknown)}",
+        )
+    requested_type = str(request.scan_type or "").strip().lower()
+    existing_type = str(options.get("scan_type") or "").strip().lower()
+    if requested_type and existing_type and requested_type != existing_type:
+        raise HTTPException(
+            status_code=422,
+            detail="CLI scan_type conflicts with options.scan_type",
+        )
+    scan_type = requested_type or existing_type
+    if scan_type:
+        translated_type, public_only = _CLI_V1_SCAN_TYPE_ALIASES.get(
+            scan_type, (scan_type, False),
+        )
+        if translated_type not in VALID_DAST_SCAN_TYPES:
+            raise HTTPException(status_code=422, detail="unsupported CLI scan_type")
+        options["scan_type"] = translated_type
+        if public_only:
+            options["public"] = True
+    try:
+        return ScanRequest(
+            target=request.target,
+            options=ScanOptions.model_validate(options),
+        )
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _set_cli_v1_deprecation_headers(response: Response) -> None:
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Thu, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = '</scans>; rel="successor-version"'
+
+
+@app.post("/api/v1/scan", deprecated=True)
+async def submit_cli_v1_scan(request: CliV1ScanRequest, response: Response):
+    """Compatibility bridge for the installed CLI's secret-free Scan flow."""
+    _set_cli_v1_deprecation_headers(response)
+    canonical = _translate_cli_v1_scan_request(request)
+    result = await _submit_scan(canonical, allow_inline_authentication=False)
+    result["requested_scan_type"] = request.scan_type
+    result["effective_scan_type"] = result.get("scan_type")
+    return result
+
+
+@app.get("/api/v1/scan", deprecated=True)
+async def get_cli_v1_scan(
+    response: Response,
+    id: str = Query(..., min_length=1),
+):
+    """Compatibility bridge for CLI status and wait commands."""
+    _set_cli_v1_deprecation_headers(response)
+    result = await get_scan(id)
+    result.setdefault("scan_id", str(result.get("id") or id))
+    scan_type = str(result.get("scan_type") or "") or None
+    result.setdefault("requested_scan_type", scan_type)
+    result.setdefault("effective_scan_type", scan_type)
+    return result
 
 
 @app.post("/scans")
@@ -67024,6 +67132,44 @@ async def list_findings(
         'candidates_total': candidates_total,
         'included_candidates': included_candidates,
     }
+
+
+@app.get("/api/v1/findings", deprecated=True)
+async def list_cli_v1_findings(
+    request: Request,
+    response: Response,
+    scan_id: str = Query(..., min_length=1),
+    severity: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Compatibility bridge for the installed CLI findings command."""
+    _set_cli_v1_deprecation_headers(response)
+    return await list_findings(
+        request=request,
+        severity=severity,
+        status=None,
+        source_type=None,
+        target_id=None,
+        ai_target_id=None,
+        device_target_id=None,
+        scan_id=scan_id,
+        root_domain=None,
+        verification_verdict=None,
+        verification_mode=None,
+        verified_only=False,
+        driven_by=None,
+        research_campaign_id=None,
+        search=None,
+        seen_within_days=None,
+        first_seen_within_days=None,
+        resolved_within_days=None,
+        sort_by=None,
+        sort_order="desc",
+        include_candidates=False,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def _public_evidence_object_row(row: Any) -> dict[str, Any]:

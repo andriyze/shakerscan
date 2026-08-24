@@ -2311,6 +2311,40 @@ def test_broker_private_option_split_keeps_public_job_secret_free():
     assert "canary" not in json.dumps(public)
 
 
+def test_cli_v1_scan_bridge_translates_only_secret_free_canonical_inputs():
+    translated = api_module._translate_cli_v1_scan_request(
+        api_module.CliV1ScanRequest(
+            target="https://example.test",
+            scan_type="sandbox",
+            options={"no_browser": True},
+        )
+    )
+
+    assert translated.target == "https://example.test"
+    assert translated.options.scan_type == "quick"
+    assert translated.options.public is True
+    assert translated.options.no_browser is True
+
+
+def test_cli_v1_scan_bridge_rejects_inline_secrets_and_unknown_options():
+    with pytest.raises(api_module.HTTPException) as secret_error:
+        api_module._translate_cli_v1_scan_request(
+            api_module.CliV1ScanRequest(
+                target="https://example.test",
+                options={"auth_header": "Bearer canary-secret"},
+            )
+        )
+    assert secret_error.value.status_code == 422
+    assert "canary-secret" not in str(secret_error.value.detail)
+
+    with pytest.raises(api_module.HTTPException, match="unsupported"):
+        api_module._translate_cli_v1_scan_request(
+            api_module.CliV1ScanRequest(
+                target="https://example.test", options={"ai": False},
+            )
+        )
+
+
 def test_legacy_broker_jobs_with_private_inputs_are_detected_for_local_routing():
     assert api_module._broker_job_has_private_inputs({
         "options": {"auth_cookies": "session=canary-secret"},
