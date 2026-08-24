@@ -263,7 +263,10 @@ class PostgresScanActionStore:
                 json.dumps(list(action.dependencies), separators=(",", ":")),
                 action.required,
                 action.supporting,
-                action.admission_status,
+                # Admission is immutable plan authority, not execution state.  A
+                # precomputed skip still has to be leased and settled so every
+                # action owns a content-addressed terminal result and receipt.
+                "planned",
                 action.reason_code,
             )
             if row is None:
@@ -437,7 +440,10 @@ class PostgresScanActionStore:
                 json.dumps(list(action.dependencies), separators=(",", ":")),
                 action.required,
                 action.supporting,
-                action.admission_status,
+                # Continued actions follow the same durable state machine as
+                # the original plan: admission skips are terminalized by the
+                # orchestrator, never pre-marked terminal in the scheduler.
+                "planned",
                 action.reason_code,
             )
             if action_row is None:

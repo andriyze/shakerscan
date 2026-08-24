@@ -325,7 +325,7 @@ def test_action_store_applies_one_idempotent_continuation_revision():
     assert asyncio.run(store.load_plan(conn, scan_id=SCAN_ID)) == amended
 
 
-def test_action_store_persists_precomputed_optional_skip_reasons():
+def test_action_store_persists_precomputed_optional_skips_as_unsettled_actions():
     raw = _plan(active=True)
     plan = allocate_scan_action_plan(
         raw,
@@ -334,8 +334,17 @@ def test_action_store_persists_precomputed_optional_skip_reasons():
     conn = FakeConn()
     asyncio.run(PostgresScanActionStore().persist_plan(conn, plan=plan))
 
-    skipped = [row for row in conn.actions.values() if row["status"] == "skipped"]
-    assert skipped
-    assert {row["reason_code"] for row in skipped} <= {
+    allocated_skips = {
+        action.action_id: action
+        for action in plan.actions
+        if action.admission_status == "skipped"
+    }
+    assert allocated_skips
+    persisted = {
+        action_id: conn.actions[action_id]
+        for action_id in allocated_skips
+    }
+    assert {row["status"] for row in persisted.values()} == {"planned"}
+    assert {row["reason_code"] for row in persisted.values()} <= {
         "insufficient_plan_budget", "dependency_failed",
     }

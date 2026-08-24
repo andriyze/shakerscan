@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import hashlib
 import json
 import uuid
@@ -266,6 +267,34 @@ def test_failed_dependency_is_blocked_but_receipt_driven_finalizer_still_runs():
     }
     assert executor.executed == ["baseline.http", "finalize.report"]
     assert ("baseline.security_txt", "blocked", False) in executor.synthetic
+
+
+def test_precomputed_admission_skip_is_settled_with_a_terminal_receipt():
+    base = _plan()
+    skipped = replace(
+        base.actions[1],
+        admission_status="skipped",
+        reason_code="insufficient_plan_budget",
+        action_digest=None,
+    )
+    plan = ScanActionPlan(
+        scan_id=base.scan_id,
+        execution_plan_digest=base.execution_plan_digest,
+        target_binding_digest=base.target_binding_digest,
+        actions=(base.actions[0], skipped, base.actions[2]),
+    )
+    backend = FakeBackend(plan, "local")
+    executor = FakeExecutor()
+
+    report = _run(ScanOrchestrator(backend=backend, executor=executor), plan)
+
+    assert report.status_matrix == {
+        "baseline.http": "success",
+        "baseline.security_txt": "skipped",
+        "finalize.report": "success",
+    }
+    assert ("baseline.security_txt", "skipped", False) in executor.synthetic
+    assert report.action_results["baseline.security_txt"].receipt_ref.receipt_hash
 
 
 def test_node_loss_charges_full_hold_and_resume_continues_from_terminal_receipt():
