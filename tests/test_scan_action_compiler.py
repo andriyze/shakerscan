@@ -230,6 +230,10 @@ def test_passive_scan_compiles_bounded_read_only_surface_discovery():
     assert by_id["passive.templates"].capability_name == (
         "templates.passive_scan"
     )
+    assert by_id["passive.templates"].dependencies == ()
+    assert by_id["passive.templates"].capability_args["target_ref"] == (
+        "canonical_origin"
+    )
     assert "verify.xss" not in by_id
     assert "verify.sqli" not in by_id
     assert by_id["discover.web_crawl"].capability_args["read_only"] is True

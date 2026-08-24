@@ -1068,12 +1068,19 @@ class ScanActionPlanCompiler:
                 "deterministic_baseline",
                 "templates.passive_scan",
                 {
-                    "target_manifest_ref": endpoint_ref or "discover.web_crawl",
+                    "target_ref": "canonical_origin",
+                    **(
+                        {"target_manifest_ref": endpoint_ref}
+                        if endpoint_ref else {}
+                    ),
                     "template_manifest_ref": template_ref,
                 },
                 manifest_ref=endpoint_ref,
                 index_name="endpoint_index",
-                dependencies=discovery_dependencies,
+                # The reviewed GET-only pack is executable against the frozen
+                # canonical origin. Optional crawl/content breadth must not be
+                # able to block this required passive baseline.
+                dependencies=primary_dependency,
                 required=True,
                 reserve_dependency_slots=(
                     int(nuclei and not defer_manifest_actions)
