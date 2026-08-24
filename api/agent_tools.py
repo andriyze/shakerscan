@@ -295,8 +295,10 @@ def _tmpl_nmap(url: str, opts: dict[str, Any]) -> list[str]:
     # Read-only single-port service/version probe of the host behind the target URL. nmap takes
     # no URL: host+port are extracted from it. Connect scan only (-sT — never raw SYN), NO NSE
     # scripts, no host discovery (-Pn), no file output (-oN - keeps it on stdout), 60s host
-    # timeout. When pinning is active build_scanner_argv feeds this a URL whose hostname is the
-    # pinned IP, so the positional host is address-frozen.
+    # timeout. Service detection may open more than one connection to the selected port, so its
+    # process proof reserves the reviewed 60-attempt upper bound instead of counting only the
+    # distinct port. When pinning is active build_scanner_argv feeds this a URL whose hostname is
+    # the pinned IP, so the positional host is address-frozen.
     parsed = urllib.parse.urlsplit(url)
     host = str(parsed.hostname or "")
     port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
@@ -853,11 +855,21 @@ def build_enforced_scanner_plan(
             "dump": False,
         }
     elif scanner == "nmap":
-        if reservation.get("tcp_ports_attempted", 0) < 1:
-            raise AgentToolError("nmap requires one reserved TCP port")
-        hard = {"tcp_ports_attempted": 1, "tool_wall_seconds": timeout_seconds}
-        mode, method = "exact", "exact_port_set"
-        proof_inputs = {"targets": 1, "ports": 1, "scripts": 0}
+        if reservation.get("tcp_ports_attempted", 0) < 60:
+            raise AgentToolError(
+                "nmap single-port version profile requires 60 TCP-attempt units"
+            )
+        hard = {"tcp_ports_attempted": 60, "tool_wall_seconds": timeout_seconds}
+        mode, method = "conservative", "version_probe_upper_bound"
+        proof_inputs = {
+            "targets": 1,
+            "ports": 1,
+            "connect_scan_attempts": 1,
+            "version_probe_attempts_upper_bound": 59,
+            "version_intensity": 2,
+            "retries": 0,
+            "scripts": 0,
+        }
     elif scanner == "naabu":
         if reservation.get("tcp_ports_attempted", 0) < 200:
             raise AgentToolError("naabu top-100 profile requires 200 TCP-attempt units")

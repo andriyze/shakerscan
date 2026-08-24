@@ -37,7 +37,7 @@ TOOL_CASES: tuple[dict[str, Any], ...] = (
     },
     {"tool": "dalfox", "path": "/dast/xss?message=control", "budget": {"http_requests": 11, "tool_wall_seconds": 10}},
     {"tool": "sqlmap", "path": "/dast/sqli?id=1", "budget": {"http_requests": 21, "tool_wall_seconds": 20}},
-    {"tool": "nmap", "path": "/", "budget": {"tcp_ports_attempted": 1, "tool_wall_seconds": 10}},
+    {"tool": "nmap", "path": "/", "budget": {"tcp_ports_attempted": 60, "tool_wall_seconds": 10}},
     {"tool": "naabu", "path": "/", "budget": {"tcp_ports_attempted": 200, "tool_wall_seconds": 10}},
 )
 

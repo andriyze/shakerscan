@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         if result.returncode != 0:
             raise RuntimeError(
                 "external wire acceptance failed: "
-                f"{result.stderr.strip()[:1000]}"
+                f"{result.stderr.strip()[-8000:]}"
             )
         receipt = json.loads(result.stdout.strip().splitlines()[-1])
         if receipt.get("status") != "passed" or receipt.get("tool_count") != 9:

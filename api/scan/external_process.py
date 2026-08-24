@@ -35,6 +35,7 @@ _PROOF_METHODS = frozenset({
     "reviewed_template_allowlist",
     "fixed_conservative_profile",
     "exact_port_set",
+    "version_probe_upper_bound",
     "port_retry_upper_bound",
 })
 

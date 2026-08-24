@@ -78,7 +78,10 @@ def test_broker_external_process_uses_lease_cancel_file_without_redis(monkeypatc
             {"sqlmap_output_dir": "/tmp/shakerscan-wire-sqlmap"},
             "rate_time_upper_bound",
         ),
-        ("nmap", {"tcp_ports_attempted": 1, "tool_wall_seconds": 10}, {}, {}, "exact_port_set"),
+        (
+            "nmap", {"tcp_ports_attempted": 60, "tool_wall_seconds": 10},
+            {}, {}, "version_probe_upper_bound",
+        ),
         ("naabu", {"tcp_ports_attempted": 200, "tool_wall_seconds": 10}, {}, {}, "port_retry_upper_bound"),
     ],
 )
@@ -115,7 +118,7 @@ def test_every_external_adapter_has_a_prelaunch_wire_proof(
         ("nuclei", {"tool_wall_seconds": 10}),
         ("dalfox", {"http_requests": 1, "tool_wall_seconds": 10}),
         ("sqlmap", {"http_requests": 1, "tool_wall_seconds": 10}),
-        ("nmap", {"tool_wall_seconds": 10}),
+        ("nmap", {"tcp_ports_attempted": 59, "tool_wall_seconds": 10}),
         ("naabu", {"tcp_ports_attempted": 199, "tool_wall_seconds": 10}),
     ],
 )
