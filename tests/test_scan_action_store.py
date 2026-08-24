@@ -28,6 +28,7 @@ from api.scan.continuation import (
     merge_scan_action_continuation,
 )
 from api.scan.execution import ScanExecutionPlan
+from api.scan.orchestrator import resumable_action_ids
 from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest
 
 
@@ -73,6 +74,7 @@ class FakeConn:
         self.actions = {}
         self.revisions = {}
         self.fail_action_id = None
+        self.fail_revision = None
 
     class _Transaction:
         def __init__(self, conn):
@@ -140,6 +142,8 @@ class FakeConn:
                     "plan_json": json.loads(raw_plan),
                 }
             existing = self.revisions.get(incoming["revision"])
+            if incoming["revision"] == self.fail_revision:
+                raise RuntimeError("injected plan-revision failure")
             if existing and (
                 existing["plan_digest"] != incoming["plan_digest"]
                 or existing.get("revision_digest") not in {
@@ -348,7 +352,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "work_manifest_refs_json" in source
 
 
-def test_action_store_applies_one_idempotent_continuation_revision():
+def test_action_store_rolls_back_failed_continuation_and_resumes_only_incomplete_actions():
     parent = _plan(defer=True)
     complete = _plan()
     finalizer = next(
@@ -404,6 +408,26 @@ def test_action_store_applies_one_idempotent_continuation_revision():
     conn = FakeConn()
     store = PostgresScanActionStore()
 
+    crashed = FakeConn()
+    asyncio.run(store.persist_plan(crashed, plan=parent))
+    asyncio.run(store.persist_continuation_allocation(
+        crashed, allocation=allocation, parent_plan=parent,
+    ))
+    crashed.fail_revision = 1
+    with pytest.raises(RuntimeError, match="injected plan-revision failure"):
+        asyncio.run(store.amend_plan(
+            crashed,
+            parent_plan=parent,
+            amended_plan=amended,
+            allocation=allocation,
+            revision=revision,
+        ))
+    assert crashed.plan_row["scan_action_plan_digest"] == parent.plan_digest
+    assert set(crashed.actions) == {
+        action.action_id for action in parent.actions
+    }
+    assert set(crashed.revisions) == {0}
+
     asyncio.run(store.persist_plan(conn, plan=parent))
     asyncio.run(store.persist_continuation_allocation(
         conn, allocation=allocation, parent_plan=parent,
@@ -430,6 +454,15 @@ def test_action_store_applies_one_idempotent_continuation_revision():
     assert len(first) == len(second) == len(amended.actions)
     assert asyncio.run(store.load_plan(conn, scan_id=SCAN_ID)) == amended
     assert asyncio.run(store.load_plan_revision(conn, scan_id=SCAN_ID)) == revision
+    terminal_parent = {
+        action.action_id: "success" for action in parent.actions
+    }
+    assert resumable_action_ids(
+        plan_action_ids=tuple(action.action_id for action in amended.actions),
+        terminal_receipts=terminal_parent,
+    ) == tuple(
+        action.action_id for action in amended.actions[len(parent.actions):]
+    )
 
 
 def test_action_store_persists_precomputed_optional_skips_as_unsettled_actions():

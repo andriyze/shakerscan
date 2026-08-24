@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 import os
@@ -170,6 +171,22 @@ def test_broker_scan_requires_complete_immutable_action_plan():
     changed["scan_execution"] = _canonical_broker_scan_lease()[1]["scan_execution"]
     with pytest.raises(broker_worker.BrokerWorkerError, match="deprecated monolithic"):
         broker_worker._broker_scan_action_plan(job, changed)
+
+    stale_revision = json.loads(json.dumps(lease))
+    changed_action = replace(
+        plan.actions[0],
+        capability_args={"method": "HEAD", "path": "/changed"},
+        action_digest=None,
+    )
+    changed_plan = ScanActionPlan(
+        scan_id=plan.scan_id,
+        execution_plan_digest=plan.execution_plan_digest,
+        target_binding_digest=plan.target_binding_digest,
+        actions=(changed_action,),
+    )
+    stale_revision["scan_action_plan"] = changed_plan.canonical_dict()
+    with pytest.raises(broker_worker.BrokerWorkerError, match="does not match"):
+        broker_worker._broker_scan_action_plan(job, stale_revision)
 
 
 def test_broker_worker_opens_only_lease_bound_private_scan_inputs():
@@ -366,6 +383,30 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
     assert report["canonical_action_execution"]["status_matrix"] == {
         "finalize.report": "success",
     }
+
+    def stale_revision_response(_state, _method, _path, _payload, **_kwargs):
+        return {
+            "plan": amended.canonical_dict(),
+            "plan_revision": root_scan_plan_revision(parent).canonical_dict(),
+            "options": {},
+            "allocation_digest": "d" * 64,
+        }
+
+    monkeypatch.setattr(
+        broker_worker, "api_request", stale_revision_response,
+    )
+    with pytest.raises(
+        broker_worker.BrokerWorkerError,
+        match="changed Scan authority",
+    ):
+        asyncio.run(broker_worker._execute_broker_action_plan(
+            {"node_id": NODE_ID},
+            {"lease_id": "lease-1", "lease_token": "token-1"},
+            job,
+            plan=parent,
+            plan_revision=root_scan_plan_revision(parent),
+            worker_id="broker:node-1:container-a",
+        ))
 
 
 def test_broker_state_requires_owner_only_https_but_not_data_store_credentials(tmp_path):
