@@ -615,8 +615,13 @@ def build_scan_execution_explanation(
                 "reasons": reliability_reasons,
                 "reason_labels": [_reason_label(item) for item in reliability_reasons],
                 "warning": (
-                    None if grade_reliable
-                    else "The grade is provisional because required coverage did not complete cleanly."
+                    None
+                    if grade_reliable
+                    else (
+                        "The grade is provisional because required coverage did not complete cleanly."
+                        if coverage_status != "complete"
+                        else "The grade is provisional until the listed verification conditions are resolved."
+                    )
                 ),
             },
             "optional_gaps": optional_gaps,

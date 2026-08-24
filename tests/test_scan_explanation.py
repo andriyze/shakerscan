@@ -247,7 +247,7 @@ def test_execution_explanation_preserves_final_report_grade_reliability():
             "High or critical candidates still require deterministic proof",
         ],
         "warning": (
-            "The grade is provisional because required coverage did not complete cleanly."
+            "The grade is provisional until the listed verification conditions are resolved."
         ),
     }
 
