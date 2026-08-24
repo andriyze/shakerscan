@@ -14,7 +14,7 @@ import {
   type ScanPublicContract,
   type Target,
 } from '@/lib/api'
-import { Button, Card, useToast } from '@/components/ui'
+import { Button, Card, Field, useToast } from '@/components/ui'
 import {
   RequestCollectionPicker,
   type RequestCollectionSelectionMetadata,
@@ -354,17 +354,19 @@ export default function NewScanPage() {
             </label>
           </div>
           {batchMode ? (
-            <textarea value={batchTargets} onChange={(event) => setBatchTargets(event.target.value)} rows={6} placeholder={'https://app.example.com\nhttps://api.example.com'} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
+            <Field label="Target URLs (one per line)" required>
+              <textarea value={batchTargets} onChange={(event) => setBatchTargets(event.target.value)} rows={6} placeholder={'https://app.example.com\nhttps://api.example.com'} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
+            </Field>
           ) : (
-            <>
+            <Field label="Target URL or hostname" required>
               <input value={target} onChange={(event) => {
                 setTarget(event.target.value)
                 setPrimaryCredentialId('')
                 setSecondaryCredentialId('')
               }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
-              <datalist id="known-targets">{existingTargets.map((item) => <option key={item.id} value={item.url} />)}</datalist>
-            </>
+            </Field>
           )}
+          <datalist id="known-targets">{existingTargets.map((item) => <option key={item.id} value={item.url} />)}</datalist>
           <label className="block text-sm text-gray-300">
             Target kind
             <select value={targetKind} onChange={(event) => setTargetKind(event.target.value as 'web' | 'api')} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
@@ -377,11 +379,11 @@ export default function NewScanPage() {
         <Card className="p-5">
           <h2 className="font-medium text-white">Budget</h2>
           <p className="mt-1 text-xs text-gray-500">Budgets are hard ceilings, not separate scan modes.</p>
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <div className="mt-4 grid gap-3 md:grid-cols-3" role="group" aria-label="Scan budget">
             {BUDGETS.map((budget) => {
               const serverLimits = scanContract?.budget_profiles[budget.value]
               return (
-                <button key={budget.value} type="button" onClick={() => setBudgetProfile(budget.value)} className={`rounded-lg border p-4 text-left transition-colors ${budgetProfile === budget.value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-950 hover:border-gray-600'}`}>
+                <button key={budget.value} type="button" aria-pressed={budgetProfile === budget.value} onClick={() => setBudgetProfile(budget.value)} className={`rounded-lg border p-4 text-left transition-colors ${budgetProfile === budget.value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-950 hover:border-gray-600'}`}>
                   <span className="font-medium text-white">{budget.label}</span>
                   <span className="mt-1 block text-sm text-gray-400">{budget.description}</span>
                   <span className="mt-3 block text-xs text-gray-500">
@@ -476,12 +478,12 @@ export default function NewScanPage() {
         </Card>
 
         <Card className="overflow-hidden">
-          <button type="button" onClick={() => setShowAdvanced((value) => !value)} className="flex w-full items-center justify-between p-5 text-left">
+          <button type="button" aria-expanded={showAdvanced} aria-controls="advanced-scan-options" onClick={() => setShowAdvanced((value) => !value)} className="flex w-full items-center justify-between p-5 text-left">
             <span><span className="block font-medium text-white">Advanced</span><span className="block text-xs text-gray-500">Authentication, known endpoints, approval, and custom ceilings.</span></span>
             <span className="text-gray-500">{showAdvanced ? '−' : '+'}</span>
           </button>
           {showAdvanced && (
-            <div className="space-y-5 border-t border-gray-800 p-5">
+            <div id="advanced-scan-options" className="space-y-5 border-t border-gray-800 p-5">
               <div>
                 <h3 className="text-sm font-medium text-gray-300">Authenticated principals</h3>
                 <p className="mt-1 text-xs text-gray-500">Select encrypted profiles bound to this exact registered target. Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
@@ -559,7 +561,7 @@ export default function NewScanPage() {
           )}
         </Card>
 
-        {error && <p className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
+        {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
           <Button type="submit" loading={loading}>Run Scan</Button>
