@@ -19,6 +19,7 @@ import {
   RequestCollectionPicker,
   type RequestCollectionSelectionMetadata,
 } from '@/components/RequestCollectionPicker'
+import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { validateScanTarget } from '@/lib/targetValidation'
 
 type BudgetProfile = 'fast' | 'balanced' | 'thorough'
@@ -118,7 +119,14 @@ export default function NewScanPage() {
   )
   const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
   const credentialUse = selectedCredentialIds.length > 0
+  const approvalRequired = networkDiscovery || credentialUse || allowStateChanging
   const active_worker_count = workerStats?.execution_capacity?.total_available ?? workerStats?.current_count ?? workerStats?.count ?? 0
+  const customDuration = Number(limits.max_duration_seconds)
+  const approvalTtlMinutes = Math.ceil((
+    Number.isSafeInteger(customDuration) && customDuration > 0
+      ? customDuration
+      : scanContract?.budget_profiles[budgetProfile]?.max_duration_seconds ?? 7200
+  ) / 60) + 15
   const includeFamilies = Object.entries(familyModes).filter(([, mode]) => mode === 'include').map(([name]) => name)
   const excludeFamilies = Object.entries(familyModes).filter(([, mode]) => mode === 'exclude').map(([name]) => name)
 
@@ -428,6 +436,19 @@ export default function NewScanPage() {
             <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services (approval receipt required)</label>
             <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} />Allow explicitly selected state-changing HTTP requests</label>
           </div>
+          {(activeTesting || credentialUse || approvalReceipt) && (
+            <ApprovalReceiptField
+              targetId={selectedRegisteredTarget?.id}
+              targetUrl={batchMode ? '' : target.trim()}
+              authorizationConfirmed={authorized}
+              receiptId={approvalReceipt}
+              onReceiptIdChange={setApprovalReceipt}
+              ttlMinutes={approvalTtlMinutes}
+              riskTier={credentialUse ? 'credential' : 'active'}
+              required={approvalRequired}
+              disabledReason={batchMode ? 'Create approvals from a single-target Scan; receipts are target-bound.' : undefined}
+            />
+          )}
           {scanContract && (
             <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -538,7 +559,6 @@ export default function NewScanPage() {
                 disabled={batchMode}
               />
               <label className="block text-sm text-gray-300">Known endpoints (one per line)<textarea value={customEndpoints} onChange={(event) => setCustomEndpoints(event.target.value)} rows={4} placeholder={'GET /api/users\nPOST /api/login username,password'} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
-              <label className="block text-sm text-gray-300">Approval receipt ID<input value={approvalReceipt} onChange={(event) => setApprovalReceipt(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" /></label>
               <div>
                 <h3 className="text-sm font-medium text-gray-300">Custom budget ceilings</h3>
                 <p className="mt-1 text-xs text-gray-500">Whole numbers only. Zero is an explicit deny ceiling where the server contract permits it.</p>

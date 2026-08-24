@@ -30,6 +30,7 @@ import {
 } from '@/lib/huntContract.generated'
 import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
+import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 
 type TargetChoice = {
   id: string
@@ -193,6 +194,8 @@ function HuntContent() {
 
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
+  const configuredDuration = positiveInteger(maxDurationSeconds)
+  const approvalTtlMinutes = Math.ceil((configuredDuration ?? HUNT_BUDGET_PROFILES[budget].max_duration_seconds) / 60) + 15
   const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network'
     ? ['ssh']
     : targetKind === 'device'
@@ -498,15 +501,20 @@ function HuntContent() {
                     className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
                   />
                 </label>
-                <label className="text-sm text-gray-300">
-                  Approval receipt ID {privileged ? '(required)' : '(optional)'}
-                  <input
-                    value={approvalReceipt}
-                    onChange={(event) => setApprovalReceipt(event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
-                  />
-                </label>
               </div>
+              {(privileged || approvalReceipt) && (
+                <ApprovalReceiptField
+                  targetId={selectedChoice?.id}
+                  targetUrl={selectedChoice?.detail || ''}
+                  authorizationConfirmed={authorizationConfirmed}
+                  receiptId={approvalReceipt}
+                  onReceiptIdChange={setApprovalReceipt}
+                  onScopeReceiptIdChange={setScopeReceipt}
+                  ttlMinutes={approvalTtlMinutes}
+                  riskTier={selectedCredentialCount > 0 ? 'credential' : 'active'}
+                  required={privileged}
+                />
+              )}
 
               <div className="space-y-4 rounded-lg border border-gray-800 bg-gray-950 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">

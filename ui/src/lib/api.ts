@@ -7507,11 +7507,24 @@ export async function deactivateTargetPrincipal(targetId: string, principalId: s
   return res.json()
 }
 
-export async function createTargetPolicyApproval(targetId: string, targetUrl: string, ttlMinutes: number = 120, riskTier: 'active' | 'credential' = 'active'): Promise<string> {
-  const parsed = new URL(targetUrl)
+export async function createTargetPolicyApprovalReceipt({
+  targetId,
+  targetUrl,
+  ttlMinutes = 120,
+  riskTier = 'active',
+}: {
+  targetId?: string
+  targetUrl: string
+  ttlMinutes?: number
+  riskTier?: 'active' | 'credential'
+}): Promise<{ approvalReceiptId: string; scopeReceiptId: string; expiresAt: string }> {
+  const normalizedTargetUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(targetUrl.trim())
+    ? targetUrl.trim()
+    : `https://${targetUrl.trim()}`
+  const parsed = new URL(normalizedTargetUrl)
   const scope = await previewScopeReceipt({
-    url: targetUrl,
-    target_id: targetId,
+    url: normalizedTargetUrl,
+    ...(targetId ? { target_id: targetId } : {}),
     allowed_hosts: [parsed.hostname],
     environment: 'production',
   })
@@ -7520,16 +7533,26 @@ export async function createTargetPolicyApproval(targetId: string, targetUrl: st
   }
   const confirmations = ['confirm_authorized']
   if (scope.scope_receipt.verdict === 'needs_approval') confirmations.push('confirm_scope_reviewed')
+  const expiresAt = new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 7 * 24 * 60 + 15)) * 60_000).toISOString()
   const approval = await createApprovalReceipt({
     scope_receipt_id: scope.scope_receipt.receipt_id,
     risk_tier: riskTier,
     confirmations,
     approved_by: 'interactive-ui',
-    // Durable hunts may run for seven days. Keep the receipt bounded to that ceiling plus a
-    // small launch/supervisor handoff buffer so the final episode does not outlive approval.
-    expires_at: new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 7 * 24 * 60 + 15)) * 60_000).toISOString(),
+    // Keep interactive approvals bounded to the requested workflow duration and the server's
+    // seven-day maximum, with only the small handoff buffer supplied by the caller.
+    expires_at: expiresAt,
   })
-  return approval.approval_receipt.id
+  return {
+    approvalReceiptId: approval.approval_receipt.id,
+    scopeReceiptId: scope.scope_receipt.receipt_id,
+    expiresAt,
+  }
+}
+
+export async function createTargetPolicyApproval(targetId: string, targetUrl: string, ttlMinutes: number = 120, riskTier: 'active' | 'credential' = 'active'): Promise<string> {
+  const receipt = await createTargetPolicyApprovalReceipt({ targetId, targetUrl, ttlMinutes, riskTier })
+  return receipt.approvalReceiptId
 }
 
 export async function upsertTargetPrincipalExpectation(targetId: string, payload: TargetPrincipalExpectationPayload): Promise<{ expectation: TargetPrincipalExpectation; execution_enabled: boolean; findings_created: number; operation_id: string }> {
