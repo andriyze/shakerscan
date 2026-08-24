@@ -18052,9 +18052,11 @@ async def process_scan_plan_job(job_data: dict):
 
 
 async def process_scan_shard_job(job_data: dict):
-    """Shard stage: run run_scan() for one child scan. Findings are NOT saved to
-    the findings table here; the merge stage persists the deduped union under the
-    parent so the parent cleanly owns all findings."""
+    """Run one child through its persisted canonical action graph.
+
+    Findings are not saved to the findings table here; the merge stage persists
+    the deduplicated union under the parent so the parent owns all findings.
+    """
     job_id = job_data.get('job_id', 'unknown')
     scan_id = job_data.get('scan_id')            # child scan id
     parent_id = job_data.get('parent_scan_id')
