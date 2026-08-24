@@ -132,16 +132,80 @@ async def _assert_dirty_merge(conn) -> None:
         raise RuntimeError(f"consumed legacy fleet token was reactivated: {legacy_token!r}")
 
 
+async def _assert_rollback(conn) -> None:
+    if await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name='targets' "
+        "AND column_name='canonical_key')"
+    ):
+        raise RuntimeError("rollback retained an upgraded targets schema")
+    if await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
+        raise RuntimeError("rollback retained current migration bookkeeping")
+
+    targets = await conn.fetch(
+        "SELECT id::text, url, total_scans, active_findings_count "
+        "FROM targets WHERE id = ANY($1::uuid[]) ORDER BY id",
+        [SURVIVOR_ID, "22222222-2222-4222-8222-222222222222"],
+    )
+    if [dict(row) for row in targets] != [
+        {
+            "id": SURVIVOR_ID,
+            "url": "http://upgrade.example.test",
+            "total_scans": 3,
+            "active_findings_count": 3,
+        },
+        {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "url": "https://upgrade.example.test/",
+            "total_scans": 0,
+            "active_findings_count": 0,
+        },
+    ]:
+        raise RuntimeError(f"rollback did not restore historical targets: {targets!r}")
+
+    scan_target = await conn.fetchval(
+        "SELECT target_id::text FROM scans WHERE id = $1::uuid", SCAN_ID,
+    )
+    finding_target = await conn.fetchval(
+        "SELECT target_id::text FROM findings WHERE id = $1::uuid", FINDING_ID,
+    )
+    duplicate_id = "22222222-2222-4222-8222-222222222222"
+    if scan_target != duplicate_id or finding_target != duplicate_id:
+        raise RuntimeError(
+            "rollback did not restore legacy ownership: "
+            f"scan={scan_target}, finding={finding_target}"
+        )
+
+    token_columns = {
+        row["column_name"]
+        for row in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='node_join_tokens'"
+        )
+    }
+    if "token_id" in token_columns or "use_count" in token_columns:
+        raise RuntimeError("rollback retained upgraded fleet join-token columns")
+    if not await conn.fetchval(
+        "SELECT consumed_at IS NOT NULL FROM node_join_tokens "
+        "WHERE token_hash='upgrade-consumed-token'"
+    ):
+        raise RuntimeError("rollback lost the consumed legacy fleet token")
+
+
 async def _run(database_url: str, scenario: str) -> None:
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
     try:
-        await run_schema_migrations(pool)
-        # Both API and workers run migrations. A second pass must be harmless.
-        await run_schema_migrations(pool)
-        async with pool.acquire() as conn:
-            await _assert_common(conn)
-            if scenario == "dirty":
-                await _assert_dirty_merge(conn)
+        if scenario == "rollback":
+            async with pool.acquire() as conn:
+                await _assert_rollback(conn)
+        else:
+            await run_schema_migrations(pool)
+            # Both API and workers run migrations. A second pass must be harmless.
+            await run_schema_migrations(pool)
+            async with pool.acquire() as conn:
+                await _assert_common(conn)
+                if scenario == "dirty":
+                    await _assert_dirty_merge(conn)
     finally:
         await pool.close()
 
@@ -149,7 +213,9 @@ async def _run(database_url: str, scenario: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
-    parser.add_argument("--scenario", choices=("clean", "dirty"), required=True)
+    parser.add_argument(
+        "--scenario", choices=("clean", "dirty", "rollback"), required=True,
+    )
     args = parser.parse_args()
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL is required")

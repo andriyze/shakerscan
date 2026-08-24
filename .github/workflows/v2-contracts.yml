@@ -17,6 +17,7 @@ on:
       - api/worker.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
+      - scripts/upgrade_smoke.sh
       - db/repairs/2026-08-22_v2_budget_reservations.sql
       - db/**
       - scanner/*.py
@@ -81,6 +82,7 @@ on:
       - api/worker.py
       - api/retest_contract.py
       - scripts/upgrade_schema_smoke.py
+      - scripts/upgrade_smoke.sh
       - db/repairs/2026-08-22_v2_budget_reservations.sql
       - db/**
       - scanner/*.py

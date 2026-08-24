@@ -187,6 +187,18 @@ def test_upgrade_smoke_waits_for_final_postgres_process():
     assert "pg_isready -U scanner -d scanner" in script
 
 
+def test_upgrade_smoke_proves_stateful_backup_rollback():
+    script = (ROOT / "scripts" / "upgrade_smoke.sh").read_text()
+    verifier = (ROOT / "scripts" / "upgrade_schema_smoke.py").read_text()
+
+    assert "pg_dump -U scanner -d scanner_dirty --format=custom" in script
+    assert "dropdb -U scanner scanner_dirty" in script
+    assert "pg_restore" in script
+    assert "run_scenario scanner_dirty rollback" in script
+    assert "_assert_rollback" in verifier
+    assert 'choices=("clean", "dirty", "rollback")' in verifier
+
+
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):
     runtime = tmp_path / "runtime"
     for relative_path in (

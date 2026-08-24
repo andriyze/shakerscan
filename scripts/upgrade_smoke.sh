@@ -89,6 +89,11 @@ SQL
 docker exec -i "$SMOKE_CONTAINER" psql -v ON_ERROR_STOP=1 -U scanner -d scanner_dirty \
     < "$SMOKE_TMP/dirty.sql" >/dev/null
 
+# Preserve the exact pre-upgrade state so the smoke can prove that an operator
+# backup restores both historical rows and the published legacy schema.
+docker exec "$SMOKE_CONTAINER" pg_dump -U scanner -d scanner_dirty --format=custom \
+    > "$SMOKE_TMP/scanner_dirty.before-upgrade.dump"
+
 run_scenario() {
     local database="$1"
     local scenario="$2"
@@ -106,4 +111,11 @@ run_scenario() {
 run_scenario scanner clean
 run_scenario scanner_dirty dirty
 
-echo "Upgrade smoke passed from $BASELINE_REF using $SCANNER_IMAGE"
+docker exec "$SMOKE_CONTAINER" dropdb -U scanner scanner_dirty
+docker exec "$SMOKE_CONTAINER" createdb -U scanner scanner_dirty
+docker exec -i "$SMOKE_CONTAINER" pg_restore \
+    -U scanner -d scanner_dirty --exit-on-error \
+    < "$SMOKE_TMP/scanner_dirty.before-upgrade.dump" >/dev/null
+run_scenario scanner_dirty rollback
+
+echo "Upgrade and rollback smoke passed from $BASELINE_REF using $SCANNER_IMAGE"

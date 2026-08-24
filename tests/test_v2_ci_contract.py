@@ -26,6 +26,7 @@ def test_v2_workflow_watches_runtime_scanner_and_gate_paths():
         "api/worker.py",
         "scanner/scanner.py",
         "scanner/scanner_tools/**",
+        "scripts/upgrade_smoke.sh",
         "scripts/release_gates.py",
         "tests/test_scan_*.py",
         "tests/test_hunt_*.py",
