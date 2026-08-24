@@ -992,9 +992,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 )}
               </>
             ) : (
-              <h1 className="text-3xl font-bold mb-2 break-words">
-                {scan.url || scan.target_url || input.target || 'Unknown Target'}
-              </h1>
+              <h2 className="text-2xl font-bold mb-2">Detailed scan report</h2>
             )}
             <p className="text-gray-400">
               Scanned on {new Date(scan.created_at).toLocaleDateString()} at {new Date(scan.created_at).toLocaleTimeString()}
@@ -3366,12 +3364,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       {Array.isArray(findings) && findings.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="mb-4">
-            <h2 className="text-2xl font-bold">{rawOnlyFindings || partiallyPersistedFindings ? 'Raw Scan Findings' : 'Key Findings'}</h2>
+            <h2 className="text-2xl font-bold">{rawOnlyFindings || partiallyPersistedFindings ? 'Findings reported by this scan' : 'Key Findings'}</h2>
             {(rawOnlyFindings || partiallyPersistedFindings) && (
               <p className="mt-2 text-sm text-amber-200">
                 {rawOnlyFindings
-                  ? 'These findings are stored in this scan result. Persistent finding records may point to a newer duplicate scan because ShakerScan deduplicates repeated findings.'
-                  : `${rawFindingsWithoutRecords.length} of ${rawFindings.length} raw finding(s) are not linked to persisted finding records, so remediation actions are shown only on linked findings.`}
+                  ? 'These results came from scanner evidence but do not yet have saved finding records. They remain visible here; status and remediation actions become available after a record is linked.'
+                  : `${rawFindingsWithoutRecords.length} of ${rawFindings.length} scan result(s) do not yet have saved finding records. Status and remediation actions are available only for linked findings.`}
               </p>
             )}
           </div>
