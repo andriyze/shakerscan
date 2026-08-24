@@ -45,7 +45,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="json_output")
     args = parser.parse_args(argv)
 
-    H.preflight()
+    # Auto-selection is a local-stack acceptance and must reject stale fleets.
+    # Release validation supplies one exact candidate container explicitly; it
+    # intentionally has no API/Redis/PostgreSQL stack to preflight.
+    if args.worker_container is None:
+        H.preflight()
     worker = _worker_container(args.worker_container)
     server = FX.start(E2E.FIXTURES_PORT)
     try:

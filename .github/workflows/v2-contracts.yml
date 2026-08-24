@@ -414,6 +414,26 @@ jobs:
           docker compose exec -T worker sh -ceu 'httpx -version; nuclei -version; katana -version; dalfox version'
           SCANNER_IMAGE=shakerscan-worker:local scripts/upgrade_smoke.sh
 
+      - name: Enforce external adapter wire ceilings
+        run: |
+          mkdir -p artifacts
+          python tests/e2e/run_external_wire_acceptance.py --json \
+            > artifacts/v2-external-wire-raw.json
+          jq --arg source_sha "$GITHUB_SHA" \
+            '. + {source_sha:$source_sha}' \
+            artifacts/v2-external-wire-raw.json \
+            > artifacts/v2-external-wire.json
+          test "$(jq -r '.status' artifacts/v2-external-wire.json)" = passed
+          test "$(jq -r '.tool_count' artifacts/v2-external-wire.json)" = 9
+
+      - name: Upload external wire acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: external-wire-${{ github.sha }}
+          path: artifacts/v2-external-wire.json
+          if-no-files-found: error
+
       - name: Prove cancellation wins action admission in PostgreSQL
         run: |
           mkdir -p artifacts

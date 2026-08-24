@@ -180,6 +180,39 @@ jobs:
           docker run --rm --entrypoint python shakerscan-model-intake-signer:release-candidate \
             -c 'import boto3, model_intake_signer_service; assert boto3.__version__'
 
+      - name: Enforce candidate-image external wire ceilings
+        env:
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          worker_name="shakerscan-wire-${GITHUB_RUN_ID}"
+          cleanup() { docker rm -f "$worker_name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$worker_name" \
+            --add-host host.docker.internal:host-gateway \
+            --entrypoint sleep shakerscan-scanner:release-candidate infinity
+          image_id="$(docker image inspect --format '{{.Id}}' shakerscan-scanner:release-candidate)"
+          python tests/e2e/run_external_wire_acceptance.py \
+            --worker-container "$worker_name" --json \
+            > artifacts/release-external-wire-raw.json
+          jq --arg source_sha "$CANDIDATE_SHA" --arg worker_image_id "$image_id" \
+            '. + {source_sha:$source_sha,worker_image_id:$worker_image_id}' \
+            artifacts/release-external-wire-raw.json \
+            > artifacts/release-external-wire.json
+          test "$(jq -r '.source_sha' artifacts/release-external-wire.json)" = "$CANDIDATE_SHA"
+          test "$(jq -r '.status' artifacts/release-external-wire.json)" = passed
+          test "$(jq -r '.tool_count' artifacts/release-external-wire.json)" = 9
+
+      - name: Upload candidate external wire receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: external-wire-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/release-external-wire.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Build and self-test fixed Firecracker guest payload
         run: scripts/selftest-model-intake-guest.sh
 

@@ -129,6 +129,24 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "--area model_intake" in text
     assert "--scorecard artifacts/v2-model-intake-scorecard.json" in text
     assert "name: v2-model-intake-e2e" in text
+    assert "python tests/e2e/run_external_wire_acceptance.py --json" in text
+    assert "name: external-wire-${{ github.sha }}" in text
+
+
+def test_release_candidate_requires_candidate_image_external_wire_acceptance():
+    text = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+        encoding="utf-8",
+    )
+
+    assert "Enforce candidate-image external wire ceilings" in text
+    assert "run_external_wire_acceptance.py" in text
+    assert "shakerscan-scanner:release-candidate" in text
+    assert "source_sha:$source_sha" in text
+    assert "name: external-wire-${{ needs.meta.outputs.candidate_sha }}" in text
+    wire_runner = (
+        ROOT / "tests" / "e2e" / "run_external_wire_acceptance.py"
+    ).read_text(encoding="utf-8")
+    assert "if args.worker_container is None:" in wire_runner
 
 
 def test_package_native_and_legacy_scan_contracts_run_in_isolated_processes():
