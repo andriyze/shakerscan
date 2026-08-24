@@ -746,7 +746,22 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "internal", "passive", _HTTP_TARGETS, "scanner.tls", "1", None,
             {"tcp_ports_attempted": 4, "tool_wall_seconds": 15},
             {"network_reachability": True},
-            _schema(),
+            _schema({
+                "origins_ref": {
+                    "type": "string", "pattern": "^frozen_https_origins$",
+                },
+                "origin_count": {
+                    "type": "integer", "minimum": 1, "maximum": 64,
+                },
+                "addresses_ref": {
+                    "type": "string", "pattern": "^frozen_addresses$",
+                },
+                "address_count": {
+                    "type": "integer", "minimum": 1, "maximum": 64,
+                },
+            }, required=(
+                "origins_ref", "origin_count", "addresses_ref", "address_count",
+            )),
             "tls-observation/v2", ("tls_posture_observation",),
             hunt_executor="inline",
         ),
