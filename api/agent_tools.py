@@ -187,7 +187,7 @@ def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
     return ["-u", url, "-status-code", "-title", "-tech-detect", "-web-server",
             "-json", "-silent", "-timeout", "10", "-no-color", "-no-stdin",
             "-retries", "0", "-rate-limit", "1", "-threads", "1",
-            "-no-fallback-scheme"]
+            "-no-fallback-scheme", "-disable-update-check"]
 
 
 def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:

@@ -54,6 +54,7 @@ def test_httpx_is_exactly_one_request_without_fallback_or_redirects():
         "tool_wall_seconds": 4,
     }
     assert "-no-fallback-scheme" in plan.argv
+    assert "-disable-update-check" in plan.argv
     assert plan.argv[plan.argv.index("-retries") + 1] == "0"
     assert "-follow-redirects" not in plan.argv
     assert plan.budget_proof["accounting_mode"] == "exact"
