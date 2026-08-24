@@ -63,6 +63,26 @@ def post(path: str, body: dict, timeout: int = 30, headers: dict[str, str] | Non
             return e.code, {}
 
 
+def put(path: str, body: dict, timeout: int = 30, headers: dict[str, str] | None = None):
+    try:
+        return _req("PUT", path, body, timeout=timeout, headers=headers)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:
+            return e.code, {}
+
+
+def patch(path: str, body: dict, timeout: int = 30, headers: dict[str, str] | None = None):
+    try:
+        return _req("PATCH", path, body, timeout=timeout, headers=headers)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:
+            return e.code, {}
+
+
 def delete(path: str, timeout: int = 30, headers: dict[str, str] | None = None):
     try:
         return _req("DELETE", path, timeout=timeout, headers=headers)

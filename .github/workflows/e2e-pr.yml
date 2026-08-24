@@ -57,9 +57,10 @@ jobs:
           done
           curl -sf http://localhost:8080/health
 
-      - name: Run deterministic Model Intake and AI Gate smoke tests
+      - name: Run deterministic platform, Model Intake, and AI Gate smoke tests
         if: steps.changes.outputs.backend == 'true'
         run: |
+          python3 tests/e2e/run_e2e.py --area platform
           python3 tests/e2e/run_e2e.py --area model_intake
           python3 tests/e2e/run_e2e.py --area ai_gate
 

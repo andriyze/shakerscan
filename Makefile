@@ -3,7 +3,7 @@ PY ?= python3
 UV ?= uv
 UVX ?= uvx
 
-.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-scan-parity e2e-wire e2e-api-overlay test \
+.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-platform e2e-scan-parity e2e-wire e2e-api-overlay test \
 	release-gates dependency-lock dependency-audit installer-smoke installed-stack-smoke upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
@@ -46,6 +46,9 @@ e2e-ai-gate:
 
 e2e-dast:
 	$(PY) tests/e2e/run_e2e.py --area dast
+
+e2e-platform:
+	$(PY) tests/e2e/run_e2e.py --area platform
 
 ## Real local/outbound-broker/parallel semantic parity. Requires a ready Linux broker node.
 e2e-scan-parity:

@@ -1426,7 +1426,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
 | Canonical scanner wrapper commands | 27 | `scanner.sh` |
 | Deprecated wrapper aliases | 2 | `scanner.sh` |
-| Make targets | 16 | `Makefile` |
+| Make targets | 17 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 353 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
@@ -2133,7 +2133,7 @@ opaque profile, and collection-reference fields.
 |---|---|
 | Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `devices`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
 | Deprecated compatibility aliases (sunset 2026-12-31) | `scan-full`, `scan-smart` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory

@@ -6,6 +6,7 @@ Usage:
     python -m tests.e2e.run_e2e --area model_intake
     python -m tests.e2e.run_e2e --area ai_gate
     python -m tests.e2e.run_e2e --area dast
+    python -m tests.e2e.run_e2e --area platform
 
 Exit code is non-zero if any area's gate fails (hard CI gate). See
 docs/E2E_TEST_PLAN.md.
@@ -375,6 +376,210 @@ _RUN_NONCE = f"{os.getpid()}-{int(_time.time())}"
 def _ai_endpoint(tag: str) -> str:
     sep = "&" if "?" in AI_ENDPOINT else "?"
     return f"{AI_ENDPOINT}{sep}e2e={tag}-{_RUN_NONCE}"
+
+
+def run_platform() -> H.Scorecard:
+    """Exercise adjacent product contracts against the assembled live stack.
+
+    This lane is intentionally non-scanning. It proves that V2 Scan changes did
+    not break shared persistence, routers, or public read models, while its only
+    writes are disposable records that are disabled/deleted before return.
+    """
+    sc = H.Scorecard("platform")
+    print("\n== Platform regression e2e ==", flush=True)
+
+    health: dict = {}
+    try:
+        health = H.get("/health")
+        reconciliation = health.get("scan_action_budget_reconciliation") or {}
+        sc.check(
+            "P-1 health, persistence, and queue are ready",
+            health.get("status") == "healthy"
+            and health.get("database") == "ok"
+            and health.get("redis") == "ok"
+            and reconciliation.get("status") == "ok",
+            (
+                f"status={health.get('status')} db={health.get('database')} "
+                f"redis={health.get('redis')} reconciliation={reconciliation.get('status')}"
+            ),
+        )
+        contract = H.get("/scan/contracts")
+        sc.check(
+            "P-1 canonical Scan contract remains mounted",
+            contract.get("schema_version") == "scan-public-contract/v1"
+            and contract.get("generation") == "v2"
+            and contract.get("engine") == "scan",
+            f"schema={contract.get('schema_version')} generation={contract.get('generation')}",
+        )
+        metrics = H.get("/metrics/v2")
+        sc.check(
+            "P-1 operational metrics remain content-free and queryable",
+            metrics.get("schema_version") == "scan-operational-metrics/v1"
+            and isinstance(metrics.get("counters"), dict)
+            and isinstance(metrics.get("alerts"), list),
+            f"schema={metrics.get('schema_version')}",
+        )
+    except Exception as exc:
+        sc.error("P-1 platform health and contracts", exc)
+
+    try:
+        catalog = H.get("/asm/check-families")
+        family_names = {
+            str(item.get("name"))
+            for item in (catalog.get("families") or [])
+            if isinstance(item, dict)
+        }
+        sc.check(
+            "P-2 ASM registry remains available",
+            {"recon", "sqli", "xss", "bola"} <= family_names,
+            f"families={sorted(family_names)}",
+        )
+    except Exception as exc:
+        sc.error("P-2 ASM registry", exc)
+
+    try:
+        devices = H.get("/devices?limit=1")
+        readiness = H.get("/devices/readiness")
+        sc.check(
+            "P-3 Connected Devices inventory and readiness remain explicit",
+            isinstance(devices.get("devices"), list)
+            and readiness.get("status") in {"ready", "not_ready", "disabled"}
+            and isinstance(readiness.get("required_worker_tools"), list),
+            f"status={readiness.get('status')} total={devices.get('total')}",
+        )
+    except Exception as exc:
+        sc.error("P-3 Connected Devices surfaces", exc)
+
+    try:
+        workers = H.get("/workers")
+        fleet = health.get("fleet") or H.get("/health").get("fleet") or {}
+        sc.check(
+            "P-4 worker and Fleet state remain explicit",
+            isinstance(workers.get("workers"), list)
+            and isinstance(workers.get("stale_count"), int)
+            and fleet.get("status") in {
+                "ready", "configured", "disabled", "unsupported", "not_ready",
+            },
+            f"workers={workers.get('count')} fleet_status={fleet.get('status')}",
+        )
+    except Exception as exc:
+        sc.error("P-4 Fleet and workers surfaces", exc)
+
+    try:
+        read_contracts = (
+            ("schedules", "/schedules?limit=1", "schedules", list),
+            ("findings", "/findings?limit=1", "findings", list),
+            ("evidence", "/evidence/instances?limit=1", "evidence_instances", list),
+            ("timeline", "/timeline?limit=1", "events", list),
+            ("campaigns", "/arsenal/campaigns?limit=1", "campaigns", list),
+        )
+        failures = []
+        for label, path, field, field_type in read_contracts:
+            body = H.get(path)
+            if not isinstance(body.get(field), field_type):
+                failures.append(f"{label}:{field}={type(body.get(field)).__name__}")
+        arsenal = H.get("/arsenal/contracts")
+        if arsenal.get("execution_enabled") is not False:
+            failures.append("arsenal:execution_enabled")
+        sc.check(
+            "P-5 schedules, findings, evidence, timeline, and mission ledger read models work",
+            not failures,
+            f"failures={failures}",
+        )
+    except Exception as exc:
+        sc.error("P-5 adjacent read models", exc)
+
+    target_id = ""
+    schedule_id = ""
+    finding_id = ""
+    target_url = f"https://platform-{_RUN_NONCE}.invalid"
+    try:
+        target_status, target = H.post("/targets", {
+            "url": target_url,
+            "name": f"Disposable platform E2E {_RUN_NONCE}",
+        })
+        target_id = str(target.get("id") or "")
+        if target_status not in {200, 201} or not target_id:
+            raise RuntimeError(f"target creation failed: status={target_status} body={target}")
+
+        policy_status, policy = H.put(
+            f"/targets/{target_id}/asm/policy",
+            {"enabled": False, "config": {}},
+        )
+        coverage = H.get(f"/targets/{target_id}/asm/coverage")
+        gaps = H.get(f"/targets/{target_id}/asm/gaps")
+        sc.check(
+            "P-6 disposable target and ASM read models round-trip",
+            policy_status == 200
+            and policy.get("enabled") is False
+            and isinstance(coverage, dict)
+            and isinstance(gaps.get("recommended_campaigns"), list),
+            (
+                f"policy_status={policy_status} enabled={policy.get('enabled')} "
+                f"coverage_total={coverage.get('total')}"
+            ),
+        )
+
+        future = datetime.now(timezone.utc) + timedelta(hours=6)
+        schedule_status, schedule = H.post("/schedules", {
+            "target_id": target_id,
+            "name": f"Disposable platform E2E {_RUN_NONCE}",
+            "frequency": "daily",
+            "time_of_day": future.strftime("%H:%M"),
+            "timezone": "UTC",
+            "schedule_kind": "normal_scan",
+            "scan_type": "scan",
+            "scan_options": {"budget_profile": "fast"},
+            "jitter_minutes": 0,
+        })
+        schedule_id = str(schedule.get("id") or "")
+        if schedule_status not in {200, 201} or not schedule_id:
+            raise RuntimeError(f"schedule creation failed: status={schedule_status} body={schedule}")
+        update_status, updated = H.patch(
+            f"/schedules/{schedule_id}", {"is_active": False},
+        )
+        stored_schedule = H.get(f"/schedules/{schedule_id}")
+        sc.check(
+            "P-7 schedule create, disable, and read lifecycle works",
+            update_status == 200
+            and updated.get("status") == "updated"
+            and stored_schedule.get("is_active") is False,
+            f"update_status={update_status} active={stored_schedule.get('is_active')}",
+        )
+
+        finding_status, finding = H.post("/findings/manual", {
+            "target": target_url,
+            "title": f"Disposable platform regression record {_RUN_NONCE}",
+            "severity": "info",
+            "description": "Lifecycle-only E2E record; not a vulnerability claim.",
+            "category": "E2E",
+            "evidence": "No security finding; public persistence contract check only.",
+            "notes": "Disposable and deleted by the platform E2E lane.",
+        })
+        finding_id = str(finding.get("id") or "")
+        if finding_status not in {200, 201} or not finding_id:
+            raise RuntimeError(f"finding creation failed: status={finding_status} body={finding}")
+        evidence = H.get(f"/findings/{finding_id}/evidence")
+        listed = H.get(f"/findings?target_id={target_id}&source_type=manual&limit=10")
+        listed_ids = {str(item.get("id")) for item in (listed.get("findings") or [])}
+        sc.check(
+            "P-8 manual finding and evidence projection round-trip",
+            finding_id in listed_ids
+            and evidence.get("finding_id") == finding_id
+            and isinstance(evidence.get("evidence_objects"), list),
+            f"listed={finding_id in listed_ids} evidence_count={len(evidence.get('evidence_objects') or [])}",
+        )
+    except Exception as exc:
+        sc.error("P-6/P-7/P-8 disposable persistence lifecycle", exc)
+    finally:
+        if finding_id:
+            H.delete(f"/findings/{finding_id}")
+        if schedule_id:
+            H.delete(f"/schedules/{schedule_id}")
+        if target_id:
+            H.delete(f"/targets/{target_id}")
+
+    return sc
 
 
 def _create_ai_target(name: str, production: bool) -> str | None:
@@ -815,6 +1020,7 @@ def run_dast() -> H.Scorecard:
 
 
 AREAS = {
+    "platform": run_platform,
     "model_intake": run_model_intake,
     "ai_gate": run_ai_gate,
     "dast": run_dast,

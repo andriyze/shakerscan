@@ -2,8 +2,9 @@
 
 **Status (reconciled 2026-07-30):** this is the E2E coverage contract, not a current pass report.
 Historical `10/10`, `12/12`, and `12/12` totals were produced by an older harness/fleet and are not
-release evidence. The change-aware PR smoke workflow runs deterministic MI-1/MI-2–MI-6 and
-AI-1–AI-4 coverage. The manual full release workflow additionally runs D-1–D-4; MI-1-HF remains
+release evidence. The change-aware PR smoke workflow runs the platform regression lane,
+deterministic MI-1/MI-2–MI-6, and AI-1–AI-4 coverage. The manual full release workflow additionally
+runs D-1–D-4; MI-1-HF remains
 explicitly opt-in. Rows marked **Planned** below are not implemented in
 `tests/e2e/run_e2e.py` and must not be included in pass totals. `make e2e` skips the external
 Hugging Face row; `make e2e-model-intake` enables it, while `make e2e-model-intake-fixture` is the
@@ -25,7 +26,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 
 ## Harness (Phase 0)
 
-`tests/e2e/` — a runner invoked as `python -m tests.e2e.run_e2e --area {all|model_intake|ai_gate|dast}`:
+`tests/e2e/` — a runner invoked as `python -m tests.e2e.run_e2e --area {all|platform|model_intake|ai_gate|dast}`:
 
 1. **Preflight** — assert `/health` and a current, uniform worker fleet. Target failures then surface
    as real scan failures; optional external prerequisites are enabled explicitly.
@@ -79,6 +80,24 @@ Slow benchmark scope (quality, not the E2E release gate): authenticated smart re
 Juice Shop answer key, crAPI dual-user BOLA/IDOR + mass-assignment + JWT, precision
 (false-positive rate), Full Coverage truncation, and NUL-byte evidence persistence.
 
+### Platform regression (Phase 4)
+
+This lane does not launch a scan. It exercises the assembled API, shared database, and Redis-backed
+read models, then creates and removes a disposable target, disabled schedule, and informational
+manual-finding record. It is safe for the PR gate and protects adjacent products from Scan/Hunt
+runtime refactors.
+
+| # | Harness status | Surface | Assertion |
+|---|---|---|---|
+| P-1 | Implemented | health, canonical Scan contract, V2 metrics | database/Redis/reconciliation are healthy; canonical contract and content-free metrics are mounted |
+| P-2 | Implemented | Continuous ASM | canonical check-family registry remains queryable |
+| P-3 | Implemented | Connected Devices | inventory and explicit readiness/degraded state remain queryable |
+| P-4 | Implemented | workers and Fleet | worker freshness plus supported/disabled/unsupported Fleet state remain explicit |
+| P-5 | Implemented | schedules, findings, evidence, timeline, campaigns, Arsenal | public read models preserve their stable response contracts |
+| P-6 | Implemented | target + ASM | disposable target can disable ASM and read coverage/gap projections without launching work |
+| P-7 | Implemented | schedules | create, disable, read, and delete lifecycle works |
+| P-8 | Implemented | findings + evidence | manual record appears in filtered findings and its evidence projection, then is deleted |
+
 ## Every recent bug → the e2e test that catches it
 Implemented: MI-1 (206) · AI-2 (redaction) · AI-3 (prod bypass) · AI-4 (confirm) ·
 MI-5/6 (trust root) · D-4 (phantom chains).
@@ -87,7 +106,7 @@ Planned: AI-5 (judge guard) · D-5 (truncation + crash) · AI-6 / MI-8 (policy w
 
 ## Workflow split
 - `.github/workflows/e2e-pr.yml` runs on every pull request so it can be a required check, but starts
-  the stack and executes deterministic Model Intake and AI Gate cases only when backend, database,
+  the stack and executes the platform, deterministic Model Intake, and AI Gate cases only when backend, database,
   Compose, harness, or workflow code changed. Documentation/UI-only PRs pass without starting Docker.
 - `.github/workflows/e2e.yml` is a manual full release gate. It starts the pinned Juice Shop profile,
   proves worker-to-target reachability, and runs `--area all`. Run it on the exact approved candidate
