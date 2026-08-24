@@ -417,6 +417,27 @@ async def test_state_changing_replay_reserves_and_settles_typed_mutation_budget(
     }
 
 
+def test_canonical_action_can_bind_the_public_replay_adapter_identity():
+    outcome = asyncio.run(execute_replay_plan(
+        _plan(),
+        target=_target(),
+        owner_kind="scan",
+        owner_id="scan-1",
+        worker_id="worker-1",
+        limits={"http_requests": 10},
+        consumed={"http_requests": 0},
+        transport=FakeTransport([_result()]),
+        receipt_capability_name="collections.replay_safe",
+        receipt_adapter_name="collections.replay",
+        receipt_adapter_version="1",
+        clock=Clock(),
+    ))
+
+    assert outcome.receipt.capability_name == "collections.replay_safe"
+    assert outcome.receipt.adapter_name == "collections.replay"
+    assert outcome.receipt.adapter_version == "1"
+
+
 def test_executor_requires_bounded_transport_results():
     with pytest.raises(ReplayExecutionError, match="capture limit"):
         ReplayTransportResult(

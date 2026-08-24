@@ -373,14 +373,16 @@ def _receipt(
     receipt_id: str | None,
     receipt_context: Mapping[str, Any] | None,
     receipt_capability_name: str,
+    receipt_adapter_name: str,
+    receipt_adapter_version: str,
     receipt_input_digest: str,
 ) -> CapabilityReceipt:
     redacted_execution = plan.public_dict()
     redacted_execution.update(_normalize_receipt_context(receipt_context))
     return CapabilityReceipt(
         capability_name=receipt_capability_name,
-        adapter_name="pinned_http_replay",
-        adapter_version="1",
+        adapter_name=receipt_adapter_name,
+        adapter_version=receipt_adapter_version,
         target_id=target.target_id,
         scan_id=owner_id if owner_kind == "scan" else None,
         hunt_id=owner_id if owner_kind == "hunt" else None,
@@ -459,6 +461,8 @@ async def execute_replay_plan(
     receipt_context: Mapping[str, Any] | None = None,
     authorized_budget: Mapping[str, int] | None = None,
     receipt_capability_name: str = "collections.replay",
+    receipt_adapter_name: str = "pinned_http_replay",
+    receipt_adapter_version: str = "1",
     receipt_input_digest: str | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> ReplayExecutionOutcome:
@@ -507,9 +511,16 @@ async def execute_replay_plan(
             "authorized replay budget is smaller than the exact request plan"
         )
     normalized_receipt_capability = str(receipt_capability_name or "").strip()
+    normalized_receipt_adapter = str(receipt_adapter_name or "").strip()
+    normalized_receipt_adapter_version = str(
+        receipt_adapter_version or ""
+    ).strip()
     normalized_receipt_digest = str(receipt_input_digest or plan.input_digest).strip().lower()
-    if not normalized_receipt_capability or not re.fullmatch(
-        r"[0-9a-f]{64}", normalized_receipt_digest,
+    if (
+        not normalized_receipt_capability
+        or not normalized_receipt_adapter
+        or not normalized_receipt_adapter_version
+        or not re.fullmatch(r"[0-9a-f]{64}", normalized_receipt_digest)
     ):
         raise ReplayExecutionError("replay receipt authority is invalid")
     if initial_reservation is None:
@@ -600,6 +611,8 @@ async def execute_replay_plan(
             observations=observations, errors=(*errors, "execution_cancelled"),
             receipt_id=receipt_id, receipt_context=receipt_context,
             receipt_capability_name=normalized_receipt_capability,
+            receipt_adapter_name=normalized_receipt_adapter,
+            receipt_adapter_version=normalized_receipt_adapter_version,
             receipt_input_digest=normalized_receipt_digest,
         )
         failed = running.fail(
@@ -624,6 +637,8 @@ async def execute_replay_plan(
             observations=observations, errors=(*errors, "execution_cancelled"),
             receipt_id=receipt_id, receipt_context=receipt_context,
             receipt_capability_name=normalized_receipt_capability,
+            receipt_adapter_name=normalized_receipt_adapter,
+            receipt_adapter_version=normalized_receipt_adapter_version,
             receipt_input_digest=normalized_receipt_digest,
         )
         failed = running.fail(
@@ -650,6 +665,8 @@ async def execute_replay_plan(
             observations=observations, errors=(*errors, error_code), receipt_id=receipt_id,
             receipt_context=receipt_context,
             receipt_capability_name=normalized_receipt_capability,
+            receipt_adapter_name=normalized_receipt_adapter,
+            receipt_adapter_version=normalized_receipt_adapter_version,
             receipt_input_digest=normalized_receipt_digest,
         )
         failed = running.fail(
@@ -675,6 +692,8 @@ async def execute_replay_plan(
         observations=observations, errors=errors, receipt_id=receipt_id,
         receipt_context=receipt_context,
         receipt_capability_name=normalized_receipt_capability,
+        receipt_adapter_name=normalized_receipt_adapter,
+        receipt_adapter_version=normalized_receipt_adapter_version,
         receipt_input_digest=normalized_receipt_digest,
     )
     committed = running.commit(

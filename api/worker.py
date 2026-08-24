@@ -15525,6 +15525,15 @@ async def _execute_scan_request_collections(
                 "receipt_context": receipt_context,
                 "authorized_budget": requested_budget,
                 "receipt_capability_name": reservation_capability_name,
+                "receipt_adapter_name": (
+                    str(canonical_action.placement["adapter_name"])
+                    if canonical_action is not None
+                    else "pinned_http_replay"
+                ),
+                "receipt_adapter_version": (
+                    str(canonical_action.placement["adapter_version"])
+                    if canonical_action is not None else "1"
+                ),
                 "receipt_input_digest": action_digest,
             },
         )
