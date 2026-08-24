@@ -81,6 +81,25 @@ def test_ffuf_exact_wordlist_has_no_hidden_calibration_or_redirect_requests():
     assert plan.budget_proof["method"] == "exact_wordlist"
 
 
+def test_ffuf_scales_throughput_to_finish_immutable_wordlist_within_hold():
+    plan = _plan(
+        "ffuf",
+        {"http_requests": 220, "tool_wall_seconds": 75},
+        runtime_paths={
+            "ffuf_wordlist": "/tmp/worker-owned-list",
+            "ffuf_word_count": 108,
+        },
+    )
+
+    assert plan.hard_budget_dict == {
+        "http_requests": 108,
+        "tool_wall_seconds": 75,
+    }
+    assert int(plan.argv[plan.argv.index("-rate") + 1]) >= 2
+    assert int(plan.argv[plan.argv.index("-t") + 1]) >= 2
+    assert plan.budget_proof["inputs"]["entries"] == 108
+
+
 @pytest.mark.parametrize(
     "name,reserved,rate_flag,concurrency_flag",
     [

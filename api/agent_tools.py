@@ -689,9 +689,15 @@ def build_enforced_scanner_plan(
         ):
             raise AgentToolError("ffuf requires a bounded worker-owned wordlist")
         _replace_argv_value(argv, "-w", wordlist_path)
-        _replace_argv_value(argv, "-t", 1)
-        _replace_argv_value(argv, "-rate", 1)
-        maxtime = min(40, wall)
+        # The wordlist, not rate*time, is the exact request ceiling.  Scale
+        # throughput so the immutable list can finish inside the reservation;
+        # forcing one request per second made the 108-entry bundled list time
+        # out after only 39 requests despite a 75-second action hold.
+        maxtime = wall
+        usable_seconds = max(1, maxtime - 2)
+        rate = max(1, int(math.ceil(entry_count / usable_seconds)))
+        _replace_argv_value(argv, "-t", min(5, rate))
+        _replace_argv_value(argv, "-rate", rate)
         _replace_argv_value(argv, "-maxtime", maxtime)
         timeout_seconds = maxtime
         timeout_ms = maxtime * 1_000
@@ -699,7 +705,8 @@ def build_enforced_scanner_plan(
         mode, method = "exact", "exact_wordlist"
         proof_inputs = {
             "entries": entry_count, "auto_calibration_requests": 0,
-            "redirects": 0, "recursion": False, "threads": 1,
+            "redirects": 0, "recursion": False,
+            "threads": min(5, rate), "rate_per_second": rate,
         }
     elif scanner == "nuclei":
         http = int(reservation.get("http_requests") or 0)
