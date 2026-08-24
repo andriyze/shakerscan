@@ -20151,6 +20151,15 @@ _AGENT_TOOL_OUTPUT_BYTES = max(
 _AGENT_TOOL_RESULT_TTL_SECONDS = max(
     60, min(86_400, int(os.environ.get("SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS", "3600")))
 )
+_DIRECT_ADDRESS_SCANNERS = frozenset({"httpx", "nmap", "naabu"})
+
+
+def _agent_scanner_network_binding(name: str | None) -> str:
+    return (
+        "exact_address_subset"
+        if name in _DIRECT_ADDRESS_SCANNERS
+        else "hostname_preserving_pinned_socks5"
+    )
 
 
 def _terminate_agent_tool_process_group(proc: asyncio.subprocess.Process) -> None:
@@ -20323,12 +20332,13 @@ async def _execute_agent_scanner_process(
             int(reserved_budget.get("http_requests") or 0),
             int(reserved_budget.get("tcp_ports_attempted") or 0),
         )
-        pinned_proxy = await PinnedSocksProxy(
-            hostname=str(parsed_execution.hostname or ""),
-            pinned_address=pinned_address,
-            port=target_port,
-            max_connections=connection_ceiling,
-        ).start()
+        if name not in _DIRECT_ADDRESS_SCANNERS:
+            pinned_proxy = await PinnedSocksProxy(
+                hostname=str(parsed_execution.hostname or ""),
+                pinned_address=pinned_address,
+                port=target_port,
+                max_connections=connection_ceiling,
+            ).start()
         runtime_paths: dict[str, Any] = {}
         if name in {"ffuf", "sqlmap"}:
             scratch_dir = tempfile.mkdtemp(
@@ -20353,7 +20363,9 @@ async def _execute_agent_scanner_process(
             options,
             reserved_budget=reserved_budget,
             pinned_address=pinned_address,
-            pinned_proxy_url=pinned_proxy.proxy_url,
+            pinned_proxy_url=(
+                pinned_proxy.proxy_url if pinned_proxy is not None else None
+            ),
             oob_interactsh_server=job_data.get("oob_interactsh_server"),
             oob_interactsh_token=job_data.get("oob_interactsh_token"),
             trusted_headers=job_data.get("trusted_headers"),
@@ -20538,7 +20550,7 @@ async def _execute_agent_scanner_process(
         "process_enforcement": process_enforcement,
         "network_telemetry": network_telemetry,
         "execution_uncertain": execution_uncertain,
-        "network_binding": "hostname_preserving_pinned_socks5",
+        "network_binding": _agent_scanner_network_binding(name),
     }
 
 
@@ -21498,7 +21510,9 @@ async def process_canonical_scanner_capability_job(
                     result = _worker_terminal_network_result(
                         stored,
                         job_id=job_id,
-                        network_binding="hostname_preserving_pinned_socks5",
+                        network_binding=_agent_scanner_network_binding(
+                            spec.process_tool_name
+                        ),
                     )
                     return
                 if stored.record.status == "running":
