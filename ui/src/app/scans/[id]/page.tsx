@@ -1370,15 +1370,12 @@ function ScanDetailContent() {
         if (data?.status === 'completed' || data?.status === 'failed') {
           refreshDeploymentDecision()
         }
-        const isModelIntake = data?.run_kind === 'model_intake' || data?.scan_type === 'model_intake'
-        if (data?.status === 'running' || data?.status === 'pending' || isModelIntake) {
-          try {
-            const logData = await getScanLogs(scanId, 200)
-            setLogs(logData?.lines || [])
-            setLogsError(null)
-          } catch {
-            setLogsError('Failed to load logs')
-          }
+        try {
+          const logData = await getScanLogs(scanId, 200)
+          setLogs(logData?.lines || [])
+          setLogsError(null)
+        } catch {
+          setLogsError('Failed to load logs')
         }
       } catch (err) {
         setError('Failed to load scan details')
@@ -1441,6 +1438,15 @@ function ScanDetailContent() {
       </Card>
     )
   }
+
+  const renderStoredScanLogs = (open = false) => (
+    <details open={open} className="rounded-lg border border-gray-800 bg-gray-900/50">
+      <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+        Scan execution log ({logs.length} lines)
+      </summary>
+      <div className="px-4 pb-4">{renderScanActivityLogs(false)}</div>
+    </details>
+  )
 
   if (loading) {
     return (
@@ -1519,10 +1525,10 @@ function ScanDetailContent() {
         <div>
           <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
           <FailedScanPanel scan={scan} hasPartialResults={true} />
-          {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
           <ExecutionPlanCard scan={scan} />
+          {renderStoredScanLogs(true)}
           <AiGateCampaignReviewCard scan={scan} />
           <DeploymentDecisionCard
             decision={deploymentDecision}
@@ -1543,10 +1549,10 @@ function ScanDetailContent() {
       <div className="space-y-6">
         <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
         <FailedScanPanel scan={scan} hasPartialResults={false} />
-        {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
         <ExecutionPlanCard scan={scan} />
+        {renderStoredScanLogs(true)}
       </div>
     )
   }
@@ -1589,10 +1595,10 @@ function ScanDetailContent() {
     <div>
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
-      {(scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake') && renderScanActivityLogs(false)}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />
       <ExecutionPlanCard scan={scan} />
+      {renderStoredScanLogs()}
       <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}
