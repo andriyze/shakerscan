@@ -1999,14 +1999,21 @@ def _build_local_broker_worker_image(paths: RuntimePaths) -> str:
         raise FleetCLIError("--local-build requires a full ShakerScan source checkout")
     revision = (
         _run(
-            ["git", "-C", str(paths.root), "rev-parse", "--short=12", "HEAD"],
+            ["git", "-C", str(paths.root), "rev-parse", "HEAD"],
             check=False,
         )
         if shutil.which("git")
         else None
     )
-    suffix = str(revision.stdout or "").strip().lower() if revision is not None else ""
-    if not re.fullmatch(r"[0-9a-f]{7,12}", suffix):
+    source_revision = (
+        str(revision.stdout or "").strip().lower()
+        if revision is not None
+        else ""
+    )
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source_revision):
+        source_revision = "unknown"
+    suffix = source_revision[:12]
+    if source_revision == "unknown":
         suffix = "dev"
     image = f"shakerscan-fleet-local:{suffix}"
     # Commit-tagged development images are deliberately immutable, but keeping
@@ -2027,6 +2034,7 @@ def _build_local_broker_worker_image(paths: RuntimePaths) -> str:
         [
             "docker", "build",
             "--build-arg", f"SCANNER_VERSION={suffix}",
+            "--build-arg", f"SCANNER_SOURCE_REVISION={source_revision}",
             "--tag", image,
             "--file", str(dockerfile),
             str(paths.root),

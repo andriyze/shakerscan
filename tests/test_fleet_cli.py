@@ -893,10 +893,11 @@ def test_local_broker_build_warns_but_continues_when_disk_is_low(tmp_path, monke
     (tmp_path / "api").mkdir()
     (tmp_path / "api" / "broker_worker.py").write_text("", encoding="utf-8")
     built = []
+    revision = "abc1234567890abc1234567890abc1234567890a"
 
     def fake_run(argv, **_kwargs):
         if argv[:4] == ["git", "-C", str(tmp_path), "rev-parse"]:
-            return types.SimpleNamespace(returncode=0, stdout="abc1234\n")
+            return types.SimpleNamespace(returncode=0, stdout=f"{revision}\n")
         if argv[:2] == ["docker", "build"]:
             built.append(argv)
         return types.SimpleNamespace(returncode=0, stdout="")
@@ -914,8 +915,10 @@ def test_local_broker_build_warns_but_continues_when_disk_is_low(tmp_path, monke
         lambda _path: types.SimpleNamespace(free=2 * 1024**3),
     )
 
-    assert fleet_cli._build_local_broker_worker_image(paths) == "shakerscan-fleet-local:abc1234"
+    assert fleet_cli._build_local_broker_worker_image(paths) == "shakerscan-fleet-local:abc123456789"
     assert len(built) == 1
+    assert ["--build-arg", "SCANNER_VERSION=abc123456789"] == built[0][2:4]
+    assert ["--build-arg", f"SCANNER_SOURCE_REVISION={revision}"] == built[0][4:6]
     assert "build will continue" in capsys.readouterr().out
 
 
