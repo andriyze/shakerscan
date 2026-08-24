@@ -85,16 +85,16 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Exposure (`/exposure`)**: graph linking domains, targets, APIs, auth roles, third-party JS/vendors, cloud hints, AI targets, MCP tools, model artifacts, scans, and findings. Registered web assets can be opened directly in **Hunt**.
 - **Continuous ASM (`/asm`)**: target coverage, family proof rollups, scheduler decisions, endpoint inventory, gaps, recommendations, and target campaign timeline. **Open Hunt** carries the target and a coverage-gap objective into the canonical AI investigation flow.
 - **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
-- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect the read-only mission ledger, lifecycle state, finding impact, and action history. It is not a Deep Hunt launcher.
+- **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect the read-only mission ledger, lifecycle state, finding impact, and action history. It is not a Hunt launcher.
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
 - **Credentials (`/credentials`)**: create, rotate, inspect, and deactivate encrypted profiles bound to an exact Web, API, network, or device target. Public responses are metadata-only; profiles support primary, secondary, service, and SSH principal slots plus optional capability and expiry bounds. Legacy Web and connected-device profiles are backfilled and transactionally mirrored into this store during the V2 compatibility window; execution still decrypts only after worker-side target and approval validation.
 - **New Scan (`/scan/new`)**: one deterministic Scan with `fast`, `balanced`, or `thorough` budget ceilings; explicit active, subdomain, and network permissions; exact-target generic primary/secondary credential-profile selection; known endpoints; optional lower custom ceilings; and bounded batch submission. Reusable secret values never enter the canonical UI request or queue.
 - **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
-- **Connected Devices (`/devices`, `/devices/{id}`, `/devices/policies`)**: separate TV/camera/printer/router/appliance inventory, dedicated worker readiness, positive multi-signal reachability preflight, top-100 or all-TCP posture scans, curated UDP discovery, service/version/CPE evidence, SSH posture on discovered ports, encrypted Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 imports with redacted previews and device-pinned request-aware DAST, meaningful live scan activity, an agent-visible Smart TV capability pack, optional host-key-pinned read-only SSH host review, AI-proposed remote SSH plans that remain inert until a user confirms the exact immutable commands, ordered allow/deny/review/required-control policies, and Web/API handoff for HTTP(S) found on any port. The agentic workflow is **Device Hunt** at `/devices/{id}/agent`; it can inspect and use only user-bound request collections while secrets remain worker-only. It is separate from web-focused Deep Hunt. Silence is inconclusive and receives no score or grade. Device scans and hidden web children never create Web targets or alter ordinary DAST/ASM metrics.
+- **Connected Devices (`/devices`, `/devices/{id}`, `/devices/policies`)**: separate TV/camera/printer/router/appliance inventory, dedicated worker readiness, positive multi-signal reachability preflight, top-100 or all-TCP posture scans, curated UDP discovery, service/version/CPE evidence, SSH posture on discovered ports, encrypted Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 imports with redacted previews and device-pinned request-aware DAST, meaningful live scan activity, an agent-visible Smart TV capability pack, optional host-key-pinned read-only SSH host review, AI-proposed remote SSH plans that remain inert until a user confirms the exact immutable commands, ordered allow/deny/review/required-control policies, and Web/API handoff for HTTP(S) found on any port. Hunt uses `target_kind=device` and the same semantic runtime; it can inspect and use only user-bound request collections while secrets remain worker-only. Silence is inconclusive and receives no score or grade. Device scans and hidden web children never create Web targets or alter ordinary DAST/ASM metrics.
   Device worker capacity is opt-in (`./scanner.sh devices start|stop|status|logs`) so existing DAST worker slots and memory are unchanged.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
-- **Findings (`/findings`)**: filter by DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
-- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Deep Hunt/ASM/manual web findings.
+- **Findings (`/findings`)**: filter by DAST, Hunt, Interactive, AI Gate, Model Intake, ASM, or Manual source plus severity/status/last-seen/domain/search; sort by severity/first-seen/last-seen/CVSS; bulk cleanup with dry-run preview.
+- **Finding Detail (`/findings/{id}`)**: status triage buttons (active/resolved/false_positive/accepted_risk), **delete finding** with confirmation, source badge, analyst notes, CVSS, CWE link, evidence summary (URLs, payloads, parameters, status codes, response anomalies), remediation steps, AI analysis (verdict/confidence/rationale/recommendations), raw HTTP request/response, copy buttons for URLs/payloads/IDs, external links to vulnerable URLs, one-shot proof replay, and a bounded **Verify finding** action for target-linked DAST/Hunt/ASM/manual web findings.
 - **AI Gate (`/ai-gate`)**: create and manage AI targets, use Secure RAG + Agent presets, choose auth, target type, probe pack, profile, and environment, then queue AI safety scans for chat APIs, RAG APIs, agent traces, and MCP endpoints. *(Preview surface: deterministic real-stack PR smoke is implemented; planned policy/exception and deterministic-judge seams are not yet release-gated.)*
 - **Model Intake automatic review (`/model-intake`, default)**: paste one Hugging Face link and start. The durable server controller first requires a current, fingerprint-uniform worker fleet, then pins and completely acquires the revision, runs the existing scanner bundle, creates CycloneDX/SPDX/AIBOM artifacts, automatically performs the fixed safetensors conversion and strict target rescan for the supported unsafe `.bin` layout, runs Firecracker calibration and repeat inference when the runner is ready, freezes exact-subject evidence, and produces JSON/HTML/SARIF reports with direct artifact downloads. Fixed offline Transformers/safetensors and CPU ONNX Runtime profiles are supported; GGUF is static-only and remains `INCOMPLETE` when runtime qualification is required. Workflow completion is not a model pass: `technical_outcome` is separately `PASS`, `REVIEW_REQUIRED`, `INCOMPLETE`, or `BLOCK`; operation correctness is reported separately from network/resource containment, and human, trust, signer, policy, and deployed-data-plane controls remain pending. The next Model Intake description is the **Advanced / manual** mode.
 - **Model Intake subject boundary**: model repositories and artifacts stay in Model Intake and appear in Exposure as model-artifact nodes; they are excluded from the normal web Targets, Domains, dashboard target total, and target-dedupe surfaces. Automatic HTML reports identify the pinned source/revision and digests, state the exact incomplete step and next action, and expose both the repository manifest and per-scanner file/package coverage.
@@ -105,7 +105,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
 - **AI Operations Router (`/settings/ai-ops-router`)**: preview natural-language operations as bounded API plans with safety, missing-input, blast-radius, and confirmation details before optional execution.
 - **Hunt (`/hunt`)**: launch one target-kind-aware investigation through `/hunts`, selecting exact-target generic primary, secondary, service, and SSH credential profiles without exposing their values. The current Codex/Claude/OpenCode session owns planning; ShakerScan enforces target scope, approval, multidimensional budgets, capability execution, evidence provenance, and deterministic proof promotion. `/deep-hunt` and device-agent pages redirect for compatibility.
-- **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Deep Hunt; they are not separate engines.
+- **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Hunt; they are not separate engines.
 - **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
 - **Settings (`/settings`)**: AI providers, scan execution policy, automation defaults, and approval-receipt enforcement.
 - **Application Graph (`/targets/{id}/graph`)**: inspect persisted route/object/principal nodes, producer/consumer/auth-boundary edges, node/edge filters, search, and selected-node connections.
@@ -294,7 +294,7 @@ curl -X POST "http://localhost:8080/session/{session_id}/findings" \
 Status options: `active`, `resolved`, `false_positive`, `accepted_risk`
 
 Finding source filters are first-class: `dast`, `deep_hunt`, `ai`, `ai_gate`, `ai_session`,
-`autonomous`, `model_intake`, `device`, `asm`, and `manual`. The UI exposes DAST, Device, Deep Hunt, Interactive,
+`autonomous`, `model_intake`, `device`, `asm`, and `manual`. The UI exposes DAST, Device, Hunt, Interactive,
 AI Gate, Model Intake, ASM, and Manual controls. `deep_hunt` combines agent-native claims with
 scanner findings driven by a hunt. Use the broader `ai` compatibility filter when AI Gate and
 Interactive findings should be combined.
@@ -388,7 +388,7 @@ responses, and external OpenAPI references never execute, and every request rema
 discovered origin on the device. Same-device SSDP descriptions and a versioned TV/device API catalog
 turn confirmed application behavior into device findings. Untrusted HTTPS remains observable, but
 credentials and imported secrets are withheld unless the operator explicitly authorizes that risk
-under `authenticated_active`; Device Hunt cannot grant the override itself.
+under `authenticated_active`; Hunt cannot grant the override itself.
 
 ```bash
 # Check dedicated worker/tool readiness
@@ -425,7 +425,7 @@ Profiles are `inventory` (top 100 TCP plus a small UDP set), `posture` (all TCP 
 and `thorough` (all TCP with deeper fingerprinting plus curated UDP). After queueing, report the scan
 ID and `/devices/{device_id}?scan={scan_id}` UI link, then stop; do not poll.
 
-**Device Hunt** is the canonical target-kind-aware Hunt workflow for one registered connected
+The device-target form of **Hunt** is the canonical target-kind-aware workflow for one registered connected
 device. Route autonomous investigation of a TV, camera, printer, router, NAS, or appliance through
 `POST /hunts` with `target_kind:"device"`; use only the capabilities returned by that run. The old
 `/devices/{device_id}/agent/session` and `/device-agent/session/*` write APIs are retired and return
@@ -513,97 +513,17 @@ deterministic verifier, and finishes or cancels the run. It never sees secrets o
 
 The older Deep Hunt material below documents compatibility routes only; do not use it for new runs.
 
-#### Legacy Deep Hunt compatibility
+#### Retired Hunt compatibility surfaces
 
-Natural-language routing is strict:
+Historical `/agent/hunt/*` and `/device-agent/*` reads remain available for migration history,
+with deprecation and sunset headers. Their start/reply/confirmation writes return `410 Gone`;
+cancellation remains available so an old run can be stopped safely. They must not advertise
+`run_tool`, accept tool-name selection, or create new legacy planner state.
 
-- `scan` is the deterministic Web/API workflow. Historical mode names are request-boundary
-  compatibility translations only; they never select another engine.
-- `deep hunt`, `autonomous hunt`, and `investigate autonomously` are the keyless `/agent/hunt/*`
-  workflow below. Never translate Deep Hunt into `/research/campaigns/launch`.
-- `verify this finding` uses the bounded finding verifier/retest.
-- `interactive testing` uses `/session/*`.
-
-Deep Hunt is AI-driven exploration plus bounded active exploitation. Before launch, confirm the
-target is authorized and create a target-bound expiring credential-tier approval. Standard installs
-enable gated execution by default; `AI_OPS_ROUTER_EXECUTE_ENABLED=false` is the administrator's
-global kill switch. The current coding-agent session is the planner; no stored AI provider key is
-required. ShakerScan seeds a redacted context pack, then suspends at each turn; the
-session reads the transcript, requests tools with a fenced
-` ```json {"tool_calls":[...]} ``` ` block (or ends with a `{"done":true,"findings":[...]}` debrief),
-and the server executes the tools (same-target-host/approval-gated, with explicit scheme/port origins)
-and returns the next observation. Tools:
-`http_request` (send as a server-managed `as_principal` — credentials are never model-visible),
-`query_kb`, `diff`, `note`, and a bounded argv-templated `run_tool`.
-
-Deep Hunt enables bounded active `run_tool` templates. Arbitrary state-changing HTTP remains blocked
-in the free-form loop; mutations belong to typed workflows with cleanup/restoration contracts.
-Findings land in the **SUSPECTED** tier only after the provenance gate resolves real tool evidence.
-Supported claims may become **VERIFIED** only through deterministic server re-execution.
-
-Business-logic families (access_control, field_constraint, workflow_transition) verify through
-operator-approved typed invariant contracts: the hunt auto-drafts review candidates from black-box
-facts (endpoint expectations, app-graph auth_boundary edges, its own SUSPECTED findings) at board
-seeding — drafts never auto-approve. Approve a draft, then re-verify. workflow_transition contracts
-require a `probe_state` (the forbidden target state to attempt) at approval time.
-
-The first observation returned by `session` is itself a full system prompt (tool arsenal, the
-RECON→PLAN→EXECUTE→EVIDENCE→SELF-CRITIQUE cadence, and the exact debrief schema) — read it; the harness
-self-describes the contract each turn. Three things trip up a first-time driver:
-- **Evidence is `evidence_refs`, not prose.** Each debrief finding proves itself ONLY through
-  `evidence_refs` — normally the `resp_N` refs returned by `http_request`; the runtime also accepts
-  `scan_N` refs from successful `run_tool` calls, although the current text contract does not advertise
-  them. The server resolves cited refs into tool-output evidence for the provenance gate. Inline
-  `evidence`/`details` prose is NOT evidence; a prose-only finding fails the gate and persists nothing.
-  Debrief shape:
-  `{"done":true,"findings":[{"title","severity","family","predicate","route","method","cwe","details","evidence_refs":["resp_1","resp_2"],"remediation"}],"abstained":false}`.
-- **The coding agent drives each turn** — reply while `status: awaiting_planner` and
-  STOP on any terminal status (a run ends `completed`, `failed`, or `cancelled`, not only `completed`;
-  check `stop_reason`). Do not keep replying to a terminal run.
-- **Authenticated targets need principals configured FIRST.** Provision managed principals + credential
-  profiles on the target (`POST /targets/{id}/principals` + credential profiles; `as_principal` reads
-  the profile server-side) before starting, or the hunt runs anonymous-only. crAPI-style JWTs expire,
-  so rotate stale profiles (`POST /targets/{id}/credential-profiles/{profile_id}/rotate`) first.
-
-```bash
-# Start Deep Hunt. The approval must be credential-tier, target-bound, and unexpired.
-curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
-  -H "Content-Type: application/json" \
-  -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
-       "mode":"deep_hunt","max_iterations":20,
-       "approval_receipt_id":"approval-uuid"}'
-
-# Optional grey-box grounding (B2): when you have the target's source locally, set
-# SHAKERSCAN_SOURCE_ROOT on the API host to the containing tree (mounted into the api container),
-# then pass source_dir. The hunt gets a security-ranked source_excerpt pack section + source-derived
-# leads. Containment is enforced (realpath both sides; 400 outside the root). Black-box is the default.
-curl -X POST http://localhost:8080/agent/hunt/{target_id}/session \
-  -H "Content-Type: application/json" \
-  -d '{"objective":"Explore autonomously and verify the highest-value weaknesses",
-       "mode":"deep_hunt","max_iterations":20,
-       "approval_receipt_id":"approval-uuid",
-       "source_dir":"/srv/sources/juice-shop"}'
-
-# Submit one planner reply (a tool_calls block or a final debrief); get the next observation.
-curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
-  -H "Content-Type: application/json" \
-  -d '{"reply": "```json\n{\"tool_calls\":[{\"name\":\"query_kb\",\"arguments\":{\"kind\":\"findings\"}}]}\n```"}'
-
-# Final debrief — evidence_refs are the resp_N refs from prior http_request calls that PROVE the finding.
-curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/reply \
-  -H "Content-Type: application/json" \
-  -d '{"reply": "```json\n{\"done\":true,\"findings\":[{\"title\":\"Excessive data exposure in feed\",\"severity\":\"medium\",\"family\":\"data_exposure\",\"predicate\":\"sensitive_value_present\",\"route\":\"/api/feed\",\"method\":\"GET\",\"cwe\":\"CWE-200\",\"details\":\"non-requester email present; identical across principals\",\"evidence_refs\":[\"resp_1\",\"resp_2\"]}],\"abstained\":false}\n```"}'
-
-# Inspect / cancel
-curl http://localhost:8080/agent/hunt/session/{run_id}
-curl -X POST http://localhost:8080/agent/hunt/session/{run_id}/cancel
-
-# Two-tier finding view for the target (VERIFIED moat vs SUSPECTED agent)
-curl http://localhost:8080/agent/findings/{target_id}
-```
-
-The compatibility `/research/*` episode controller remains available for specialized guided
-verification, exact-finding missions, and legacy runs. It is not the Deep Hunt launcher.
+Historical UI routes under `/deep-hunt` may redirect to `/hunt` or display read-only records.
+“Deep Hunt” and “Device Hunt” are compatibility search terms only. New work always creates one
+target-kind-aware `POST /hunts` run and invokes only semantic capabilities from that run's
+server-returned manifest.
 
 ### Subdomain Discovery
 

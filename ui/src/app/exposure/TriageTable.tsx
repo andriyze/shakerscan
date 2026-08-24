@@ -416,7 +416,7 @@ function AssetDetailDrawer({
     try {
       await onInvestigate(asset)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to open Deep Hunt')
+      toast.error(err instanceof Error ? err.message : 'Failed to open Hunt')
     } finally {
       setAutonomousLoading(false)
     }

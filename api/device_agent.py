@@ -376,7 +376,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "properties": {
                     "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
                     "include_web_dast": {"type": "boolean"},
-                    "web_scan_type": {"type": "string", "enum": ["quick", "standard", "deep"]},
+                    "web_budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough"]},
                     "include_imported_requests": {"type": "boolean"},
                     "reason": {"type": "string", "maxLength": 500},
                     "capability_ids": {
@@ -560,7 +560,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "inspect_capabilities": set(),
         "inspect_request_collections": set(),
         "propose_ssh_shell": {"port", "commands", "timeout_seconds", "purpose", "risk_summary"},
-        "queue_device_scan": {"coverage_profile", "include_web_dast", "web_scan_type", "include_imported_requests", "reason", "capability_ids"},
+        "queue_device_scan": {"coverage_profile", "include_web_dast", "web_budget_profile", "include_imported_requests", "reason", "capability_ids"},
         "inspect_device_scan": {"scan_id"},
         "query_device_evidence": {"scan_id", "collection", "kind", "limit"},
         "diff_scans": {"scan_a", "scan_b"},
@@ -579,9 +579,11 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         coverage = str(args.get("coverage_profile") or "").lower()
         if coverage not in {"inventory", "posture", "thorough"}:
             raise ValueError("queue_device_scan coverage_profile is invalid")
-        web_type = str(args.get("web_scan_type") or "standard").lower()
-        if web_type not in {"quick", "standard", "deep"}:
-            raise ValueError("queue_device_scan web_scan_type is invalid")
+        web_budget_profile = str(
+            args.get("web_budget_profile") or "balanced"
+        ).lower()
+        if web_budget_profile not in {"fast", "balanced", "thorough"}:
+            raise ValueError("queue_device_scan web_budget_profile is invalid")
         reason = str(args.get("reason") or "").strip()
         if not reason:
             raise ValueError("queue_device_scan reason is required")
@@ -595,7 +597,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         args = {
             "coverage_profile": coverage,
             "include_web_dast": bool(args.get("include_web_dast", True)),
-            "web_scan_type": web_type,
+            "web_budget_profile": web_budget_profile,
             "include_imported_requests": bool(args.get("include_imported_requests", False)),
             "reason": reason[:500],
             "capability_ids": capability_ids,

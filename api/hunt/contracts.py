@@ -103,22 +103,9 @@ def resolve_hunt_policy(
     )
 
 
-def _capability_public(spec: CapabilitySpec) -> dict[str, Any]:
-    return {
-        "name": spec.name,
-        "description": spec.description,
-        "risk_tier": spec.risk_tier,
-        "input_schema": dict(spec.input_schema),
-        "output_schema": spec.output_schema,
-        "budget_cost": dict(spec.budget_cost),
-        "required_approval": spec.required_approval,
-        "evidence_contract": list(spec.evidence_contract),
-    }
-
-
 def capability_manifest(policy: HuntPolicy) -> list[dict[str, Any]]:
     return [
-        _capability_public(spec)
+        spec.planner_contract()
         for spec in CAPABILITY_REGISTRY.list(
             target_kind=policy.target_kind,
             include_active=policy.active_testing,

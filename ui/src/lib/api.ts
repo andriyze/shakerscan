@@ -5447,7 +5447,7 @@ export async function getDeviceScanActivity(scanId: string): Promise<DeviceScanA
 
 export async function getDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Device Hunt'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load device Hunt'))
   return res.json()
 }
 
@@ -5462,13 +5462,13 @@ export async function listDeviceAgentSessions(params: {
   if (params.limit) search.set('limit', String(params.limit))
   const suffix = search.size ? `?${search.toString()}` : ''
   const res = await fetch(`${API_URL}/device-agent/runs${suffix}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to list Device Hunt runs'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to list device Hunt runs'))
   return res.json()
 }
 
 export async function cancelDeviceAgentSession(runId: string): Promise<DeviceAgentSession> {
   const res = await fetch(`${API_URL}/device-agent/session/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel Device Hunt'))
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cancel device Hunt'))
   return res.json()
 }
 

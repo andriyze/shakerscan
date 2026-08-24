@@ -7,6 +7,8 @@ details. This module deliberately contains no planner logic and does not execute
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import re
 from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping
 
@@ -15,6 +17,22 @@ ExecutionKind = Literal[
     "internal", "http", "browser", "network_tcp", "network_udp", "external_tool"
 ]
 RiskTier = Literal["read_only", "passive", "active", "credential", "mutation"]
+HuntExecutor = Literal[
+    "inline",
+    "worker_network",
+    "worker_browser",
+    "worker_scanner",
+    "worker_replay",
+    "device_control",
+    "device_http",
+    "device_queue",
+    "device_ssh_proposal",
+    "confirmation",
+]
+
+
+class CapabilityInputContractError(ValueError):
+    """Planner input does not match the capability registry schema."""
 
 
 @dataclass(frozen=True)
@@ -42,6 +60,7 @@ class CapabilitySpec:
     arsenal_status: str = "wired"
     retest_contract: str | None = None
     planner_visible: bool = True
+    hunt_executor: HuntExecutor | None = None
     redaction_contract: tuple[str, ...] = (
         "authorization headers", "cookies", "tokens", "private keys"
     )
@@ -53,6 +72,10 @@ class CapabilitySpec:
             raise ValueError("default_timeout_ms must be positive")
         if not self.target_kinds:
             raise ValueError("target_kinds must not be empty")
+        if self.planner_visible and self.hunt_executor is None:
+            raise ValueError(
+                f"planner-visible capability {self.name} requires a Hunt executor"
+            )
         for dimension, amount in self.budget_cost.items():
             if not str(dimension).strip() or int(amount) < 0:
                 raise ValueError("budget costs require named non-negative dimensions")
@@ -80,6 +103,35 @@ class CapabilitySpec:
             "output_schema": self.output_schema,
             "evidence_contract": self.evidence_contract,
             "placement_requirements": dict(self.placement_requirements),
+        }
+
+    def planner_contract(self) -> dict[str, Any]:
+        """Return semantic planner authority without leaking adapter/tool selection."""
+        placement_keys = {
+            "network_reachability",
+            "runtime_target_binding",
+            "durable_reservation",
+            "device_worker",
+            "control_plane",
+            "worker_private_result",
+            "credentials_resolved_server_side",
+            "user_confirmation",
+        }
+        return {
+            "name": self.name,
+            "description": self.description,
+            "risk_tier": self.risk_tier,
+            "target_kinds": sorted(self.target_kinds),
+            "input_schema": dict(self.input_schema),
+            "output_schema": self.output_schema,
+            "budget_cost": dict(self.budget_cost),
+            "required_approval": self.required_approval,
+            "placement": {
+                key: value
+                for key, value in self.placement_requirements.items()
+                if key in placement_keys
+            },
+            "evidence_contract": list(self.evidence_contract),
         }
 
 
@@ -143,6 +195,101 @@ class CapabilityRegistry:
 
     def required_binaries(self) -> frozenset[str]:
         return frozenset(spec.binary for spec in self.external_tools() if spec.binary)
+
+    def for_hunt_executor(self, executor: HuntExecutor) -> tuple[CapabilitySpec, ...]:
+        return tuple(
+            spec for spec in self._by_name.values()
+            if spec.hunt_executor == executor
+        )
+
+    def validate_input(self, name: str, value: Any) -> dict[str, Any]:
+        spec = self.require(name)
+        if not isinstance(value, Mapping):
+            raise CapabilityInputContractError("capability input must be an object")
+        try:
+            encoded = json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise CapabilityInputContractError(
+                "capability input must be JSON serializable"
+            ) from exc
+        if len(encoded) > 65_536:
+            raise CapabilityInputContractError(
+                "capability input exceeds the 65536-byte limit"
+            )
+        _validate_schema_value(spec.input_schema, value, path="input", depth=0)
+        return dict(value)
+
+
+def _validate_schema_value(
+    schema: Mapping[str, Any], value: Any, *, path: str, depth: int,
+) -> None:
+    """Enforce the bounded JSON-Schema subset used by the canonical registry."""
+    if depth > 12:
+        raise CapabilityInputContractError(f"{path} is nested too deeply")
+    expected = schema.get("type")
+    if expected == "object":
+        if not isinstance(value, Mapping):
+            raise CapabilityInputContractError(f"{path} must be an object")
+        if len(value) > 256:
+            raise CapabilityInputContractError(f"{path} has too many fields")
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or ())
+        missing = sorted(required - set(value))
+        if missing:
+            raise CapabilityInputContractError(
+                f"{path} is missing required fields: {', '.join(missing)}"
+            )
+        if schema.get("additionalProperties") is False:
+            unknown = sorted(set(value) - set(properties))
+            if unknown:
+                raise CapabilityInputContractError(
+                    f"{path} contains unsupported fields: {', '.join(unknown)}"
+                )
+        for key, item in value.items():
+            child = properties.get(key)
+            if isinstance(child, Mapping):
+                _validate_schema_value(
+                    child, item, path=f"{path}.{key}", depth=depth + 1,
+                )
+    elif expected == "array":
+        if not isinstance(value, (list, tuple)):
+            raise CapabilityInputContractError(f"{path} must be an array")
+        minimum = int(schema.get("minItems") or 0)
+        maximum = int(schema.get("maxItems") or 2_048)
+        if not minimum <= len(value) <= maximum:
+            raise CapabilityInputContractError(
+                f"{path} must contain between {minimum} and {maximum} items"
+            )
+        item_schema = schema.get("items")
+        if isinstance(item_schema, Mapping):
+            for index, item in enumerate(value):
+                _validate_schema_value(
+                    item_schema, item, path=f"{path}[{index}]", depth=depth + 1,
+                )
+    elif expected == "string":
+        if not isinstance(value, str):
+            raise CapabilityInputContractError(f"{path} must be a string")
+        if len(value) < int(schema.get("minLength") or 0):
+            raise CapabilityInputContractError(f"{path} is too short")
+        if len(value) > int(schema.get("maxLength") or 16_384):
+            raise CapabilityInputContractError(f"{path} is too long")
+        pattern = schema.get("pattern")
+        if pattern and re.fullmatch(str(pattern), value) is None:
+            raise CapabilityInputContractError(f"{path} has an invalid format")
+    elif expected == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise CapabilityInputContractError(f"{path} must be an integer")
+        if "minimum" in schema and value < int(schema["minimum"]):
+            raise CapabilityInputContractError(f"{path} is below its minimum")
+        if "maximum" in schema and value > int(schema["maximum"]):
+            raise CapabilityInputContractError(f"{path} exceeds its maximum")
+    elif expected == "boolean":
+        if not isinstance(value, bool):
+            raise CapabilityInputContractError(f"{path} must be a boolean")
+    if "enum" in schema and value not in schema["enum"]:
+        raise CapabilityInputContractError(f"{path} is not an allowed value")
 
 
 _HTTP_TARGETS = frozenset({"web", "api"})
@@ -224,6 +371,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _http_principal_schema(),
             "httpx-json/v1", ("http_observation",), "httpx", "httpx", 30_000,
             ("-version",), ("/opt/tools/httpx",),
+            hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
             "templates.scan", "Bounded target-bound Nuclei HTTP template scan.",
@@ -240,6 +388,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "nuclei-jsonl/v1", ("template_match", "request_response"),
             "nuclei", "nuclei", 300_000, ("-version",), ("/opt/tools/nuclei",),
             retest_contract="rerun-template-or-family-on-same-surface",
+            hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
             "templates.passive_scan",
@@ -275,6 +424,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _http_principal_schema(),
             "katana-lines/v1", ("crawl_observation",), "katana", "katana", 75_000,
             ("-version",), ("/opt/tools/katana",),
+            hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
             "web.content_discover", "Bounded content discovery using a bundled wordlist.",
@@ -288,6 +438,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             }),
             "ffuf-json/v1", ("content_discovery_observation",), "ffuf", "ffuf", 75_000,
             ("-V",), ("/opt/tools/ffuf",),
+            hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
             "xss.verify", "Bounded target-bound Dalfox XSS verification.",
@@ -301,6 +452,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             }),
             "dalfox-jsonl/v1", ("xss_reflection_or_browser_proof",),
             "dalfox", "dalfox", 120_000, ("version",), ("/opt/tools/dalfox",),
+            hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
             "sqli.verify", "Bounded target-bound SQL injection verification.",
@@ -311,6 +463,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "sqlmap-output/v1", ("sqli_dbms_or_error_proof",),
             "sqlmap", "sqlmap", 300_000, ("--version",), ("/opt/tools/sqlmap",),
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",
+            hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
             "xss.request_verify",
@@ -381,6 +534,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "nmap-xml/v1", ("open_port_observation", "service_observation"),
             "nmap", "nmap", 90_000, ("--version",), ("/opt/tools/nmap",),
             arsenal_status="gated",
+            hunt_executor="worker_network",
         ),
         CapabilitySpec(
             "ports.discover", "Bounded connection-based TCP port discovery.",
@@ -393,6 +547,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "naabu-jsonl/v1", ("open_port_observation",),
             "naabu", "naabu", 120_000, ("-version",), ("/opt/tools/naabu",),
             arsenal_status="gated",
+            hunt_executor="worker_network",
         ),
         CapabilitySpec(
             "subdomains.discover", "Passive target-root-bound subdomain discovery.",
@@ -402,6 +557,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({"root_domain": {"type": "string"}}), "subfinder-lines/v1",
             ("passive_discovery_observation",), binary="subfinder", default_timeout_ms=120_000,
             version_args=("-version",), common_paths=("/opt/tools/subfinder",),
+            hunt_executor="worker_network",
         ),
         CapabilitySpec(
             "http.request", "Send one target-pinned read-only request, optionally as a managed principal.",
@@ -414,8 +570,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
                 "follow_redirects": {"type": "boolean"},
-            }),
+            }, required=("method", "path")),
             "http-observation/v1", ("http_observation", "tool_receipt"),
+            hunt_executor="inline",
         ),
         CapabilitySpec(
             "auth.session.establish",
@@ -488,15 +645,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "internal", "passive", _HTTP_TARGETS, "scanner.tls", "1", None,
             {"tcp_ports_attempted": 4, "tool_wall_seconds": 15},
             {"network_reachability": True},
-            _schema({
-                "origins_ref": {"type": "string", "enum": ["frozen_https_origins"]},
-                "origin_count": {"type": "integer", "minimum": 1, "maximum": 64},
-                "addresses_ref": {"type": "string", "enum": ["frozen_addresses"]},
-                "address_count": {"type": "integer", "minimum": 1, "maximum": 64},
-            }, required=(
-                "origins_ref", "origin_count", "addresses_ref", "address_count",
-            )),
+            _schema(),
             "tls-observation/v2", ("tls_posture_observation",),
+            hunt_executor="inline",
         ),
         CapabilitySpec(
             "dns.inspect", "Inspect bounded DNS and mail-policy records for the frozen host.",
@@ -542,6 +693,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "browser-navigation/v1",
             ("browser_navigation_observation", "http_observation", "tool_receipt"),
             default_timeout_ms=30_000,
+            hunt_executor="worker_browser",
         ),
         CapabilitySpec(
             "browser.interact",
@@ -577,24 +729,28 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "browser-interaction/v1",
             ("browser_interaction_observation", "http_observation", "tool_receipt"),
             default_timeout_ms=30_000,
+            hunt_executor="worker_browser",
         ),
         CapabilitySpec(
             "device.inspect", "Inspect the registered device, services, scans, and posture evidence.",
             "internal", "read_only", frozenset({"device"}), "device.inspect_device", "1",
             None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(), "device-context/v1",
             ("device_inventory_observation",),
+            hunt_executor="device_control",
         ),
         CapabilitySpec(
             "device.capabilities.inspect", "Inspect device-class protocol and application capabilities.",
             "internal", "read_only", frozenset({"device"}), "device.inspect_capabilities", "1",
             None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(), "device-capabilities/v1",
             ("device_capability_observation",),
+            hunt_executor="device_control",
         ),
         CapabilitySpec(
             "collections.inspect", "Inspect redacted request collections bound to this Hunt.",
             "internal", "read_only", frozenset({"web", "api", "device"}),
             "collections.inspect", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(),
             "request-collection-index/v2", ("request_collection_observation",),
+            hunt_executor="inline",
         ),
         CapabilitySpec(
             "collections.select", "Select a bounded redacted request subset from a bound collection.",
@@ -602,8 +758,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "collections.select", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},
-                     "limit": {"type": "integer", "maximum": 200}}),
+                     "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                    required=("collection_id",)),
             "request-collection-selection/v2", ("request_collection_observation",),
+            hunt_executor="inline",
         ),
         CapabilitySpec(
             "collections.replay_safe", "Replay up to 25 safe-method requests from a bound collection.",
@@ -611,11 +769,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},
-                     "limit": {"type": "integer", "maximum": 25},
+                     "limit": {"type": "integer", "minimum": 1, "maximum": 25},
                      "as_principal": {"type": "string", "enum": [
                          "anonymous", "primary", "secondary", "service",
-                     ]}}),
+                     ]}}, required=("collection_id",)),
             "request-collection-replay/v2", ("http_observation", "tool_receipt"),
+            hunt_executor="worker_replay",
         ),
         CapabilitySpec(
             "collections.replay_active",
@@ -646,8 +805,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "device.http.probe", "Send one target-pinned read-only request to a confirmed device web origin.",
             "http", "passive", frozenset({"device"}), "device.device_http_request", "1",
             None, {"http_requests": 1, "tool_wall_seconds": 10, "device_fragility_points": 1}, {"network_reachability": True},
-            _schema({"path": {"type": "string"}, "method": {"type": "string", "enum": ["GET", "HEAD"]}, "origin_port": {"type": "integer"}}),
+            _schema({"path": {"type": "string", "minLength": 1, "maxLength": 2048}, "method": {"type": "string", "enum": ["GET", "HEAD"]}, "origin_port": {"type": "integer", "minimum": 1, "maximum": 65535}}, required=("path",)),
             "device-http-observation/v1", ("http_observation",),
+            hunt_executor="device_http",
         ),
         CapabilitySpec(
             "device.scan", "Queue one bounded device posture scan through the canonical scanner pipeline.",
@@ -656,19 +816,21 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
                 "include_web_dast": {"type": "boolean"},
-                "web_scan_type": {"type": "string", "enum": ["quick", "standard", "deep"]},
+                "web_budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough"]},
                 "include_imported_requests": {"type": "boolean"},
                 "reason": {"type": "string", "maxLength": 500},
                 "capability_ids": {"type": "array", "items": {"type": "string", "enum": ["ssh-authenticated-host-review"]}, "maxItems": 1},
             }, required=("coverage_profile", "reason")),
             "device-scan-queue/v1", ("scan_receipt",),
+            hunt_executor="device_queue",
         ),
         CapabilitySpec(
             "device.service.verify", "Queue a typed, fixed-port service-state verifier.",
             "internal", "active", frozenset({"device"}), "device.verify_service_state", "1",
             "active_testing", {"active_actions": 1, "tcp_ports_attempted": 1, "udp_ports_attempted": 1, "tool_wall_seconds": 30, "device_fragility_points": 6}, {"device_worker": True},
-            _schema({"transport": {"type": "string", "enum": ["tcp", "udp"]}, "port": {"type": "integer"}, "expected_state": {"type": "string"}, "reason": {"type": "string"}}),
+            _schema({"transport": {"type": "string", "enum": ["tcp", "udp"]}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "expected_state": {"type": "string", "enum": ["open", "closed"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 500}}, required=("transport", "port", "expected_state", "reason")),
             "device-service-verification/v1", ("service_state_observation",),
+            hunt_executor="device_queue",
         ),
         CapabilitySpec(
             "device.ssh.propose", "Propose an immutable command plan for a bound, host-key-pinned SSH service; this does not execute it.",
@@ -682,6 +844,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "risk_summary": {"type": "string", "minLength": 1, "maxLength": 1000},
             }, required=("port", "commands", "purpose", "risk_summary")),
             "device-ssh-plan/v1", ("immutable_shell_plan", "user_confirmation_required"),
+            hunt_executor="device_ssh_proposal",
         ),
         CapabilitySpec(
             "device.ssh.execute_confirmed", "Queue one immutable SSH command plan only after the user confirms its exact digest and remote-device effects.",
@@ -698,6 +861,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "device-ssh-execution-queue/v1",
             ("immutable_shell_plan", "user_confirmation_receipt", "scan_receipt"),
             planner_visible=False,
+            hunt_executor="confirmation",
         ),
     )
 )

@@ -287,7 +287,7 @@ export default function RunDetailPage() {
           {plannerMode === 'local_codex' ? (
             <code className="mt-1 block text-xs text-blue-200">shakerscan research {detail.episode.id} 5</code>
           ) : (
-            <span className="mt-1 block text-xs text-gray-400">Return to the agent session that launched this hunt and ask it to continue Deep Hunt.</span>
+            <span className="mt-1 block text-xs text-gray-400">Return to the agent session that launched this investigation and ask it to continue Hunt.</span>
           )}
         </div>
       ) : null}

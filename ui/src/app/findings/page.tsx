@@ -65,7 +65,7 @@ const SOURCE_TYPE_OPTIONS = [
   { value: '', label: 'All' },
   { value: 'dast', label: 'DAST' },
   { value: 'device', label: 'Device' },
-  { value: 'deep_hunt', label: 'Deep Hunt' },
+  { value: 'deep_hunt', label: 'Hunt' },
   { value: 'ai_gate', label: 'AI Gate' },
   { value: 'ai_session', label: 'Interactive' },
   { value: 'model_intake', label: 'Model Intake' },
@@ -89,7 +89,7 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
     return 'Interactive'
   }
   if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
-    return 'Deep Hunt'
+    return 'Hunt'
   }
   if (finding.source === 'asm') {
     return 'ASM'
@@ -508,7 +508,7 @@ function FindingsContent() {
           More filters and sorting
         </summary>
         <div className="flex flex-wrap items-center gap-4 border-t border-gray-800 p-4">
-        {/* User-facing finding source. Deep Hunt includes direct AI claims and
+        {/* User-facing finding source. Hunt includes direct AI claims and
             DAST work launched as part of a hunt. */}
         <div className="flex items-center gap-2">
           <label className="text-sm text-gray-400">Source:</label>

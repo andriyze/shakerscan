@@ -61,7 +61,7 @@ export default function InvestigationCandidatesPage() {
     <div className="space-y-6">
       <PageHeader
         title="Investigation candidates"
-        description="Evidence-backed Deep Hunt and Device Hunt claims awaiting deterministic proof. Candidates are not findings and never carry promotion authority."
+        description="Evidence-backed Hunt claims awaiting deterministic proof. Candidates are not findings and never carry promotion authority."
         backHref="/findings"
         backLabel="Back to verified findings"
       />
@@ -75,8 +75,8 @@ export default function InvestigationCandidatesPage() {
             className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-gray-200"
           >
             <option value="">Web and devices</option>
-            <option value="web">Deep Hunt</option>
-            <option value="device">Device Hunt</option>
+            <option value="web">Hunt · web/API</option>
+            <option value="device">Hunt · device</option>
           </select>
         </label>
         <label className="flex items-center gap-2 text-sm text-gray-400">
@@ -111,7 +111,7 @@ export default function InvestigationCandidatesPage() {
                         {candidate.status.replace(/_/g, ' ')}
                       </span>
                       <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-400">
-                        {candidate.plane === 'device' ? 'Device Hunt' : 'Deep Hunt'}
+                        {candidate.plane === 'device' ? 'Hunt · device' : 'Hunt · web/API'}
                       </span>
                     </div>
                     <h2 className="mt-3 font-medium text-gray-100">{candidate.title}</h2>
@@ -121,7 +121,7 @@ export default function InvestigationCandidatesPage() {
                     </p>
                   </div>
                   <Link href={sourceHref} className={buttonClasses('secondary', 'sm')}>
-                    Open {candidate.plane === 'device' ? 'Device Hunt' : 'Deep Hunt'}
+                    Open Hunt
                   </Link>
                 </div>
               </Card>

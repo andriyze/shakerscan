@@ -1196,7 +1196,7 @@ export default function InteractiveSessionPage() {
         <Card className="p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-white">Business Rules for Deep Hunt</h2>
+              <h2 className="text-lg font-semibold text-white">Business Rules for Hunt</h2>
               <p className="mt-1 text-xs text-gray-500">
                 One short rule becomes a typed draft. Approval guides planning only; live deterministic replay is still required.
               </p>

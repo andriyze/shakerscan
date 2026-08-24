@@ -57,7 +57,7 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
     return 'Interactive'
   }
   if (finding.source === 'autonomous' || finding.tool === 'autonomous_workflow' || getFindingResearchProvenance(finding)) {
-    return 'Deep Hunt'
+    return 'Hunt'
   }
   if (finding.source === 'asm') {
     return 'ASM'
@@ -75,7 +75,7 @@ function isAiReplayFinding(finding: Finding): boolean {
 
 function autonomousWebTargetUrl(finding: Finding): string | null {
   const sourceType = getFindingSourceType(finding)
-  if (!finding.target_id || !(['DAST', 'Deep Hunt', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
+  if (!finding.target_id || !(['DAST', 'Hunt', 'ASM', 'Manual'] as FindingSourceType[]).includes(sourceType)) return null
   const candidate = finding.target_url || finding.url
   if (!candidate) return null
   try {
@@ -92,7 +92,7 @@ function autonomousUnsupportedReason(finding: Finding): string {
     return 'Model Intake findings must be investigated by re-running the artifact check.'
   }
   if (sourceType === 'AI Gate' || sourceType === 'Interactive') {
-    return 'These findings use their dedicated replay workflow; web verification supports DAST, Deep Hunt, ASM, and manual findings.'
+    return 'These findings use their dedicated replay workflow; web verification supports DAST, Hunt, ASM, and manual findings.'
   }
   if (!finding.target_id) {
     return 'This finding is not linked to a ShakerScan web target.'

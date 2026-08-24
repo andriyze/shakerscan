@@ -50,7 +50,8 @@ def test_device_http_receipts_strip_query_values_but_keep_digest_binding():
     handler = _handler_source()
 
     assert "_hunt_redacted_capability_input(name, request.input)" in handler
-    assert "json.dumps(_hunt_redacted_capability_input(name, request.input))" in handler
+    assert '"input": _hunt_redacted_capability_input(name, request.input)' in handler
+    assert '"input_digest": capability_input_digest' in handler
     assert "capability_input=receipt_capability_input" in handler
     assert "redacted_argv=[receipt_capability_input]" in handler
     assert "action_digest=durable_action_digest" in handler

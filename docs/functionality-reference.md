@@ -104,7 +104,7 @@ offline deterministic finalizer ── findings / coverage / grade reliability
 
 - **API server** (`api/api.py`): admits the canonical request, freezes target and input authority,
   compiles and persists the content-addressed action plan, and serves the full product REST surface.
-  Its background loops maintain schedules, ASM, retention, and Model Intake workflows.
+  Its six background asyncio loops maintain schedules, ASM, retention, and Model Intake workflows.
   - `stale_scan_checker` — fails scans stuck beyond `MAX_SCAN_DURATION`.
   - `schedule_runner` — fires due recurring schedules and recomputes their next run.
   - `asm_dispatcher` — for each ASM-enabled target, picks **one** safe next action (recon vs. test
@@ -115,9 +115,10 @@ offline deterministic finalizer ── findings / coverage / grade reliability
 - **Canonical Scan runtime** (`api/scan/`): the action compiler, allocator, durable action store,
   shared orchestrator, local/broker execution backends, continuation amendment, private manifest
   transport, and pure finalizer. This is the V2 execution authority.
-- **Workers** (`api/worker.py`, `api/broker_worker.py`): lease only admitted jobs/actions. They resolve
-  secrets late, revalidate scope and approval immediately before privileged work, reserve typed
-  budget, execute one registered capability adapter, and settle a content-safe receipt.
+- **Workers** (`api/worker.py`, `api/broker_worker.py`): lease only admitted jobs/actions by leasing
+  Redis Stream messages. They resolve secrets late, revalidate scope and approval immediately before
+  privileged work, reserve typed budget, execute one registered capability adapter, and settle a
+  content-safe receipt.
 - **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
   implementations behind registered adapters. Its historical phase waterfall and mode flags are not
   V2 orchestration authority and must not be used to add a new Scan engine.
@@ -910,11 +911,11 @@ audited sensitive access only when the server policy allows it.
 
 ## 12. Cross-cutting: findings, exposure graph, workers, queue
 
-**Findings lifecycle**: every proof-promoted DAST, connected-device, Deep Hunt, Interactive, AI Gate,
+**Findings lifecycle**: every proof-promoted DAST, connected-device, Hunt, Interactive, AI Gate,
 ASM, manual, and model-intake result lands in one
 `findings` table, de-duplicated by `(target_id, fingerprint)`. Findings have a status
 (`active` / `resolved` / `false_positive` / `accepted_risk`), CVSS, CWE/OWASP tags, evidence,
-optional AI verdict fields, and verification history. The UI exposes DAST, Deep Hunt, Interactive,
+optional AI verdict fields, and verification history. The UI exposes DAST, Hunt, Interactive,
 AI Gate, Model Intake, ASM, and Manual filters. The API `source_type` filter accepts the canonical
 `deep_hunt` value plus compatibility values:
 `dast`, `ai`, `ai_gate`, `ai_session`, `autonomous`, `deep_hunt`, `model_intake`, `asm`, `manual`.
@@ -1117,7 +1118,7 @@ or browser request. Results contain content-free principal/profile/role/tenant i
 bounded mixed HTTP/browser observations, comparisons, assertions, and restoration outcomes. A
 caller-supplied workflow UUID allows cooperative cancellation through
 `POST /experiments/workflows/{id}/cancel`; cancellation is checked between steps and browser contexts
-always close in a `finally` block. Credential-tier Deep Hunt may receive `PUT`, `PATCH`, and `DELETE`
+always close in a `finally` block. Credential-tier Hunt may receive `PUT`, `PATCH`, and `DELETE`
 steps only through the typed workflow contract, with later cleanup/rollback and restoration
 assertions. The server independently re-executes a promotable workflow, derives family predicates
 from observed results, and may create or refresh a canonical finding only when deterministic family
@@ -1151,6 +1152,10 @@ State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only
 `POST /hunts` · `GET /hunts/{hunt_id}` · `POST /hunts/{hunt_id}/query` ·
 `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `GET|POST /device-policies` · `PATCH /device-policies/{id}`
+
+Every Hunt capability call carries a client-generated opaque `idempotency_key`. Repeating the same
+key with the same semantic input returns the original durable action; reusing it for a different
+capability or input fails closed.
 
 Legacy device SSH, header, cookie, and form profiles are backfilled to same-ID generic profiles.
 Their older encrypted JSON envelopes are canonicalized without returning or logging plaintext;

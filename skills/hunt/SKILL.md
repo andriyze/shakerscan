@@ -30,8 +30,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 
 - Query context with `POST /hunts/{hunt_id}/query` before sending new traffic.
 - Execute only a capability returned by the run at
-  `POST /hunts/{hunt_id}/capabilities/{capability_name}`. Supply operation inputs, never a new
-  target or raw command line.
+  `POST /hunts/{hunt_id}/capabilities/{capability_name}`. Supply a fresh opaque
+  `idempotency_key` for each intended action and reuse that same key only when retrying the exact
+  action. Supply semantic operation inputs, never a new target, tool name, or raw command line.
 - Prefer passive inventory and prior evidence, then focused probes, then active capabilities when
   the approval and expected evidence justify their budget and risk.
 - Compare principals for authorization hypotheses. Principal references are not proof of identity

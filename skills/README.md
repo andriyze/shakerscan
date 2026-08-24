@@ -35,8 +35,9 @@ session hook automatically.
 | [`ai-security-session`](ai-security-session/SKILL.md) | Interactive Testing: browser exploration, auth workflows, endpoint replay, and BOLA/IDOR testing |
 | [`js-analyze`](js-analyze/SKILL.md) | Frontend routes, browser-captured APIs, libraries, source-map hints, and secret candidates |
 | [`content-discovery`](content-discovery/SKILL.md) | High-signal route/file seeds, `custom_list`, and `custom_endpoints` |
-| [`research-agent`](research-agent/SKILL.md) | Deep Hunt: AI-driven exploration, bounded active testing, evidence, and deterministic promotion |
-| [`device-hunt`](device-hunt/SKILL.md) | Device Hunt: AI-directed investigation of one authorized connected device with bounded scans, encrypted/redacted Postman, HAR, OpenAPI, and Swagger request inventories, evidence, and explicit SSH confirmation |
+| [`hunt`](hunt/SKILL.md) | Canonical target-kind-aware investigation with bounded semantic capabilities, evidence, and deterministic promotion |
+| [`research-agent`](research-agent/SKILL.md) | Compatibility entry point for older Deep Hunt wording; delegates to canonical Hunt |
+| [`device-hunt`](device-hunt/SKILL.md) | Compatibility entry point for older Device Hunt wording; delegates to canonical Hunt with a device target |
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
 Each modern skill is a directory with:

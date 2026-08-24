@@ -193,7 +193,7 @@ Keep these distinctions visible:
 
 - reported or suspected versus exploit-verified
 - completed coverage versus attempted, skipped, timed out, or stale coverage
-- DAST, Deep Hunt, Interactive, AI Gate, Model Intake, ASM, and Manual sources
+- DAST, Hunt, Interactive, AI Gate, Model Intake, ASM, and Manual sources
 - partial results from failed scans versus complete reports
 
 Prefer concise summaries with IDs and links. Include proof, confidence, coverage gaps, and next

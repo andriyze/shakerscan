@@ -8,58 +8,34 @@ from typing import Any, Mapping
 
 try:
     from runtime.budget_reservations import DurableBudgetReservation
+    from runtime.capability_registry import CAPABILITY_REGISTRY
     from runtime.capability_settlement import terminalize_capability_reservation
     from runtime.receipts import CapabilityReceipt
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budget_reservations import DurableBudgetReservation
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from ..runtime.capability_settlement import terminalize_capability_reservation
     from ..runtime.receipts import CapabilityReceipt
 
 
-DURABLE_INLINE_HUNT_CAPABILITIES = frozenset({
-    "collections.inspect",
-    "collections.select",
-    "http.request",
-    "tls.inspect",
-})
+def _hunt_executor_names(executor: str) -> frozenset[str]:
+    return frozenset(
+        spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor(executor)
+    )
 
-DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES = frozenset({
-    "device.capabilities.inspect",
-    "device.inspect",
-})
 
-DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES = frozenset({
-    "device.http.probe",
-})
-
-DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES = frozenset({
-    "device.scan",
-    "device.service.verify",
-})
-
-DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES = frozenset({
-    "device.ssh.propose",
-})
-
-DURABLE_WORKER_HUNT_CAPABILITIES = frozenset({
-    "ports.discover",
-    "service.fingerprint",
-    "subdomains.discover",
-})
-
-DURABLE_BROWSER_HUNT_CAPABILITIES = frozenset({
-    "browser.interact",
-    "browser.navigate",
-})
-
-DURABLE_SCANNER_HUNT_CAPABILITIES = frozenset({
-    "sqli.verify",
-    "templates.scan",
-    "web.content_discover",
-    "web.crawl",
-    "web.probe",
-    "xss.verify",
-})
+# Compatibility constant names remain local to the implementation, but their membership is
+# derived exclusively from the canonical registry instead of forming a second routing catalog.
+DURABLE_INLINE_HUNT_CAPABILITIES = _hunt_executor_names("inline")
+DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES = _hunt_executor_names("device_control")
+DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES = _hunt_executor_names("device_http")
+DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES = _hunt_executor_names("device_queue")
+DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES = _hunt_executor_names(
+    "device_ssh_proposal"
+)
+DURABLE_WORKER_HUNT_CAPABILITIES = _hunt_executor_names("worker_network")
+DURABLE_BROWSER_HUNT_CAPABILITIES = _hunt_executor_names("worker_browser")
+DURABLE_SCANNER_HUNT_CAPABILITIES = _hunt_executor_names("worker_scanner")
 
 
 def hunt_capability_action_digest(

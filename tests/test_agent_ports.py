@@ -268,8 +268,8 @@ def test_relevance_ranks_objective_keyword_first():
 
 def test_tool_schemas_render():
     assert {s["name"] for s in at.tool_schemas(include_run_tool=False)} == {"http_request", "query_kb", "diff", "note"}
-    schemas = at.tool_schemas()  # default includes run_tool
-    assert {s["name"] for s in schemas} == {"http_request", "query_kb", "diff", "note", "run_tool"}
+    schemas = at.tool_schemas()
+    assert {s["name"] for s in schemas} == {"http_request", "query_kb", "diff", "note"}
     # the schemas must render through the text-contract shim
     contract = tc.render_tool_contract(schemas)
     assert "http_request(" in contract
@@ -330,10 +330,11 @@ def test_query_kb_and_note_coercion():
         pass
 
 
-def test_run_tool_schema_and_names():
+def test_run_tool_schema_is_compatibility_only_and_never_callable():
     schemas = at.tool_schemas(include_run_tool=True)
     assert any(s["name"] == "run_tool" for s in schemas)
-    assert "run_tool" in at.CALLABLE_TOOL_NAMES
+    assert "run_tool" not in at.CALLABLE_TOOL_NAMES
+    assert "run_tool" not in {item["name"] for item in at.tool_schemas()}
     assert at.tool_schemas(include_run_tool=False) == [s for s in schemas if s["name"] != "run_tool"]
     run_tool = next(schema for schema in schemas if schema["name"] == "run_tool")
     name_schema = run_tool["parameters"]["properties"]["name"]

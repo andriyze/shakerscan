@@ -188,7 +188,8 @@ def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     handler = source[start:end]
     migrations = (root / "api" / "retest_contract.py").read_text()
 
-    assert "DURABLE_INLINE_HUNT_CAPABILITIES" in handler
+    assert 'spec.hunt_executor in {' in handler
+    assert '"inline", "device_control", "device_http", "device_queue"' in handler
     assert "create_requested" in handler
     assert "reserve_against" in handler
     assert "record.start(" in handler

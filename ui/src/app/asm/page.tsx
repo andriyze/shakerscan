@@ -1449,10 +1449,10 @@ function TargetView({ targetId }: { targetId: string }) {
     }
   }
 
-  const openDeepHuntForGaps = () => {
+  const openHuntForGaps = () => {
     if (!target) return
     if (!/^https?:\/\//i.test(target.url)) {
-      toast.error('Deep Hunt requires an HTTP or HTTPS web target.')
+      toast.error('Hunt requires an HTTP or HTTPS web target.')
       return
     }
     const objective = 'Explore this target autonomously and close the highest-value unexplained coverage gaps with evidence.'
@@ -1483,7 +1483,7 @@ function TargetView({ targetId }: { targetId: string }) {
           </Button>
           <button
             type="button"
-            onClick={openDeepHuntForGaps}
+            onClick={openHuntForGaps}
             disabled={!target}
             title="Open Hunt with this target and a coverage-gap objective."
             className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"

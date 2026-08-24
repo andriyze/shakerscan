@@ -279,7 +279,7 @@ The UI launcher is **AI Investigator → Hunt**. Through an agent, the routing i
 | “Test this manually” | Interactive Testing |
 
 The older `/research/*` episode controller remains available for specialized guided verification
-and compatibility. It is not the Deep Hunt launcher.
+and compatibility. It is not the Hunt launcher.
 
 ## Web UI map
 

@@ -37,7 +37,8 @@ test('collection presentation stays metadata-only after upload', () => {
 
 test('Scan and Hunt attach exact saved selection IDs without manual UUID entry', () => {
   assert.match(scan, /<RequestCollectionPicker/)
-  assert.match(scan, /request_collections: requestCollectionIds\.map\(\(id\) => \(\{ id \}\)\)/)
+  assert.match(scan, /request_collections: requestCollectionIds\.map\(\(id\) => \(\{/)
+  assert.match(scan, /replay_policy: requestCollectionMetadata\[id\]\.replayPolicy/)
   assert.match(scan, /allow_state_changing_http: allowStateChanging/)
   assert.match(hunt, /<RequestCollectionPicker/)
   assert.match(hunt, /requestCollectionIds,/)

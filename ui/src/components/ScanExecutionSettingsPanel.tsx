@@ -188,7 +188,7 @@ export default function ScanExecutionSettingsPanel() {
           <div>
             <h3 className="text-sm font-medium text-gray-200">Advanced automation controls</h3>
             <p className="mt-1 text-xs text-gray-500">
-              Deep Hunt planner selection and approval-receipt enforcement.
+              Hunt planner selection and approval-receipt enforcement.
             </p>
           </div>
           <span className="shrink-0 text-xs font-medium text-blue-400">
@@ -200,7 +200,7 @@ export default function ScanExecutionSettingsPanel() {
         <div className="space-y-3 border-t border-gray-800 p-3">
           <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
             <div>
-              <h3 className="text-sm font-medium text-gray-100">Default Deep Hunt planner</h3>
+              <h3 className="text-sm font-medium text-gray-100">Default Hunt planner</h3>
               <p className="mt-1 text-xs text-gray-500">
                 Sets who chooses each bounded research action. Individual hunts can override this.
               </p>
@@ -230,7 +230,7 @@ export default function ScanExecutionSettingsPanel() {
                     type="button"
                     onClick={() => save(
                       { default_research_planner_mode: option.mode },
-                      `Default Deep Hunt planner set to ${option.label}`,
+                      `Default Hunt planner set to ${option.label}`,
                     )}
                     disabled={loading || saving || !research}
                     className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${

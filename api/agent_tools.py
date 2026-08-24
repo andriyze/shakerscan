@@ -1,7 +1,8 @@
-"""Agent tool contracts + guards for the autonomous ReAct loop.
+"""Compatibility tool guards for the retired autonomous ReAct loop.
 
-The bounded tools exposed to the Deep Hunt planner (documented in
-docs/functionality-reference.md, section 11.6).
+Canonical Hunt planners receive semantic capability contracts from the shared registry. The
+helpers in this module remain for read-only legacy-history code and fixed adapter construction;
+they are not a planner-facing capability catalog.
 This module holds the **function-call schemas** (consumed by the text-contract renderer
 in :mod:`agent_text_toolcalls`) and the **pure guards** — target-host origin/path validation,
 request-header allowlisting (so the model can never inject an auth header — real auth
@@ -72,8 +73,9 @@ QUERY_KB_KINDS: frozenset[str] = frozenset(
 NOTE_KINDS: frozenset[str] = frozenset({"hypothesis", "observation", "todo"})
 
 AGENT_TOOL_NAMES: frozenset[str] = frozenset({"http_request", "query_kb", "diff", "note"})
-# Includes run_tool (defined below); used by the loop's hallucinated-tool guard.
-CALLABLE_TOOL_NAMES: frozenset[str] = AGENT_TOOL_NAMES | {"run_tool"}
+# The retired loop must never regain external scanner selection. Canonical Hunt exposes registry
+# names such as ``web.probe`` and ``sqli.verify`` through ``/hunts/*/capabilities/*``.
+CALLABLE_TOOL_NAMES: frozenset[str] = AGENT_TOOL_NAMES
 
 
 # --------------------------------------------------------------------------------------
@@ -382,9 +384,8 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
-def tool_schemas(*, include_run_tool: bool = True) -> list[dict[str, Any]]:
-    """Return the callable tool schemas (a copy). ``include_run_tool`` adds the
-    argv-template scanner tool (slice 5)."""
+def tool_schemas(*, include_run_tool: bool = False) -> list[dict[str, Any]]:
+    """Return retired-loop schemas; external scanner selection is opt-in test compatibility only."""
     schemas = [dict(schema) for schema in AGENT_TOOL_SCHEMAS]
     if include_run_tool:
         schemas.append(dict(RUN_TOOL_SCHEMA))

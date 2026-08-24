@@ -351,7 +351,7 @@ function PostureSummary({
   )
 }
 
-// The two-tier Deep Hunt findings for a selected web target: VERIFIED (proven by
+// The two-tier Hunt findings for a selected web target: VERIFIED (proven by
 // the moat) vs SUSPECTED (agent leads). Renders nothing until it has findings, so
 // it stays out of the way for targets the hunter hasn't touched.
 function AgentFindingsSection({ targetId }: { targetId: string }) {
@@ -385,7 +385,7 @@ function AgentFindingsSection({ targetId }: { targetId: string }) {
   return (
     <div>
       <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500">
-        <span>Deep Hunt findings</span>
+        <span>Hunt findings</span>
         <Link
           href={`/hunt?target=${encodeURIComponent(targetId)}`}
           className="ml-auto rounded text-[11px] normal-case text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
@@ -843,7 +843,7 @@ function ExposureView() {
   }
 
   async function handleAutonomousInvestigation(asset: ExposureAsset): Promise<void> {
-    if (asset.kind !== 'web') throw new Error('Deep Hunt is only available for registered web targets.')
+    if (asset.kind !== 'web') throw new Error('Hunt is only available for registered web targets.')
     router.push(`/hunt?target=${encodeURIComponent(asset.id)}`)
   }
 

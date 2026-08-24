@@ -1516,14 +1516,14 @@ async def _target_web_origins(conn: Any, target_id: uuid.UUID, primary_url: Any)
 
 
 def _resolve_hunt_origin(primary_url: Any, origins: list[str], requested_origin: Any = None) -> str:
-    """Choose a concrete Deep Hunt origin inside the target's host boundary.
+    """Choose a concrete Hunt origin inside the target's host boundary.
 
     A requested scheme/port may be new, but it must resolve to the same host asset.
     Without an explicit choice, the most recently scanned origin wins.
     """
     primary_host = _canonical_web_host(primary_url)
     if not primary_host:
-        raise HTTPException(status_code=400, detail="Deep Hunt requires a valid web target host")
+        raise HTTPException(status_code=400, detail="Hunt requires a valid web target host")
     if requested_origin:
         try:
             chosen, _note = normalize_target_url(str(requested_origin))
@@ -1532,7 +1532,7 @@ def _resolve_hunt_origin(primary_url: Any, origins: list[str], requested_origin:
         if not chosen or _canonical_web_host(chosen) != primary_host:
             raise HTTPException(
                 status_code=400,
-                detail="Deep Hunt origin must use the same host as the selected target",
+                detail="Hunt origin must use the same host as the selected target",
             )
         return chosen
     for origin in origins:
@@ -1540,7 +1540,7 @@ def _resolve_hunt_origin(primary_url: Any, origins: list[str], requested_origin:
             return origin
     normalized, _note = normalize_target_url(str(primary_url or ""))
     if not normalized:
-        raise HTTPException(status_code=400, detail="Deep Hunt target origin is invalid")
+        raise HTTPException(status_code=400, detail="Hunt target origin is invalid")
     return normalized
 
 
@@ -21470,7 +21470,7 @@ def _device_worker_readiness() -> dict[str, Any]:
 
 
 def _agent_tool_worker_readiness() -> dict[str, Any]:
-    """Return fresh, build-current isolated Deep Hunt scanner capacity."""
+    """Return fresh, build-current isolated Hunt scanner capacity."""
     expected_fingerprint = expected_build_fingerprint()
     expected_version = current_scanner_version()
     now = datetime.now(timezone.utc)
@@ -23873,7 +23873,11 @@ async def _execute_device_agent_tool(
             safety_profile=safety_profile,
             confirm_authorized=True,
             include_web_dast=include_web_dast,
-            web_scan_type=args.get("web_scan_type") or "standard",
+            web_scan_type={
+                "fast": "quick",
+                "balanced": "standard",
+                "thorough": "deep",
+            }[str(args.get("web_budget_profile") or "balanced")],
             max_web_origins=8,
             ssh_credential_profile_id=(
                 str(ssh_ref["profile_id"]) if ssh_ref else None
@@ -28021,7 +28025,7 @@ def _exposure_recommended_actions(*, kind: str, reasons: list[str], active_verif
     if active_verified > 0:
         actions.append({"label": "Fix verified findings", "kind": "findings"})
     if active_needs_verification > 0:
-        actions.append({"label": "Review Deep Hunt candidates", "kind": "deep_hunt"})
+        actions.append({"label": "Review Hunt candidates", "kind": "deep_hunt"})
     # Stable de-dupe by label, preserving priority order.
     seen: set[str] = set()
     unique = [a for a in actions if not (a["label"] in seen or seen.add(a["label"]))]
@@ -37058,7 +37062,7 @@ async def _resolve_runtime_target_addresses(
 
 async def _resolve_agent_target_addresses(url: str) -> list[str]:
     """Compatibility name for Hunt's frozen runtime target binding."""
-    return await _resolve_runtime_target_addresses(url, subject="Deep Hunt target")
+    return await _resolve_runtime_target_addresses(url, subject="Hunt target")
 
 
 async def _agent_tool_http_request(
@@ -39551,6 +39555,11 @@ class HuntQueryRequest(BaseModel):
 
 class HuntCapabilityRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(
+        min_length=8,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    )
     input: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -39952,20 +39961,8 @@ def _hunt_nonexecuting_actual(
     return actual
 
 
-_HUNT_NETWORK_CAPABILITIES = frozenset({"ports.discover", "service.fingerprint"})
-
-
 def _hunt_capability_public(spec: Any) -> dict[str, Any]:
-    return {
-        "name": spec.name,
-        "description": spec.description,
-        "risk_tier": spec.risk_tier,
-        "input_schema": dict(spec.input_schema),
-        "output_schema": spec.output_schema,
-        "budget_cost": dict(spec.budget_cost),
-        "required_approval": spec.required_approval,
-        "evidence_contract": list(spec.evidence_contract),
-    }
+    return spec.planner_contract()
 
 
 def _hunt_capability_is_allowed(
@@ -39977,8 +39974,6 @@ def _hunt_capability_is_allowed(
     if not spec.planner_visible:
         return False
     if contract.target_kind not in spec.target_kinds:
-        return False
-    if spec.name in _HUNT_NETWORK_CAPABILITIES and not contract.policy.network_discovery:
         return False
     if spec.risk_tier == "credential" and not credential_access:
         return False
@@ -40726,7 +40721,25 @@ async def execute_hunt_capability(
         spec = agent_tools.CAPABILITY_REGISTRY.require(name)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    action_id = uuid.uuid4()
+    if not spec.planner_visible or spec.hunt_executor is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Capability is not exposed to Hunt planners",
+        )
+    try:
+        agent_tools.CAPABILITY_REGISTRY.validate_input(name, request.input)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    action_id: uuid.UUID | None = None
+    capability_input_digest = hashlib.sha256(json.dumps(
+        request.input,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+    idempotency_key_digest = hashlib.sha256(
+        request.idempotency_key.encode("utf-8")
+    ).hexdigest()
     admission_error: HTTPException | None = None
     admission_action_status = "running"
     admission_result_summary: dict[str, Any] = {}
@@ -40740,6 +40753,39 @@ async def execute_hunt_capability(
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+            action_id = uuid.uuid5(
+                uuid.UUID(str(run["id"])),
+                f"hunt-capability:{request.idempotency_key}",
+            )
+            existing_action = await conn.fetchrow(
+                """SELECT capability_name, status, input_summary, result_summary,
+                          receipt_id
+                   FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2""",
+                action_id,
+                run["id"],
+            )
+            if existing_action is not None:
+                existing_input = _hunt_json(existing_action["input_summary"], {})
+                if (
+                    str(existing_action["capability_name"]) != name
+                    or str(existing_input.get("input_digest") or "")
+                    != capability_input_digest
+                    or str(existing_input.get("idempotency_key_sha256") or "")
+                    != idempotency_key_digest
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Hunt idempotency key was already used for another action",
+                    )
+                return {
+                    "hunt_id": hunt_id,
+                    "capability": name,
+                    "action_id": str(action_id),
+                    "idempotent_replay": True,
+                    "status": str(existing_action["status"]),
+                    "receipt_id": str(existing_action["receipt_id"] or "") or None,
+                    "result": _hunt_json(existing_action["result_summary"], {}),
+                }
             if run["status"] not in {"active", "awaiting_planner"}:
                 raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
             policy = _hunt_json(run["policy_json"], {})
@@ -40918,19 +40964,14 @@ async def execute_hunt_capability(
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
-            worker_managed_budget = name == "collections.replay_safe"
-            worker_durable_budget = name in (
-                DURABLE_WORKER_HUNT_CAPABILITIES
-                | DURABLE_SCANNER_HUNT_CAPABILITIES
-                | DURABLE_BROWSER_HUNT_CAPABILITIES
-            )
-            api_managed_budget = name in (
-                DURABLE_INLINE_HUNT_CAPABILITIES
-                | DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES
-                | DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES
-                | DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES
-                | DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES
-            )
+            worker_managed_budget = spec.hunt_executor == "worker_replay"
+            worker_durable_budget = spec.hunt_executor in {
+                "worker_network", "worker_scanner", "worker_browser",
+            }
+            api_managed_budget = spec.hunt_executor in {
+                "inline", "device_control", "device_http", "device_queue",
+                "device_ssh_proposal",
+            }
             durable_budget = api_managed_budget or worker_durable_budget
             if name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:
                 await conn.execute(
@@ -41085,10 +41126,16 @@ async def execute_hunt_capability(
                              CASE WHEN $4='failed' THEN NOW() ELSE NULL END)""",
                 action_id, run["id"], name,
                 admission_action_status,
-                json.dumps(_hunt_redacted_capability_input(name, request.input)),
+                json.dumps({
+                    "schema_version": "hunt-capability-input-summary/v1",
+                    "input": _hunt_redacted_capability_input(name, request.input),
+                    "input_digest": capability_input_digest,
+                    "idempotency_key_sha256": idempotency_key_digest,
+                }),
                 json.dumps(admission_result_summary),
             )
 
+    assert action_id is not None
     if admission_error is not None:
         raise admission_error
 
@@ -42072,7 +42119,13 @@ async def execute_hunt_capability(
                 )
                 if str(run["target_kind"]) == "device":
                     await conn.execute("UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(context, default=str))
-    return {"hunt_id": hunt_id, "capability": name, "action_id": str(action_id), "result": result}
+    return {
+        "hunt_id": hunt_id,
+        "capability": name,
+        "action_id": str(action_id),
+        "idempotent_replay": False,
+        "result": result,
+    }
 
 
 @app.post("/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")
@@ -54966,12 +55019,12 @@ def _research_command_views(episode: dict[str, Any]) -> list[dict[str, Any]]:
         view["parameters_schema"] = parameter_schema
         if name in {"experiment.http_diff", "experiment.workflow"}:
             view["autonomous_constraints"] = ([
-                "PUT, PATCH, and DELETE require Deep Hunt, a cleanup/rollback step after mutation, a typed restoration assertion, and successful independent replay.",
+                "PUT, PATCH, and DELETE require Hunt, a cleanup/rollback step after mutation, a typed restoration assertion, and successful independent replay.",
             ] if name == "experiment.workflow" and str(episode.get("max_risk_tier") or "") == "credential" else [
                 (
                     "POST, PUT, PATCH, and DELETE are unavailable in HTTP diff because it has no restoration contract; use a typed workflow or focused family scan."
                     if name == "experiment.http_diff" else
-                    "DELETE, PUT, and PATCH are unavailable at this tier; use Deep Hunt with typed cleanup and restoration assertions."
+                    "DELETE, PUT, and PATCH are unavailable at this tier; use Hunt with typed cleanup and restoration assertions."
                 ),
             ])
         view["server_supplied_parameters"] = sorted(set(server_supplied))

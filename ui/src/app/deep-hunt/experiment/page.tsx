@@ -280,10 +280,10 @@ export default function ExperimentBuilderPage() {
           {error ? <ErrorState message={error} /> : null}
           {result ? <Card className="border-blue-500/30 bg-blue-500/[0.05] p-5">
             <div className="flex items-center gap-2 text-blue-200"><FileCheck2 className="h-5 w-5" /><h2 className="font-semibold">Plan recorded</h2></div>
-            <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. This screen validates and records the plan only; an authorized agent or Deep Hunt must initiate execution.</p>
+            <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. This screen validates and records the plan only; an authorized agent or Hunt must initiate execution.</p>
             {result.execution_blocked_reason ? <div className="mt-3 rounded-lg bg-gray-950/60 p-3 text-xs text-gray-400"><span className="font-medium text-amber-300">Execution gate:</span> {result.execution_blocked_reason}</div> : null}
             <div className="mt-4 flex flex-wrap gap-3">
-              <Link href={`/deep-hunt?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Deep Hunt <ArrowRight className="h-4 w-4" /></Link>
+              <Link href={`/deep-hunt?target=${encodeURIComponent(targetId)}`} className="inline-flex items-center gap-1 text-sm text-blue-300 hover:text-blue-200">Use target in Hunt <ArrowRight className="h-4 w-4" /></Link>
               <Link href="/deep-hunt/leads" className="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-gray-200">Return to leads</Link>
             </div>
           </Card> : null}

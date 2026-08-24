@@ -25,7 +25,7 @@ Project-local commands under `.claude/commands/` cover:
 
 Reusable task instructions live under `skills/`. Use `skills/shakerscan/SKILL.md` for the general
 workflow and the specialized skill directory for Interactive Testing, JS analysis, content
-discovery, Deep Hunt, or skill-system review.
+discovery, Hunt, or skill-system review.
 
 Do not duplicate API contracts in this file. Use `AGENTS.md`, the live OpenAPI document at the API
 URL printed by `./scanner.sh status` (loopback installs use `http://localhost:8080/openapi.json`), and the public

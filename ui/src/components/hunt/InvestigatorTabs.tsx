@@ -4,8 +4,8 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/cn'
 
-// One small product navigation for AI investigation. Deep Hunt is the single
-// user-facing engine; Leads and Test Builder support it. The legacy guided
+// One small product navigation for the single Hunt runtime. Leads and Test Builder support it.
+// The legacy guided
 // verifier remains an implementation surface, not a peer launcher.
 const BASE = '/deep-hunt'
 
@@ -29,7 +29,7 @@ export function InvestigatorTabs() {
   return (
     <nav aria-label="AI Investigator" className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <div className="flex rounded-lg border border-gray-800 bg-gray-950 p-1">
-        <Link href={BASE} aria-current={active === 'deep_hunt' ? 'page' : undefined} className={seg(active === 'deep_hunt')}>Deep Hunt</Link>
+        <Link href={BASE} aria-current={active === 'deep_hunt' ? 'page' : undefined} className={seg(active === 'deep_hunt')}>Hunt</Link>
         <Link href={`${BASE}/leads`} aria-current={active === 'leads' ? 'page' : undefined} className={seg(active === 'leads')}>Leads</Link>
         <Link href={`${BASE}/experiment`} aria-current={active === 'experiment' ? 'page' : undefined} className={seg(active === 'experiment')}>Test Builder</Link>
       </div>
