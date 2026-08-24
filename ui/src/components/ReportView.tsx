@@ -642,6 +642,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const resolved_budget = scan_config.resolved_budget || scan.options?.resolved_budget || {}
   const requestBudget = scanData.request_budget || {}
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
+  const canonicalBudgetUsed = scanData.scan_metadata?.budget_used || {}
+  const canonicalBudgetLimit = scan.options?.scan_execution_plan?.budget || scan.options?.resolved_scan_budget || {}
+  const attemptedHttpRequests = requestBudget.attempted_requests ?? canonicalBudgetUsed.http_requests ?? 0
+  const httpRequestLimit = requestBudget.request_limit
+    ?? resolved_budget.request_max
+    ?? canonicalBudgetLimit.max_http_requests
   const coverage = scanData.coverage || {}
   const smart_coverage = scanData.smart_coverage || {}
   const nucleiTemplates = smart_coverage.nuclei_templates || {}
@@ -798,7 +804,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         ? 'ASM recon (discovery)'
         : isAsmBatch
           ? 'ASM test batch'
-          : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+          : scan.scan_type === 'scan' || scan.run_kind === 'web_dast'
+            ? 'DAST Scan'
+            : String(scan.scan_type || 'Standard').replace(/_/g, ' ')
+  const scanBudgetAndPolicyLabel = `${formatCheckFamilyName(String(budgetProfile || 'balanced'))} + ${
+    scan.options?.scan_policy?.active_testing || scan.options?.active ? 'active testing' : 'passive testing'
+  }`
   const modelIntakeDecision = String(result?.decision || '').toLowerCase()
   const modelIntakeDecisionClass =
     modelIntakeDecision === 'block'
@@ -1041,14 +1052,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <p className="text-lg font-semibold capitalize">{scan.status}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
-            <h3 className="text-sm text-gray-400 mb-1">Scan Type</h3>
+            <h3 className="text-sm text-gray-400 mb-1">Workflow</h3>
             <p className="text-lg font-semibold capitalize">{scanTypeLabel}</p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
-            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Depth' : isModelIntakeScan ? 'Intake Mode' : isDeviceScan ? 'Device Profile' : 'Scan Mode'}</h3>
+            <h3 className="text-sm text-gray-400 mb-1">{isAIScan ? 'AI Depth' : isModelIntakeScan ? 'Intake Mode' : isDeviceScan ? 'Device Profile' : 'Budget & permissions'}</h3>
             <p className="text-lg font-semibold capitalize">
-              {isAIScan ? aiScanProfileLabel : isModelIntakeScan ? 'Artifact checks' : isDeviceScan ? devicePosture?.profile || 'Posture' : scan.options?.quick ? 'Quick' : 'Thorough'}
-              {!isAIScan && !isModelIntakeScan && !isDeviceScan && scan.options?.active && ' + Active'}
+              {isAIScan ? aiScanProfileLabel : isModelIntakeScan ? 'Artifact checks' : isDeviceScan ? devicePosture?.profile || 'Posture' : scanBudgetAndPolicyLabel}
             </p>
           </div>
           {!isAIScan && !isModelIntakeScan && !isDeviceScan && (
@@ -1062,9 +1072,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {resolved_budget.active_max_endpoints ? `${resolved_budget.active_max_endpoints} active endpoints` : ''}
                 </p>
               )}
-              {(requestBudget.request_limit !== undefined || resolved_budget.request_max) && (
+              {httpRequestLimit !== undefined && (
                 <p className="mt-1 text-xs text-gray-500">
-                  {requestBudget.attempted_requests || 0}/{requestBudget.request_limit ?? resolved_budget.request_max} requests
+                  {attemptedHttpRequests}/{httpRequestLimit} requests used
                   {requestBudget.mode ? ` (${requestBudget.mode})` : ''}
                 </p>
               )}
