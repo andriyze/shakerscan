@@ -468,6 +468,7 @@ try:
         request_collection_action_refs,
     )
     from scan.action_store import PostgresScanActionStore
+    from scan.activity import parallel_scan_activity_lines
     from scan.action_budget_reconciliation import scan_action_budget_reconciliation
     from scan.operational_metrics import (
         record_operational_event,
@@ -590,6 +591,7 @@ except ModuleNotFoundError:
         request_collection_action_refs,
     )
     from api.scan.action_store import PostgresScanActionStore
+    from api.scan.activity import parallel_scan_activity_lines
     from api.scan.action_budget_reconciliation import scan_action_budget_reconciliation
     from api.scan.operational_metrics import (
         record_operational_event,
@@ -32501,6 +32503,9 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         lines = r.lrange(log_key, max(-limit, -1000), -1) if limit else r.lrange(log_key, -200, -1)
     except Exception:
         lines = []
+    # When the displayed row is a parallel parent, its children own execution
+    # and therefore own the raw log keys. Aggregate their bounded feeds so the
+    # parent page does not misleadingly show "No logs yet" while shards run.
     # Model Intake activity is content-free and also stored in the durable scan
     # result. Use it when Redis live logs have expired or when an older worker
     # failed before it could emit live lines, so the UI does not become blank.
@@ -32510,19 +32515,48 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         except ValueError:
             scan_uuid = None
         row = None
+        shard_rows = []
         if scan_uuid is not None:
             try:
                 async with db_pool.acquire() as conn:
                     row = await conn.fetchrow(
                         """
-                        SELECT run_kind, status, progress, current_phase, result
+                        SELECT run_kind, scan_role, status, progress,
+                               current_phase, result
                         FROM scans WHERE id=$1
                         """,
                         scan_uuid,
                     )
+                    if row and str(row.get("scan_role") or "") == "parent":
+                        shard_rows = await conn.fetch(
+                            """
+                            SELECT id, shard_index, status, current_phase
+                            FROM scans
+                            WHERE parent_scan_id=$1 AND scan_role='shard'
+                            ORDER BY shard_index ASC NULLS LAST, created_at ASC
+                            """,
+                            scan_uuid,
+                        )
             except Exception:
                 row = None
-        if row and str(row.get("run_kind") or "") == "model_intake":
+                shard_rows = []
+        if row and str(row.get("scan_role") or "") == "parent" and shard_rows:
+            per_shard = max(1, min(200, limit // max(1, len(shard_rows))))
+            child_logs: dict[str, list[Any]] = {}
+            for shard in shard_rows:
+                child_id = str(shard.get("id") or "")
+                try:
+                    child_logs[child_id] = r.lrange(
+                        f"scan:{child_id}:logs", -per_shard, -1,
+                    )
+                except Exception:
+                    child_logs[child_id] = []
+            lines = parallel_scan_activity_lines(
+                shards=shard_rows,
+                child_logs=child_logs,
+                limit=limit,
+            )
+        if not lines and row and str(row.get("run_kind") or "") == "model_intake":
             result = parse_json_field(row.get("result")) or {}
             intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
             activity = intake.get("activity") if isinstance(intake.get("activity"), list) else []
