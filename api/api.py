@@ -3847,32 +3847,28 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         retry_at, schedule_id)
                 continue
 
-            canonical_schedule = scan_type == "scan"
-            scan_contract: ResolvedScanContract | None = None
-            if canonical_schedule:
-                try:
-                    scan_contract = resolve_scan_contract(
-                        budget_profile=scan_options.get("budget_profile"),
-                        policy=scan_options.pop("policy", None),
-                        advanced=scan_options.pop("advanced", None),
-                        approval_receipt_id=scan_options.get("approval_receipt_id"),
-                    )
-                except ValueError as exc:
-                    print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
-                    continue
-                for key in ("scan_type", "quick", "thorough"):
-                    scan_options.pop(key, None)
-                scan_options["budget_profile"] = scan_contract.budget_profile
-                scan_options["active"] = scan_contract.policy.active_testing
-                scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
-            else:
-                scan_options['scan_type'] = scan_type
+            # Normal schedules are canonical V2 admission inputs. Historical
+            # rows may still contain a legacy scan name; translate that name at
+            # this boundary and never create a digest-less legacy queue job.
+            canonical_schedule = True
+            try:
+                scan_contract = resolve_scan_contract(
+                    budget_profile=scan_options.get("budget_profile"),
+                    policy=scan_options.pop("policy", None),
+                    advanced=scan_options.pop("advanced", None),
+                    approval_receipt_id=scan_options.get("approval_receipt_id"),
+                    legacy_scan_type=(scan_type if scan_type != "scan" else None),
+                )
+            except ValueError as exc:
+                print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                continue
+            for key in ("scan_type", "quick", "thorough"):
+                scan_options.pop(key, None)
+            scan_options["budget_profile"] = scan_contract.budget_profile
+            scan_options["active"] = scan_contract.policy.active_testing
+            scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
             scan_options_model = ScanOptions(**scan_options)
-            if canonical_schedule:
-                active_testing = scan_contract.policy.active_testing
-            else:
-                scan_type = normalize_dast_scan_options(scan_options_model)
-                active_testing = scan_type in ACTIVE_ENFORCED_SCAN_TYPES
+            active_testing = scan_contract.policy.active_testing
             if active_testing and scan_options_model.public:
                 print(
                     f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
@@ -3893,18 +3889,11 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # Managed credential refs are target-bound and are resolved below. Defer
             # focused-family auth preconditions until those refs are present; otherwise
             # scheduled auth/BOLA scans fail even though the target has valid profiles.
-            if canonical_schedule:
-                scan_options = _build_canonical_scan_options_payload(
-                    scan_options_model,
-                    scan_contract,
-                    defer_family_preconditions=True,
-                )
-            else:
-                scan_options = _build_scan_options_payload(
-                    scan_options_model,
-                    scan_type,
-                    defer_family_preconditions=True,
-                )
+            scan_options = _build_canonical_scan_options_payload(
+                scan_options_model,
+                scan_contract,
+                defer_family_preconditions=True,
+            )
             scan_options = await _resolve_target_credential_profiles(conn, target_id, scan_options)
             scan_options, _family = _apply_scan_check_family_policy(scan_options)
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(

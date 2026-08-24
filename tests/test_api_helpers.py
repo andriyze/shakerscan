@@ -194,6 +194,7 @@ if "fastapi" not in sys.modules:
                 self.url = types.SimpleNamespace(scheme="http")
 
     fastapi_mod.FastAPI = _FakeFastAPI
+    fastapi_mod.Header = _fake_query
     fastapi_mod.HTTPException = _FakeHTTPException
     fastapi_mod.Query = _fake_query
     fastapi_mod.Request = _FakeRequest
@@ -3327,6 +3328,7 @@ def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatc
     conn = _FakeConn([_due_schedule()])
     redis_client = _FailingRedis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    _freeze_test_asm_target(monkeypatch)
 
     scheduler_pool = _FakePool(conn)
     asyncio.run(api_module.run_due_schedules(scheduler_pool))
@@ -3343,6 +3345,7 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     conn = _FakeConn([_due_schedule()])
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    _freeze_test_asm_target(monkeypatch)
 
     asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
 
@@ -3378,6 +3381,33 @@ def test_canonical_schedule_queues_scan_job_v2_without_legacy_identity(monkeypat
     assert insert[1][7] == "v2"
     assert persisted_job["schema_version"] == api_module.SCAN_JOB_SCHEMA
     assert insert[1][13]
+    assert not {"scan_type", "quick", "thorough"} & set(persisted_options)
+
+
+def test_legacy_named_schedule_translates_to_canonical_job_without_fallback(monkeypatch):
+    schedule = _due_schedule()
+    schedule["scan_type"] = "smart"
+    schedule["scan_options"] = {}
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    _freeze_test_asm_target(monkeypatch)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    queued = json.loads(redis_client.rpush_calls[0][1])
+    insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    persisted_options = json.loads(insert[1][4])
+    persisted_job = json.loads(insert[1][12])
+    assert queued["schema_version"] == api_module.SCAN_JOB_SCHEMA
+    assert queued["execution_plan"]["engine"] == "scan"
+    assert "options" not in queued
+    assert insert[1][5] == "scan"
+    assert insert[1][7] == "v2"
+    assert persisted_job["schema_version"] == api_module.SCAN_JOB_SCHEMA
+    assert insert[1][13]
+    assert persisted_options["budget_profile"] == "thorough"
+    assert persisted_options["scan_policy"]["active_testing"] is True
     assert not {"scan_type", "quick", "thorough"} & set(persisted_options)
 
 
