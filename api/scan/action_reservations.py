@@ -64,6 +64,42 @@ def _validate_stored(
         )
 
 
+def _aggregate_owner_uuid(
+    aggregate_owner_id: str | None,
+    *,
+    plan: ScanActionPlan,
+) -> uuid.UUID | None:
+    if not aggregate_owner_id:
+        return None
+    try:
+        owner_id = uuid.UUID(str(aggregate_owner_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ScanActionReservationError(
+            "parallel aggregate Scan owner is invalid"
+        ) from exc
+    if str(owner_id) == plan.scan_id:
+        raise ScanActionReservationError(
+            "parallel aggregate Scan owner must differ from its child"
+        )
+    return owner_id
+
+
+def _ledger(
+    owner: Mapping[str, Any],
+    *,
+    budget_required: bool,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    limits = (
+        scan_budget_ledger_limits(
+            _json_object(owner.get("budget_json"), name="Scan budget"),
+            allow_zero=True,
+        )
+        if budget_required else {}
+    )
+    used = _json_object(owner.get("budget_used_json"), name="Scan budget ledger")
+    return limits, used
+
+
 async def admit_and_start_scan_action_reservation(
     conn: Any,
     *,
@@ -71,10 +107,25 @@ async def admit_and_start_scan_action_reservation(
     action: ScanAction,
     worker_id: str,
     lease_seconds: int,
+    aggregate_owner_id: str | None = None,
     store: PostgresBudgetReservationStore | None = None,
 ) -> StoredBudgetReservation:
     """Apply a hold and start its worker lease under the Scan owner lock."""
     repository = store or PostgresBudgetReservationStore()
+    aggregate_uuid = _aggregate_owner_uuid(aggregate_owner_id, plan=plan)
+    aggregate_owner = None
+    if aggregate_uuid is not None:
+        aggregate_owner = await conn.fetchrow(
+            "SELECT status, budget_json, budget_used_json "
+            "FROM scans WHERE id=$1 FOR UPDATE",
+            aggregate_uuid,
+        )
+        if not aggregate_owner or str(aggregate_owner.get("status") or "") not in {
+            "pending", "queued", "running", "cancelling", "cancelled",
+        }:
+            raise ScanActionReservationError(
+                "parallel parent Scan stopped before action budget admission"
+            )
     owner = await conn.fetchrow(
         "SELECT status, budget_json, budget_used_json "
         "FROM scans WHERE id=$1 FOR UPDATE",
@@ -86,12 +137,19 @@ async def admit_and_start_scan_action_reservation(
         raise ScanActionReservationError(
             "Scan stopped before action budget admission"
         )
-    limits = scan_budget_ledger_limits(
-        _json_object(owner.get("budget_json"), name="Scan budget"),
-        allow_zero=True,
-    )
-    used = _json_object(owner.get("budget_used_json"), name="Scan budget ledger")
+    limits, used = _ledger(owner, budget_required=True)
     ledger = {name: int(used.get(name) or 0) for name in limits}
+    aggregate_limits: dict[str, int] = {}
+    aggregate_used: dict[str, Any] = {}
+    aggregate_ledger: dict[str, int] = {}
+    if aggregate_owner is not None:
+        aggregate_limits, aggregate_used = _ledger(
+            aggregate_owner, budget_required=True,
+        )
+        aggregate_ledger = {
+            name: int(aggregate_used.get(name) or 0)
+            for name in aggregate_limits
+        }
     stored = await repository.load_by_action(
         conn,
         owner_kind="scan",
@@ -124,6 +182,13 @@ async def admit_and_start_scan_action_reservation(
                 consumed=ledger,
                 lease_seconds=lease_seconds,
             )
+            aggregate_held = None
+            if aggregate_owner is not None:
+                _aggregate_reserved, aggregate_held = stored.record.reserve_against(
+                    limits=aggregate_limits,
+                    consumed=aggregate_ledger,
+                    lease_seconds=lease_seconds,
+                )
         except BudgetExceeded as exc:
             raise ScanActionReservationError(
                 "Scan action exceeds the remaining durable budget: "
@@ -141,6 +206,15 @@ async def admit_and_start_scan_action_reservation(
             uuid.UUID(plan.scan_id),
             json.dumps(used, sort_keys=True, separators=(",", ":")),
         )
+        if aggregate_owner is not None and aggregate_held is not None:
+            aggregate_used.update(aggregate_held)
+            await conn.execute(
+                "UPDATE scans SET budget_used_json=$2::jsonb WHERE id=$1",
+                aggregate_uuid,
+                json.dumps(
+                    aggregate_used, sort_keys=True, separators=(",", ":"),
+                ),
+            )
     if stored.record.status != "reserved":
         raise ScanActionReservationError(
             "Scan action already has an active budget execution lease"
@@ -166,10 +240,21 @@ async def heartbeat_scan_action_reservation(
     action: ScanAction,
     worker_id: str,
     lease_seconds: int,
+    aggregate_owner_id: str | None = None,
     store: PostgresBudgetReservationStore | None = None,
 ) -> StoredBudgetReservation:
     """Renew the reservation while holding the same Scan owner lock order."""
     repository = store or PostgresBudgetReservationStore()
+    aggregate_uuid = _aggregate_owner_uuid(aggregate_owner_id, plan=plan)
+    if aggregate_uuid is not None:
+        aggregate_status = await conn.fetchval(
+            "SELECT status FROM scans WHERE id=$1 FOR UPDATE",
+            aggregate_uuid,
+        )
+        if str(aggregate_status or "") not in {"running", "cancelled"}:
+            raise ScanActionReservationError(
+                "parallel parent Scan is no longer executable"
+            )
     status = await conn.fetchval(
         "SELECT status FROM scans WHERE id=$1 FOR UPDATE",
         uuid.UUID(plan.scan_id),
@@ -207,6 +292,7 @@ async def settle_scan_action_reservation(
     action: ScanAction,
     worker_id: str,
     receipt: CapabilityReceipt,
+    aggregate_owner_id: str | None = None,
     store: PostgresBudgetReservationStore | None = None,
 ) -> tuple[StoredBudgetReservation, CapabilityReceipt]:
     """Terminalize a raw worker receipt and reconcile its hold atomically."""
@@ -215,6 +301,19 @@ async def settle_scan_action_reservation(
             "worker receipt may not claim control-plane budget settlement"
         )
     repository = store or PostgresBudgetReservationStore()
+    aggregate_uuid = _aggregate_owner_uuid(aggregate_owner_id, plan=plan)
+    aggregate_owner = None
+    if aggregate_uuid is not None:
+        aggregate_owner = await conn.fetchrow(
+            "SELECT status, budget_used_json FROM scans WHERE id=$1 FOR UPDATE",
+            aggregate_uuid,
+        )
+        if not aggregate_owner or str(aggregate_owner.get("status") or "") not in {
+            "running", "cancelled",
+        }:
+            raise ScanActionReservationError(
+                "parallel parent Scan no longer accepts action results"
+            )
     owner = await conn.fetchrow(
         "SELECT status, budget_used_json FROM scans WHERE id=$1 FOR UPDATE",
         uuid.UUID(plan.scan_id),
@@ -281,6 +380,17 @@ async def settle_scan_action_reservation(
     }
     reconciled = terminal.reconcile_consumed(ledger)
     used.update(reconciled)
+    aggregate_used: dict[str, Any] | None = None
+    if aggregate_owner is not None:
+        aggregate_used = _json_object(
+            aggregate_owner.get("budget_used_json"),
+            name="parallel parent Scan budget ledger",
+        )
+        aggregate_ledger = {
+            name: int(aggregate_used.get(name) or 0)
+            for name in stored.record.requested
+        }
+        aggregate_used.update(terminal.reconcile_consumed(aggregate_ledger))
     settled = await repository.persist_terminal(
         conn,
         previous=stored,
@@ -293,6 +403,14 @@ async def settle_scan_action_reservation(
         uuid.UUID(plan.scan_id),
         json.dumps(used, sort_keys=True, separators=(",", ":")),
     )
+    if aggregate_used is not None:
+        await conn.execute(
+            "UPDATE scans SET budget_used_json=$2::jsonb WHERE id=$1",
+            aggregate_uuid,
+            json.dumps(
+                aggregate_used, sort_keys=True, separators=(",", ":"),
+            ),
+        )
     return settled, linked_receipt
 
 

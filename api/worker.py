@@ -14167,6 +14167,10 @@ async def _execute_reserved_deterministic_scan(
         plan=plan,
         worker_id=worker_id,
         backend_name="local",
+        aggregate_owner_id=(
+            str(normalized.get("_v2_worker_authority", {}).get("parent_scan_id") or "")
+            or None
+        ),
     )
 
     async def load_private_replay_plan(
@@ -14263,6 +14267,10 @@ async def _execute_reserved_deterministic_scan(
             plan=plan,
             worker_id=worker_id,
             backend_name="local",
+            aggregate_owner_id=(
+                str(normalized.get("_v2_worker_authority", {}).get("parent_scan_id") or "")
+                or None
+            ),
         )
         dispatcher.plan = plan
         dispatcher.plan_revision = plan_revision

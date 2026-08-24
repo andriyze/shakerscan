@@ -22,6 +22,7 @@ from api.scan.execution_backend import (
     ActionLease,
     ActionLeaseLost,
     PostgresScanExecutionBackend,
+    ScanExecutionBackendError,
 )
 from api.scan.orchestrator import ScanOrchestrator
 from api.runtime.receipts import CapabilityReceipt
@@ -407,8 +408,10 @@ class FakePool:
 
 
 class FakePostgresConn:
-    def __init__(self, plan):
+    def __init__(self, plan, *, aggregate_owner_id=None):
         self.scan_status = "running"
+        self.aggregate_owner_id = aggregate_owner_id
+        self.aggregate_status = "running"
         self.observations = {}
         self.budget_rows = {}
         self.budget_actions = {}
@@ -431,6 +434,7 @@ class FakePostgresConn:
             "hosts_attempted": 0,
             "tool_wall_seconds": 0,
         }
+        self.aggregate_budget_used = dict(self.budget_used)
         self.rows = {
             action.action_id: {
                 "status": "planned",
@@ -448,7 +452,11 @@ class FakePostgresConn:
     async def execute(self, query, *args):
         if "UPDATE scans SET budget_used_json" in query:
             value = args[1]
-            self.budget_used = json.loads(value) if isinstance(value, str) else dict(value)
+            parsed = json.loads(value) if isinstance(value, str) else dict(value)
+            if self.aggregate_owner_id and str(args[0]) == self.aggregate_owner_id:
+                self.aggregate_budget_used = parsed
+            else:
+                self.budget_used = parsed
             return "UPDATE 1"
         raise AssertionError(query)
 
@@ -485,15 +493,23 @@ class FakePostgresConn:
     async def fetchrow(self, query, *args):
         stripped = query.lstrip()
         if "FROM scans WHERE id=$1 FOR UPDATE" in query:
+            aggregate = bool(
+                self.aggregate_owner_id
+                and str(args[0]) == self.aggregate_owner_id
+            )
             if "budget_json" in query:
                 return {
-                    "status": self.scan_status,
+                    "status": self.aggregate_status if aggregate else self.scan_status,
                     "budget_json": self.budget_json,
-                    "budget_used_json": self.budget_used,
+                    "budget_used_json": (
+                        self.aggregate_budget_used if aggregate else self.budget_used
+                    ),
                 }
             return {
-                "status": self.scan_status,
-                "budget_used_json": self.budget_used,
+                "status": self.aggregate_status if aggregate else self.scan_status,
+                "budget_used_json": (
+                    self.aggregate_budget_used if aggregate else self.budget_used
+                ),
             }
         if stripped.startswith("INSERT INTO budget_reservations"):
             record = self._reservation_from_args(args)
@@ -636,6 +652,8 @@ class FakePostgresConn:
         if "SELECT target_id::text FROM scans" in query:
             return "50000000-0000-4000-8000-000000000010"
         assert "SELECT status FROM scans" in query
+        if self.aggregate_owner_id and str(args[0]) == self.aggregate_owner_id:
+            return self.aggregate_status
         return self.scan_status
 
 
@@ -665,6 +683,55 @@ def test_postgres_backend_hashes_lease_token_and_settles_generic_result_atomical
     assert stored_row["status"] == "success"
     assert stored_row["lease_token_hash"] is None
     assert stored_row["result_digest"] == settled.result_digest
+
+
+def test_parallel_child_action_holds_and_settles_parent_budget_atomically():
+    plan = _plan()
+    parent_id = "30000000-0000-4000-8000-000000000099"
+    conn = FakePostgresConn(plan, aggregate_owner_id=parent_id)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="parallel-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+        aggregate_owner_id=parent_id,
+    )
+    action = plan.actions[0]
+
+    lease = asyncio.run(backend.acquire_action(action))
+    assert conn.budget_used == {**conn.aggregate_budget_used}
+    assert conn.aggregate_budget_used["http_requests"] == 1
+    assert conn.aggregate_budget_used["tool_wall_seconds"] == 2
+
+    asyncio.run(backend.heartbeat(lease))
+    asyncio.run(backend.settle(
+        lease,
+        _raw_receipt(action, worker_id="parallel-worker-1"),
+    ))
+    assert conn.aggregate_budget_used["http_requests"] == 1
+    assert conn.aggregate_budget_used["tool_wall_seconds"] == 1
+    assert conn.aggregate_budget_used == conn.budget_used
+
+
+def test_parallel_child_action_fails_closed_when_parent_budget_is_exhausted():
+    plan = _plan()
+    parent_id = "30000000-0000-4000-8000-000000000099"
+    conn = FakePostgresConn(plan, aggregate_owner_id=parent_id)
+    conn.aggregate_budget_used["http_requests"] = conn.budget_json[
+        "max_http_requests"
+    ]
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="parallel-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+        aggregate_owner_id=parent_id,
+    )
+
+    with pytest.raises(
+        ScanExecutionBackendError, match="remaining durable budget: http_requests",
+    ):
+        asyncio.run(backend.acquire_action(plan.actions[0]))
 
 
 def test_postgres_backend_fails_closed_after_lease_authority_is_lost():

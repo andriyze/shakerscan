@@ -12039,6 +12039,10 @@ async def _broker_action_context(
         worker_id=worker_id,
         backend_name="broker",
         lease_seconds=min(BROKER_LEASE_SECONDS, 3600),
+        aggregate_owner_id=(
+            canonical_job.shard.parent_scan_id
+            if canonical_job.shard is not None else None
+        ),
     )
     return row, plan, canonical_job, action, backend
 
@@ -12088,6 +12092,10 @@ async def _materialize_broker_scan_continuation(
         worker_id=worker_id,
         backend_name="broker",
         lease_seconds=min(BROKER_LEASE_SECONDS, 3600),
+        aggregate_owner_id=(
+            canonical_job.shard.parent_scan_id
+            if canonical_job.shard is not None else None
+        ),
     )
     results = {}
     observations = {}

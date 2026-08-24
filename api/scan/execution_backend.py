@@ -309,6 +309,7 @@ class PostgresScanExecutionBackend:
         backend_name: str = "local",
         lease_seconds: int = 120,
         token_factory: Callable[[], str] | None = None,
+        aggregate_owner_id: str | None = None,
     ) -> None:
         if not isinstance(plan, ScanActionPlan):
             raise ScanExecutionBackendError("Postgres backend requires a canonical action plan")
@@ -324,6 +325,14 @@ class PostgresScanExecutionBackend:
         self.backend_name = normalized_backend
         self._lease_seconds = _positive_seconds(lease_seconds)
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
+        self._aggregate_owner_id = (
+            _uuid(aggregate_owner_id, name="aggregate_owner_id")
+            if aggregate_owner_id else None
+        )
+        if self._aggregate_owner_id == plan.scan_id:
+            raise ScanExecutionBackendError(
+                "aggregate_owner_id must differ from the child Scan"
+            )
         self._actions = {action.action_id: action for action in plan.actions}
 
     def _require_action(self, action_id: str) -> ScanAction:
@@ -459,6 +468,7 @@ class PostgresScanExecutionBackend:
                     action=action,
                     worker_id=worker_id,
                     receipt=raw_receipt,
+                    aggregate_owner_id=self._aggregate_owner_id,
                 )
             except ScanActionReservationError as exc:
                 raise ScanExecutionBackendError(str(exc)) from exc
@@ -539,6 +549,7 @@ class PostgresScanExecutionBackend:
                         action=action,
                         worker_id=self._worker_id,
                         lease_seconds=self._lease_seconds,
+                        aggregate_owner_id=self._aggregate_owner_id,
                     )
                 except ScanActionReservationError as exc:
                     raise ScanExecutionBackendError(str(exc)) from exc
@@ -605,6 +616,7 @@ class PostgresScanExecutionBackend:
                     action=action,
                     worker_id=self._worker_id,
                     lease_seconds=self._lease_seconds,
+                    aggregate_owner_id=self._aggregate_owner_id,
                 )
             except ScanActionReservationError as exc:
                 raise ActionLeaseLost(str(exc)) from exc
@@ -658,6 +670,7 @@ class PostgresScanExecutionBackend:
                         action=action,
                         worker_id=self._worker_id,
                         receipt=result,
+                        aggregate_owner_id=self._aggregate_owner_id,
                     )
                     reservation_id = reservation.record.reservation_id
                 except ScanActionReservationError as exc:
