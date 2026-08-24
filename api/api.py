@@ -519,6 +519,7 @@ try:
         capability_list_response as scan_capability_list_response,
         coverage_response as scan_coverage_response,
     )
+    from scan.parity import build_scan_semantic_parity_artifact
     from scan.surface_manifest import build_scan_surface_manifest
     from scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -624,6 +625,7 @@ except ModuleNotFoundError:
         capability_list_response as scan_capability_list_response,
         coverage_response as scan_coverage_response,
     )
+    from api.scan.parity import build_scan_semantic_parity_artifact
     from api.scan.surface_manifest import build_scan_surface_manifest
     from api.scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -31417,6 +31419,30 @@ async def get_scan_coverage(scan_id: str):
     async with db_pool.acquire() as conn:
         explanation = await _load_public_scan_execution_explanation(conn, scan_id)
     return scan_coverage_response(explanation)
+
+
+@app.get("/scans/{scan_id}/parity-artifact")
+async def get_scan_parity_artifact(scan_id: str):
+    """Return a content-free semantic artifact for placement certification."""
+    try:
+        parsed_scan_id = uuid.UUID(str(scan_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=404, detail="Scan not found") from exc
+    async with db_pool.acquire() as conn:
+        explanation = await _load_public_scan_execution_explanation(conn, scan_id)
+        findings = await conn.fetch(
+            """
+            SELECT fingerprint, tool, url, title
+              FROM findings
+             WHERE scan_id=$1
+             ORDER BY fingerprint, id
+            """,
+            parsed_scan_id,
+        )
+    return build_scan_semantic_parity_artifact(
+        explanation,
+        tuple(dict(row) for row in findings),
+    )
 
 
 @app.get("/scans/{scan_id}")

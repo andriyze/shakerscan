@@ -329,8 +329,16 @@ def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch)
             }
 
         async def fetch(self, query, *args):
-            assert "FROM scan_capability_actions" in query
-            return [action]
+            if "FROM scan_capability_actions" in query:
+                return [action]
+            if "FROM findings" in query:
+                return [{
+                    "fingerprint": "f" * 64,
+                    "tool": "fixture",
+                    "url": "https://example.test/",
+                    "title": "Fixture",
+                }]
+            raise AssertionError(query)
 
     class _Acquire:
         async def __aenter__(self):
@@ -347,12 +355,15 @@ def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch)
     actions = asyncio.run(api_module.get_scan_actions(str(scan_id)))
     capabilities = asyncio.run(api_module.get_scan_capabilities(str(scan_id)))
     coverage = asyncio.run(api_module.get_scan_coverage(str(scan_id)))
+    parity = asyncio.run(api_module.get_scan_parity_artifact(str(scan_id)))
 
     assert actions["actions"][0]["status"] == "success"
     assert actions["actions"][0]["output_schema"] == "http-observation/v1"
     assert actions["transport_parity"]["consistent"] is True
     assert capabilities["capability_coverage"]["completed"] == 1
     assert coverage["grade_reliability"]["reliable"] is True
+    assert parity["schema_version"] == "scan-semantic-parity-artifact/v1"
+    assert parity["finding_identities"] == ["f" * 64]
     assert "never-public" not in json.dumps({
         "actions": actions, "capabilities": capabilities, "coverage": coverage,
     })
