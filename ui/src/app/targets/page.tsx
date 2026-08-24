@@ -507,6 +507,7 @@ function TargetsContent() {
         <div className="relative flex-1 min-w-[200px]">
           <Input
             type="text"
+            aria-label="Search targets by URL or domain"
             placeholder="Search by URL or domain..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
