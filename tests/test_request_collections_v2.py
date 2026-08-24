@@ -145,5 +145,6 @@ def test_generic_storage_and_scan_hunt_api_contracts_are_wired():
     assert 'app.post("/request-collections/{collection_id}/environments")' in api
     assert 'app.post("/request-collections/{collection_id}/bindings")' in api
     assert 'app.post("/request-collections/{collection_id}/selections")' in api
-    assert "collection_refs, collection_endpoints = await _generic_collection_refs" in api
+    assert "collection_manifest_requests," in api
+    assert ") = await _generic_collection_refs" in api
     assert "secret_values_visible" in api
