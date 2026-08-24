@@ -14,6 +14,7 @@ DEFAULT_ROOTS = (
     REPOSITORY_ROOT / "api" / "scan",
     REPOSITORY_ROOT / "api" / "capabilities",
     REPOSITORY_ROOT / "api" / "runtime",
+    REPOSITORY_ROOT / "api" / "pinned_socks_proxy.py",
 )
 NETWORK_IMPORTS = frozenset({
     "aiohttp", "http.client", "httpx", "requests", "socket",
@@ -50,6 +51,65 @@ REVIEWED_CALLS = {
     "api/runtime/pinned_http_replay.py": frozenset({
         "aiohttp.ClientSession", "aiohttp.TCPConnector",
     }),
+    "api/pinned_socks_proxy.py": frozenset({"asyncio.open_connection"}),
+}
+
+# Each direct non-target egress seam is reviewed by exact caller and authority class.
+# Target credentials and target routing are forbidden for every entry. New provider,
+# control-plane, storage, update, or local-IPC clients must be added deliberately here.
+NON_TARGET_EGRESS_ALLOWLIST = (
+    ("api/ai_gate_scan.py", "_rubric_judge_findings", "ai_provider"),
+    ("api/ai_gate_scan.py", "_semantic_judge_probe_transcripts", "ai_provider"),
+    ("api/ai_verifier.py", "_call_llm", "ai_provider"),
+    ("api/api.py", "_fetch_json_url", "control_plane"),
+    ("api/api.py", "_model_intake_runner_http", "control_plane"),
+    ("api/api.py", "_call_model_intake_signer", "control_plane"),
+    ("api/api.py", "_model_intake_stage_run", "package_update"),
+    ("api/api.py", "get_workers", "local_ipc"),
+    ("api/broker_worker.py", "api_request", "control_plane"),
+    ("api/broker_worker.py", "upload_artifact", "object_storage"),
+    ("api/evidence_storage.py", "_s3_request", "object_storage"),
+    ("api/fleet_agent.py", "connect", "control_plane"),
+    ("api/fleet_agent.py", "api_request", "control_plane"),
+    ("api/model_intake_admission_webhook.py", "_verify", "control_plane"),
+    ("api/model_intake_firecracker_runner.py", "_unix_http", "local_ipc"),
+)
+NON_TARGET_EGRESS_CLASSES = frozenset({
+    "ai_provider", "control_plane", "object_storage", "package_update", "local_ipc",
+})
+REQUIRED_TARGET_TRANSPORT_ANCHORS = {
+    "api/agent_tools.py": (
+        "build_enforced_scanner_plan", "pinned_proxy_url", "primary_frozen_address",
+    ),
+    "api/capabilities/browser.py": (
+        "PinnedSocksProxy", "--host-resolver-rules=MAP * ~NOTFOUND",
+        "service_workers=\"block\"",
+    ),
+    "api/capabilities/http.py": (
+        "FrozenTargetSocketFactory", "connection_addresses", '"Host": host_header',
+        'request.extensions["sni_hostname"]',
+    ),
+    "api/capabilities/tls.py": (
+        "FrozenTargetSocketFactory", "server_hostname=parsed.hostname",
+    ),
+    "api/runtime/pinned_http_replay.py": (
+        "_FrozenAddressResolver", "socket_factory=tracked_socket_factory",
+    ),
+    "api/pinned_socks_proxy.py": (
+        "FrozenTargetSocketFactory", "self.socket_factory.connection_addresses",
+    ),
+    "api/scan/action_adapter.py": (
+        "FrozenTargetSocketFactory", '"authorized_addresses": list(self.target.allowed_addresses)',
+        '"address_policy": socket_factory.policy_receipt',
+    ),
+    "api/worker.py": (
+        "PinnedSocksProxy", "build_enforced_scanner_plan",
+        "max_connections=connection_ceiling", "_DIRECT_ADDRESS_SCANNERS",
+    ),
+    "scanner/sitecustomize.py": (
+        "SHAKERSCAN_CANONICAL_SCAN_EXECUTION", "frozen_getaddrinfo",
+        "normalize_frozen_addresses",
+    ),
 }
 
 
@@ -146,13 +206,68 @@ def find_violations(paths: Iterable[Path]) -> tuple[str, ...]:
     return tuple(violations)
 
 
+def find_target_transport_anchor_violations() -> tuple[str, ...]:
+    violations: list[str] = []
+    for relative_path, anchors in REQUIRED_TARGET_TRANSPORT_ANCHORS.items():
+        path = REPOSITORY_ROOT / relative_path
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            violations.append(f"{relative_path}: cannot inspect transport anchors: {exc}")
+            continue
+        for anchor in anchors:
+            if anchor not in source:
+                violations.append(
+                    f"{relative_path}: missing reviewed target transport anchor {anchor}"
+                )
+    return tuple(violations)
+
+
+def find_non_target_egress_allowlist_violations() -> tuple[str, ...]:
+    """Prove the reviewed non-target callers still exist as separately named seams."""
+    violations: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for relative_path, function_name, egress_class in NON_TARGET_EGRESS_ALLOWLIST:
+        identity = (relative_path, function_name)
+        if identity in seen:
+            violations.append(
+                f"{relative_path}:{function_name}: duplicate non-target egress authority"
+            )
+            continue
+        seen.add(identity)
+        if egress_class not in NON_TARGET_EGRESS_CLASSES:
+            violations.append(
+                f"{relative_path}:{function_name}: invalid non-target egress class"
+            )
+            continue
+        path = REPOSITORY_ROOT / relative_path
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError) as exc:
+            violations.append(f"{relative_path}: cannot inspect egress authority: {exc}")
+            continue
+        if not any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+            for node in ast.walk(tree)
+        ):
+            violations.append(
+                f"{relative_path}:{function_name}: reviewed non-target egress caller is missing"
+            )
+    return tuple(violations)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Reject unreviewed canonical Scan network transports",
     )
     parser.add_argument("paths", nargs="*", type=Path)
     args = parser.parse_args()
-    violations = find_violations(args.paths or DEFAULT_ROOTS)
+    violations = (
+        *find_violations(args.paths or DEFAULT_ROOTS),
+        *find_target_transport_anchor_violations(),
+        *find_non_target_egress_allowlist_violations(),
+    )
     if violations:
         for violation in violations:
             print(violation)
