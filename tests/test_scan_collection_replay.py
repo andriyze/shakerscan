@@ -379,12 +379,14 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
 
 def test_scan_api_requires_single_owner_and_freezes_replay_binding():
     source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    submit_start = source.index('async def submit_scan')
-    submit_end = source.index('\n\n@app.get("/scans/{scan_id}")', submit_start)
+    submit_start = source.index('async def _submit_scan')
+    submit_end = source.index('\n\n@app.post("/scans/batch")', submit_start)
     submit = source[submit_start:submit_end]
 
     assert "confirmed_active_collection_replay" in submit
-    assert "always_require_receipt=bool(" in submit
+    assert "always_require_receipt=durable_approval_required" in submit
+    assert "require_target_binding=durable_approval_required" in submit
+    assert "require_expiry=durable_approval_required" in submit
     assert "_freeze_scan_collection_target_binding" in submit
     assert "request_collection_exact_replay_requires_single_scan_owner" in submit
     assert 'options_payload["shards"] = None' in submit
