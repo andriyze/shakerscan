@@ -30849,19 +30849,6 @@ async def _submit_scan(
                 max(0, int(parallel_worker_count)),
                 scan_contract.budget.max_workers,
             )
-        if executable_collection_refs and parallel_enabled:
-            # Exact replay owns one logical Scan ledger.  The current compatibility
-            # fan-out would execute the same saved selection once per shard, so keep
-            # this Scan single-owner until CanonicalScanJob replaces shard dictionaries.
-            parallel_enabled = False
-            parallel_worker_count = None
-            options_payload["parallel"] = False
-            options_payload["shards"] = None
-            options_payload["shard_strategy"] = None
-            options_payload["auto_sharded"] = False
-            options_payload["parallel_disabled_reason"] = (
-                "request_collection_exact_replay_requires_single_scan_owner"
-            )
 
         # Every V2 Scan persists one immutable target-bound job envelope even
         # while parallel/fleet transport is migrated in the next bounded step.

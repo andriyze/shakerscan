@@ -452,8 +452,10 @@ def test_scan_worker_routes_collections_through_shared_durable_executor():
     assert "ScanOrchestrator(" in scheduler
 
 
-def test_scan_api_requires_single_owner_and_freezes_replay_binding():
-    source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
+def test_scan_api_allows_canonical_parallel_replay_and_freezes_binding():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "api.py").read_text()
+    worker = (root / "api" / "worker.py").read_text()
     submit_start = source.index('async def _submit_scan')
     submit_end = source.index('\n\n@app.post("/scans/batch")', submit_start)
     submit = source[submit_start:submit_end]
@@ -463,6 +465,6 @@ def test_scan_api_requires_single_owner_and_freezes_replay_binding():
     assert "require_target_binding=durable_approval_required" in submit
     assert "require_expiry=durable_approval_required" in submit
     assert "_freeze_scan_collection_target_binding" in submit
-    assert "request_collection_exact_replay_requires_single_scan_owner" in submit
-    assert 'options_payload["shards"] = None' in submit
-    assert 'options_payload["auto_sharded"] = False' in submit
+    assert "request_collection_exact_replay_requires_single_scan_owner" not in submit
+    assert "partition_request_manifests(" in worker
+    assert "narrow_replay_plan_to_request_manifest(" in worker
