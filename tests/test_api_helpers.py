@@ -292,6 +292,7 @@ def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch)
             "stage": "deterministic_baseline",
             "ordinal": 0,
             "capability_name": "http.request",
+            "output_schema": "http-observation/v1",
             "capability_args": {"authorization": "never-public"},
             "requested_budget": {"http_requests": 1},
             "placement": {"eligible_backends": ["local", "broker"]},
@@ -315,6 +316,8 @@ def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch)
 
     class _Conn:
         async def fetchrow(self, query, *args):
+            if "FROM scan_action_plan_revisions" in query:
+                return None
             assert "FROM scans" in query
             return {
                 "id": scan_id,
@@ -346,6 +349,7 @@ def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch)
     coverage = asyncio.run(api_module.get_scan_coverage(str(scan_id)))
 
     assert actions["actions"][0]["status"] == "success"
+    assert actions["actions"][0]["output_schema"] == "http-observation/v1"
     assert actions["transport_parity"]["consistent"] is True
     assert capabilities["capability_coverage"]["completed"] == 1
     assert coverage["grade_reliability"]["reliable"] is True

@@ -46,6 +46,7 @@ _REASON_LABELS = {
     "not_applicable": "The capability did not apply to this target",
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
+    "report_grade_unreliable": "The final report marked the grade as provisional",
     "missing_terminal_result": "A required capability has no terminal result",
 }
 
@@ -313,6 +314,10 @@ def build_scan_execution_explanation(
             "stage": _text(raw_plan.get("stage") or row.get("stage"), maximum=128) or "unknown",
             "capability_name": capability,
             "capability_label": _label(capability),
+            "output_schema": _text(
+                raw_plan.get("output_schema") or row.get("output_schema"),
+                maximum=200,
+            ),
             "required": bool(raw_plan.get("required", row.get("required", False))),
             "supporting": bool(raw_plan.get("supporting", row.get("supporting", False))),
             "status": status or "missing",
@@ -419,11 +424,16 @@ def build_scan_execution_explanation(
             if name in _TRAFFIC_DIMENSIONS
         )
     ]
+    report_coverage = _object(report_payload.get("coverage"))
+    report_reliability = _object(report_coverage.get("grade_reliability"))
     reliability_reasons = sorted({
         str(item.get("reason_code") or "missing_terminal_result")
         for item in required_incomplete
-    } | ({"active_verifier_zero_attempts"} if zero_attempt_verifiers else set()))
-    report_coverage = _object(report_payload.get("coverage"))
+    } | ({"active_verifier_zero_attempts"} if zero_attempt_verifiers else set()) | {
+        str(item)[:100]
+        for item in _array(report_reliability.get("reasons"))
+        if str(item).strip()
+    })
     coverage_status = _text(report_coverage.get("status"), maximum=40)
     if not coverage_status:
         if str(scan_status) == "cancelled" or counts.get("cancelled"):
@@ -436,7 +446,16 @@ def build_scan_execution_explanation(
             coverage_status = "in_progress"
         else:
             coverage_status = "complete"
-    grade_reliable = not reliability_reasons and coverage_status == "complete"
+    report_declares_unreliable = report_reliability.get("reliable") is False
+    if report_declares_unreliable and not reliability_reasons:
+        # The finalizer is authoritative. Historical reports did not always
+        # persist a specific reason, so keep those fail-closed too.
+        reliability_reasons = ["report_grade_unreliable"]
+    grade_reliable = (
+        not report_declares_unreliable
+        and not reliability_reasons
+        and coverage_status == "complete"
+    )
     optional_gaps = [
         {
             "action_id": item["action_id"],

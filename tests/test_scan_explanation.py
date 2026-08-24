@@ -37,6 +37,7 @@ def _plan():
                 "stage": "deterministic_baseline",
                 "ordinal": 0,
                 "capability_name": "http.request",
+                "output_schema": "http-observation/v1",
                 "required": True,
                 "admission_status": "planned",
                 "capability_args": {
@@ -140,6 +141,7 @@ def test_execution_explanation_is_content_safe_and_explicit():
         "attempt": 1,
     }
     assert action["budget"]["consumed"]["http_requests"] == 2
+    assert action["output_schema"] == "http-observation/v1"
     assert action["observation"]["count"] == 1
     assert action["receipt"]["provenance"]["source_revision"] == "revision-1"
     serialized = json.dumps(explanation)
@@ -169,6 +171,61 @@ def test_execution_explanation_marks_required_partial_grade_unreliable():
     assert coverage["capability_coverage"]["partial"] == 1
     assert coverage["optional_gaps"][0]["action_id"] == "verify.xss.0"
     assert explanation["transport_parity"]["broker_eligible"] is True
+
+
+def test_execution_explanation_preserves_final_report_grade_reliability():
+    rows = _rows()
+    rows[0]["status"] = "success"
+    rows[0]["reason_code"] = None
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="completed",
+        plan_payload=_plan(),
+        action_rows=rows,
+        report={
+            "coverage": {
+                "status": "complete",
+                "grade_reliability": {
+                    "reliable": False,
+                    "reasons": ["unproven_critical_high"],
+                },
+            },
+        },
+    )
+
+    assert explanation["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["unproven_critical_high"],
+        "reason_labels": [
+            "High or critical candidates still require deterministic proof",
+        ],
+        "warning": (
+            "The grade is provisional because required coverage did not complete cleanly."
+        ),
+    }
+
+
+def test_execution_explanation_fails_closed_for_reasonless_unreliable_report():
+    rows = _rows()
+    rows[0]["status"] = "success"
+    rows[0]["reason_code"] = None
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="completed",
+        plan_payload=_plan(),
+        action_rows=rows,
+        report={
+            "coverage": {
+                "status": "complete",
+                "grade_reliability": {"reliable": False, "reasons": []},
+            },
+        },
+    )
+
+    assert explanation["coverage"]["grade_reliability"]["reliable"] is False
+    assert explanation["coverage"]["grade_reliability"]["reasons"] == [
+        "report_grade_unreliable",
+    ]
 
 
 def test_public_endpoint_projections_have_stable_schemas():
