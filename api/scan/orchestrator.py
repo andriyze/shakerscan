@@ -245,12 +245,10 @@ class ScanOrchestrator:
             ]
             if await self._backend.cancellation_requested():
                 for action in pending:
-                    results[action.action_id] = await self._settle_without_execution(
-                        plan=plan,
-                        action=action,
-                        status=CapabilityResultStatus.CANCELLED,
-                        reason=CapabilityResultReason.CANCELLED,
+                    results[action.action_id] = await self._backend.cancel_action(
+                        action,
                     )
+                    self._validate_result(action, results[action.action_id])
                     await self._emit(
                         action, "settled", results[action.action_id],
                     )

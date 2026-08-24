@@ -176,6 +176,35 @@ class BrokerScanExecutionBackend:
             raise ScanExecutionBackendError("broker stored action result is invalid") from exc
         return stored
 
+    async def cancel_action(
+        self, action: ScanAction,
+    ) -> CapabilityResultReference:
+        """Ask the control plane to terminalize without issuing a worker lease."""
+        expected = self._action(action.action_id)
+        if expected.action_digest != action.action_digest:
+            raise ScanExecutionBackendError(
+                "broker action differs from the immutable Scan plan"
+            )
+        response = await self._request(
+            "POST", self._path(action.action_id, "cancel"),
+            self._authority(action),
+        )
+        if not isinstance(response, Mapping) or set(response) != {"result"}:
+            raise ScanExecutionBackendError(
+                "broker action cancellation response is invalid"
+            )
+        try:
+            stored = CapabilityResultReference.from_dict(response["result"])
+        except (TypeError, ValueError) as exc:
+            raise ScanExecutionBackendError(
+                "broker cancelled action result is invalid"
+            ) from exc
+        if stored.action_id != action.action_id:
+            raise ScanExecutionBackendError(
+                "broker cancelled action result changed action authority"
+            )
+        return stored
+
     async def load_result(self, action_id: str) -> CapabilityResultReference | None:
         action = self._action(action_id)
         response = await self._request(

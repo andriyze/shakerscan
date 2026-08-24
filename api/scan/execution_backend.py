@@ -20,6 +20,7 @@ from .action_plan import SCAN_ACTION_PLAN_SCHEMA, ScanAction, ScanActionPlan
 from .action_reservations import (
     ScanActionReservationError,
     admit_and_start_scan_action_reservation,
+    cancel_scan_action_reservation,
     heartbeat_scan_action_reservation,
     settle_scan_action_reservation,
 )
@@ -209,6 +210,10 @@ class ScanExecutionBackend(Protocol):
         self,
         lease: ActionLease,
         result: CapabilityResultReference | CapabilityReceipt,
+    ) -> CapabilityResultReference: ...
+
+    async def cancel_action(
+        self, action: ScanAction,
     ) -> CapabilityResultReference: ...
 
     async def load_result(self, action_id: str) -> CapabilityResultReference | None: ...
@@ -603,6 +608,136 @@ class PostgresScanExecutionBackend:
             lease_seconds=self._lease_seconds,
             attempt=attempt,
         )
+
+    async def cancel_action(
+        self, action: ScanAction,
+    ) -> CapabilityResultReference:
+        """Persist a zero-traffic cancellation without an execution lease."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await self.cancel_action_with_connection(conn, action)
+
+    async def cancel_action_with_connection(
+        self, conn: Any, action: ScanAction,
+    ) -> CapabilityResultReference:
+        """Cancel through a caller-owned control-plane transaction."""
+        expected = self._require_action(action.action_id)
+        if expected.action_digest != action.action_digest:
+            raise ScanExecutionBackendError(
+                "action differs from the persisted Scan plan"
+            )
+        state = await conn.fetchrow(
+            """SELECT status, action_digest, result_json
+                 FROM scan_capability_actions
+                WHERE scan_id=$1 AND action_id=$2
+                  AND action_digest=$3
+                  AND execution_plan_digest=$4
+                  AND target_binding_digest=$5
+                FOR UPDATE""",
+            uuid.UUID(self._plan.scan_id),
+            action.action_id,
+            action.action_digest,
+            self._plan.execution_plan_digest,
+            self._plan.target_binding_digest,
+        )
+        if state is None:
+            raise ScanExecutionBackendError(
+                "action immutable authority changed before cancellation"
+            )
+        existing = state.get("result_json")
+        if existing is not None:
+            try:
+                result = CapabilityResultReference.from_dict(_json_object(
+                    existing, name="stored cancelled action result",
+                ))
+                placement_from_stored_result(action=action, stored=result)
+                return result
+            except (CapabilityResultError, ValueError) as exc:
+                raise ScanExecutionBackendError(
+                    "stored cancelled action result is invalid"
+                ) from exc
+        if str(state.get("status") or "") != "planned":
+            raise ScanExecutionBackendError(
+                "active action cancellation belongs to its owning worker"
+            )
+        target_id = await conn.fetchval(
+            "SELECT target_id::text FROM scans WHERE id=$1",
+            uuid.UUID(self._plan.scan_id),
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        raw_receipt = CapabilityReceipt(
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement.get("adapter_name") or ""),
+            adapter_version=str(action.placement.get("adapter_version") or ""),
+            target_id=str(target_id or self._plan.scan_id),
+            scan_id=self._plan.scan_id,
+            worker_id=self._worker_id,
+            status="cancelled",
+            input_digest=action.action_digest,
+            parser_version="scan-cancellation/v1",
+            started_at=now,
+            finished_at=now,
+            redacted_execution={
+                "action_id": action.action_id,
+                "execution_started": False,
+                "terminalization": "owner_cancelled",
+            },
+            budget_reserved=action.requested_budget,
+            budget_consumed={
+                name: 0 for name in action.requested_budget
+            },
+            observations=(),
+            errors=("cancelled_before_execution",),
+        )
+        try:
+            reservation, linked_receipt = await cancel_scan_action_reservation(
+                conn,
+                plan=self._plan,
+                action=action,
+                receipt=raw_receipt,
+                aggregate_owner_id=self._aggregate_owner_id,
+            )
+        except ScanActionReservationError as exc:
+            raise ScanExecutionBackendError(str(exc)) from exc
+        result = await self._result_from_receipt(
+            conn, action=action, receipt=linked_receipt,
+        )
+        result_json = json.dumps(
+            result.canonical_dict(), sort_keys=True, separators=(",", ":"),
+        )
+        row = await conn.fetchrow(
+            """UPDATE scan_capability_actions
+                  SET status='cancelled', reason_code=$4,
+                      receipt_id=$5, receipt_hash=$6,
+                      result_digest=$7, result_json=$8::jsonb,
+                      receipt_json=$9::jsonb, reservation_id=$10,
+                      finished_at=now(), updated_at=now(),
+                      lease_token_hash=NULL, lease_expires_at=NULL
+                WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
+                  AND status='planned'
+                  AND (reservation_id IS NULL OR reservation_id=$10)
+            RETURNING result_json""",
+            uuid.UUID(self._plan.scan_id),
+            action.action_id,
+            action.action_digest,
+            CapabilityResultReason.CANCELLED.value,
+            result.receipt_ref.receipt_id,
+            result.receipt_ref.receipt_hash,
+            result.result_digest,
+            result_json,
+            json.dumps(
+                linked_receipt.public_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            reservation.record.reservation_id,
+        )
+        if row is None:
+            raise ScanExecutionBackendError(
+                "action changed during cancellation settlement"
+            )
+        return CapabilityResultReference.from_dict(_json_object(
+            row["result_json"], name="stored cancelled action result",
+        ))
 
     async def heartbeat(self, lease: ActionLease) -> None:
         action = self._require_action(lease.action.action_id)

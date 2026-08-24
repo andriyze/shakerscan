@@ -414,6 +414,24 @@ jobs:
           docker compose exec -T worker sh -ceu 'httpx -version; nuclei -version; katana -version; dalfox version'
           SCANNER_IMAGE=shakerscan-worker:local scripts/upgrade_smoke.sh
 
+      - name: Prove cancellation wins action admission in PostgreSQL
+        run: |
+          mkdir -p artifacts
+          docker compose cp \
+            tests/e2e/run_scan_cancellation_race.py \
+            api:/tmp/run_scan_cancellation_race.py
+          docker compose exec -T -w /app api \
+            python /tmp/run_scan_cancellation_race.py --json \
+            > artifacts/v2-scan-cancellation-race.json
+
+      - name: Upload Scan cancellation race receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-scan-cancellation-race
+          path: artifacts/v2-scan-cancellation-race.json
+          if-no-files-found: error
+
       - name: Type-check and build the production UI
         run: |
           npm --prefix ui ci

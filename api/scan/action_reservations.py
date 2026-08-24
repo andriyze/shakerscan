@@ -32,6 +32,17 @@ class ScanActionReservationError(RuntimeError):
     """Action and shared budget authority could not transition together."""
 
 
+_EXECUTABLE_SCAN_STATES = frozenset({"pending", "queued", "running"})
+_CANCELLING_SCAN_STATES = frozenset({"cancelling", "cancelled"})
+_CANCELLATION_SETTLEMENT_SCAN_STATES = frozenset({
+    *_EXECUTABLE_SCAN_STATES,
+    *_CANCELLING_SCAN_STATES,
+})
+_RESULT_SETTLEMENT_SCAN_STATES = frozenset({
+    "running", "cancelling", "cancelled",
+})
+
+
 def _json_object(value: Any, *, name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -120,9 +131,11 @@ async def admit_and_start_scan_action_reservation(
             "FROM scans WHERE id=$1 FOR UPDATE",
             aggregate_uuid,
         )
-        if not aggregate_owner or str(aggregate_owner.get("status") or "") not in {
-            "pending", "queued", "running", "cancelling", "cancelled",
-        }:
+        if (
+            not aggregate_owner
+            or str(aggregate_owner.get("status") or "")
+            not in _EXECUTABLE_SCAN_STATES
+        ):
             raise ScanActionReservationError(
                 "parallel parent Scan stopped before action budget admission"
             )
@@ -131,9 +144,10 @@ async def admit_and_start_scan_action_reservation(
         "FROM scans WHERE id=$1 FOR UPDATE",
         uuid.UUID(plan.scan_id),
     )
-    if not owner or str(owner.get("status") or "") not in {
-        "pending", "queued", "running", "cancelling", "cancelled",
-    }:
+    if (
+        not owner
+        or str(owner.get("status") or "") not in _EXECUTABLE_SCAN_STATES
+    ):
         raise ScanActionReservationError(
             "Scan stopped before action budget admission"
         )
@@ -251,7 +265,7 @@ async def heartbeat_scan_action_reservation(
             "SELECT status FROM scans WHERE id=$1 FOR UPDATE",
             aggregate_uuid,
         )
-        if str(aggregate_status or "") not in {"running", "cancelled"}:
+        if str(aggregate_status or "") != "running":
             raise ScanActionReservationError(
                 "parallel parent Scan is no longer executable"
             )
@@ -259,7 +273,7 @@ async def heartbeat_scan_action_reservation(
         "SELECT status FROM scans WHERE id=$1 FOR UPDATE",
         uuid.UUID(plan.scan_id),
     )
-    if str(status or "") not in {"running", "cancelled"}:
+    if str(status or "") != "running":
         raise ScanActionReservationError("Scan owner is no longer executable")
     stored = await repository.load_by_action(
         conn,
@@ -308,9 +322,11 @@ async def settle_scan_action_reservation(
             "SELECT status, budget_used_json FROM scans WHERE id=$1 FOR UPDATE",
             aggregate_uuid,
         )
-        if not aggregate_owner or str(aggregate_owner.get("status") or "") not in {
-            "running", "cancelled",
-        }:
+        if (
+            not aggregate_owner
+            or str(aggregate_owner.get("status") or "")
+            not in _RESULT_SETTLEMENT_SCAN_STATES
+        ):
             raise ScanActionReservationError(
                 "parallel parent Scan no longer accepts action results"
             )
@@ -318,7 +334,10 @@ async def settle_scan_action_reservation(
         "SELECT status, budget_used_json FROM scans WHERE id=$1 FOR UPDATE",
         uuid.UUID(plan.scan_id),
     )
-    if not owner or str(owner.get("status") or "") not in {"running", "cancelled"}:
+    if (
+        not owner
+        or str(owner.get("status") or "") not in _RESULT_SETTLEMENT_SCAN_STATES
+    ):
         raise ScanActionReservationError(
             "Scan owner no longer accepts action results"
         )
@@ -414,9 +433,132 @@ async def settle_scan_action_reservation(
     return settled, linked_receipt
 
 
+async def cancel_scan_action_reservation(
+    conn: Any,
+    *,
+    plan: ScanActionPlan,
+    action: ScanAction,
+    receipt: CapabilityReceipt,
+    aggregate_owner_id: str | None = None,
+    store: PostgresBudgetReservationStore | None = None,
+) -> tuple[StoredBudgetReservation, CapabilityReceipt]:
+    """Terminalize an unstarted action without granting execution authority.
+
+    This path deliberately never reserves budget, starts a worker lease, or updates
+    either Scan ledger.  A reservation that already advanced beyond ``requested``
+    belongs to its executing worker and must use measured normal settlement instead.
+    """
+    if receipt.budget_reservation_id or receipt.budget_reservation_state:
+        raise ScanActionReservationError(
+            "cancellation receipt may not claim control-plane budget settlement"
+        )
+    if (
+        receipt.status != "cancelled"
+        or any(receipt.budget_consumed.values())
+        or bool(receipt.redacted_execution.get("execution_started"))
+    ):
+        raise ScanActionReservationError(
+            "zero-traffic cancellation requires a zero-consumption receipt"
+        )
+    repository = store or PostgresBudgetReservationStore()
+    aggregate_uuid = _aggregate_owner_uuid(aggregate_owner_id, plan=plan)
+    aggregate_status = None
+    if aggregate_uuid is not None:
+        aggregate_status = await conn.fetchval(
+            "SELECT status FROM scans WHERE id=$1 FOR UPDATE",
+            aggregate_uuid,
+        )
+        if (
+            str(aggregate_status or "")
+            not in _CANCELLATION_SETTLEMENT_SCAN_STATES
+        ):
+            raise ScanActionReservationError(
+                "parallel parent Scan no longer accepts cancellation settlement"
+            )
+    owner_status = await conn.fetchval(
+        "SELECT status FROM scans WHERE id=$1 FOR UPDATE",
+        uuid.UUID(plan.scan_id),
+    )
+    if (
+        str(owner_status or "")
+        not in _CANCELLATION_SETTLEMENT_SCAN_STATES
+    ):
+        raise ScanActionReservationError(
+            "Scan owner no longer accepts cancellation settlement"
+        )
+    if (
+        str(owner_status or "") not in _CANCELLING_SCAN_STATES
+        and str(aggregate_status or "") not in _CANCELLING_SCAN_STATES
+    ):
+        raise ScanActionReservationError(
+            "zero-traffic cancellation requires a cancelling Scan owner"
+        )
+
+    stored = await repository.load_by_action(
+        conn,
+        owner_kind="scan",
+        owner_id=plan.scan_id,
+        action_id=action.action_id,
+        for_update=True,
+    )
+    if stored is None:
+        requested = DurableBudgetReservation.request(
+            owner_kind="scan",
+            owner_id=plan.scan_id,
+            capability_name=action.capability_name,
+            amounts=action.requested_budget,
+            reservation_id=str(uuid.uuid4()),
+            allow_empty=not bool(action.requested_budget),
+        )
+        stored = await repository.create_requested(
+            conn,
+            action_id=action.action_id,
+            action_digest=action.action_digest,
+            record=requested,
+        )
+    _validate_stored(stored, plan=plan, action=action)
+    if stored.record.terminal:
+        if stored.receipt is None:
+            raise ScanActionReservationError(
+                "terminal cancelled action reservation has no receipt"
+            )
+        try:
+            existing_receipt = CapabilityReceipt.from_dict(stored.receipt)
+        except (TypeError, ValueError) as exc:
+            raise ScanActionReservationError(
+                "terminal cancelled action reservation receipt is invalid"
+            ) from exc
+        return stored, existing_receipt
+    if stored.record.status != "requested":
+        raise ScanActionReservationError(
+            "active Scan action must be settled by its owning worker"
+        )
+
+    linked_receipt = replace(
+        receipt,
+        budget_reservation_id=stored.record.reservation_id,
+        budget_reservation_state="failed",
+    )
+    terminal = stored.record.fail(
+        reason="action_cancelled_before_execution",
+        actual={name: 0 for name in stored.record.requested},
+        execution_receipt_hash=linked_receipt.receipt_hash,
+        execution_may_have_started=False,
+    )
+    settled = await repository.persist_terminal(
+        conn,
+        previous=stored,
+        terminal=terminal,
+        ledger_after_settlement={},
+        receipt=linked_receipt,
+    )
+    return settled, linked_receipt
+
+
 __all__ = (
     "ScanActionReservationError",
     "admit_and_start_scan_action_reservation",
+    "cancel_scan_action_reservation",
     "heartbeat_scan_action_reservation",
     "settle_scan_action_reservation",
 )

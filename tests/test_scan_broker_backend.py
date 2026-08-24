@@ -14,6 +14,7 @@ from scan.broker_backend import (
 )
 from scan.capability_result import (
     CapabilityReceiptReference,
+    CapabilityResultReason,
     CapabilityResultReference,
     CapabilityResultStatus,
 )
@@ -72,7 +73,12 @@ def _endpoint_manifest(scan_id: str):
     )
 
 
-def _result(action: ScanAction, receipt: CapabilityReceipt) -> CapabilityResultReference:
+def _result(
+    action: ScanAction,
+    receipt: CapabilityReceipt,
+    *,
+    status: CapabilityResultStatus = CapabilityResultStatus.SUCCESS,
+) -> CapabilityResultReference:
     return CapabilityResultReference(
         action_id=action.action_id,
         action_digest=action.action_digest,
@@ -80,10 +86,13 @@ def _result(action: ScanAction, receipt: CapabilityReceipt) -> CapabilityResultR
         adapter_name=receipt.adapter_name,
         adapter_version=receipt.adapter_version,
         output_schema=action.output_schema,
-        status=CapabilityResultStatus.SUCCESS,
+        status=status,
         partial=False,
         timed_out=False,
-        reason_code=None,
+        reason_code=(
+            CapabilityResultReason.CANCELLED
+            if status is CapabilityResultStatus.CANCELLED else None
+        ),
         receipt_ref=CapabilityReceiptReference(
             receipt_id=receipt.receipt_id,
             receipt_hash=receipt.receipt_hash,
@@ -157,6 +166,55 @@ def test_broker_backend_round_trips_one_strict_action_lease_and_receipt():
     assert receipt_holder["receipt"].receipt_hash == receipt.receipt_hash
     assert all(call[2]["plan_digest"] == plan.plan_digest for call in calls)
     assert all(call[2]["action_digest"] == action.action_digest for call in calls)
+
+
+def test_broker_backend_cancels_without_requesting_an_execution_lease():
+    plan = _plan()
+    action = plan.actions[0]
+    worker_id = "broker:node-1:container-a"
+    calls = []
+    now = "2026-08-23T12:00:00+00:00"
+    receipt = CapabilityReceipt(
+        capability_name=action.capability_name,
+        adapter_name="native.http",
+        adapter_version="1",
+        target_id="target-1",
+        scan_id=plan.scan_id,
+        worker_id=worker_id,
+        status="cancelled",
+        input_digest=action.action_digest,
+        parser_version="scan-cancellation/v1",
+        started_at=now,
+        finished_at=now,
+        budget_reserved=action.requested_budget,
+        budget_consumed={
+            name: 0 for name in action.requested_budget
+        },
+        errors=("cancelled_before_execution",),
+    )
+
+    async def request(method, path, payload):
+        calls.append((method, path, payload))
+        assert path.endswith("/cancel")
+        return {
+            "result": _result(
+                action, receipt, status=CapabilityResultStatus.CANCELLED,
+            ).canonical_dict(),
+        }
+
+    backend = BrokerScanExecutionBackend(
+        plan=plan,
+        worker_id=worker_id,
+        job_lease_token="j" * 32,
+        base_path="/fleet/broker/nodes/node/leases/job",
+        request=request,
+    )
+
+    result = asyncio.run(backend.cancel_action(action))
+
+    assert result.status is CapabilityResultStatus.CANCELLED
+    assert len(calls) == 1
+    assert calls[0][1].endswith("/cancel")
 
 
 def test_broker_backend_maps_terminal_and_lost_authority():

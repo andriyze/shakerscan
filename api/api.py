@@ -12385,39 +12385,9 @@ async def lease_broker_scan_action(
             )
         if await backend.cancellation_requested_with_connection(conn):
             try:
-                cancelled_lease = await backend.acquire_action_with_connection(
+                await backend.cancel_action_with_connection(
                     conn, action,
                 )
-                now = utc_now().isoformat()
-                cancelled_receipt = CapabilityReceipt(
-                    capability_name=action.capability_name,
-                    adapter_name=str(action.placement.get("adapter_name") or ""),
-                    adapter_version=str(action.placement.get("adapter_version") or ""),
-                    target_id=job.target.target_id,
-                    scan_id=plan.scan_id,
-                    worker_id=body.worker_id,
-                    scope_receipt_id=job.target.scope_receipt_id,
-                    approval_receipt_id=job.execution_plan.policy.approval_receipt_id,
-                    status="cancelled",
-                    input_digest=action.action_digest,
-                    parser_version="broker-cancellation/v1",
-                    started_at=now,
-                    finished_at=now,
-                    budget_reserved=action.requested_budget,
-                    budget_consumed={
-                        name: 0 for name in action.requested_budget
-                    },
-                    redacted_execution={
-                        "action_id": action.action_id,
-                        "execution_started": False,
-                    },
-                    errors=("cancelled",),
-                )
-                await backend.settle_with_connection(
-                    conn, cancelled_lease, cancelled_receipt,
-                )
-            except ActionAlreadyTerminal:
-                pass
             except ScanExecutionBackendError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return JSONResponse(
@@ -12439,6 +12409,38 @@ async def lease_broker_scan_action(
         except ScanExecutionBackendError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"action_lease": action_lease.remote_payload()}
+
+
+@app.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel")
+async def cancel_broker_scan_action(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionAuthorityRequest,
+    request: Request,
+):
+    """Settle a broker action after cancellation without issuing a lease."""
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(
+            status_code=409, detail="broker action path differs from body",
+        )
+    async with db_pool.acquire() as conn, conn.transaction():
+        _row, _plan, _job, action, backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+        try:
+            stored = await backend.cancel_action_with_connection(conn, action)
+        except ScanExecutionBackendError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"result": stored.canonical_dict()}
 
 
 def _broker_submitted_action_lease(

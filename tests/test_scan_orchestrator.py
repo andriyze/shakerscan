@@ -188,6 +188,18 @@ class FakeBackend:
         self.results[lease.action.action_id] = result
         return result
 
+    async def cancel_action(self, action):
+        existing = self.results.get(action.action_id)
+        if existing is not None:
+            return existing
+        result = _result(
+            action,
+            status=CapabilityResultStatus.CANCELLED,
+            reason=CapabilityResultReason.CANCELLED,
+        )
+        self.results[action.action_id] = result
+        return result
+
     async def load_result(self, action_id):
         return self.results.get(action_id)
 
@@ -400,7 +412,8 @@ def test_cancellation_terminalizes_current_and_residual_actions_without_executio
 
     assert set(report.status_matrix.values()) == {"cancelled"}
     assert executor.executed == []
-    assert len(executor.synthetic) == len(plan.actions)
+    assert executor.synthetic == []
+    assert backend.acquired == []
 
 
 def test_duplicate_lease_reuses_the_already_terminal_result():
@@ -652,6 +665,22 @@ class FakePostgresConn:
                 "attempt": row["attempt"] + 1,
             })
             return {"attempt": row["attempt"]}
+        if "SET status='cancelled'" in query:
+            if row["status"] != "planned" or row["action_digest"] != args[2]:
+                return None
+            row.update({
+                "status": "cancelled",
+                "reason_code": args[3],
+                "receipt_id": args[4],
+                "receipt_hash": args[5],
+                "result_digest": args[6],
+                "result_json": args[7],
+                "receipt_json": args[8],
+                "reservation_id": args[9],
+                "lease_token_hash": None,
+                "lease_expires_at": None,
+            })
+            return {"result_json": row["result_json"]}
         if "SET status='running'" in query:
             if (
                 row["status"] not in {"leased", "running"}
@@ -838,7 +867,7 @@ def test_postgres_backend_rejects_reexecution_after_expired_action_lease():
     assert replayed.status is CapabilityResultStatus.FAILED
 
 
-def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
+def test_postgres_backend_cancellation_rejects_execution_and_settles_without_lease():
     plan = _plan()
     conn = FakePostgresConn(plan)
     backend = PostgresScanExecutionBackend(
@@ -851,6 +880,33 @@ def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
     conn.scan_status = "cancelling"
     assert asyncio.run(backend.cancellation_requested()) is True
 
+    with pytest.raises(ScanExecutionBackendError, match="stopped"):
+        asyncio.run(backend.acquire_action(plan.actions[0]))
+
+    result = asyncio.run(backend.cancel_action(plan.actions[0]))
+    assert result.status is CapabilityResultStatus.CANCELLED
+    assert dict(result.budget_consumed) == {
+        name: 0 for name in plan.actions[0].requested_budget
+    }
+    assert conn.rows[plan.actions[0].action_id]["attempt"] == 0
+    reservation_id = conn.rows[plan.actions[0].action_id]["reservation_id"]
+    reservation = StoredBudgetReservation.from_row(conn.budget_rows[reservation_id])
+    assert reservation.record.status == "failed"
+    assert reservation.record.hold_applied is False
+    assert not any(reservation.record.actual.values())
+    assert conn.budget_used["http_requests"] == 0
+
+
+def test_postgres_backend_remote_payload_is_database_free():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="broker-worker-1",
+        backend_name="broker",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
     lease = asyncio.run(backend.acquire_action(plan.actions[0]))
     payload = lease.remote_payload()
     flattened = str(payload).lower()
@@ -858,6 +914,84 @@ def test_postgres_backend_cancellation_and_remote_payload_are_database_free():
     assert payload["action"]["requested_budget"] == dict(plan.actions[0].requested_budget)
     assert payload["action"]["dependencies"] == list(plan.actions[0].dependencies)
     assert not any(name in flattened for name in ("database_url", "postgres", "redis_url"))
+
+
+@pytest.mark.parametrize("status", ["cancelling", "cancelled"])
+def test_postgres_backend_heartbeat_rejects_cancelled_owner(status):
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    lease = asyncio.run(backend.acquire_action(plan.actions[0]))
+    conn.scan_status = status
+
+    with pytest.raises(ActionLeaseLost, match="no longer executable"):
+        asyncio.run(backend.heartbeat(lease))
+
+
+@pytest.mark.parametrize(
+    ("child_status", "parent_status", "message"),
+    [
+        ("cancelling", "running", "Scan stopped"),
+        ("running", "cancelling", "parallel parent Scan stopped"),
+        ("cancelled", "running", "Scan stopped"),
+        ("running", "cancelled", "parallel parent Scan stopped"),
+    ],
+)
+def test_parallel_action_admission_rejects_cancelled_child_or_parent(
+    child_status, parent_status, message,
+):
+    plan = _plan()
+    parent_id = "30000000-0000-4000-8000-000000000099"
+    conn = FakePostgresConn(plan, aggregate_owner_id=parent_id)
+    conn.scan_status = child_status
+    conn.aggregate_status = parent_status
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="parallel-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+        aggregate_owner_id=parent_id,
+    )
+
+    with pytest.raises(ScanExecutionBackendError, match=message):
+        asyncio.run(backend.acquire_action(plan.actions[0]))
+    assert conn.rows[plan.actions[0].action_id]["status"] == "planned"
+    assert conn.budget_rows == {}
+
+
+def test_started_action_can_settle_measured_cancellation_after_owner_cancels():
+    plan = _plan()
+    conn = FakePostgresConn(plan)
+    backend = PostgresScanExecutionBackend(
+        pool=FakePool(conn),
+        plan=plan,
+        worker_id="local-worker-1",
+        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
+    )
+    action = plan.actions[0]
+    lease = asyncio.run(backend.acquire_action(action))
+    conn.scan_status = "cancelling"
+    receipt = replace(
+        _raw_receipt(action, worker_id="local-worker-1"),
+        status="cancelled",
+        budget_consumed={name: 0 for name in action.requested_budget},
+        observations=(),
+        errors=("execution_cancelled",),
+    )
+
+    result = asyncio.run(backend.settle(lease, receipt))
+
+    assert result.status is CapabilityResultStatus.CANCELLED
+    assert not any(result.budget_consumed.values())
+    reservation_id = conn.rows[action.action_id]["reservation_id"]
+    reservation = StoredBudgetReservation.from_row(conn.budget_rows[reservation_id])
+    assert reservation.record.status == "failed"
+    assert reservation.record.hold_applied is True
 
 
 def test_postgres_backend_converts_full_receipt_and_observations_in_one_settlement():
