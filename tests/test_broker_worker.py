@@ -165,6 +165,48 @@ def test_broker_scan_requires_complete_immutable_action_plan():
         broker_worker._broker_scan_action_plan(job, changed)
 
 
+def test_broker_worker_opens_only_lease_bound_private_scan_inputs():
+    pytest.importorskip("cryptography")
+    from runtime.sealed_inputs import generate_sealed_input_keypair, seal_private_input
+
+    _job, lease, plan = _canonical_broker_action_lease()
+    worker_id = lease["action_worker_id"]
+    lease.update({
+        "lease_id": "lease-private-1",
+        "lease_expires_at": "2099-08-23T20:00:00+00:00",
+    })
+    private_key, public_key = generate_sealed_input_keypair()
+    authority = broker_worker._private_input_authority(lease, plan, worker_id)
+    payload = {
+        "schema_version": "broker-private-scan-input/v1",
+        **authority,
+        "options": {"auth_header": "Bearer canary-secret"},
+        "replay_plans": {},
+    }
+    lease["private_scan_inputs"] = seal_private_input(
+        payload,
+        recipient_public_key=public_key,
+        authority=authority,
+    )
+
+    opened = broker_worker._open_broker_private_scan_inputs(
+        lease,
+        plan=plan,
+        worker_id=worker_id,
+        private_input_key=private_key,
+    )
+
+    assert opened.options["auth_header"] == "Bearer canary-secret"
+    changed = dict(lease)
+    changed["lease_id"] = "lease-private-2"
+    with pytest.raises(broker_worker.BrokerWorkerError, match="invalid"):
+        broker_worker._open_broker_private_scan_inputs(
+            changed,
+            plan=plan,
+            worker_id=worker_id,
+            private_input_key=private_key,
+        )
+
 def test_broker_action_plan_requests_and_executes_control_plane_continuation(monkeypatch):
     job, lease, parent = _canonical_broker_action_lease()
     job.update({

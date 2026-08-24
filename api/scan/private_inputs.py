@@ -53,7 +53,11 @@ def _decode_body(value: Any) -> bytes:
 
 def private_replay_plan_payload(plan: ReplayPlan) -> dict[str, Any]:
     """Serialize exact wire requests for encryption, never for public storage."""
-    if not isinstance(plan, ReplayPlan):
+    if (
+        str(getattr(plan, "schema_version", "")) != "request-replay-plan/v1"
+        or not tuple(getattr(plan, "requests", ()) or ())
+        or not _HEX_64_RE.fullmatch(str(getattr(plan, "input_digest", "")))
+    ):
         raise BrokerPrivateScanInputError("private replay plan is invalid")
     return {
         "schema_version": PRIVATE_REPLAY_PLAN_SCHEMA,

@@ -98,6 +98,11 @@ except ModuleNotFoundError:
     )
 
 try:
+    from scanner_tools.request_replay import build_selected_replay_plan
+except ModuleNotFoundError:
+    from scanner.scanner_tools.request_replay import build_selected_replay_plan
+
+try:
     from scanner_tools.device_request_formats import resolve_imported_requests as _resolve_imported_device_requests
     from scanner_tools.device_web import (
         paired_reverse_request as _device_paired_reverse_request,
@@ -436,6 +441,8 @@ try:
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
         scan_replay_authorization,
+        scan_replay_selector,
+        validate_scan_replay_request_manifest,
     )
     from scan.jobs import (
         CanonicalScanJob,
@@ -509,6 +516,10 @@ try:
         coverage_response as scan_coverage_response,
     )
     from scan.surface_manifest import build_scan_surface_manifest
+    from scan.private_inputs import (
+        BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+        private_replay_plan_payload,
+    )
     from scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -527,6 +538,8 @@ except ModuleNotFoundError:
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
         scan_replay_authorization,
+        scan_replay_selector,
+        validate_scan_replay_request_manifest,
     )
     from api.scan.jobs import (
         CanonicalScanJob,
@@ -600,6 +613,10 @@ except ModuleNotFoundError:
         coverage_response as scan_coverage_response,
     )
     from api.scan.surface_manifest import build_scan_surface_manifest
+    from api.scan.private_inputs import (
+        BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+        private_replay_plan_payload,
+    )
     from api.scan.broker_execution import (
         BrokerScanExecutionError,
         heartbeat_broker_scan_execution,
@@ -687,6 +704,11 @@ try:
         validate_generic_credential_references,
     )
     from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
+    from runtime.credential_resolver import (
+        CredentialResolutionError,
+        WorkerCredentialResolver,
+        validate_worker_credential_authority,
+    )
     from runtime.credential_migration import (
         LegacyCredentialMigrationError,
         sync_legacy_ai_principal_credential,
@@ -706,8 +728,15 @@ try:
         request_collection_selection_digest,
     )
     from runtime.scan_credentials import (
+        SCAN_CREDENTIAL_CAPABILITY,
         ScanCredentialError,
         admit_scan_credential_profiles,
+        bind_resolved_scan_credential,
+    )
+    from runtime.sealed_inputs import (
+        SealedInputError,
+        seal_private_input,
+        validate_sealed_input_public_key,
     )
     from capabilities.network import CapabilityInputError, network_capability_adapter
     from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
@@ -720,6 +749,11 @@ except ModuleNotFoundError:
         validate_generic_credential_references,
     )
     from api.runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
+    from api.runtime.credential_resolver import (
+        CredentialResolutionError,
+        WorkerCredentialResolver,
+        validate_worker_credential_authority,
+    )
     from api.runtime.credential_migration import (
         LegacyCredentialMigrationError,
         sync_legacy_ai_principal_credential,
@@ -739,8 +773,15 @@ except ModuleNotFoundError:
         request_collection_selection_digest,
     )
     from api.runtime.scan_credentials import (
+        SCAN_CREDENTIAL_CAPABILITY,
         ScanCredentialError,
         admit_scan_credential_profiles,
+        bind_resolved_scan_credential,
+    )
+    from api.runtime.sealed_inputs import (
+        SealedInputError,
+        seal_private_input,
+        validate_sealed_input_public_key,
     )
     from api.capabilities.network import CapabilityInputError, network_capability_adapter
     from api.capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
@@ -6557,6 +6598,19 @@ class FleetScaleRequest(BaseModel):
 class BrokerLeaseRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     wait_seconds: int = Field(default=20, ge=0, le=30)
+    private_input_public_key: Optional[str] = Field(
+        default=None, min_length=44, max_length=44,
+    )
+
+    @field_validator("private_input_public_key")
+    @classmethod
+    def _validate_private_input_public_key(cls, value):
+        if value is None:
+            return None
+        try:
+            return validate_sealed_input_public_key(value)
+        except SealedInputError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class BrokerLeaseHeartbeatRequest(BaseModel):
@@ -10532,6 +10586,448 @@ async def _hydrate_broker_job_options(conn: Any, payload: dict[str, Any]) -> dic
     return payload
 
 
+_BROKER_PRIVATE_OPTION_KEYS = frozenset({
+    *SCAN_AUTHENTICATION_KEYS,
+    "authentication",
+    "ai_api_key",
+})
+
+
+def _broker_target_binding_from_options(options: Mapping[str, Any]) -> TargetBinding:
+    raw = options.get("_canonical_target_binding")
+    if not isinstance(raw, Mapping):
+        raise HTTPException(
+            status_code=409,
+            detail="broker private inputs have no canonical target binding",
+        )
+    try:
+        return TargetBinding(
+            target_id=str(raw.get("target_id") or ""),
+            target_kind=str(raw.get("target_kind") or ""),
+            canonical_host=raw.get("canonical_host"),
+            allowed_origins=tuple(raw.get("allowed_origins") or ()),
+            allowed_addresses=tuple(raw.get("allowed_addresses") or ()),
+            allowed_root_domains=tuple(raw.get("allowed_root_domains") or ()),
+            environment=str(raw.get("environment") or "unknown"),
+            scope_receipt_id=str(raw.get("scope_receipt_id") or "") or None,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="broker private input target binding is invalid",
+        ) from exc
+
+
+async def _hydrate_broker_generic_scan_credentials(
+    conn: Any,
+    *,
+    options: Mapping[str, Any],
+    scan_id: str,
+) -> dict[str, Any]:
+    """Resolve generic credential references only inside the lease transaction."""
+    hydrated = dict(options)
+    raw_refs = hydrated.get("credential_profile_refs")
+    if not isinstance(raw_refs, list) or not raw_refs:
+        return hydrated
+    if (
+        hydrated.get("managed_credential_profiles") not in (None, "", [], {})
+        or hydrated.get("authentication") not in (None, "", [], {})
+        or any(
+            hydrated.get(key) not in (None, "", [], {})
+            for key in SCAN_AUTHENTICATION_KEYS
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "generic Scan credential references cannot be combined with "
+                "another authentication path"
+            ),
+        )
+    refs = [dict(item) for item in raw_refs if isinstance(item, Mapping)]
+    if len(refs) != len(raw_refs) or not 1 <= len(refs) <= 2:
+        raise HTTPException(
+            status_code=409, detail="broker Scan credential references are invalid",
+        )
+    profile_ids = [str(item.get("profile_id") or "") for item in refs]
+    lanes = [str(item.get("scan_lane") or "") for item in refs]
+    try:
+        uuid.UUID(str(scan_id))
+        for profile_id in profile_ids:
+            uuid.UUID(profile_id)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="broker Scan credential reference UUID is invalid",
+        ) from exc
+    if (
+        len(profile_ids) != len(set(profile_ids))
+        or len(lanes) != len(set(lanes))
+        or any(lane not in {"primary", "secondary"} for lane in lanes)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="broker Scan credential references are ambiguous",
+        )
+    target = _broker_target_binding_from_options(hydrated)
+    target_kind = str(hydrated.get("credential_target_kind") or "").lower()
+    action_name = str(hydrated.get("credential_action_name") or "").strip()
+    if target_kind != target.target_kind or target_kind not in {"web", "api"} or not action_name:
+        raise HTTPException(
+            status_code=409,
+            detail="broker Scan credential authority is incomplete",
+        )
+    try:
+        authority = await validate_worker_credential_authority(
+            conn,
+            owner_kind="scan",
+            owner_id=str(scan_id),
+            target=target,
+            approval_receipt_id=hydrated.get("approval_receipt_id"),
+            scope_receipt_id=hydrated.get("scope_receipt_id"),
+            action_name=action_name,
+        )
+        resolver = WorkerCredentialResolver()
+        resolved_refs: list[dict[str, Any]] = []
+        for ref in refs:
+            expected_version = int(ref.get("profile_version") or 0)
+            if expected_version < 1:
+                raise ScanCredentialError(
+                    "generic Scan credential profile version is invalid"
+                )
+            async with resolver.resolve(
+                conn,
+                profile_id=ref["profile_id"],
+                target=target,
+                capability=SCAN_CREDENTIAL_CAPABILITY,
+                authority=authority,
+            ) as resolved:
+                profile = resolved.profile
+                if (
+                    profile.current_version != expected_version
+                    or profile.auth_kind != str(ref.get("auth_kind") or "")
+                    or profile.principal_slot
+                    != str(ref.get("principal_slot") or "")
+                    or profile.target_kind != target_kind
+                ):
+                    raise ScanCredentialError(
+                        "generic Scan credential changed after admission"
+                    )
+                hydrated = bind_resolved_scan_credential(
+                    hydrated,
+                    resolved,
+                    scan_lane=str(ref["scan_lane"]),
+                )
+                resolved_refs.append({
+                    **resolved.receipt_metadata(),
+                    "scan_lane": str(ref["scan_lane"]),
+                })
+        hydrated["resolved_credential_profiles"] = resolved_refs
+        return hydrated
+    except (
+        CredentialResolutionError, ScanCredentialError, ValueError, TypeError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _split_broker_private_options(
+    options: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return secret-free public options plus the minimal encrypted patch."""
+    public = copy.deepcopy(dict(options))
+    private: dict[str, Any] = {}
+    for key in _BROKER_PRIVATE_OPTION_KEYS:
+        if key in public and public[key] not in (None, "", [], {}):
+            private[key] = public.pop(key)
+        else:
+            public.pop(key, None)
+    resolved = public.pop("resolved_credential_profiles", None)
+    if resolved not in (None, "", [], {}):
+        private["resolved_credential_profiles"] = resolved
+    return public, private
+
+
+def _broker_json_object(value: Any, *, subject: str) -> dict[str, Any]:
+    parsed = parse_json_field(value)
+    if not isinstance(parsed, Mapping):
+        raise HTTPException(status_code=409, detail=f"{subject} is invalid")
+    return dict(parsed)
+
+
+def _broker_json_array(value: Any, *, subject: str) -> list[Any]:
+    parsed = parse_json_field(value)
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=409, detail=f"{subject} is invalid")
+    return parsed
+
+
+async def _broker_private_replay_plan(
+    conn: Any,
+    *,
+    action: Any,
+    options: Mapping[str, Any],
+    target: TargetBinding,
+    scan_id: str,
+) -> dict[str, Any]:
+    """Materialize one exact replay plan and prove it against public authority."""
+    bound_ref = action.capability_args.get("request_collection_ref")
+    raw_manifest_ref = action.capability_args.get("request_manifest_ref")
+    if not isinstance(bound_ref, Mapping) or not isinstance(
+        raw_manifest_ref, Mapping,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="broker collection action has incomplete immutable input authority",
+        )
+    matches = [
+        dict(item)
+        for item in options.get("request_collections") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("selection_id") or "")
+        == str(bound_ref.get("selection_id") or "")
+        and str(item.get("selection_digest") or "").lower()
+        == str(bound_ref.get("selection_digest") or "").lower()
+    ]
+    if len(matches) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="broker collection selection changed after action admission",
+        )
+    ref = matches[0]
+    replay_policy = str(ref.get("replay_policy") or "").strip().lower()
+    capability_name = (
+        "collections.replay_active"
+        if replay_policy == "confirmed_active"
+        else "collections.replay_safe"
+    )
+    if capability_name != action.capability_name:
+        raise HTTPException(
+            status_code=409,
+            detail="broker collection replay policy differs from action authority",
+        )
+    try:
+        collection_id = uuid.UUID(str(ref.get("collection_id") or ""))
+        binding_id = uuid.UUID(str(ref.get("binding_id") or ""))
+        selection_id = uuid.UUID(str(ref.get("selection_id") or ""))
+        target_id = uuid.UUID(target.target_id)
+        manifest_ref = ScanWorkManifestReference.from_dict(raw_manifest_ref)
+    except (TypeError, ValueError, AttributeError, ScanWorkManifestError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="broker collection immutable references are invalid",
+        ) from exc
+    try:
+        manifest = await PostgresScanManifestStore().load(
+            conn,
+            manifest_id=manifest_ref.manifest_id,
+            scan_id=scan_id,
+            expected_kind=manifest_ref.kind,
+            expected_digest=manifest_ref.manifest_digest,
+            expected_target_binding_digest=target.digest,
+        )
+    except ScanManifestStoreError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if (
+        manifest is None
+        or manifest.reference() != manifest_ref
+        or manifest_ref.kind.value != "request"
+        or action.action_id not in manifest.source_action_ids
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="broker exact request manifest is unavailable",
+        )
+    row = await conn.fetchrow(
+        """SELECT c.encrypted_payload, c.payload_sha256,
+                  b.allowed_origins, b.environment_id,
+                  e.encrypted_payload AS encrypted_environment,
+                  e.payload_sha256 AS environment_sha256,
+                  s.replay_policy, s.selector_json, s.selection_digest
+           FROM request_collections c
+           JOIN request_collection_bindings b
+             ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
+           JOIN request_collection_selections s
+             ON s.id=$3 AND s.collection_id=c.id
+            AND s.binding_id=b.id AND s.is_active=true
+           LEFT JOIN request_collection_environments e
+             ON e.id=b.environment_id AND e.collection_id=c.id
+            AND e.is_active=true
+           WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
+             AND b.target_id=$4 AND b.target_kind=$5
+           FOR UPDATE OF c, b, s""",
+        collection_id, binding_id, selection_id, target_id, target.target_kind,
+    )
+    if not row:
+        raise HTTPException(
+            status_code=409,
+            detail="broker request collection selection is unavailable",
+        )
+    stored_origins = tuple(str(item) for item in _broker_json_array(
+        row["allowed_origins"], subject="broker collection origins",
+    ) if str(item))
+    expected_origins = tuple(str(item) for item in ref.get("allowed_origins") or ())
+    expected_payload_digest = str(ref.get("payload_sha256") or "").lower()
+    expected_selection_digest = str(ref.get("selection_digest") or "").lower()
+    expected_environment_id = str(ref.get("environment_id") or "") or None
+    expected_environment_digest = str(
+        ref.get("environment_sha256") or ""
+    ).lower() or None
+    stored_environment_id = str(row["environment_id"]) if row["environment_id"] else None
+    stored_environment_digest = str(row["environment_sha256"] or "").lower() or None
+    if (
+        str(ref.get("target_id") or "") != target.target_id
+        or str(ref.get("target_kind") or "") != target.target_kind
+        or stored_origins != expected_origins
+        or any(origin not in target.allowed_origins for origin in stored_origins)
+        or str(row["payload_sha256"] or "").lower() != expected_payload_digest
+        or stored_environment_id != expected_environment_id
+        or stored_environment_digest != expected_environment_digest
+        or str(row["replay_policy"] or "") != replay_policy
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="broker request collection changed after admission",
+        )
+    try:
+        selection = RequestCollectionSelection.from_mapping(
+            _broker_json_object(
+                row["selector_json"], subject="broker collection selector",
+            )
+        )
+    except RequestCollectionContractError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if (
+        str(row["selection_digest"] or "").lower() != expected_selection_digest
+        or request_collection_selection_digest(
+            collection_id=str(collection_id),
+            payload_sha256=expected_payload_digest,
+            binding_id=str(binding_id),
+            allowed_origins=stored_origins,
+            selector=selection,
+            replay_policy=replay_policy,
+            environment_sha256=stored_environment_digest,
+        ) != expected_selection_digest
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="broker request collection selection digest changed",
+        )
+    raw_payload = str(decrypt_secret(row["encrypted_payload"]) or "")
+    if not raw_payload or raw_payload.startswith("enc:fernet:"):
+        raise HTTPException(
+            status_code=409,
+            detail="broker request collection could not be decrypted",
+        )
+    try:
+        collection_payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=409, detail="broker request collection payload is invalid",
+        ) from exc
+    if not isinstance(collection_payload, Mapping) or hashlib.sha256(json.dumps(
+        collection_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")).hexdigest() != expected_payload_digest:
+        raise HTTPException(
+            status_code=409,
+            detail="broker request collection failed its content digest",
+        )
+    collection_payload = dict(collection_payload)
+    if expected_environment_id:
+        raw_environment = str(decrypt_secret(row["encrypted_environment"]) or "")
+        if not raw_environment or raw_environment.startswith("enc:fernet:"):
+            raise HTTPException(
+                status_code=409,
+                detail="broker request collection environment could not be decrypted",
+            )
+        try:
+            environment = json.loads(raw_environment)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="broker request collection environment is invalid",
+            ) from exc
+        if not isinstance(environment, Mapping) or hashlib.sha256(json.dumps(
+            environment,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")).hexdigest() != expected_environment_digest:
+            raise HTTPException(
+                status_code=409,
+                detail="broker request collection environment failed its digest",
+            )
+        collection_payload["environment"] = dict(environment)
+    try:
+        replay_plan = build_selected_replay_plan(
+            collection_payload,
+            scan_replay_selector(
+                selection,
+                replay_policy,
+                runtime_limit=int(action.requested_budget.get("http_requests") or 0),
+            ),
+            allowed_origins=stored_origins,
+            default_origin=stored_origins[0] if stored_origins else None,
+            authorization=scan_replay_authorization(
+                replay_policy,
+                options.get("scan_policy")
+                if isinstance(options.get("scan_policy"), Mapping) else {},
+                approval_receipt_id=options.get("approval_receipt_id"),
+            ),
+        )
+        validate_scan_replay_request_manifest(replay_plan, manifest)
+        return private_replay_plan_payload(replay_plan)
+    except (ValueError, ScanCollectionReplayContractError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _build_broker_private_scan_payload(
+    conn: Any,
+    *,
+    payload: dict[str, Any],
+    plan: Any,
+    lease_id: str,
+    worker_id: str,
+    expires_at: datetime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the encrypted-only worker patch and scrub its public job copy."""
+    scan_id = str(payload.get("scan_id") or "")
+    options = await _hydrate_broker_generic_scan_credentials(
+        conn,
+        options=dict(payload.get("options") or {}),
+        scan_id=scan_id,
+    )
+    public_options, private_options = _split_broker_private_options(options)
+    target = _broker_target_binding_from_options(public_options)
+    replay_plans: dict[str, Any] = {}
+    for action in plan.actions:
+        if action.capability_name in {
+            "collections.replay_safe", "collections.replay_active",
+        }:
+            replay_plans[action.action_id] = await _broker_private_replay_plan(
+                conn,
+                action=action,
+                options=public_options,
+                target=target,
+                scan_id=scan_id,
+            )
+    public_payload = copy.deepcopy(payload)
+    public_payload["options"] = public_options
+    private_payload = {
+        "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+        "lease_id": str(lease_id),
+        "worker_id": str(worker_id),
+        "plan_digest": plan.plan_digest,
+        "target_binding_digest": plan.target_binding_digest,
+        "expires_at": expires_at.isoformat(),
+        "options": private_options,
+        "replay_plans": replay_plans,
+    }
+    return public_payload, private_payload
+
+
 async def _broker_reserve_request_budget(
     conn: Any,
     redis_client: Any,
@@ -10764,6 +11260,27 @@ def _broker_action_plan_requires_local_private_inputs(plan: Any) -> bool:
     )
 
 
+def _broker_job_has_private_inputs(payload: Mapping[str, Any]) -> bool:
+    options = payload.get("options")
+    if not isinstance(options, Mapping):
+        return False
+    if any(
+        options.get(key) not in (None, "", [], {})
+        for key in _BROKER_PRIVATE_OPTION_KEYS
+    ):
+        return True
+    if options.get("managed_credential_profiles") not in (None, "", [], {}):
+        return True
+    if options.get("credential_profile_refs") not in (None, "", [], {}):
+        return True
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("replay_policy") or "").strip().lower()
+        in EXECUTABLE_REPLAY_POLICIES
+        for item in options.get("request_collections") or ()
+    )
+
+
 def _broker_take_or_refresh_slot(redis_client: Any, slot_id: str, *, cap: int | None = None) -> bool:
     try:
         if cap is None:
@@ -10950,6 +11467,8 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
 
+    broker_candidate_plan = None
+    broker_requires_private_inputs = False
     if (
         canonical_materialized is not None
         and is_deterministic_dast(canonical_materialized.get("options"))
@@ -10959,12 +11478,13 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             broker_candidate_plan = await PostgresScanActionStore().load_plan(
                 conn, scan_id=str(candidate_scan_id),
             )
-        if (
+        broker_requires_private_inputs = bool(
             broker_candidate_plan is not None
             and _broker_action_plan_requires_local_private_inputs(
                 broker_candidate_plan,
             )
-        ):
+        )
+        if broker_requires_private_inputs and not body.private_input_public_key:
             local_payload = dict(queued_payload)
             local_payload["placement"] = {"node_scope": "local"}
             enqueue_job(
@@ -10974,6 +11494,24 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             )
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
+
+    private_input_probe = canonical_materialized or payload
+    if (
+        _broker_job_has_private_inputs(private_input_probe)
+        and not broker_requires_private_inputs
+    ):
+        # Legacy/non-canonical execution has no action-bound sealed-input
+        # contract.  Keep it local instead of placing credentials or exact
+        # imported requests in an HTTPS broker lease response.
+        local_payload = dict(queued_payload)
+        local_payload["placement"] = {"node_scope": "local"}
+        enqueue_job(
+            redis_client,
+            str(local_payload.get("_base_queue_name") or QUEUE_NAME),
+            local_payload,
+        )
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
 
     slot_id = _broker_slot_id(str(lease.stream_key), str(lease.message_id))
     broker_cap = await _broker_active_scan_cap()
@@ -10999,11 +11537,13 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     durable_scan_terminal = None
     scan_action_plan_payload: dict[str, Any] | None = None
     action_worker_id: str | None = None
+    private_scan_inputs: dict[str, Any] | None = None
     row = None
     if canonical_materialized is not None:
         payload = _broker_execution_projection(canonical_materialized)
     async with db_pool.acquire() as conn, conn.transaction():
-        payload = await _hydrate_broker_job_options(conn, payload)
+        if broker_requires_private_inputs:
+            payload = await _hydrate_broker_job_options(conn, payload)
         budget_reservation = await _broker_reserve_request_budget(conn, redis_client, payload)
         if budget_reservation is None:
             await _mark_broker_budget_wait(conn, payload)
@@ -11040,6 +11580,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                     status_code=409,
                     detail="broker Scan action plan conflicts with runtime authority",
                 )
+            broker_candidate_plan = persisted_action_plan
             scan_action_plan_payload = persisted_action_plan.canonical_dict()
             action_worker_id = f"broker:{body.worker_id}"
         if budget_reservation is not None:
@@ -11132,6 +11673,44 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                     "queue_name": lease.queue_name,
                 },
             )
+        if row and broker_requires_private_inputs:
+            if (
+                broker_candidate_plan is None
+                or action_worker_id is None
+                or not body.private_input_public_key
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker private Scan input authority is incomplete",
+                )
+            payload, private_payload = await _build_broker_private_scan_payload(
+                conn,
+                payload=payload,
+                plan=broker_candidate_plan,
+                lease_id=str(row["id"]),
+                worker_id=action_worker_id,
+                expires_at=expires_at,
+            )
+            authority = {
+                "lease_id": str(row["id"]),
+                "worker_id": action_worker_id,
+                "plan_digest": broker_candidate_plan.plan_digest,
+                "target_binding_digest": (
+                    broker_candidate_plan.target_binding_digest
+                ),
+                "expires_at": expires_at.isoformat(),
+            }
+            try:
+                private_scan_inputs = seal_private_input(
+                    private_payload,
+                    recipient_public_key=body.private_input_public_key,
+                    authority=authority,
+                )
+            except SealedInputError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="broker private Scan inputs could not be sealed",
+                ) from exc
     if budget_reservation is None:
         _broker_release_slot(redis_client, slot_id)
         if durable_scan_terminal is not None:
@@ -11245,6 +11824,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             "scan_execution": durable_scan_execution,
             "scan_action_plan": scan_action_plan_payload,
             "action_worker_id": action_worker_id,
+            "private_scan_inputs": private_scan_inputs,
         },
         headers={"Cache-Control": "no-store"},
     )

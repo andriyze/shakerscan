@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import uuid
 
 from hunt.capability_executor import CapabilityAdapterResult
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
+from runtime.request_replay_executor import ReplayTransportResult
 import scan.action_adapter as action_adapter_module
 from runtime.observation_manifests import ObservationManifestReference
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_plan import ScanAction, ScanActionPlan
+from scan.private_inputs import (
+    BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+    BrokerPrivateScanInputs,
+    private_replay_plan_payload,
+)
 from scan.capability_result import (
     CapabilityReceiptReference,
     CapabilityResultReference,
@@ -21,7 +28,16 @@ from scan.work_manifests import (
     build_candidate_manifest,
     build_canonical_nuclei_template_manifest,
     build_endpoint_manifest,
+    build_request_candidate_manifest,
+    build_request_manifest,
 )
+try:
+    from scanner_tools.request_replay import ReplayAuthorization, build_replay_plan
+except ModuleNotFoundError:
+    from scanner.scanner_tools.request_replay import (
+        ReplayAuthorization,
+        build_replay_plan,
+    )
 
 
 TARGET = TargetBinding(
@@ -86,7 +102,9 @@ class Backend:
         return self.manifests[reference.manifest_id]
 
 
-def _dispatcher(plan, backend, *, target=TARGET, policy=None):
+def _dispatcher(
+    plan, backend, *, target=TARGET, policy=None, private_inputs=None,
+):
     async def process_runner(*_args, **_kwargs):
         raise AssertionError("process runner must not be used")
 
@@ -102,6 +120,7 @@ def _dispatcher(plan, backend, *, target=TARGET, policy=None):
         backend=backend,
         process_runner=process_runner,
         cancelled=lambda: False,
+        private_inputs=private_inputs,
     )
 
 
@@ -148,6 +167,148 @@ def test_database_neutral_dispatcher_never_treats_profile_reference_as_secret():
         name: 0 for name in action.requested_budget
     }
     assert receipt.errors == ("not_applicable",)
+
+
+def test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    request_id = "private-request-1"
+    route_id = "a" * 64
+    replay_plan = build_replay_plan(
+        [{
+            "id": request_id,
+            "method": "POST",
+            "url": "https://app.example.test/api/items?token=canary-query",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer canary-header",
+            },
+            "body": '{"name":"canary-body"}',
+            "body_mode": "raw",
+            "auth_type": "bearer",
+            "has_sensitive_material": True,
+        }],
+        allowed_origins=TARGET.allowed_origins,
+        default_origin=TARGET.allowed_origins[0],
+        authorization=ReplayAuthorization(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+    request_manifest = build_request_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        source_action_ids=("inputs.collection_00",),
+        requests=({
+            "request_ref_id": request_id,
+            "route_id": route_id,
+            "method": "POST",
+            "auth_lane": "primary",
+            "selected_shard": None,
+            "safe_method": False,
+            "body_schema_digest": "b" * 64,
+        },),
+    )
+    candidates = build_request_candidate_manifest(
+        (request_manifest,),
+        source_action_ids=("inputs.collection_00",),
+        maximum=1,
+    )
+    collection = _action(
+        "inputs.collection_00",
+        "collections.replay_active",
+        0,
+        capability_args={
+            "request_manifest_ref": request_manifest.reference().canonical_dict(),
+        },
+    )
+    mutation = _action(
+        "verify.xss.request.00000",
+        "xss.request_verify",
+        1,
+        dependencies=(collection.action_id,),
+        capability_args={
+            "request_candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "request_candidate_index": 0,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection, mutation),
+    )
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    private_inputs = BrokerPrivateScanInputs.from_payload(
+        {
+            "schema_version": BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
+            "lease_id": "lease-1",
+            "worker_id": "broker:worker-1",
+            "plan_digest": plan.plan_digest,
+            "target_binding_digest": TARGET.digest,
+            "expires_at": expires_at.isoformat(),
+            "options": {},
+            "replay_plans": {
+                collection.action_id: private_replay_plan_payload(replay_plan),
+            },
+        },
+        lease_id="lease-1",
+        worker_id="broker:worker-1",
+        plan_digest=plan.plan_digest,
+        target_binding_digest=TARGET.digest,
+    )
+    sent = []
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            sent.append(request)
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "application/json"},
+                response_body=b'{"ok":true}',
+                elapsed_ms=1,
+            )
+
+    transport = Transport()
+    monkeypatch.setattr(
+        action_adapter_module,
+        "PinnedAiohttpReplayTransport",
+        lambda: transport,
+    )
+    backend = Backend(manifests={candidates.manifest_id: candidates})
+    dispatcher = _dispatcher(
+        plan,
+        backend,
+        private_inputs=private_inputs,
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+    )
+
+    replay_receipt = asyncio.run(dispatcher(
+        collection, _lease(plan, collection), _noop,
+    ))
+    mutation_receipt = asyncio.run(dispatcher(
+        mutation, _lease(plan, mutation), _noop,
+    ))
+
+    assert replay_receipt.status == "success"
+    assert mutation_receipt.status == "success"
+    assert len(sent) == 3
+    assert sent[0].body == b'{"name":"canary-body"}'
+    assert sent[1].body == sent[0].body
+    assert sent[2].body != sent[0].body
+    durable = json.dumps({
+        "replay": replay_receipt.public_dict(),
+        "mutation": mutation_receipt.public_dict(),
+    })
+    assert "canary-body" not in durable
+    assert "canary-header" not in durable
+    assert "canary-query" not in durable
 
 
 async def _noop():

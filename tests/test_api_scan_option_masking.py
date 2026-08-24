@@ -2231,7 +2231,7 @@ def test_broker_work_manifest_request_and_action_authority_are_exact():
         )
 
 
-def test_broker_plan_rejects_private_inputs_until_sealed_exchange_exists():
+def test_broker_plan_identifies_actions_that_require_sealed_inputs():
     public_plan = types.SimpleNamespace(actions=(
         types.SimpleNamespace(capability_name="http.request"),
     ))
@@ -2248,6 +2248,42 @@ def test_broker_plan_rejects_private_inputs_until_sealed_exchange_exists():
     assert api_module._broker_action_plan_requires_local_private_inputs(
         request_verifier_plan
     )
+
+
+def test_broker_private_option_split_keeps_public_job_secret_free():
+    public, private = api_module._split_broker_private_options({
+        "budget_profile": "balanced",
+        "auth_header": "Bearer canary-secret",
+        "login_password": "canary-password",
+        "credential_profile_refs": [{"profile_id": "profile-1"}],
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1", "scan_lane": "primary",
+        }],
+    })
+
+    assert public == {
+        "budget_profile": "balanced",
+        "credential_profile_refs": [{"profile_id": "profile-1"}],
+    }
+    assert private["auth_header"] == "Bearer canary-secret"
+    assert private["login_password"] == "canary-password"
+    assert private["resolved_credential_profiles"][0]["profile_id"] == "profile-1"
+    assert "canary" not in json.dumps(public)
+
+
+def test_legacy_broker_jobs_with_private_inputs_are_detected_for_local_routing():
+    assert api_module._broker_job_has_private_inputs({
+        "options": {"auth_cookies": "session=canary-secret"},
+    })
+    assert api_module._broker_job_has_private_inputs({
+        "options": {"credential_profile_refs": [{"profile_id": "profile-1"}]},
+    })
+    assert api_module._broker_job_has_private_inputs({
+        "options": {"request_collections": [{"replay_policy": "safe_reads"}]},
+    })
+    assert not api_module._broker_job_has_private_inputs({
+        "options": {"budget_profile": "balanced"},
+    })
 
 
 def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):

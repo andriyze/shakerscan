@@ -28,6 +28,11 @@ from typing import Any, Mapping
 
 from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
 from runtime.models import ScanPolicy, TargetBinding
+from runtime.sealed_inputs import (
+    SealedInputError,
+    generate_sealed_input_keypair,
+    open_private_input,
+)
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.action_plan import ScanActionPlan, ScanActionPlanError
 from scan.broker_backend import (
@@ -36,6 +41,10 @@ from scan.broker_backend import (
 )
 from scan.orchestrator import ScanOrchestrator
 from scan.migration import require_legacy_scan_execution_window
+from scan.private_inputs import (
+    BrokerPrivateScanInputError,
+    BrokerPrivateScanInputs,
+)
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from worker import (
     RESULTS_DIR,
@@ -503,6 +512,7 @@ async def _execute_broker_action_plan(
     *,
     plan: ScanActionPlan,
     worker_id: str,
+    private_inputs: BrokerPrivateScanInputs | None = None,
 ) -> dict[str, Any]:
     """Run the shared ScanOrchestrator over the HTTPS action backend."""
     node_id = str(state["node_id"])
@@ -559,6 +569,7 @@ async def _execute_broker_action_plan(
         backend=backend,
         process_runner=_execute_agent_scanner_process,
         cancelled=lambda: _scan_cancel_requested(scan_id),
+        private_inputs=private_inputs,
     )
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
@@ -626,19 +637,15 @@ async def _execute_broker_action_plan(
             base_path=base_path,
             request=request,
         )
-        dispatcher = DatabaseNeutralScanActionDispatcher(
-            target_url=str(job.get("target") or ""),
-            options=options,
-            target=target,
-            policy=policy,
-            scan_id=scan_id,
-            job_id=str(job.get("job_id") or ""),
-            worker_id=worker_id,
-            plan=plan,
-            backend=backend,
-            process_runner=_execute_agent_scanner_process,
-            cancelled=lambda: _scan_cancel_requested(scan_id),
-        )
+        # Keep the same dispatcher across the immutable continuation.  Its
+        # in-memory exact requests were authenticated by collection replay in
+        # the parent plan and must never be reloaded from public storage.
+        dispatcher.plan = plan
+        dispatcher.backend = backend
+        dispatcher.options = {
+            **dict(getattr(dispatcher, "options", {}) or {}),
+            **options,
+        }
         executor = ReceiptScanActionExecutor(
             scan_id=scan_id,
             target_id=target.target_id,
@@ -668,7 +675,54 @@ async def _execute_broker_action_plan(
     return report
 
 
-async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
+def _private_input_authority(
+    lease: Mapping[str, Any], plan: ScanActionPlan, worker_id: str,
+) -> dict[str, str]:
+    return {
+        "lease_id": str(lease.get("lease_id") or ""),
+        "worker_id": str(worker_id),
+        "plan_digest": plan.plan_digest,
+        "target_binding_digest": plan.target_binding_digest,
+        "expires_at": str(lease.get("lease_expires_at") or ""),
+    }
+
+
+def _open_broker_private_scan_inputs(
+    lease: Mapping[str, Any],
+    *,
+    plan: ScanActionPlan,
+    worker_id: str,
+    private_input_key: str | None,
+) -> BrokerPrivateScanInputs | None:
+    envelope = lease.get("private_scan_inputs")
+    if envelope is None:
+        return None
+    if not isinstance(envelope, Mapping) or not private_input_key:
+        raise BrokerWorkerError(
+            "broker private Scan input envelope has no one-use worker key"
+        )
+    authority = _private_input_authority(lease, plan, worker_id)
+    try:
+        payload = open_private_input(
+            envelope,
+            recipient_private_key=private_input_key,
+            authority=authority,
+        )
+        return BrokerPrivateScanInputs.from_payload(
+            payload,
+            lease_id=authority["lease_id"],
+            worker_id=authority["worker_id"],
+            plan_digest=authority["plan_digest"],
+            target_binding_digest=authority["target_binding_digest"],
+        )
+    except (SealedInputError, BrokerPrivateScanInputError) as exc:
+        raise BrokerWorkerError("broker private Scan inputs are invalid") from exc
+
+
+async def execute_lease(
+    state: dict[str, Any], lease: dict[str, Any],
+    *, private_input_key: str | None = None,
+) -> None:
     job = lease.get("job") if isinstance(lease.get("job"), dict) else {}
     if job.get("_broker_result_id"):
         raise BrokerWorkerError("trusted broker-result ingestion cannot execute on a fleet node")
@@ -678,6 +732,14 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
     if not target or not scan_id or not job_id:
         raise BrokerWorkerError("broker lease is missing executable scan fields")
     canonical_action_authority = _broker_scan_action_plan(job, lease)
+    private_inputs = None
+    if canonical_action_authority is not None:
+        private_inputs = _open_broker_private_scan_inputs(
+            lease,
+            plan=canonical_action_authority[0],
+            worker_id=canonical_action_authority[1],
+            private_input_key=private_input_key,
+        )
     node_id = str(state["node_id"])
     lease_id = str(lease.get("lease_id") or "")
     lease_token = str(lease.get("lease_token") or "")
@@ -731,6 +793,7 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
                     job,
                     plan=action_plan,
                     worker_id=action_worker_id,
+                    private_inputs=private_inputs,
                 )
             else:
                 require_legacy_scan_execution_window()
@@ -810,6 +873,8 @@ async def execute_lease(state: dict[str, Any], lease: dict[str, Any]) -> None:
             timeout=120,
         )
     finally:
+        private_inputs = None
+        private_input_key = None
         done.set()
         heartbeat_thread.join(timeout=heartbeat_request_timeout + 2)
         _clear_fleet_busy_marker(busy_marker)
@@ -820,19 +885,29 @@ async def run_forever(state: dict[str, Any], worker_id: str) -> None:
     backoff = 5
     while True:
         try:
+            private_input_key, private_input_public_key = (
+                generate_sealed_input_keypair()
+            )
             lease = await asyncio.to_thread(
                 api_request,
                 state,
                 "POST",
                 f"/fleet/broker/nodes/{node_id}/lease",
-                {"worker_id": worker_id, "wait_seconds": 20},
+                {
+                    "worker_id": worker_id,
+                    "wait_seconds": 20,
+                    "private_input_public_key": private_input_public_key,
+                },
                 allow_empty=True,
                 timeout=40,
             )
             if lease is None:
                 backoff = 5
                 continue
-            await execute_lease(state, lease)
+            await execute_lease(
+                state, lease, private_input_key=private_input_key,
+            )
+            private_input_key = None
             backoff = 5
         except Exception as exc:
             # Never print lease payloads or state: both may contain target credentials.
@@ -863,15 +938,23 @@ def main() -> int:
     state = load_state(Path(args.state))
     os.environ["SHAKERSCAN_NODE_ID"] = str(state["node_id"])
     if args.once:
+        private_input_key, private_input_public_key = generate_sealed_input_keypair()
         lease = api_request(
             state,
             "POST",
             f"/fleet/broker/nodes/{state['node_id']}/lease",
-            {"worker_id": worker_id, "wait_seconds": 0},
+            {
+                "worker_id": worker_id,
+                "wait_seconds": 0,
+                "private_input_public_key": private_input_public_key,
+            },
             allow_empty=True,
         )
         if lease:
-            asyncio.run(execute_lease(state, lease))
+            asyncio.run(execute_lease(
+                state, lease, private_input_key=private_input_key,
+            ))
+        private_input_key = None
         return 0
     asyncio.run(run_forever(state, worker_id))
     return 0

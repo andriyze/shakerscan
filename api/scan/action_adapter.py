@@ -14,6 +14,7 @@ import urllib.parse
 
 try:
     import agent_tools
+    from capabilities.auth import establish_target_bound_http_session
     from capabilities.authz import (
         authz_route_inventory_digest,
         verify_target_bound_object_authorization,
@@ -21,21 +22,30 @@ try:
     from capabilities.dns import inspect_dns_posture
     from capabilities.http import execute_bound_http_request
     from capabilities.inline import (
+        AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
+    from capabilities.request_mutation import RequestMutationVerificationAdapter
     from capabilities.scanner import ScannerExecutionAdapter
     from capabilities.tls import inspect_tls_binding
     from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
     from runtime.capability_registry import CAPABILITY_REGISTRY
     from runtime.models import TargetBinding
+    from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
     from runtime.receipts import CapabilityReceipt
-    from runtime.scan_credentials import resolve_scan_http_principal
+    from runtime.request_replay_executor import execute_replay_plan
+    from runtime.scan_credentials import (
+        bind_scan_session_headers,
+        resolve_scan_http_principal,
+        resolve_scan_interactive_credential,
+    )
 except (ImportError, ModuleNotFoundError):
     from .. import agent_tools
+    from ..capabilities.auth import establish_target_bound_http_session
     from ..capabilities.authz import (
         authz_route_inventory_digest,
         verify_target_bound_object_authorization,
@@ -43,19 +53,27 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.dns import inspect_dns_posture
     from ..capabilities.http import execute_bound_http_request
     from ..capabilities.inline import (
+        AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
+    from ..capabilities.request_mutation import RequestMutationVerificationAdapter
     from ..capabilities.scanner import ScannerExecutionAdapter
     from ..capabilities.tls import inspect_tls_binding
     from ..hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from ..runtime.models import TargetBinding
+    from ..runtime.pinned_http_replay import PinnedAiohttpReplayTransport
     from ..runtime.receipts import CapabilityReceipt
-    from ..runtime.scan_credentials import resolve_scan_http_principal
+    from ..runtime.request_replay_executor import execute_replay_plan
+    from ..runtime.scan_credentials import (
+        bind_scan_session_headers,
+        resolve_scan_http_principal,
+        resolve_scan_interactive_credential,
+    )
 
 try:
     from scanner_tools.url_redaction import redact_url
@@ -69,8 +87,10 @@ except (ImportError, ModuleNotFoundError):
 
 try:
     from scanner_tools.common import run_streaming
+    from scanner_tools.request_replay import bind_replay_credential_headers
 except (ImportError, ModuleNotFoundError):
     from scanner.scanner_tools.common import run_streaming
+    from scanner.scanner_tools.request_replay import bind_replay_credential_headers
 
 from .action_plan import ScanAction, ScanActionPlan
 from .capability_execution import (
@@ -83,6 +103,7 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
+from .private_inputs import BrokerPrivateScanInputs
 from .work_manifests import (
     ScanWorkManifest,
     ScanWorkManifestError,
@@ -131,11 +152,22 @@ class DatabaseNeutralScanActionDispatcher:
         backend: ObservationBackend,
         process_runner: ScannerProcessRunner,
         cancelled: Cancelled,
+        private_inputs: BrokerPrivateScanInputs | None = None,
     ) -> None:
         if not isinstance(plan, ScanActionPlan) or target.digest != plan.target_binding_digest:
             raise ScanActionAdapterError("action dispatcher authority is inconsistent")
+        if private_inputs is not None and (
+            private_inputs.plan_digest != plan.plan_digest
+            or private_inputs.target_binding_digest != plan.target_binding_digest
+            or private_inputs.worker_id != str(worker_id)
+        ):
+            raise ScanActionAdapterError(
+                "private Scan inputs differ from dispatcher authority"
+            )
         self.target_url = scan_external_execution_target(target_url, target=target)
         self.options = dict(options)
+        if private_inputs is not None:
+            self.options.update(dict(private_inputs.options))
         self.target = target
         self.policy = policy
         self.scan_id = str(scan_id)
@@ -145,6 +177,13 @@ class DatabaseNeutralScanActionDispatcher:
         self.backend = backend
         self.process_runner = process_runner
         self.cancelled = cancelled
+        self._private_replay_plans = dict(
+            private_inputs.replay_plans if private_inputs is not None else {}
+        )
+        # Exact request bodies become verifier inputs only after their replay
+        # action actually succeeds.  Preloading them would let a dependent
+        # verifier run after a failed or skipped collection action.
+        self._private_requests: dict[str, Any] = {}
 
     def _receipt(
         self,
@@ -498,6 +537,155 @@ class DatabaseNeutralScanActionDispatcher:
             action, adapter, heartbeat, target=bounded_target,
         )
 
+    async def _auth_session(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        lane = "primary" if action.action_id.endswith("primary") else "secondary"
+        credential = resolve_scan_interactive_credential(self.options, lane=lane)
+        if credential is None:
+            return self._skip(action, "not_applicable")
+
+        async def operation() -> Mapping[str, Any]:
+            session = await establish_target_bound_http_session(
+                credential, target=self.target,
+            )
+            if session.established and session.headers():
+                self.options = bind_scan_session_headers(
+                    self.options, session.headers(), lane=lane,
+                )
+            return session.execution_result()
+
+        specification = CAPABILITY_REGISTRY.require(action.capability_name)
+        adapter = AuthSessionExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=action.requested_budget,
+            redacted_execution={
+                "action_id": action.action_id,
+                "lane": lane,
+                "credential_binding_digest": credential.binding_digest,
+                "secret_values_visible": False,
+            },
+        )
+        return await self._execute_adapter(action, adapter, heartbeat)
+
+    async def _collection_replay(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        plan = self._private_replay_plans.get(action.action_id)
+        if plan is None:
+            return self._skip(action, "private_request_unavailable")
+        if any(
+            int(action.requested_budget.get(name) or 0) < int(amount)
+            for name, amount in plan.estimated_budget.items()
+        ):
+            raise ScanActionAdapterError(
+                "private replay plan exceeds its immutable action reservation"
+            )
+        principal = resolve_scan_http_principal(self.options, lane="primary")
+        primary_profile_bound = any(
+            isinstance(item, Mapping)
+            and str(item.get("scan_lane") or item.get("auth_state") or "")
+            in {"primary", "user1"}
+            for item in self.options.get("resolved_credential_profiles") or ()
+        )
+        if primary_profile_bound:
+            if not principal.authenticated:
+                return self._skip(action, "credential_session_unavailable")
+            plan = bind_replay_credential_headers(
+                plan,
+                principal.headers(),
+                auth_kind="broker_session",
+            )
+        wall = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
+        await heartbeat()
+        outcome = await execute_replay_plan(
+            plan,
+            target=self.target,
+            owner_kind="scan",
+            owner_id=self.scan_id,
+            worker_id=self.worker_id,
+            limits=action.requested_budget,
+            consumed={name: 0 for name in action.requested_budget},
+            transport=PinnedAiohttpReplayTransport(),
+            timeout_seconds=max(0.1, min(30.0, wall / len(plan.requests))),
+            lease_seconds=max(30, wall + 5),
+            authorized_budget=action.requested_budget,
+            receipt_capability_name=action.capability_name,
+            receipt_input_digest=action.action_digest,
+            cancelled=self.cancelled,
+        )
+        for request in plan.requests:
+            previous = self._private_requests.get(request.request_id)
+            if previous is not None and previous.digest_dict() != request.digest_dict():
+                raise ScanActionAdapterError(
+                    "private replay request changed during broker execution"
+                )
+            self._private_requests[request.request_id] = request
+        receipt = outcome.receipt
+        return self._receipt(
+            action,
+            status=(
+                "success" if outcome.status == "succeeded" else outcome.status
+            ),
+            parser_version=receipt.parser_version,
+            started_at=receipt.started_at,
+            observations=receipt.observations,
+            errors=receipt.errors,
+            consumed=receipt.budget_consumed,
+            partial=receipt.partial,
+            timed_out=receipt.timed_out,
+            redacted_execution={
+                **dict(receipt.redacted_execution),
+                "action_id": action.action_id,
+                "private_transport": "lease_sealed",
+            },
+        )
+
+    async def _request_mutation(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        if (
+            not self.policy.active_testing
+            or not self.policy.allow_state_changing_http
+            or not self.policy.approval_receipt_id
+        ):
+            return self._skip(action, "state_changing_authority_missing")
+        manifest = await self._work_manifest(
+            action,
+            "request_candidate_manifest_ref",
+            ScanWorkManifestKind.REQUEST_CANDIDATE,
+        )
+        if manifest is None or not manifest.entries:
+            return self._skip(action, "manifest_unavailable")
+        index = action.capability_args.get("request_candidate_index")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(manifest.entries)
+        ):
+            raise ScanActionAdapterError(
+                "request verifier candidate index is invalid"
+            )
+        candidate = manifest.entries[index]
+        request = self._private_requests.get(
+            str(candidate.get("request_ref_id") or "")
+        )
+        if request is None:
+            return self._skip(action, "private_request_unavailable")
+        specification = CAPABILITY_REGISTRY.require(action.capability_name)
+        adapter = RequestMutationVerificationAdapter(
+            specification=specification,
+            target=self.target,
+            request=request,
+            candidate=candidate,
+            transport=PinnedAiohttpReplayTransport(),
+            requested_budget=action.requested_budget,
+        )
+        return await self._execute_adapter(
+            action, adapter, heartbeat, managed_cancellation=True,
+        )
+
     async def _external(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         tool_by_capability = {
             "web.probe": "httpx",
@@ -634,6 +822,8 @@ class DatabaseNeutralScanActionDispatcher:
         return await self._execute_adapter(action, adapter, heartbeat)
 
     async def _finalize(self, action: ScanAction) -> CapabilityReceipt:
+        self._private_replay_plans.clear()
+        self._private_requests.clear()
         results = {}
         observations = {}
         for planned in self.plan.actions:
@@ -678,15 +868,9 @@ class DatabaseNeutralScanActionDispatcher:
         if action.action_id == "finalize.report":
             return await self._finalize(action)
         if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
-            # A profile reference is not credential material. The broker private
-            # input exchange is implemented separately and must populate a bound
-            # principal before this action may succeed.
-            lane = "primary" if action.action_id.endswith("primary") else "secondary"
-            if not resolve_scan_http_principal(self.options, lane=lane).authenticated:
-                return self._skip(action, "not_applicable")
-            return self._skip(action, "not_applicable")
+            return await self._auth_session(action, heartbeat)
         if action.action_id.startswith("inputs.collection_"):
-            return self._skip(action, "not_applicable")
+            return await self._collection_replay(action, heartbeat)
         if action.capability_name == "http.request":
             return await self._http(action, heartbeat)
         if action.capability_name == "dns.inspect":
@@ -705,7 +889,7 @@ class DatabaseNeutralScanActionDispatcher:
         if action.capability_name in {
             "xss.request_verify", "sqli.request_verify",
         }:
-            return self._skip(action, "private_request_unavailable")
+            return await self._request_mutation(action, heartbeat)
         if action.capability_name == "authz.verify":
             return await self._authz(action, heartbeat)
         raise ScanActionAdapterError(
