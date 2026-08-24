@@ -1198,7 +1198,7 @@ command_needs_jq() {
 
 command_needs_python() {
     case "$1" in
-        mcp|research)
+        mcp|research|report-rebuild)
             return 0
             ;;
         *)
@@ -1872,6 +1872,7 @@ print_help() {
     echo "  scan <target>      Submit the deterministic DAST Scan"
     echo "  scan-full <target> Compatibility alias for 'scan --type full'"
     echo "  scan-smart <target> Compatibility alias for 'scan --type smart'"
+    echo "  report-rebuild <bundle>  Rebuild a deterministic report fully offline"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
@@ -3479,7 +3480,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|scan-full|scan-smart|agent|ai|fleet|join|model-intake-runner)
+        scan|scan-full|scan-smart|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -3548,6 +3549,13 @@ case $COMMAND in
         ;;
     scan-smart)
         submit_scan "scan-smart" "smart" 0 "${ARGS[@]}"
+        ;;
+    report-rebuild)
+        if [ ! -f "$SCRIPT_DIR/scripts/rebuild_scan_report.py" ]; then
+            echo -e "${RED}Error: the offline report builder is missing from this runtime.${NC}" >&2
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/rebuild_scan_report.py" "${ARGS[@]}"
         ;;
     install-deps)
         install_dependencies
