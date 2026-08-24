@@ -209,6 +209,30 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
     assert set(plan.actions[-1].dependencies) == set(by_id) - {"finalize.report"}
 
 
+def test_passive_scan_compiles_bounded_read_only_surface_discovery():
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(active=False),
+        target_binding=_target(),
+    )
+    by_id = {action.action_id: action for action in plan.actions}
+
+    assert {"discover.web_probe", "discover.web_crawl", "discover.web_content"} <= set(
+        by_id
+    )
+    assert "active.templates" not in by_id
+    assert "verify.xss" not in by_id
+    assert "verify.sqli" not in by_id
+    assert by_id["discover.web_crawl"].capability_args["read_only"] is True
+    for action_id in (
+        "discover.web_probe", "discover.web_crawl", "discover.web_content",
+    ):
+        spec = CAPABILITY_REGISTRY.require(by_id[action_id].capability_name)
+        assert spec.risk_tier in {"read_only", "passive"}
+        assert spec.required_approval is None
+        assert by_id[action_id].requested_budget.get("state_changing_requests", 0) == 0
+
+
 def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
     with pytest.raises(ScanActionPlanError, match="immutable template manifest"):
         ScanActionPlanCompiler().compile(

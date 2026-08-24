@@ -214,8 +214,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "web.crawl", "Bounded same-host crawl and JavaScript endpoint discovery.",
-            "external_tool", "active", _HTTP_TARGETS, "katana", "1",
-            "active_testing", {"http_requests": 150, "tool_wall_seconds": 75},
+            "external_tool", "read_only", _HTTP_TARGETS, "katana", "1",
+            None, {"http_requests": 150, "tool_wall_seconds": 75},
             {"network_reachability": True, "binary": "katana"},
             _http_principal_schema(),
             "katana-lines/v1", ("crawl_observation",), "katana", "katana", 75_000,
@@ -223,8 +223,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "web.content_discover", "Bounded content discovery using a bundled wordlist.",
-            "external_tool", "active", _HTTP_TARGETS, "ffuf", "1",
-            "active_testing", {"http_requests": 220, "tool_wall_seconds": 75},
+            "external_tool", "read_only", _HTTP_TARGETS, "ffuf", "1",
+            None, {"http_requests": 220, "tool_wall_seconds": 75},
             {"network_reachability": True, "binary": "ffuf"},
             _http_principal_schema({
                 "wordlist": {

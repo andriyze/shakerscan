@@ -11727,7 +11727,7 @@ async def _execute_scan_web_crawl_capability(
     job_id: str,
     canonical_action: Any | None = None,
 ) -> dict[str, Any]:
-    """Run canonical Katana once under active Scan authority."""
+    """Run canonical read-only Katana once under Scan authority."""
     _normalized, admission = prepare_worker_dispatch(options)
     if not admission.canonical or admission.plan is None:
         return _skipped_scan_web_crawl_summary("legacy_scan")
@@ -11745,10 +11745,6 @@ async def _execute_scan_web_crawl_capability(
         return _skipped_scan_web_crawl_summary("policy_excluded")
     if include and "recon" not in include:
         return _skipped_scan_web_crawl_summary("policy_not_included")
-    if not policy.active_testing:
-        return _skipped_scan_web_crawl_summary("active_testing_not_authorized")
-    if not policy.approval_receipt_id:
-        return _skipped_scan_web_crawl_summary("active_approval_missing")
     allocation = scan_web_crawl_capability_allocation(
         execution.payload()["execution_budget"]
     )
@@ -11884,12 +11880,6 @@ async def _execute_scan_content_discovery_capability(
         return _skipped_scan_content_discovery_summary("policy_excluded")
     if include and "recon" not in include:
         return _skipped_scan_content_discovery_summary("policy_not_included")
-    if not policy.active_testing:
-        return _skipped_scan_content_discovery_summary(
-            "active_testing_not_authorized"
-        )
-    if not policy.approval_receipt_id:
-        return _skipped_scan_content_discovery_summary("active_approval_missing")
     allocation = scan_content_discovery_capability_allocation(
         execution.payload()["execution_budget"]
     )

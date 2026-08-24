@@ -577,6 +577,12 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         ).authenticated is True
         return worker._skipped_scan_web_probe_summary("test_isolation")
 
+    async def skip_web_crawl(*_args, **_kwargs):
+        return worker._skipped_scan_web_crawl_summary("test_isolation")
+
+    async def skip_content_discovery(*_args, **_kwargs):
+        return worker._skipped_scan_content_discovery_summary("test_isolation")
+
     async def skip_subdomains(runtime_options, _scan_id, **_kwargs):
         nonlocal subdomain_calls
         subdomain_calls += 1
@@ -613,6 +619,16 @@ def test_deterministic_scan_reserves_remaining_budget_before_process_and_redeliv
         worker,
         "_execute_scan_web_probe_capability",
         skip_web_probe,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_web_crawl_capability",
+        skip_web_crawl,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_execute_scan_content_discovery_capability",
+        skip_content_discovery,
     )
     monkeypatch.setattr(
         worker,
@@ -1999,11 +2015,17 @@ def test_recon_stage_places_one_reserved_content_discovery_result(monkeypatch):
     assert summary["receipt"]["budget_reservation_state"] == "committed"
 
 
-def test_content_discovery_never_runs_without_active_permission(monkeypatch):
+def test_content_discovery_runs_read_only_without_active_permission(monkeypatch):
     _plan, _target, options = _authority(enabled=True, network=False)
 
-    async def execute_capability(**_kwargs):
-        raise AssertionError("passive Scan launched FFUF")
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "web.content_discover", observations=[],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
 
     monkeypatch.setattr(
         worker, "_execute_reserved_scan_capability", execute_capability,
@@ -2015,15 +2037,23 @@ def test_content_discovery_never_runs_without_active_permission(monkeypatch):
         job_id="job-1",
     ))
 
-    assert summary["status"] == "skipped"
-    assert summary["reason"] == "active_testing_not_authorized"
+    assert summary["status"] == "success"
+    assert len(calls) == 1
+    assert calls[0]["capability_name"] == "web.content_discover"
+    assert calls[0]["target_binding"].digest == _target.digest
 
 
-def test_crawl_stage_never_runs_without_active_permission(monkeypatch):
+def test_crawl_stage_runs_read_only_without_active_permission(monkeypatch):
     _plan, _target, options = _authority(enabled=True, network=False)
 
-    async def execute_capability(**_kwargs):
-        raise AssertionError("passive Scan launched Katana")
+    calls = []
+
+    async def execute_capability(**kwargs):
+        calls.append(kwargs)
+        return _stored_network_capability(
+            "web.crawl", observations=[],
+            amounts={"http_requests": 1, "tool_wall_seconds": 1},
+        ), False
 
     monkeypatch.setattr(
         worker, "_execute_reserved_scan_capability", execute_capability,
@@ -2035,8 +2065,10 @@ def test_crawl_stage_never_runs_without_active_permission(monkeypatch):
         job_id="job-1",
     ))
 
-    assert summary["status"] == "skipped"
-    assert summary["reason"] == "active_testing_not_authorized"
+    assert summary["status"] == "success"
+    assert len(calls) == 1
+    assert calls[0]["capability_name"] == "web.crawl"
+    assert calls[0]["target_binding"].digest == _target.digest
 
 
 def test_template_stage_never_runs_without_active_permission(monkeypatch):

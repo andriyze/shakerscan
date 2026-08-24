@@ -811,7 +811,6 @@ class ScanActionPlanCompiler:
         crawl_required = bool(explicitly_requested) and needs_candidates and not endpoint_ref and not candidate_ref
         if (
             scope in {"full", "discovery"}
-            and active
             and (self._family_enabled(execution_plan, "recon") or needs_candidates)
         ):
             add(
