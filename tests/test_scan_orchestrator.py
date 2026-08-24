@@ -540,6 +540,14 @@ class FakePostgresConn:
                 return None
             self.observations[args[0]] = incoming
             return {"manifest_json": incoming["manifest_json"]}
+        if "FROM scan_observation_manifests" in query:
+            stored = self.observations.get(args[0])
+            if stored is None:
+                return None
+            return {
+                "manifest_json": stored["manifest_json"],
+                "observations_json": stored["observations_json"],
+            }
         action_id = str(args[1])
         row = self.rows[action_id]
         if "SET status=$4" in query and "lease_expires_at <= now()" in query:
@@ -774,6 +782,9 @@ def test_postgres_backend_converts_full_receipt_and_observations_in_one_settleme
     assert result.observation_manifest_ref is not None
     assert result.observation_manifest_ref.count == 1
     assert conn.observations
+    assert asyncio.run(backend.load_observations(action.action_id)) == (
+        {"kind": "http_response", "status_code": 200},
+    )
     stored_receipt = json.loads(conn.rows[action.action_id]["receipt_json"])
     assert stored_receipt["receipt_id"] == receipt.receipt_id
     assert stored_receipt["budget_reservation_id"]

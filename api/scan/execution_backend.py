@@ -38,11 +38,17 @@ from .work_manifests import (
     work_manifest_references_in,
 )
 try:  # Preserve one class identity under api.scan.* host imports.
-    from ..runtime.observation_store import PostgresObservationManifestStore
+    from ..runtime.observation_store import (
+        ObservationStoreError,
+        PostgresObservationManifestStore,
+    )
     from ..runtime.receipts import CapabilityReceipt
     from ..runtime.reservation_store import PostgresBudgetReservationStore
 except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
-    from runtime.observation_store import PostgresObservationManifestStore
+    from runtime.observation_store import (
+        ObservationStoreError,
+        PostgresObservationManifestStore,
+    )
     from runtime.receipts import CapabilityReceipt
     from runtime.reservation_store import PostgresBudgetReservationStore
 
@@ -206,6 +212,10 @@ class ScanExecutionBackend(Protocol):
     ) -> CapabilityResultReference: ...
 
     async def load_result(self, action_id: str) -> CapabilityResultReference | None: ...
+
+    async def load_observations(
+        self, action_id: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
 
     async def load_work_manifest(
         self, action_id: str, reference: ScanWorkManifestReference,
@@ -851,6 +861,29 @@ class PostgresScanExecutionBackend:
         """Read a result without recursively acquiring the control-plane pool."""
         action = self._require_action(action_id)
         return await self._load_result_with_conn(conn, action)
+
+    async def load_observations(
+        self, action_id: str,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Load only content-addressed observations from a terminal action."""
+        result = await self.load_result(action_id)
+        if result is None or result.observation_manifest_ref is None:
+            return ()
+        try:
+            async with self._pool.acquire() as conn:
+                observations = await PostgresObservationManifestStore().load(
+                    conn,
+                    reference=result.observation_manifest_ref,
+                    scan_id=self._plan.scan_id,
+                    action_id=action_id,
+                )
+        except ObservationStoreError as exc:
+            raise ScanExecutionBackendError(str(exc)) from exc
+        if observations is None:
+            raise ScanExecutionBackendError(
+                "terminal Scan observation manifest is unavailable"
+            )
+        return tuple(observations)
 
     async def load_work_manifest(
         self,
