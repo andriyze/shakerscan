@@ -14,12 +14,16 @@ import urllib.parse
 
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from pinned_socks_proxy import PinnedSocksProxy
     from runtime.models import PreparedExecution, TargetBinding
     from runtime.secret_material import contains_secret_material
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
 except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from ..pinned_socks_proxy import PinnedSocksProxy
     from ..runtime.models import PreparedExecution, TargetBinding
     from ..runtime.secret_material import contains_secret_material
+    from ..runtime.target_bound_socket import FrozenTargetSocketFactory
 
 try:
     from scanner_tools.url_redaction import redact_url
@@ -197,7 +201,15 @@ def _prepare_browser_base(
         raise BrowserCapabilityInputError(
             "browser target binding has no frozen runtime address"
         )
-    pinned_address = str(ipaddress.ip_address(target.allowed_addresses[0]))
+    parsed_origin = urllib.parse.urlsplit(base_origin)
+    socket_factory = FrozenTargetSocketFactory(
+        hostname=target.canonical_host,
+        port=parsed_origin.port or (
+            443 if parsed_origin.scheme.lower() == "https" else 80
+        ),
+        frozen_addresses=target.allowed_addresses,
+    )
+    pinned_address = socket_factory.addresses[0]
     if _is_ip_literal(target.canonical_host) and str(
         ipaddress.ip_address(str(target.canonical_host))
     ) != pinned_address:
@@ -216,6 +228,7 @@ def _prepare_browser_base(
         "wait_until": wait_until,
         "timeout_ms": timeout_ms,
         "max_requests": max_requests,
+        "address_policy": socket_factory.policy_receipt,
     }
 
 
@@ -276,6 +289,7 @@ class BrowserNavigateAdapter:
                 "origin": common["origin"],
                 "path": _redacted_path(common["path"]),
                 "pinned_address": common["pinned_address"],
+                "address_policy": common["address_policy"],
                 "wait_until": common["wait_until"],
                 "max_requests": common["max_requests"],
                 "read_only_requests_only": True,
@@ -388,6 +402,7 @@ class BrowserInteractAdapter:
                 "origin": common["origin"],
                 "path": _redacted_path(common["path"]),
                 "pinned_address": common["pinned_address"],
+                "address_policy": common["address_policy"],
                 "wait_until": common["wait_until"],
                 "max_requests": common["max_requests"],
                 "selector_sha256": selector_digest,
@@ -437,6 +452,7 @@ async def _execute_browser_action(
     playwright = None
     browser = None
     context = None
+    pinned_proxy = None
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
@@ -472,25 +488,34 @@ async def _execute_browser_action(
                 parser_version=prepared.parser_version,
                 redacted_execution=prepared.redacted_execution,
             )
+        parsed_origin = urllib.parse.urlsplit(prepared.origin)
+        pinned_proxy = await PinnedSocksProxy(
+            hostname=prepared.target.canonical_host,
+            pinned_addresses=prepared.target.allowed_addresses,
+            port=parsed_origin.port or (
+                443 if parsed_origin.scheme.lower() == "https" else 80
+            ),
+            max_connections=prepared.max_requests,
+        ).start()
+        responses.append({
+            "kind": "browser_target_transport",
+            "address_policy": pinned_proxy.socket_factory.policy_receipt,
+            "address_attempts": pinned_proxy.address_attempts,
+            "address_connections": pinned_proxy.address_connections,
+            "hostname_preserved": True,
+            "runtime_dns_resolution": False,
+        })
         playwright = await async_playwright().start()
-        mapped = (
-            f"[{prepared.pinned_address}]"
-            if ":" in prepared.pinned_address
-            else prepared.pinned_address
-        )
-        resolver_args = []
-        if not _is_ip_literal(prepared.target.canonical_host):
-            resolver_args.append(
-                f"--host-resolver-rules=MAP {prepared.target.canonical_host} {mapped}"
-            )
         browser = await playwright.chromium.launch(
             headless=True,
+            proxy={"server": pinned_proxy.proxy_url},
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-background-networking",
                 "--dns-prefetch-disable",
                 "--disable-features=Prerender2,SpeculationRulesPrefetch,UseDnsHttpsSvcbAlpn",
-                *resolver_args,
+                "--proxy-bypass-list=<-loopback>",
+                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
             ],
         )
         context = await browser.new_context(
@@ -749,6 +774,11 @@ async def _execute_browser_action(
         if playwright is not None:
             try:
                 await playwright.stop()
+            except Exception:
+                pass
+        if pinned_proxy is not None:
+            try:
+                await pinned_proxy.close()
             except Exception:
                 pass
 

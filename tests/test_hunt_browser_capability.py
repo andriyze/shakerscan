@@ -108,6 +108,28 @@ def test_browser_prepare_freezes_origin_address_digest_and_budget():
     }
     assert "page=2" not in str(prepared.redacted_execution)
     assert "page" in prepared.redacted_execution["path"]
+    assert prepared.redacted_execution["address_policy"] == {
+        "schema_version": "frozen-target-address-policy/v1",
+        "family_preference": "ipv4_first",
+        "admitted_address_count": 1,
+        "fallback_attempt_limit": 1,
+        "no_runtime_resolution": True,
+    }
+
+
+def test_browser_prepare_address_selection_is_stable_across_dns_order():
+    first = BrowserNavigateAdapter.prepare(
+        target=_target(addresses=("192.0.2.20", "2001:db8::1", "192.0.2.10")),
+        base_url="https://app.example.test",
+        args={"path": "/"},
+    )
+    repeated = BrowserNavigateAdapter.prepare(
+        target=_target(addresses=("192.0.2.10", "192.0.2.20", "2001:db8::1")),
+        base_url="https://app.example.test",
+        args={"path": "/"},
+    )
+
+    assert first.pinned_address == repeated.pinned_address == "192.0.2.10"
 
 
 @pytest.mark.parametrize("path", [
@@ -251,6 +273,21 @@ def test_browser_interaction_rejects_cross_origin_mutating_or_secret_elements(el
 
 
 def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypatch):
+    class FakePinnedProxy:
+        def __init__(self, **_kwargs):
+            self.socket_factory = types.SimpleNamespace(policy_receipt={
+                "schema_version": "frozen-target-address-policy/v1",
+            })
+            self.address_attempts = {"192.0.2.10": 1}
+            self.address_connections = {"192.0.2.10": 1}
+            self.proxy_url = "socks5://127.0.0.1:41000"
+
+        async def start(self): return self
+        async def close(self): return None
+
+    monkeypatch.setattr(
+        "api.capabilities.browser.PinnedSocksProxy", FakePinnedProxy,
+    )
     blocked_routes = []
 
     class FakeRequest:
@@ -407,6 +444,21 @@ def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypat
 
 
 def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(monkeypatch):
+    class FakePinnedProxy:
+        def __init__(self, **_kwargs):
+            self.socket_factory = types.SimpleNamespace(policy_receipt={
+                "schema_version": "frozen-target-address-policy/v1",
+            })
+            self.address_attempts = {"192.0.2.10": 1}
+            self.address_connections = {"192.0.2.10": 1}
+            self.proxy_url = "socks5://127.0.0.1:41000"
+
+        async def start(self): return self
+        async def close(self): return None
+
+    monkeypatch.setattr(
+        "api.capabilities.browser.PinnedSocksProxy", FakePinnedProxy,
+    )
     blocked_routes = []
 
     class FakeRequest:
@@ -529,6 +581,11 @@ def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(m
         item.get("reason") == "state_changing_method"
         for item in result.observations
     )
+    transport = next(
+        item for item in result.observations
+        if item.get("kind") == "browser_target_transport"
+    )
+    assert transport["address_connections"] == {"192.0.2.10": 1}
 
 
 def test_cancelled_browser_terminal_is_distinct_and_preserves_measured_usage():
