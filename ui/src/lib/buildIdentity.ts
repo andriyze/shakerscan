@@ -54,8 +54,11 @@ export function deriveBuildIdentity(
   const apiVersion = typeof health?.scanner_version === 'string' ? health.scanner_version : undefined
   const workerBuild = health?.worker_build
   const auxiliaryMismatchCount = (
-    (health?.agent_tool_worker?.status && health.agent_tool_worker.status !== 'ready' ? 1 : 0)
-    + (health?.device_worker?.enabled === true && health.device_worker.status !== 'ready' ? 1 : 0)
+    ((health?.agent_tool_worker?.worker_count || 0) > 0
+      && health?.agent_tool_worker?.status !== 'ready' ? 1 : 0)
+    + (health?.device_worker?.enabled === true
+      && (health.device_worker.worker_count || 0) > 0
+      && health.device_worker.status !== 'ready' ? 1 : 0)
   )
   const normalWorkerLabel = workerBuild?.available
     ? workerBuild.fleet_uniform

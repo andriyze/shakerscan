@@ -101,3 +101,13 @@ test('specialized scanner workers participate in build mismatch reporting', () =
     'UI abc1234 · API abc1234 · Workers mixed/stale (1 specialized)',
   )
 })
+
+test('optional specialized pools with no running workers do not invent build skew', () => {
+  const identity = deriveBuildIdentity('abc1234', {
+    ...uniformHealth,
+    agent_tool_worker: { status: 'not_ready', worker_count: 0 },
+    device_worker: { enabled: true, status: 'not_ready', worker_count: 0 },
+  })
+  assert.equal(identity.skew, false)
+  assert.equal(formatBuildIdentity(identity), 'Version abc1234')
+})
