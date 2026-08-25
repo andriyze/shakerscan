@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
 import {
-  createCredentialProfile,
-  deactivateCredentialProfile,
   getDevices,
   getTargets,
+  type DeviceTarget,
+  type Target,
+} from '@/lib/api'
+import {
+  createCredentialProfile,
+  deactivateCredentialProfile,
   listCredentialProfiles,
   rotateCredentialProfile,
   type CredentialAuthKind,
@@ -14,9 +18,7 @@ import {
   type CredentialProfile,
   type CredentialSecretPayload,
   type CredentialTargetKind,
-  type DeviceTarget,
-  type Target,
-} from '@/lib/api'
+} from '@/lib/credentialApi'
 import { SCAN_PUBLIC_CONTRACT_SNAPSHOT } from '@/lib/scanContract.generated'
 import {
   Button,

@@ -8,14 +8,16 @@ import {
   getDevices,
   getDeviceAgentSession,
   getTargets,
-  listCredentialProfiles,
-  type CredentialPrincipalSlot,
-  type CredentialProfile,
   type DeviceAgentShellPlan,
   type DeviceAgentSession,
   type DeviceTarget,
   type Target,
 } from '@/lib/api'
+import {
+  listCredentialProfiles,
+  type CredentialPrincipalSlot,
+  type CredentialProfile,
+} from '@/lib/credentialApi'
 import {
   cancelHuntV2,
   confirmHuntShellPlan,

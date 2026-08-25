@@ -9,8 +9,6 @@ import type {
   ScanStartRequest,
 } from './scanContract.generated'
 import type {
-  CredentialProfileCreate as GeneratedCredentialProfileCreate,
-  CredentialProfileRotate as GeneratedCredentialProfileRotate,
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
   RequestCollectionBindingUpsert as GeneratedRequestCollectionBindingUpsert,
   RequestCollectionCreate as GeneratedRequestCollectionCreate,
@@ -7492,106 +7490,6 @@ export async function endInteractiveSession(sessionId: string): Promise<{ status
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to end interactive session'))
   }
-  return res.json()
-}
-
-export type CredentialTargetKind = GeneratedCredentialProfileCreate['target_kind']
-export type CredentialPrincipalSlot = NonNullable<GeneratedCredentialProfileCreate['principal_slot']>
-export type CredentialAuthKind = GeneratedCredentialProfileCreate['auth_kind']
-
-export interface CredentialProfile {
-  id: string
-  target_kind: CredentialTargetKind
-  target_id: string
-  name: string
-  auth_kind: CredentialAuthKind
-  principal_label?: string | null
-  principal_slot: CredentialPrincipalSlot
-  configuration: {
-    schema_version: string
-    auth_kind: CredentialAuthKind
-    username_configured: boolean
-    secondary_secret_configured: boolean
-    header_name?: string | null
-    endpoint_configured: boolean
-    client_id_configured: boolean
-    scope_count: number
-    custom_header_names: string[]
-    parameter_name?: string | null
-    interactive_exchange_required: boolean
-    secret_values_visible: false
-  }
-  current_version: number
-  record_version: number
-  is_active: boolean
-  expires_at?: string | null
-  rotated_at: string
-  created_at: string
-  updated_at: string
-  allowed_capabilities: string[]
-  secret_configured: true
-  secret_values_visible: false
-  status: 'active' | 'inactive' | 'expired'
-  refresh_required: boolean
-  execution_compatible: boolean
-  storage_encrypted: true
-  encryption_available: boolean
-}
-
-export type CredentialSecretPayload = Omit<
-  GeneratedCredentialProfileRotate,
-  'expected_record_version' | 'created_by'
->
-
-export type CredentialProfileCreatePayload = GeneratedCredentialProfileCreate
-
-export async function listCredentialProfiles(params: {
-  target_kind: CredentialTargetKind
-  target_id: string
-  include_inactive?: boolean
-}): Promise<{ profiles: CredentialProfile[]; count: number }> {
-  const search = new URLSearchParams({
-    target_kind: params.target_kind,
-    target_id: params.target_id,
-  })
-  if (params.include_inactive) search.set('include_inactive', 'true')
-  const res = await fetch(`${API_URL}/credential-profiles?${search}`, { cache: 'no-store' })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load credential profiles'))
-  return res.json()
-}
-
-export async function createCredentialProfile(
-  payload: CredentialProfileCreatePayload,
-): Promise<{ profile: CredentialProfile }> {
-  const res = await fetch(`${API_URL}/credential-profiles`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create credential profile'))
-  return res.json()
-}
-
-export async function rotateCredentialProfile(
-  profileId: string,
-  payload: CredentialSecretPayload & { expected_record_version: number; created_by?: string },
-): Promise<{ profile: CredentialProfile }> {
-  const res = await fetch(`${API_URL}/credential-profiles/${encodeURIComponent(profileId)}/rotate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to rotate credential profile'))
-  return res.json()
-}
-
-export async function deactivateCredentialProfile(
-  profileId: string,
-): Promise<{ status: string; profile: CredentialProfile }> {
-  const res = await fetch(`${API_URL}/credential-profiles/${encodeURIComponent(profileId)}`, {
-    method: 'DELETE',
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to deactivate credential profile'))
   return res.json()
 }
 

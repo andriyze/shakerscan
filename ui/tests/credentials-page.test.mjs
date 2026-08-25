@@ -6,6 +6,7 @@ import test from 'node:test'
 const root = path.resolve(import.meta.dirname, '..')
 const page = fs.readFileSync(path.join(root, 'src/app/credentials/page.tsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+const credentialApi = fs.readFileSync(path.join(root, 'src/lib/credentialApi.ts'), 'utf8')
 const sidebar = fs.readFileSync(path.join(root, 'src/components/Sidebar.tsx'), 'utf8')
 
 test('shared Credentials UI binds profiles to an exact supported target kind', () => {
@@ -14,8 +15,8 @@ test('shared Credentials UI binds profiles to an exact supported target kind', (
   for (const kind of ['web', 'api', 'network', 'device']) {
     assert.match(page, new RegExp(`<option value="${kind}">`))
   }
-  assert.match(api, /target_kind: params\.target_kind/)
-  assert.match(api, /target_id: params\.target_id/)
+  assert.match(credentialApi, /target_kind: params\.target_kind/)
+  assert.match(credentialApi, /target_id: params\.target_id/)
 })
 
 test('shared Credentials UI supports every canonical credential kind and lifecycle action', () => {
@@ -35,14 +36,15 @@ test('shared Credentials UI supports every canonical credential kind and lifecyc
   ]) {
     assert.match(page, new RegExp(`value: '${kind}'`))
   }
-  assert.match(api, /fetch\(`\$\{API_URL\}\/credential-profiles`/)
-  assert.match(api, /credential-profiles\/\$\{encodeURIComponent\(profileId\)\}\/rotate/)
-  assert.match(api, /method: 'DELETE'/)
+  assert.match(credentialApi, /fetch\(`\$\{API_URL\}\/credential-profiles`/)
+  assert.match(credentialApi, /credential-profiles\/\$\{encodeURIComponent\(profileId\)\}\/rotate/)
+  assert.match(credentialApi, /method: 'DELETE'/)
+  assert.doesNotMatch(api, /export async function listCredentialProfiles/)
 })
 
 test('credential responses and presentation stay metadata-only', () => {
-  assert.match(api, /secret_values_visible: false/)
-  assert.match(api, /storage_encrypted: true/)
+  assert.match(credentialApi, /secret_values_visible: false/)
+  assert.match(credentialApi, /storage_encrypted: true/)
   assert.match(page, /secret values hidden/)
   assert.match(page, /never returned to this screen/)
   assert.doesNotMatch(page, /profile\.(secret|encrypted_secret|encrypted_metadata)/)

@@ -7,14 +7,13 @@ import {
   getTargets,
   getScanPublicContract,
   getWorkers,
-  listCredentialProfiles,
   submitBatchV2,
   submitScanV2,
-  type CredentialProfile,
   type ScanBudgetProfile,
   type ScanPublicContract,
   type Target,
 } from '@/lib/api'
+import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
 import { Button, Card, Field, useToast } from '@/components/ui'
 import {
   RequestCollectionPicker,
