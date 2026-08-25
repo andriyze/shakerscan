@@ -372,6 +372,7 @@ AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
 MODEL_INTAKE_RUN_KINDS = {"model_intake"}
 ASM_RECON_RUN_KINDS = {"asm_recon"}
 ASM_BATCH_RUN_KINDS = {"asm_batch", "asm_dynamic_batch"}
+_RESEARCH_DISPATCH_CORRELATION_KEY = "research_dispatch_correlation"
 SCANNER_PATH = '/app/scanner.py'
 SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
@@ -17301,24 +17302,74 @@ async def process_exploit_batch_job(job_data: dict):
             _release_parallel_shard_slot(r, parent_id, job_id)
         return
 
-    # Claim the next batch (priority-ordered, FOR UPDATE SKIP LOCKED → work-stealing).
+    # Canonical standalone ASM batches freeze and lease their exact endpoint IDs
+    # before queue handoff so the action manifest cannot diverge from inventory
+    # accounting. Parallel compatibility tests may call this handler directly;
+    # only those non-queued paths retain worker-side selection.
     claimed: list[dict] = []
+    canonical_claim_ids = (
+        job_data.get("claimed_endpoint_ids")
+        if isinstance(job_data.get("_canonical_asm_queue_payload"), Mapping)
+        else None
+    )
+    claim_error: str | None = None
     try:
         async with db_pool.acquire() as conn:
-            claimed = await asm_inventory.claim_test_batch(
-                conn,
-                target_id,
-                limit=batch_size,
-                stale_days=stale_days,
-                lease_owner=f"{worker_id}:{job_id}",
-                campaign_id=campaign_id,
-                campaign_only=campaign_only,
-                check_family=check_family,
-                endpoint_filter=endpoint_filter,
-                auth_state=options.get('auth_state'),
-            )
+            if canonical_claim_ids is not None:
+                claimed = await asm_inventory.load_leased_test_batch(
+                    conn,
+                    canonical_claim_ids,
+                    lease_owner=job_id,
+                )
+                if len(claimed) != len(canonical_claim_ids):
+                    claim_error = (
+                        "canonical ASM endpoint lease changed or expired before execution"
+                    )
+            else:
+                claimed = await asm_inventory.claim_test_batch(
+                    conn,
+                    target_id,
+                    limit=batch_size,
+                    stale_days=stale_days,
+                    lease_owner=f"{worker_id}:{job_id}",
+                    campaign_id=campaign_id,
+                    campaign_only=campaign_only,
+                    check_family=check_family,
+                    endpoint_filter=endpoint_filter,
+                    auth_state=options.get('auth_state'),
+                )
     except Exception as e:
+        claim_error = str(e)
         print(f"[asm {job_id[:8]}] claim error: {e}", flush=True)
+
+    if claim_error:
+        completed_at = utc_now()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE scans SET status='failed', current_phase='scope_revalidation_failed',
+                       progress=100, completed_at=$1, error_message=$2 WHERE id=$3""",
+                completed_at, claim_error[:2000], uuid.UUID(scan_id),
+            )
+            if finish_campaign_on_complete:
+                await asm_inventory.finish_campaign(
+                    conn, campaign_id, status='failed'
+                )
+        r.hset(
+            f"job:{job_id}",
+            mapping={
+                'status': 'failed',
+                'current_phase': 'scope_revalidation_failed',
+                'progress': '100',
+                'error_message': claim_error[:1000],
+            },
+        )
+        r.expire(f"job:{job_id}", 86400)
+        if slot_acquired:
+            _release_parallel_shard_slot(r, parent_id, job_id)
+        await _reconcile_parallel_child_completion(
+            parent_id, r, f"asm {job_id[:8]}"
+        )
+        return
 
     if not claimed:
         async with db_pool.acquire() as conn:
@@ -17527,9 +17578,11 @@ async def process_exploit_batch_job(job_data: dict):
 
     scan_opts = scoped_opts
     scan_opts['run_kind'] = 'asm_dynamic_batch' if coverage_dynamic_worker else 'asm_batch'
-    scan_opts['scan_type'] = scan_opts.get('scan_type') or 'smart'
     scan_opts['parallel'] = False
-    for k in ('shard_strategy', 'shards', 'auth_state_shards'):
+    for k in (
+        'scan_type', 'legacy_scan_type', 'quick', 'thorough',
+        'shard_strategy', 'shards', 'auth_state_shards',
+    ):
         scan_opts.pop(k, None)
     scan_opts['custom_endpoints'] = endpoints
     if coverage_dynamic_worker:
@@ -17960,6 +18013,9 @@ class ExecutionScopeError(RuntimeError):
 
 def _safe_requeue_payload(job_data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the original secret-free canonical envelope after materialization."""
+    asm_canonical = job_data.get("_canonical_asm_queue_payload")
+    if isinstance(asm_canonical, Mapping):
+        return dict(asm_canonical)
     canonical = job_data.get("_canonical_queue_payload")
     if isinstance(canonical, Mapping):
         return dict(canonical)
@@ -18023,7 +18079,7 @@ async def _materialize_scan_job_v2(queue_payload: Mapping[str, Any]) -> dict[str
             """
             SELECT target_id, target_url, job_id, options, scan_generation,
                    policy_json, budget_json, scan_job_payload, scan_job_digest,
-                   parent_scan_id, scan_role, shard_index, shard_count
+                   parent_scan_id, scan_role, shard_index, shard_count, campaign_id
             FROM scans
             WHERE id=$1
             """,
@@ -18034,9 +18090,12 @@ async def _materialize_scan_job_v2(queue_payload: Mapping[str, Any]) -> dict[str
             "queued scan-job/v2 has no durable Scan record"
         )
     addresses = await _resolve_scan_job_target_addresses(str(row["target_url"] or ""))
-    return materialize_canonical_scan_job(
+    materialized = materialize_canonical_scan_job(
         queue_payload, row, resolved_addresses=addresses,
     )
+    campaign_id = _row_get(row, "campaign_id")
+    materialized["campaign_id"] = str(campaign_id) if campaign_id else None
+    return materialized
 
 
 def _execution_target_key(value: Any) -> str:
@@ -22288,6 +22347,70 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
 
 async def process_job(job_data: dict):
     """Route job to appropriate handler."""
+    if job_data.get("type") == asm_inventory.EXPLOIT_BATCH_JOB_TYPE:
+        outer_payload = dict(job_data)
+        canonical_payload = outer_payload.get("scan_job")
+        if not isinstance(canonical_payload, Mapping):
+            await _fail_execution_scope(
+                outer_payload,
+                "ASM endpoint batch has no canonical scan-job/v2 authority",
+            )
+            print(
+                "[asm] refused endpoint batch without canonical Scan authority",
+                flush=True,
+            )
+            return
+        try:
+            materialized = await _materialize_scan_job_v2(canonical_payload)
+            if str(outer_payload.get("job_id") or "") != str(materialized["job_id"]):
+                raise CanonicalScanJobMaterializationError(
+                    "ASM endpoint batch job identity differs from scan-job/v2"
+                )
+            if str(outer_payload.get("scan_id") or "") != str(materialized["scan_id"]):
+                raise CanonicalScanJobMaterializationError(
+                    "ASM endpoint batch scan identity differs from scan-job/v2"
+                )
+            guard = materialized.get("options", {}).get("runtime_scope_guard")
+            durable_target_id = str(
+                guard.get("target_id") if isinstance(guard, Mapping) else ""
+            )
+            if str(outer_payload.get("target_id") or "") != durable_target_id:
+                raise CanonicalScanJobMaterializationError(
+                    "ASM endpoint batch target identity differs from scan-job/v2"
+                )
+            if str(outer_payload.get("campaign_id") or "") != str(
+                materialized.get("campaign_id") or ""
+            ):
+                raise CanonicalScanJobMaterializationError(
+                    "ASM endpoint batch campaign identity differs from durable Scan state"
+                )
+            claimed_ids = outer_payload.get("claimed_endpoint_ids")
+            if not isinstance(claimed_ids, list) or len(claimed_ids) > 1000:
+                raise CanonicalScanJobMaterializationError(
+                    "ASM endpoint batch has an invalid claimed endpoint list"
+                )
+            claimed_ids = [str(uuid.UUID(str(item))) for item in claimed_ids]
+        except (CanonicalScanJobMaterializationError, ValueError) as exc:
+            await _fail_execution_scope(outer_payload, str(exc))
+            print(f"[asm] refused endpoint batch: {exc}", flush=True)
+            return
+        job_data = {
+            **materialized,
+            "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
+            "target_id": durable_target_id,
+            "batch_size": outer_payload.get("batch_size"),
+            "stale_days": outer_payload.get("stale_days"),
+            "exploit_depth": outer_payload.get("exploit_depth"),
+            "check_family": outer_payload.get("check_family"),
+            "endpoint_filter": outer_payload.get("endpoint_filter"),
+            "domain_rate_reserved": outer_payload.get("domain_rate_reserved"),
+            "claimed_endpoint_ids": claimed_ids,
+            "triggered_by": outer_payload.get("triggered_by"),
+            _RESEARCH_DISPATCH_CORRELATION_KEY: outer_payload.get(
+                _RESEARCH_DISPATCH_CORRELATION_KEY
+            ),
+            "_canonical_asm_queue_payload": outer_payload,
+        }
     if job_data.get("schema_version") == SCAN_JOB_SCHEMA:
         canonical_payload = dict(job_data)
         try:

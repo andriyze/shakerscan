@@ -149,6 +149,8 @@ def test_result_metadata_is_canonical():
 
 def test_non_dast_run_kinds_bypass_scan_admission():
     assert is_deterministic_dast({"run_kind": "web_dast"}) is True
+    assert is_deterministic_dast({"run_kind": "asm_recon"}) is True
+    assert is_deterministic_dast({"run_kind": "asm_batch"}) is True
     assert is_deterministic_dast({"run_kind": "device_posture"}) is False
     assert is_deterministic_dast({"run_kind": "model_intake"}) is False
 

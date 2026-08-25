@@ -805,6 +805,46 @@ def test_claim_test_batch_sets_durable_lease_fields():
     assert update_args[3] == campaign_id
 
 
+def test_load_leased_test_batch_preserves_admitted_order_and_owner():
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    rows = [
+        {"id": second_id, "method": "POST", "path": "/b"},
+        {"id": first_id, "method": "GET", "path": "/a"},
+    ]
+    conn = _ClaimConn(rows)
+
+    loaded = asyncio.run(a.load_leased_test_batch(
+        conn,
+        [first_id, second_id],
+        lease_owner="job-v2",
+    ))
+
+    assert [item["id"] for item in loaded] == [first_id, second_id]
+    query, args = conn.fetch_calls[-1]
+    assert "test_status = 'in_progress'" in query
+    assert "lease_expires_at > NOW()" in query
+    assert args == ([first_id, second_id], "job-v2")
+
+
+def test_release_leased_test_batch_is_exact_and_owner_bound():
+    endpoint_id = uuid.uuid4()
+    conn = _ClaimConn([{"id": endpoint_id}])
+
+    released = asyncio.run(a.release_leased_test_batch(
+        conn,
+        [endpoint_id],
+        lease_owner="job-v2",
+        reason="queue_failed",
+    ))
+
+    assert released == 1
+    query, args = conn.executed[-1]
+    assert "test_status = 'untested'" in query
+    assert "lease_owner = $2" in query
+    assert args == ([endpoint_id], "job-v2", "queue_failed")
+
+
 def test_claim_test_batch_can_scope_to_campaign_inventory():
     target_id = uuid.uuid4()
     campaign_id = uuid.uuid4()

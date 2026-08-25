@@ -19,8 +19,7 @@ from .worker_contract import WorkerScanAdmission, resolve_worker_scan_admission
 
 NON_DAST_RUN_KINDS = frozenset({
     "ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget", "model_intake",
-    "device_posture", "device_probe", "device_web_dast", "asm_recon", "asm_batch",
-    "asm_dynamic_batch",
+    "device_posture", "device_probe", "device_web_dast",
 })
 
 

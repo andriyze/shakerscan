@@ -1716,6 +1716,75 @@ async def claim_test_batch(
     return [dict(r) for r in rows]
 
 
+async def load_leased_test_batch(
+    conn,
+    endpoint_ids: list,
+    *,
+    lease_owner: str,
+) -> list[dict]:
+    """Load one exact API-admitted ASM batch without selecting new work.
+
+    Canonical V2 batches freeze their endpoint IDs before queue handoff so the
+    action manifest and the inventory lease describe the same traffic.  The
+    worker may only recover rows still owned by that immutable job identity;
+    it cannot silently replace an expired or modified batch with other target
+    endpoints.
+    """
+    import uuid as _uuid
+
+    normalized_ids = [_uuid.UUID(str(item)) for item in endpoint_ids]
+    if not normalized_ids:
+        return []
+    rows = await conn.fetch(
+        """
+        SELECT id, method, path, param_shape, auth_state, param_location,
+               replay_spec, content_type, campaign_id, lease_owner,
+               lease_expires_at, attempt_count
+        FROM target_endpoints
+        WHERE id = ANY($1::uuid[])
+          AND test_status = 'in_progress'
+          AND lease_owner = $2
+          AND lease_expires_at > NOW()
+        """,
+        normalized_ids,
+        str(lease_owner),
+    )
+    by_id = {str(row["id"]): dict(row) for row in rows}
+    return [by_id[str(item)] for item in normalized_ids if str(item) in by_id]
+
+
+async def release_leased_test_batch(
+    conn,
+    endpoint_ids: list,
+    *,
+    lease_owner: str,
+    reason: str = "queue_failed",
+) -> int:
+    """Return an exact not-yet-executed canonical batch to the claimable pool."""
+    import uuid as _uuid
+
+    normalized_ids = [_uuid.UUID(str(item)) for item in endpoint_ids]
+    if not normalized_ids:
+        return 0
+    result = await conn.execute(
+        """
+        UPDATE target_endpoints
+        SET test_status = 'untested', last_attempt_status = $3,
+            lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+        WHERE id = ANY($1::uuid[])
+          AND test_status = 'in_progress'
+          AND lease_owner = $2
+        """,
+        normalized_ids,
+        str(lease_owner),
+        str(reason)[:64],
+    )
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 def _param_count(param_shape: Any) -> int:
     return len([p for p in str(param_shape or "").split(",") if p])
 

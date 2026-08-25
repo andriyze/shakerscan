@@ -64534,6 +64534,7 @@ async def _canonical_asm_scan_options(
     target_url: str,
     base_options: Mapping[str, Any] | None,
     check_family: str | None,
+    active_testing: bool = True,
 ) -> tuple[dict[str, Any], Any]:
     """Resolve one internal ASM test batch to canonical Scan V2 authority.
 
@@ -64549,10 +64550,15 @@ async def _canonical_asm_scan_options(
         if isinstance(options.get("scan_policy"), Mapping)
         else {}
     )
-    family = _normalize_asm_check_family(check_family)
+    family = (
+        _normalize_asm_check_family(check_family)
+        if active_testing else None
+    )
     include_families = list(existing_policy.get("include_families") or ())
     if family and family != "all":
         include_families = [family]
+    elif not active_testing:
+        include_families = ["recon"]
     approval_receipt_id = str(
         options.get("approval_receipt_id")
         or existing_policy.get("approval_receipt_id")
@@ -64561,7 +64567,7 @@ async def _canonical_asm_scan_options(
     contract = resolve_scan_contract(
         budget_profile=options.get("budget_profile"),
         policy={
-            "active_testing": True,
+            "active_testing": active_testing,
             # ASM has no first-class state-changing permission in its request
             # contract, so an old target option or stale receipt can never grant it.
             "allow_state_changing_http": False,
@@ -64584,7 +64590,7 @@ async def _canonical_asm_scan_options(
         options.pop(key, None)
     options.update(contract.option_metadata())
     options.update({
-        "active": True,
+        "active": active_testing,
         "network_discovery": False,
         "subfinder": False,
         "budget_profile": contract.budget_profile,
@@ -64616,6 +64622,114 @@ async def _canonical_asm_scan_options(
     return options, contract
 
 
+def _compile_asm_scan_authority(
+    *,
+    scan_id: str,
+    job_id: str,
+    target_url: str,
+    options: dict[str, Any],
+    scan_contract: ResolvedScanContract,
+) -> dict[str, Any]:
+    """Compile one exact ASM operation into the canonical Scan V2 stores."""
+    guard = options.get("runtime_scope_guard")
+    if not isinstance(guard, Mapping):
+        raise ScanActionPlanError("ASM Scan has no frozen runtime target binding")
+    target_binding = TargetBinding(
+        target_id=str(guard.get("target_id") or ""),
+        target_kind=str(guard.get("target_kind") or "web"),
+        canonical_host=guard.get("canonical_host"),
+        allowed_origins=tuple(guard.get("allowed_origins") or ()),
+        allowed_addresses=tuple(guard.get("allowed_addresses") or ()),
+        allowed_root_domains=tuple(guard.get("allowed_root_domains") or ()),
+        environment=str(guard.get("environment") or "unknown"),
+        scope_receipt_id=scan_contract.policy.scope_receipt_id,
+    )
+    endpoint_manifest, candidate_manifest = (
+        _compile_scan_admission_surface_work_manifests(
+            scan_id=scan_id,
+            target_url=target_url,
+            scan_contract=scan_contract,
+            target_binding=target_binding,
+            options=options,
+        )
+    )
+    endpoint_ref = endpoint_manifest.reference().canonical_dict()
+    candidate_ref = candidate_manifest.reference().canonical_dict()
+    template_manifest = _compile_scan_template_work_manifest(
+        scan_id=scan_id,
+        scan_contract=scan_contract,
+        target_binding=target_binding,
+    )
+    options.update({
+        "endpoint_manifest_id": str(endpoint_manifest.manifest_id),
+        "endpoint_manifest_ref": endpoint_ref,
+        "candidate_manifest_ref": candidate_ref,
+    })
+    if template_manifest is not None:
+        options["template_manifest_ref"] = (
+            template_manifest.reference().canonical_dict()
+        )
+    credential_refs = [
+        dict(item)
+        for item in options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping)
+    ]
+    action_plan, continuation = _compile_scan_admission_action_authority(
+        scan_id=scan_id,
+        scan_contract=scan_contract,
+        target_binding=target_binding,
+        credential_refs=credential_refs,
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=(candidate_ref if candidate_manifest.entries else None),
+        template_manifest_ref=(
+            template_manifest.reference().canonical_dict()
+            if template_manifest is not None else None
+        ),
+    )
+    if continuation is not None:
+        options["scan_continuation_allocation_digest"] = (
+            continuation.allocation_digest
+        )
+    canonical_job = CanonicalScanJob.create(
+        job_id=job_id,
+        scan_id=scan_id,
+        target=target_binding,
+        execution_plan=scan_contract.execution_plan,
+        credential_profile_ids=admitted_credential_profile_ids(credential_refs),
+        endpoint_manifest_id=str(endpoint_manifest.manifest_id),
+    )
+    return {
+        "job": canonical_job,
+        "action_plan": action_plan,
+        "continuation": continuation,
+        "manifests": tuple(
+            item
+            for item in (endpoint_manifest, candidate_manifest, template_manifest)
+            if item is not None
+        ),
+    }
+
+
+async def _persist_asm_scan_authority(
+    conn,
+    *,
+    authority: Mapping[str, Any],
+) -> None:
+    action_plan = authority["action_plan"]
+    action_store = PostgresScanActionStore()
+    await action_store.persist_plan(conn, plan=action_plan)
+    continuation = authority.get("continuation")
+    if continuation is not None:
+        await action_store.persist_continuation_allocation(
+            conn,
+            allocation=continuation,
+            parent_plan=action_plan,
+        )
+    manifest_store = PostgresScanManifestStore()
+    for manifest in authority.get("manifests") or ():
+        await manifest_store.persist(conn, manifest=manifest)
+
+
 async def _enqueue_asm_exploit_batch(
     conn, r, target_id: str, target_url: str, base_opts: dict,
     *, batch_size: int, stale_days: int, exploit_depth: bool,
@@ -64641,13 +64755,7 @@ async def _enqueue_asm_exploit_batch(
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)
     if endpoint_filter:
         opts["asm_endpoint_filter"] = endpoint_filter
-    persisted_opts = {**opts, _QUEUE_HANDOFF_CONFIRMATION_KEY: False}
     research_correlation = _current_research_dispatch_correlation()
-    if research_correlation:
-        # This is committed with the scan row before Redis handoff. It lets crash
-        # recovery and operator cancellation find work even if the API process
-        # dies before the later command_result receipt is written.
-        persisted_opts[_RESEARCH_DISPATCH_CORRELATION_KEY] = research_correlation
     campaign_id = await asm_inventory.create_campaign(
         conn,
         target_id,
@@ -64667,22 +64775,78 @@ async def _enqueue_asm_exploit_batch(
             ),
         },
     )
-    await conn.execute(
-        """INSERT INTO scans (
-               id, target_id, target_url, job_id, status, options, scan_type,
-               scan_role, campaign_id, scan_generation, policy_json, budget_json,
-               coverage_status, coverage_json
-           ) VALUES (
-               $1, $2, $3, $4, 'pending', $5, $6, $7, $8,
-               'v2', $9, $10, 'pending', $11
-           )""",
-        uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(persisted_opts), "scan",
-        asm_inventory.ASM_BATCH_ROLE, uuid.UUID(campaign_id),
-        json.dumps(scan_contract.execution_plan.canonical_dict()["policy"]),
-        json.dumps(scan_contract.execution_plan.canonical_dict()["budget"]),
-        json.dumps({"status": "pending", "reasons": []}),
+    claimed = await asm_inventory.claim_test_batch(
+        conn,
+        target_id,
+        limit=batch_size,
+        stale_days=stale_days,
+        lease_owner=job_id,
+        campaign_id=campaign_id,
+        campaign_only=False,
+        check_family=family,
+        endpoint_filter=endpoint_filter,
+        auth_state=opts.get("auth_state"),
     )
+    claimed_ids = [str(item["id"]) for item in claimed]
+    opts.update({
+        "custom_endpoints": [
+            asm_inventory.to_custom_endpoint(
+                item["method"], item["path"], item["param_shape"],
+                param_location=item.get("param_location") or "query",
+                replay_spec=item.get("replay_spec"),
+            )
+            for item in claimed
+        ],
+        "focused_endpoints_only": True,
+        "zero_rediscovery": True,
+    })
+    if claimed:
+        opts["auth_state"] = asm_inventory.normalize_auth_state(
+            claimed[0].get("auth_state")
+        )
+    try:
+        authority = _compile_asm_scan_authority(
+            scan_id=scan_id,
+            job_id=job_id,
+            target_url=target_url,
+            options=opts,
+            scan_contract=scan_contract,
+        )
+        persisted_opts = {**opts, _QUEUE_HANDOFF_CONFIRMATION_KEY: False}
+        if research_correlation:
+            # This is committed with the scan row before Redis handoff. It lets crash
+            # recovery and operator cancellation find work even if the API process
+            # dies before the later command_result receipt is written.
+            persisted_opts[_RESEARCH_DISPATCH_CORRELATION_KEY] = research_correlation
+        canonical_job = authority["job"]
+        async with conn.transaction():
+            await conn.execute(
+                """INSERT INTO scans (
+                       id, target_id, target_url, job_id, status, options, scan_type,
+                       scan_role, campaign_id, scan_generation, policy_json, budget_json,
+                       coverage_status, coverage_json, scan_job_payload, scan_job_digest
+                   ) VALUES (
+                       $1, $2, $3, $4, 'pending', $5, $6, $7, $8,
+                       'v2', $9, $10, 'pending', $11, $12, $13
+                   )""",
+                uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
+                json.dumps(persisted_opts), "scan",
+                asm_inventory.ASM_BATCH_ROLE, uuid.UUID(campaign_id),
+                json.dumps(scan_contract.execution_plan.canonical_dict()["policy"]),
+                json.dumps(scan_contract.execution_plan.canonical_dict()["budget"]),
+                json.dumps({"status": "pending", "reasons": []}),
+                json.dumps(canonical_job.payload()), canonical_job.payload_digest,
+            )
+            await _persist_asm_scan_authority(conn, authority=authority)
+    except Exception:
+        await asm_inventory.release_leased_test_batch(
+            conn,
+            claimed_ids,
+            lease_owner=job_id,
+            reason="admission_failed",
+        )
+        await asm_inventory.finish_campaign(conn, campaign_id, status="failed")
+        raise
     job_payload = {
         "type": asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
         "job_id": job_id, "scan_id": scan_id,
@@ -64692,7 +64856,9 @@ async def _enqueue_asm_exploit_batch(
         "check_family": family,
         "endpoint_filter": endpoint_filter,
         "domain_rate_reserved": max(0, int(domain_rate_reserved or 0)),
-        "options": opts, "triggered_by": triggered_by,
+        "claimed_endpoint_ids": claimed_ids,
+        "scan_job": canonical_job.queue_payload(),
+        "triggered_by": triggered_by,
         **(
             {_RESEARCH_DISPATCH_CORRELATION_KEY: research_correlation}
             if research_correlation else {}
@@ -64702,21 +64868,41 @@ async def _enqueue_asm_exploit_batch(
     try:
         enqueue_job(r, QUEUE_NAME, job_payload)
     except Exception as enqueue_error:
+        await asm_inventory.release_leased_test_batch(
+            conn,
+            claimed_ids,
+            lease_owner=job_id,
+            reason="queue_failed",
+        )
         await _fail_asm_queue_handoff(conn, scan_id, campaign_id, enqueue_error)
         raise
-    await _confirm_asm_queue_handoff(
-        conn,
-        scan_id=scan_id,
-        job_id=job_id,
-        campaign_id=campaign_id,
-    )
+    try:
+        await _confirm_asm_queue_handoff(
+            conn,
+            scan_id=scan_id,
+            job_id=job_id,
+            campaign_id=campaign_id,
+        )
+    except Exception:
+        await asm_inventory.release_leased_test_batch(
+            conn,
+            claimed_ids,
+            lease_owner=job_id,
+            reason="handoff_failed",
+        )
+        raise
     try:
         r.hset(f"job:{job_id}", mapping={"status": "queued", "target": target_url})
     except Exception:
         # The durable queue entry is authoritative. A metadata-cache failure must
         # not make the caller believe an already-enqueued job was rejected.
         logger.warning("Failed to cache queued ASM job metadata for %s", job_id, exc_info=True)
-    return {"scan_id": scan_id, "job_id": job_id, "campaign_id": campaign_id}
+    return {
+        "scan_id": scan_id,
+        "job_id": job_id,
+        "campaign_id": campaign_id,
+        "claimed_count": len(claimed_ids),
+    }
 
 
 async def _enqueue_asm_recon(
@@ -64726,29 +64912,38 @@ async def _enqueue_asm_recon(
     """Create an asm_recon scan row and enqueue a lean standalone discovery scan
     that refreshes/grows the inventory (worklist persisted on completion)."""
     opts = dict(base_opts or {})
-    opts["run_kind"] = "asm_recon"
-    opts["scan_type"] = "smart"
-    opts["discovery_manifest_only"] = True
-    opts["active"] = False
-    opts["xss"] = False
-    opts["sqli"] = False
     opts.pop("parallel", None)  # recon is one lightweight standalone scan
-    cb = dict(opts.get("custom_budget") or {})
-    cb.update(parallel_scan.RECON_DISCOVERY_BUDGET)  # lean enumeration, active off
-    opts["custom_budget"] = cb
-    persisted_opts = {**opts, _QUEUE_HANDOFF_CONFIRMATION_KEY: False}
+    custom_budget = dict(opts.get("custom_budget") or {})
+    custom_budget.update(parallel_scan.RECON_DISCOVERY_BUDGET)
+    opts["custom_budget"] = custom_budget
+    opts, scan_contract = await _canonical_asm_scan_options(
+        target_id=target_id,
+        target_url=target_url,
+        base_options=opts,
+        check_family="recon",
+        active_testing=False,
+    )
+    opts["run_kind"] = "asm_recon"
     research_correlation = _current_research_dispatch_correlation()
-    if research_correlation:
-        persisted_opts[_RESEARCH_DISPATCH_CORRELATION_KEY] = research_correlation
     scan_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
+    authority = _compile_asm_scan_authority(
+        scan_id=scan_id,
+        job_id=job_id,
+        target_url=target_url,
+        options=opts,
+        scan_contract=scan_contract,
+    )
+    persisted_opts = {**opts, _QUEUE_HANDOFF_CONFIRMATION_KEY: False}
+    if research_correlation:
+        persisted_opts[_RESEARCH_DISPATCH_CORRELATION_KEY] = research_correlation
     campaign_id = await asm_inventory.create_campaign(
         conn,
         target_id,
         mode=asm_inventory.CAMPAIGN_SURFACE_RECON,
         requested_by=triggered_by,
         budget_profile=opts.get("budget_profile"),
-        wide_budget=cb,
+        wide_budget=scan_contract.execution_plan.canonical_dict()["budget"],
         check_families=["recon"],
         metadata_json={
             "scan_role": asm_inventory.ASM_RECON_ROLE,
@@ -64758,22 +64953,27 @@ async def _enqueue_asm_recon(
             ),
         },
     )
-    await conn.execute(
-        """INSERT INTO scans (id, target_id, target_url, job_id, status, options, scan_type, scan_role, campaign_id)
-           VALUES ($1, $2, $3, $4, 'pending', $5, 'smart', $6, $7)""",
-        uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
-        json.dumps(persisted_opts), asm_inventory.ASM_RECON_ROLE, uuid.UUID(campaign_id),
-    )
-    job_payload = {
-        "job_id": job_id, "scan_id": scan_id, "target": target_url,
-        "options": opts, "triggered_by": triggered_by, "asm_recon": True,
-        "campaign_id": campaign_id,
-        **(
-            {_RESEARCH_DISPATCH_CORRELATION_KEY: research_correlation}
-            if research_correlation else {}
-        ),
-        "submitted_at": utc_now_iso(),
-    }
+    canonical_job = authority["job"]
+    async with conn.transaction():
+        await conn.execute(
+            """INSERT INTO scans (
+                   id, target_id, target_url, job_id, status, options, scan_type,
+                   scan_role, campaign_id, scan_generation, policy_json, budget_json,
+                   coverage_status, coverage_json, scan_job_payload, scan_job_digest
+               ) VALUES (
+                   $1, $2, $3, $4, 'pending', $5, $6, $7, $8,
+                   'v2', $9, $10, 'pending', $11, $12, $13
+               )""",
+            uuid.UUID(scan_id), uuid.UUID(target_id), target_url, job_id,
+            json.dumps(persisted_opts), "scan", asm_inventory.ASM_RECON_ROLE,
+            uuid.UUID(campaign_id),
+            json.dumps(scan_contract.execution_plan.canonical_dict()["policy"]),
+            json.dumps(scan_contract.execution_plan.canonical_dict()["budget"]),
+            json.dumps({"status": "pending", "reasons": []}),
+            json.dumps(canonical_job.payload()), canonical_job.payload_digest,
+        )
+        await _persist_asm_scan_authority(conn, authority=authority)
+    job_payload = canonical_job.queue_payload()
     try:
         enqueue_job(r, QUEUE_NAME, job_payload)
     except Exception as enqueue_error:

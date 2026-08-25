@@ -3045,6 +3045,9 @@ class _AsmEnqueueConn:
             raise RuntimeError("database unavailable during compensation")
         return "OK"
 
+    def transaction(self):
+        return _FakeAcquire(self)
+
 
 async def _fake_create_asm_campaign(*_args, **_kwargs):
     return "22222222-2222-4222-8222-222222222222"
@@ -3067,6 +3070,61 @@ def _freeze_test_asm_target(monkeypatch):
         }
 
     monkeypatch.setattr(api_module, "_freeze_scan_target_binding", freeze)
+
+    async def claim(*_args, **_kwargs):
+        return []
+
+    async def release(*_args, **_kwargs):
+        return 0
+
+    async def persist(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(api_module.asm_inventory, "claim_test_batch", claim)
+    monkeypatch.setattr(api_module.asm_inventory, "release_leased_test_batch", release)
+    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", persist)
+
+
+def test_asm_scan_authority_freezes_exact_v2_work_without_legacy_execution(monkeypatch):
+    _freeze_test_asm_target(monkeypatch)
+    target_id = "11111111-1111-4111-8111-111111111111"
+    scan_id = "22222222-2222-4222-8222-222222222222"
+    job_id = "33333333-3333-4333-8333-333333333333"
+    options, contract = asyncio.run(api_module._canonical_asm_scan_options(
+        target_id=target_id,
+        target_url="https://example.test",
+        base_options={},
+        check_family="xss",
+    ))
+    options.update({
+        "run_kind": "asm_batch",
+        "custom_endpoints": ["GET /api/orders?id=1"],
+        "focused_endpoints_only": True,
+        "zero_rediscovery": True,
+    })
+
+    authority = api_module._compile_asm_scan_authority(
+        scan_id=scan_id,
+        job_id=job_id,
+        target_url="https://example.test",
+        options=options,
+        scan_contract=contract,
+    )
+
+    payload = authority["job"].payload()
+    assert payload["schema_version"] == "scan-job/v2"
+    assert payload["scan_id"] == scan_id
+    assert payload["job_id"] == job_id
+    assert payload["execution_plan"]["policy"]["include_families"] == ["xss"]
+    assert payload["endpoint_manifest_id"] == options["endpoint_manifest_id"]
+    assert "scan_type" not in options
+    assert authority["action_plan"].plan_digest
+    endpoint_manifest = authority["manifests"][0]
+    assert endpoint_manifest.kind.value == "endpoint"
+    assert any(
+        item.get("canonical_path") == "/api/orders"
+        for item in endpoint_manifest.entries
+    )
 
 
 def test_enqueue_asm_exploit_batch_fails_committed_scan_when_queue_handoff_fails(monkeypatch):
@@ -3117,6 +3175,7 @@ def test_enqueue_asm_recon_preserves_queue_error_when_failure_cas_also_fails(mon
     conn = _AsmEnqueueConn(fail_queue_failure_update=True)
     redis_client = _FailingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    _freeze_test_asm_target(monkeypatch)
 
     with pytest.raises(RuntimeError, match="redis down"):
         asyncio.run(api_module._enqueue_asm_recon(
@@ -3143,6 +3202,7 @@ def test_enqueue_asm_recon_metadata_cache_failure_does_not_mask_durable_queue(mo
     conn = _AsmEnqueueConn()
     redis_client = MetadataFailingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
+    _freeze_test_asm_target(monkeypatch)
 
     result = asyncio.run(api_module._enqueue_asm_recon(
         conn,
@@ -3169,8 +3229,7 @@ def test_asm_enqueue_persists_research_dispatch_correlation_before_queue_handoff
     conn = _AsmEnqueueConn()
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
-    if kind == "exploit":
-        _freeze_test_asm_target(monkeypatch)
+    _freeze_test_asm_target(monkeypatch)
     correlation = (
         "research_episode:11111111-1111-4111-8111-111111111111:"
         "decision:22222222-2222-4222-8222-222222222222"
@@ -3204,7 +3263,18 @@ def test_asm_enqueue_persists_research_dispatch_correlation_before_queue_handoff
     queued_payload = json.loads(redis_client.rpush_calls[0][1])
     assert persisted_options["research_dispatch_correlation"] == correlation
     assert persisted_options["queue_handoff_confirmed"] is False
-    assert queued_payload["research_dispatch_correlation"] == correlation
+    if kind == "exploit":
+        assert queued_payload["research_dispatch_correlation"] == correlation
+        assert queued_payload["type"] == api_module.asm_inventory.EXPLOIT_BATCH_JOB_TYPE
+        assert queued_payload["claimed_endpoint_ids"] == []
+        assert queued_payload["scan_job"]["schema_version"] == "scan-job/v2"
+        assert "options" not in queued_payload
+    else:
+        assert queued_payload["schema_version"] == "scan-job/v2"
+        assert queued_payload["scan_id"] == str(insert[1][0])
+        assert "options" not in queued_payload
+        assert "run_kind" not in queued_payload
+        assert "research_dispatch_correlation" not in queued_payload
 
 
 @pytest.mark.parametrize(
@@ -3236,15 +3306,14 @@ def test_enqueue_asm_confirmation_ack_loss_uses_exact_fresh_readback(
             return {
                 "status": readback_status,
                 "job_id": insert[1][3],
-                "campaign_id": insert[1][7] if kind == "exploit" else insert[1][-1],
+                "campaign_id": insert[1][7],
                 "options": options,
             }
 
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
     monkeypatch.setattr(api_module, "db_pool", _FakePool(ReadbackConn()))
-    if kind == "exploit":
-        _freeze_test_asm_target(monkeypatch)
+    _freeze_test_asm_target(monkeypatch)
 
     if kind == "exploit":
         result = asyncio.run(api_module._enqueue_asm_exploit_batch(
@@ -3285,8 +3354,7 @@ def test_enqueue_asm_confirmation_write_failure_fails_scan_and_campaign(monkeypa
     redis_client = _RecordingRedis()
     monkeypatch.setattr(api_module.asm_inventory, "create_campaign", _fake_create_asm_campaign)
     monkeypatch.setattr(api_module, "db_pool", None)
-    if kind == "exploit":
-        _freeze_test_asm_target(monkeypatch)
+    _freeze_test_asm_target(monkeypatch)
 
     with pytest.raises(RuntimeError, match="confirmation write failed"):
         if kind == "exploit":

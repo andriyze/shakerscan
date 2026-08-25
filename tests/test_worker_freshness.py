@@ -378,6 +378,56 @@ def test_revoked_node_refusal_requeues_job_before_dispatch(monkeypatch):
     assert dispatched == []
 
 
+def test_canonical_asm_batch_materializes_inner_authority_before_dispatch(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    target_id = str(uuid.uuid4())
+    campaign_id = str(uuid.uuid4())
+    endpoint_id = str(uuid.uuid4())
+    dispatched = []
+
+    async def materialize(payload):
+        assert payload == {"schema_version": "scan-job/v2", "scan_id": scan_id}
+        return {
+            "job_id": "asm-job-v2",
+            "scan_id": scan_id,
+            "target": "https://example.test",
+            "options": {
+                "runtime_scope_guard": {"target_id": target_id},
+                "scan_execution_plan": {"policy": {}, "budget": {}},
+            },
+            "campaign_id": campaign_id,
+            "_canonical_queue_payload": payload,
+        }
+
+    async def dispatch(job):
+        dispatched.append(job)
+
+    monkeypatch.delenv("SHAKERSCAN_NODE_ID", raising=False)
+    monkeypatch.setattr(worker, "_materialize_scan_job_v2", materialize)
+    monkeypatch.setattr(worker, "_fleet_node_accepts_work", lambda: _async_value(True))
+    monkeypatch.setattr(worker, "_refuse_stale_job_if_needed", lambda _job: _async_value(False))
+    monkeypatch.setattr(worker, "_attribute_job_execution", lambda _job: _async_value(None))
+    monkeypatch.setattr(worker, "process_exploit_batch_job", dispatch)
+
+    outer = {
+        "type": worker.asm_inventory.EXPLOIT_BATCH_JOB_TYPE,
+        "job_id": "asm-job-v2",
+        "scan_id": scan_id,
+        "target_id": target_id,
+        "campaign_id": campaign_id,
+        "claimed_endpoint_ids": [endpoint_id],
+        "scan_job": {"schema_version": "scan-job/v2", "scan_id": scan_id},
+    }
+    _run(worker.process_job(outer))
+
+    assert len(dispatched) == 1
+    admitted = dispatched[0]
+    assert admitted["claimed_endpoint_ids"] == [endpoint_id]
+    assert admitted["options"]["runtime_scope_guard"]["target_id"] == target_id
+    assert admitted["_canonical_asm_queue_payload"] == outer
+    assert admitted["_canonical_queue_payload"] == outer["scan_job"]
+
+
 async def _async_value(value):
     return value
 
