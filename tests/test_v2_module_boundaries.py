@@ -196,6 +196,9 @@ def test_api_routers_own_real_endpoint_behavior_without_monolith_imports():
     assert ("post", "/request-collections") not in _decorated_routes("api/api.py", "app")
     assert ("get", "/scans/{scan_id}/actions") not in _decorated_routes("api/api.py", "app")
     for method, path in (
+        ("post", "/hunts"),
+        ("get", "/hunts/contract"),
+        ("get", "/hunts/lifecycle-metrics"),
         ("get", "/hunts/{hunt_id}"),
         ("get", "/hunts"),
         ("post", "/hunts/{hunt_id}/finish"),

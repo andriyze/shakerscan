@@ -725,13 +725,8 @@ try:
     from hunt.contracts import allowed_capability_names
     from hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
-        HUNT_START_SCHEMA,
-        MAX_HUNT_BODY_BYTES,
         HuntStartContract,
-        HuntStartContractError,
         bind_validated_receipts,
-        hunt_start_public_contract,
-        normalize_hunt_start_payload,
     )
     from hunt.legacy import LegacyHuntIsolationMiddleware
     from hunt.run_router import (
@@ -783,13 +778,8 @@ except ModuleNotFoundError:
     from api.hunt.contracts import allowed_capability_names
     from api.hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
-        HUNT_START_SCHEMA,
-        MAX_HUNT_BODY_BYTES,
         HuntStartContract,
-        HuntStartContractError,
         bind_validated_receipts,
-        hunt_start_public_contract,
-        normalize_hunt_start_payload,
     )
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
     from api.hunt.run_router import (
@@ -39001,54 +38991,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
             "suspected": suspected, "net_new": net_new, "verified": verified, "stop_reason": stop_reason}
 
 
-class HuntStartV2PolicyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    active_testing: bool = False
-    allow_state_changing_http: bool = False
-    network_discovery: bool = False
-    allow_oob_interactions: bool = False
-    authorization_confirmed: bool = False
-    approval_receipt_id: Optional[str] = Field(default=None, max_length=256)
-    scope_receipt_id: Optional[str] = Field(default=None, max_length=256)
-
-
-class HuntStartV2Request(BaseModel):
-    """Typed public request for the one native Hunt start boundary."""
-
-    model_config = ConfigDict(extra="forbid")
-    schema_version: Literal["hunt-start/v2"] = HUNT_START_SCHEMA
-    target_id: str = Field(min_length=1, max_length=256)
-    target_kind: Literal["web", "api", "device", "network"]
-    goal: Optional[str] = Field(default=None, max_length=20_000)
-    objective: Optional[str] = Field(default=None, max_length=20_000)
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
-    policy_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
-    budgets: dict[str, int] = Field(default_factory=dict, max_length=32)
-    policy: HuntStartV2PolicyRequest
-    credential_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
-    capabilities: list[str] = Field(default_factory=list, max_length=128)
-    request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
-    approval_receipt_id: Optional[str] = Field(default=None, max_length=256)
-    scope_receipt_id: Optional[str] = Field(default=None, max_length=256)
-
-
-class HuntStartV2Response(BaseModel):
-    """Stable Hunt-start response with room for additive public metadata."""
-
-    model_config = ConfigDict(extra="allow")
-    hunt_id: Optional[str] = None
-    target_kind: Optional[str] = None
-    target_id: Optional[str] = None
-    objective: Optional[str] = None
-    status: Optional[str] = None
-    budget_profile: Optional[str] = None
-    policy: dict[str, Any] = Field(default_factory=dict)
-    budget: dict[str, Any] = Field(default_factory=dict)
-    budget_used: dict[str, Any] = Field(default_factory=dict)
-    capabilities: list[dict[str, Any]] = Field(default_factory=list)
-    context_pack: dict[str, Any] = Field(default_factory=dict)
-
-
 class HuntQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal[
@@ -39979,98 +39921,12 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     return _hunt_public(row)
 
 
-async def _parse_hunt_start_body(
-    request: Request,
-) -> HuntStartV2Request:
-    raw_body = await request.body()
-    if len(raw_body) > MAX_HUNT_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "error": "request_body_too_large",
-                "message": "Hunt request body exceeds the public API limit.",
-                "max_bytes": MAX_HUNT_BODY_BYTES,
-            },
-        )
-    try:
-        decoded = json.loads(raw_body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "invalid_json",
-                "message": "Hunt request body must be valid JSON.",
-            },
-        ) from exc
-    if not isinstance(decoded, Mapping):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "invalid_request_shape",
-                "message": "Hunt request body must be an object.",
-            },
-        )
-    if "policy" not in decoded:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "explicit_v2_policy_required",
-                "message": "Hunt starts must include the hunt-start/v2 policy object",
-                "schema_version": HUNT_START_SCHEMA,
-            },
-        )
-    try:
-        return HuntStartV2Request.model_validate(decoded)
-    except ValidationError as exc:
-        raise RequestValidationError(exc.errors()) from exc
-
-
-@app.post(
-    "/hunts",
-    response_model=HuntStartV2Response,
-    tags=["Hunt"],
-    openapi_extra={
-        "requestBody": {
-            "required": True,
-            "content": {
-                "application/json": {
-                    "schema": HuntStartV2Request.model_json_schema(),
-                },
-            },
-        },
-    },
-)
-async def start_hunt(request: Request, response: Response):
-    """Create one target-kind-aware Hunt through the native V2 authority boundary."""
-    parsed = await _parse_hunt_start_body(request)
-    try:
-        contract = normalize_hunt_start_payload(
-            parsed.model_dump(mode="python", exclude_none=True)
-        )
-        result = await _start_hunt_v2(contract)
-    except HuntStartContractError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"message": str(exc), "schema_version": HUNT_START_SCHEMA},
-        ) from exc
-    response.headers["x-shakerscan-hunt-contract"] = "v2"
-    return result
-
-
-@app.get("/hunts/contract", tags=["Hunt"])
-async def get_hunt_contract():
-    """Publish the exact policy and budget schema used by API and generated UI types."""
-    return hunt_start_public_contract()
-
-
-@app.get("/hunts/lifecycle-metrics", tags=["Hunt"])
-async def get_hunt_lifecycle_metrics():
-    """Return content-free lifecycle reconciliation counts by registry placement."""
-    return HUNT_ACTION_SERVICE.metrics.snapshot()
-
-
 _hunt_run_service = HuntRunService(lambda: db_pool)
-configure_hunt_run_router(lambda: _hunt_run_service)
+configure_hunt_run_router(
+    lambda: _hunt_run_service,
+    start_handler=_start_hunt_v2,
+    metrics_provider=lambda: HUNT_ACTION_SERVICE.metrics.snapshot(),
+)
 app.include_router(hunt_run_router)
 
 

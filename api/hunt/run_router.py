@@ -1,13 +1,73 @@
-"""Public router for durable Hunt run reads and terminal transitions."""
+"""Public router for canonical Hunt admission, reads, and transitions."""
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Awaitable, Callable
+import json
+from typing import Any, Literal, Mapping
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
+from .start_contract import (
+    HUNT_START_SCHEMA,
+    MAX_HUNT_BODY_BYTES,
+    HuntStartContract,
+    HuntStartContractError,
+    hunt_start_public_contract,
+    normalize_hunt_start_payload,
+)
+
+
+class HuntStartV2PolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    active_testing: bool = False
+    allow_state_changing_http: bool = False
+    network_discovery: bool = False
+    allow_oob_interactions: bool = False
+    authorization_confirmed: bool = False
+    approval_receipt_id: str | None = Field(default=None, max_length=256)
+    scope_receipt_id: str | None = Field(default=None, max_length=256)
+
+
+class HuntStartV2Request(BaseModel):
+    """Typed public request for the one native Hunt start boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["hunt-start/v2"] = HUNT_START_SCHEMA
+    target_id: str = Field(min_length=1, max_length=256)
+    target_kind: Literal["web", "api", "device", "network"]
+    goal: str | None = Field(default=None, max_length=20_000)
+    objective: str | None = Field(default=None, max_length=20_000)
+    budget_profile: Literal["fast", "balanced", "thorough"] | None = None
+    policy_profile: Literal["fast", "balanced", "thorough"] | None = None
+    budgets: dict[str, int] = Field(default_factory=dict, max_length=32)
+    policy: HuntStartV2PolicyRequest
+    credential_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
+    capabilities: list[str] = Field(default_factory=list, max_length=128)
+    request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
+    approval_receipt_id: str | None = Field(default=None, max_length=256)
+    scope_receipt_id: str | None = Field(default=None, max_length=256)
+
+
+class HuntStartV2Response(BaseModel):
+    """Stable Hunt-start response with room for additive public metadata."""
+
+    model_config = ConfigDict(extra="allow")
+    hunt_id: str | None = None
+    target_kind: str | None = None
+    target_id: str | None = None
+    objective: str | None = None
+    status: str | None = None
+    budget_profile: str | None = None
+    policy: dict[str, Any] = Field(default_factory=dict)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    budget_used: dict[str, Any] = Field(default_factory=dict)
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    context_pack: dict[str, Any] = Field(default_factory=dict)
 
 
 class HuntFinishRequest(BaseModel):
@@ -18,13 +78,20 @@ class HuntFinishRequest(BaseModel):
 
 router = APIRouter()
 _service_provider: Callable[[], HuntRunService] | None = None
+_start_handler: Callable[[HuntStartContract], Awaitable[dict[str, Any]]] | None = None
+_metrics_provider: Callable[[], Mapping[str, Any]] | None = None
 
 
 def configure_hunt_run_router(
     service_provider: Callable[[], HuntRunService],
+    *,
+    start_handler: Callable[[HuntStartContract], Awaitable[dict[str, Any]]] | None = None,
+    metrics_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> None:
-    global _service_provider
+    global _metrics_provider, _service_provider, _start_handler
     _service_provider = service_provider
+    _start_handler = start_handler
+    _metrics_provider = metrics_provider
 
 
 def _service() -> HuntRunService:
@@ -32,6 +99,96 @@ def _service() -> HuntRunService:
     if service is None:
         raise HTTPException(status_code=503, detail="Hunt service is not ready")
     return service
+
+
+async def parse_hunt_start_body(request: Request) -> HuntStartV2Request:
+    raw_body = await request.body()
+    if len(raw_body) > MAX_HUNT_BODY_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "request_body_too_large",
+                "message": "Hunt request body exceeds the public API limit.",
+                "max_bytes": MAX_HUNT_BODY_BYTES,
+            },
+        )
+    try:
+        decoded = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_json",
+                "message": "Hunt request body must be valid JSON.",
+            },
+        ) from exc
+    if not isinstance(decoded, Mapping):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_request_shape",
+                "message": "Hunt request body must be an object.",
+            },
+        )
+    if "policy" not in decoded:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "explicit_v2_policy_required",
+                "message": "Hunt starts must include the hunt-start/v2 policy object",
+                "schema_version": HUNT_START_SCHEMA,
+            },
+        )
+    try:
+        return HuntStartV2Request.model_validate(decoded)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+@router.post(
+    "/hunts",
+    response_model=HuntStartV2Response,
+    tags=["Hunt"],
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": HuntStartV2Request.model_json_schema(),
+                },
+            },
+        },
+    },
+)
+async def start_hunt(request: Request, response: Response):
+    """Create one target-kind-aware Hunt through the native V2 authority boundary."""
+    if _start_handler is None:
+        raise HTTPException(status_code=503, detail="Hunt start service is not ready")
+    parsed = await parse_hunt_start_body(request)
+    try:
+        contract = normalize_hunt_start_payload(
+            parsed.model_dump(mode="python", exclude_none=True)
+        )
+        result = await _start_handler(contract)
+    except HuntStartContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "schema_version": HUNT_START_SCHEMA},
+        ) from exc
+    response.headers["x-shakerscan-hunt-contract"] = "v2"
+    return result
+
+
+@router.get("/hunts/contract", tags=["Hunt"])
+async def get_hunt_contract():
+    return hunt_start_public_contract()
+
+
+@router.get("/hunts/lifecycle-metrics", tags=["Hunt"])
+async def get_hunt_lifecycle_metrics():
+    if _metrics_provider is None:
+        raise HTTPException(status_code=503, detail="Hunt lifecycle metrics are not ready")
+    return dict(_metrics_provider())
 
 
 @router.get("/hunts/{hunt_id}")
@@ -69,11 +226,18 @@ async def resume_hunt(hunt_id: str):
 
 __all__ = [
     "HuntFinishRequest",
+    "HuntStartV2PolicyRequest",
+    "HuntStartV2Request",
+    "HuntStartV2Response",
     "cancel_hunt",
     "configure_hunt_run_router",
     "finish_hunt",
     "get_hunt",
+    "get_hunt_contract",
+    "get_hunt_lifecycle_metrics",
     "list_hunts",
+    "parse_hunt_start_body",
     "resume_hunt",
     "router",
+    "start_hunt",
 ]

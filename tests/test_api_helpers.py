@@ -274,6 +274,11 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from hunt import run_router as hunt_run_router_module  # noqa: E402
+from hunt.start_contract import (  # noqa: E402
+    MAX_HUNT_BODY_BYTES,
+    normalize_hunt_start_payload,
+)
 
 
 class _ApprovalPoolContext:
@@ -649,12 +654,12 @@ def _hunt_v2_payload():
 def test_primary_api_parses_typed_native_hunt_start(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS", raising=False)
 
-    parsed = asyncio.run(api_module._parse_hunt_start_body(
+    parsed = asyncio.run(hunt_run_router_module.parse_hunt_start_body(
         _BodyRequest(json.dumps(_hunt_v2_payload()).encode())
     ))
 
-    assert isinstance(parsed, api_module.HuntStartV2Request)
-    contract = api_module.normalize_hunt_start_payload(
+    assert isinstance(parsed, hunt_run_router_module.HuntStartV2Request)
+    contract = normalize_hunt_start_payload(
         parsed.model_dump(mode="python", exclude_none=True)
     )
     assert contract.schema_version == "hunt-start/v2"
@@ -665,19 +670,19 @@ def test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitt
     payload = _hunt_v2_payload()
     payload["policy_profile"] = "thorough"
 
-    parsed = asyncio.run(api_module._parse_hunt_start_body(
+    parsed = asyncio.run(hunt_run_router_module.parse_hunt_start_body(
         _BodyRequest(json.dumps(payload).encode())
     ))
-    contract = api_module.normalize_hunt_start_payload(
+    contract = normalize_hunt_start_payload(
         parsed.model_dump(mode="python", exclude_none=True)
     )
 
     assert contract.budget_profile == "thorough"
 
 
-def test_primary_api_documents_the_native_hunt_request_and_response_models():
-    source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    decorator = source[source.index('@app.post(\n    "/hunts",'):]
+def test_hunt_router_documents_the_native_request_and_response_models():
+    source = (Path(__file__).resolve().parents[1] / "api" / "hunt" / "run_router.py").read_text()
+    decorator = source[source.index('@router.post(\n    "/hunts",'):]
     decorator = decorator[:decorator.index("\nasync def start_hunt(")]
 
     assert "response_model=HuntStartV2Response" in decorator
@@ -689,7 +694,7 @@ def test_primary_api_rejects_legacy_hunt_start_without_migration_flag(monkeypatc
     body = json.dumps({"target_id": "target-1"}).encode()
 
     with pytest.raises(api_module.HTTPException) as exc:
-        asyncio.run(api_module._parse_hunt_start_body(_BodyRequest(body)))
+        asyncio.run(hunt_run_router_module.parse_hunt_start_body(_BodyRequest(body)))
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"] == "explicit_v2_policy_required"
@@ -700,7 +705,7 @@ def test_primary_api_rejects_legacy_hunt_start_even_with_old_override_env(monkey
     body = json.dumps({"target_id": "target-1"}).encode()
 
     with pytest.raises(api_module.HTTPException) as exc:
-        asyncio.run(api_module._parse_hunt_start_body(_BodyRequest(body)))
+        asyncio.run(hunt_run_router_module.parse_hunt_start_body(_BodyRequest(body)))
 
     assert exc.value.status_code == 422
     assert exc.value.detail["error"] == "explicit_v2_policy_required"
@@ -710,8 +715,8 @@ def test_primary_api_rejects_legacy_hunt_start_even_with_old_override_env(monkey
 
 def test_primary_api_rejects_oversized_hunt_body_before_json_parsing():
     with pytest.raises(api_module.HTTPException) as exc:
-        asyncio.run(api_module._parse_hunt_start_body(
-            _BodyRequest(b"x" * (api_module.MAX_HUNT_BODY_BYTES + 1))
+        asyncio.run(hunt_run_router_module.parse_hunt_start_body(
+            _BodyRequest(b"x" * (MAX_HUNT_BODY_BYTES + 1))
         ))
 
     assert exc.value.status_code == 413
@@ -782,7 +787,7 @@ def test_native_hunt_start_persists_exact_contract_and_capability_allowlist(monk
     payload = _hunt_v2_payload()
     payload["target_id"] = str(target_id)
     payload["capabilities"] = ["web.probe"]
-    contract = api_module.normalize_hunt_start_payload(payload)
+    contract = normalize_hunt_start_payload(payload)
 
     result = asyncio.run(api_module._start_hunt_v2(contract))
 

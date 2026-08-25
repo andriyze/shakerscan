@@ -67,14 +67,18 @@ def test_runtime_uses_validated_scope_and_independent_network_permission():
     assert 'scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None' in worker
 
 
-def test_primary_api_owns_the_only_hunt_start_route():
+def test_hunt_router_owns_the_only_hunt_start_route():
     root = Path(__file__).resolve().parents[1]
     primary_api = (root / "api" / "api.py").read_text()
+    hunt_router = (root / "api" / "hunt" / "run_router.py").read_text()
     entrypoint = (root / "scanner" / "entrypoint.sh").read_text()
 
     assert not (root / "api" / "api_v2.py").exists()
-    assert primary_api.count('    "/hunts",\n    response_model=HuntStartV2Response') == 1
-    assert "async def start_hunt(request: Request, response: Response):" in primary_api
+    assert hunt_router.count('    "/hunts",\n    response_model=HuntStartV2Response') == 1
+    assert "async def start_hunt(request: Request, response: Response):" in hunt_router
+    assert '    "/hunts",\n    response_model=HuntStartV2Response' not in primary_api
+    assert "app.include_router(hunt_run_router)" in primary_api
     assert "SHAKERSCAN_ALLOW_LEGACY_HUNT_STARTS" not in primary_api
     assert "LegacyHuntStartRequest" not in primary_api
+    assert "LegacyHuntStartRequest" not in hunt_router
     assert "api_v2.py" not in entrypoint
