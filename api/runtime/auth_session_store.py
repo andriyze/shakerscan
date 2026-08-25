@@ -372,6 +372,7 @@ class PostgresAuthSessionStore:
         owner_id: Any,
         target: TargetBinding,
         for_update: bool,
+        now: datetime | None = None,
     ) -> Any:
         query = """SELECT s.*, p.current_version AS live_profile_version,
                           p.is_active AS live_profile_active,
@@ -401,7 +402,11 @@ class PostgresAuthSessionStore:
                 "authentication session is unavailable for this authority"
             )
         metadata = AuthSessionMetadata.from_row(row)
-        current = datetime.now(timezone.utc)
+        current = (
+            _utc(now, name="operation time")
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
         profile_expires = row.get("live_profile_expires_at")
         if (
             metadata.target_binding_digest != target.digest
@@ -428,6 +433,11 @@ class PostgresAuthSessionStore:
         capability: str,
         now: datetime | None = None,
     ) -> WorkerAuthSession:
+        current = (
+            _utc(now, name="operation time")
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
         row = await self._load_row(
             conn,
             session_ref=session_ref,
@@ -435,9 +445,9 @@ class PostgresAuthSessionStore:
             owner_id=owner_id,
             target=target,
             for_update=False,
+            now=current,
         )
         metadata = AuthSessionMetadata.from_row(row)
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         if metadata.status != "active" or metadata.expires_at <= current:
             raise AuthSessionStoreError("authentication session is expired or revoked")
         capability_name = str(capability or "").strip()
@@ -546,6 +556,11 @@ class PostgresAuthSessionStore:
         reason: str,
         now: datetime | None = None,
     ) -> AuthSessionMetadata:
+        timestamp = (
+            _utc(now, name="operation time")
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
         row = await self._load_row(
             conn,
             session_ref=session_ref,
@@ -553,11 +568,11 @@ class PostgresAuthSessionStore:
             owner_id=owner_id,
             target=target,
             for_update=True,
+            now=timestamp,
         )
         current = AuthSessionMetadata.from_row(row)
         if current.status != "active":
             return current
-        timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         destroyed = encrypt_secret("{}")
         updated = await conn.fetchrow(
             """UPDATE auth_sessions
