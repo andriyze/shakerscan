@@ -51,6 +51,8 @@ def test_device_http_guard_reason_survives_durable_action_replay():
 
     assert 'capability_execution.errors' in handler
     assert 'receipt_contract_payload["error"]' in handler
+    assert 'receipt_payload["error"]' in handler
+    assert 'receipt_payload["observations"]' in handler
     assert 'existing_summary.get("error")' in handler
 
 

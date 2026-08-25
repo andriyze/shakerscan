@@ -41155,9 +41155,23 @@ async def _execute_hunt_capability_lifecycle(
                 else {}
             )
             if capability_execution is not None:
-                receipt_contract_payload["receipt_observations"] = [
+                normalized_observations = [
                     dict(item) for item in capability_execution.observations
                 ]
+                receipt_contract_payload["receipt_observations"] = (
+                    normalized_observations
+                )
+                if isinstance(receipt_payload, dict):
+                    # The action summary powers idempotent API/CLI/UI replays;
+                    # keep the same normalized, content-free observations as
+                    # the immutable capability receipt.
+                    receipt_payload["observations"] = normalized_observations
+                    receipt_payload["partial"] = bool(
+                        capability_execution.partial
+                    )
+                    receipt_payload["timed_out"] = bool(
+                        capability_execution.timed_out
+                    )
                 if (
                     capability_execution.errors
                     and not receipt_contract_payload.get("error")
@@ -41169,6 +41183,10 @@ async def _execute_hunt_capability_lifecycle(
                     receipt_contract_payload["error"] = str(
                         capability_execution.errors[0]
                     )[:500]
+                    if isinstance(receipt_payload, dict):
+                        receipt_payload["error"] = receipt_contract_payload[
+                            "error"
+                        ]
             downstream_receipt: dict[str, Any] = {}
             if is_device_queue:
                 queued_result = (
