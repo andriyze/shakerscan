@@ -33,3 +33,17 @@ test('sidebar links are internal, unique, and navigable', async ({ page }) => {
   // The product logo and explicit Dashboard item intentionally share the home route.
   expect(duplicates).toEqual(['/'])
 })
+
+
+test('production shell sends browser security headers', async ({ page }) => {
+  const response = await page.goto('/', { waitUntil: 'domcontentloaded' })
+  expect(response).not.toBeNull()
+  const headers = response!.headers()
+  expect(headers['x-powered-by']).toBeUndefined()
+  expect(headers['x-content-type-options']).toBe('nosniff')
+  expect(headers['x-frame-options']).toBe('DENY')
+  expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
+  expect(headers['permissions-policy']).toContain('camera=()')
+  expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
+  expect(headers['content-security-policy']).toContain("object-src 'none'")
+})
