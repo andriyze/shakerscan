@@ -1,36 +1,8 @@
 import { expect, test } from '@playwright/test'
+import routeManifest from '../../test-manifests/ui-route-action-manifest.json'
 
 
-const STATIC_ROUTES = [
-  '/',
-  '/docs',
-  '/targets',
-  '/scan/new',
-  '/scans',
-  '/findings',
-  '/credentials',
-  '/request-collections',
-  '/devices',
-  '/devices/policies',
-  '/schedules',
-  '/interactive',
-  '/exposure',
-  '/asm',
-  '/hunt',
-  '/deep-hunt/leads',
-  '/deep-hunt/experiment',
-  '/evidence',
-  '/timeline',
-  '/campaigns',
-  '/ai-gate',
-  '/model-intake',
-  '/exceptions',
-  '/fleet',
-  '/settings',
-  '/settings/policy-profiles',
-  '/settings/arsenal',
-  '/settings/ai-ops-router',
-] as const
+const STATIC_ROUTES = routeManifest.routes.flatMap((route) => route.smokePath ? [route.smokePath] : [])
 
 
 for (const route of STATIC_ROUTES) {
