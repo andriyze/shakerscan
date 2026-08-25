@@ -2945,6 +2945,59 @@ async def run_schema_migrations(pool) -> None:
                 FROM device_request_collections
                 ON CONFLICT (id) DO NOTHING
             """)
+            # Legacy connected-device collections already persist a bounded,
+            # redacted request inventory in summary_json. Mirror that inventory
+            # into the canonical V2 index as well as the collection header so
+            # pagination, selections, and the unified UI never report 0 rows
+            # for a collection whose durable metadata reports requests.
+            await conn.execute("""
+                INSERT INTO request_collection_requests (
+                    collection_id, request_id, ordinal, folder, name, method,
+                    redacted_url, normalized_path, body_mode, auth_type,
+                    tags_json, safe_method, supported
+                )
+                SELECT drc.id,
+                       LEFT(COALESCE(NULLIF(item->>'id', ''),
+                           'legacy-device-' || (ordinality - 1)::text), 128),
+                       (ordinality - 1)::int,
+                       NULLIF(LEFT(item->>'folder', 500), ''),
+                       NULLIF(LEFT(item->>'name', 500), ''),
+                       LEFT(UPPER(COALESCE(NULLIF(item->>'method', ''), 'GET')), 16),
+                       NULLIF(LEFT(item->>'url', 4000), ''),
+                       NULLIF(LEFT(SPLIT_PART(
+                           REGEXP_REPLACE(
+                               REGEXP_REPLACE(COALESCE(item->>'url', ''),
+                                   '^[A-Za-z][A-Za-z0-9+.-]*://[^/]*', ''),
+                               '^\\{\\{[^}]+\\}\\}', ''
+                           ), '?', 1
+                       ), 2000), ''),
+                       NULLIF(LEFT(item->>'body_mode', 100), ''),
+                       NULLIF(LEFT(item->>'auth_type', 200), ''),
+                       '[]'::jsonb,
+                       COALESCE((item->>'safe_method')::boolean, false),
+                       COALESCE((item->>'supported')::boolean, true)
+                FROM device_request_collections drc
+                JOIN request_collections rc ON rc.id=drc.id
+                CROSS JOIN LATERAL JSONB_ARRAY_ELEMENTS(
+                    CASE
+                        WHEN JSONB_TYPEOF(COALESCE(drc.summary_json, '{}'::jsonb)->'requests')='array'
+                        THEN drc.summary_json->'requests'
+                        ELSE '[]'::jsonb
+                    END
+                ) WITH ORDINALITY AS legacy_request(item, ordinality)
+                ON CONFLICT (collection_id, request_id) DO UPDATE SET
+                    ordinal=EXCLUDED.ordinal,
+                    folder=EXCLUDED.folder,
+                    name=EXCLUDED.name,
+                    method=EXCLUDED.method,
+                    redacted_url=EXCLUDED.redacted_url,
+                    normalized_path=EXCLUDED.normalized_path,
+                    body_mode=EXCLUDED.body_mode,
+                    auth_type=EXCLUDED.auth_type,
+                    tags_json=EXCLUDED.tags_json,
+                    safe_method=EXCLUDED.safe_method,
+                    supported=EXCLUDED.supported
+            """)
             # Canonical Hunt V2 keeps server authority and audit state without owning model
             # reasoning. Legacy web/device run tables remain compatibility adapters.
             await conn.execute("""

@@ -153,3 +153,13 @@ def test_generic_storage_and_scan_hunt_api_contracts_are_wired():
     assert "collection_manifest_requests," in api
     assert ") = await _generic_collection_refs" in api
     assert "secret_values_visible" in api
+
+
+def test_legacy_device_collection_inventory_is_backfilled_into_v2_index():
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "api" / "retest_contract.py").read_text()
+
+    assert "JSONB_ARRAY_ELEMENTS" in migration
+    assert "drc.summary_json->'requests'" in migration
+    assert "legacy-device-" in migration
+    assert "ON CONFLICT (collection_id, request_id) DO UPDATE" in migration
