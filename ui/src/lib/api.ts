@@ -7349,11 +7349,13 @@ export async function createTargetPolicyApprovalReceipt({
   targetUrl,
   ttlMinutes = 120,
   riskTier = 'active',
+  environment = 'production',
 }: {
   targetId?: string
   targetUrl: string
   ttlMinutes?: number
   riskTier?: 'active' | 'credential'
+  environment?: 'production' | 'lab'
 }): Promise<{ approvalReceiptId: string; scopeReceiptId: string; expiresAt: string }> {
   const normalizedTargetUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(targetUrl.trim())
     ? targetUrl.trim()
@@ -7363,7 +7365,7 @@ export async function createTargetPolicyApprovalReceipt({
     url: normalizedTargetUrl,
     ...(targetId ? { target_id: targetId } : {}),
     allowed_hosts: [parsed.hostname],
-    environment: 'production',
+    environment,
   })
   if (scope.scope_receipt.verdict === 'blocked') {
     throw new Error(`Target policy scope is blocked: ${scope.scope_receipt.blocked_by.join(', ')}`)

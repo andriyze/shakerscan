@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createTargetPolicyApprovalReceipt } from '@/lib/api'
 import { Button, Field } from '@/components/ui'
 
@@ -30,10 +30,17 @@ export function ApprovalReceiptField({
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expiresAt, setExpiresAt] = useState<string | null>(null)
+  const [scopeEnvironment, setScopeEnvironment] = useState<'production' | 'lab'>('production')
   const missingTarget = !targetUrl.trim()
   const createDisabledReason = disabledReason
     || (missingTarget ? 'Choose one target first.' : null)
     || (!authorizationConfirmed ? 'Confirm that you are authorized to test this target first.' : null)
+
+  useEffect(() => {
+    setScopeEnvironment('production')
+    setExpiresAt(null)
+    setError(null)
+  }, [targetId, targetUrl])
 
   async function createReceipt() {
     if (createDisabledReason) return
@@ -45,6 +52,7 @@ export function ApprovalReceiptField({
         targetUrl,
         ttlMinutes,
         riskTier,
+        environment: scopeEnvironment,
       })
       onReceiptIdChange(receipt.approvalReceiptId)
       onScopeReceiptIdChange?.(receipt.scopeReceiptId)
@@ -72,6 +80,26 @@ export function ApprovalReceiptField({
           placeholder="Paste an existing receipt UUID"
           className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder:text-gray-600"
         />
+      </Field>
+      <Field
+        label="Approval scope environment"
+        hint="Production blocks private and loopback destinations. Choose Lab/test only for an owned local fixture or device."
+      >
+        <select
+          aria-label="Approval scope environment"
+          value={scopeEnvironment}
+          onChange={(event) => {
+            setScopeEnvironment(event.target.value as 'production' | 'lab')
+            onReceiptIdChange('')
+            onScopeReceiptIdChange?.('')
+            setExpiresAt(null)
+            setError(null)
+          }}
+          className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white"
+        >
+          <option value="production">Production / public target</option>
+          <option value="lab">Lab / owned private target</option>
+        </select>
       </Field>
       <div className="flex flex-wrap items-center gap-3">
         <Button type="button" variant="secondary" onClick={() => void createReceipt()} loading={creating} disabled={Boolean(createDisabledReason)}>

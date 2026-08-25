@@ -12,7 +12,12 @@ test('core privileged workflows create target-bound approval receipts in place',
   assert.match(hunt, /<ApprovalReceiptField/)
   assert.match(component, /Create approval for this target/)
   assert.match(component, /Confirm that you are authorized to test this target first/)
+  assert.match(component, /Approval scope environment/)
+  assert.match(component, /Production blocks private and loopback destinations/)
+  assert.match(component, /Lab \/ owned private target/)
   assert.match(api, /createTargetPolicyApprovalReceipt/)
+  assert.match(api, /environment = 'production'/)
+  assert.match(api, /environment,\n  \}\)/)
   assert.match(api, /confirm_authorized/)
 })
 
