@@ -1356,6 +1356,9 @@ set_build_env() {
     local local_commit
     local release_version
     local image_tag
+    local requested_scanner_version="${SCANNER_VERSION:-}"
+    local requested_git_commit="${GIT_COMMIT:-}"
+    local requested_ui_version="${NEXT_PUBLIC_APP_VERSION:-}"
     local_commit=$(get_build_version)
     release_version=$(get_release_version)
     image_tag="${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
@@ -1386,9 +1389,9 @@ set_build_env() {
         export GIT_COMMIT="${SCANNER_IMAGE_COMMIT:-image:${image_tag}}"
         export NEXT_PUBLIC_APP_VERSION="$image_tag"
     else
-        export SCANNER_VERSION="$local_commit"
-        export GIT_COMMIT="$local_commit"
-        export NEXT_PUBLIC_APP_VERSION="$local_commit"
+        export SCANNER_VERSION="${requested_scanner_version:-$local_commit}"
+        export GIT_COMMIT="${requested_git_commit:-$local_commit}"
+        export NEXT_PUBLIC_APP_VERSION="${requested_ui_version:-$SCANNER_VERSION}"
     fi
 }
 

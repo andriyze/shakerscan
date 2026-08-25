@@ -1349,6 +1349,31 @@ def test_source_build_version_marks_untracked_runtime_files_dirty(tmp_path):
     assert dirty == f"{clean}-dirty"
 
 
+def test_source_candidate_build_preserves_explicit_release_identity():
+    script = (ROOT / "scanner.sh").read_text()
+    body = script.split("set_build_env() {", 1)[1].split("\n}", 1)[0]
+    harness = f"""
+get_build_version() {{ echo local-short-sha; }}
+get_release_version() {{ echo 2.0.0; }}
+set_build_env() {{{body}
+}}
+USE_PREBUILT=0
+DEFAULT_PREBUILT_IMAGE_TAG=latest
+PLATFORM=linux
+SCANNER_VERSION=2.0.0
+GIT_COMMIT=0123456789abcdef0123456789abcdef01234567
+unset NEXT_PUBLIC_APP_VERSION
+set_build_env
+printf '%s|%s|%s\n' "$SCANNER_VERSION" "$GIT_COMMIT" "$NEXT_PUBLIC_APP_VERSION"
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness], check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert result == (
+        "2.0.0|0123456789abcdef0123456789abcdef01234567|2.0.0"
+    )
+
+
 def test_full_rebuild_verifies_the_recreated_running_stack_before_success():
     script = (ROOT / "scanner.sh").read_text()
     rebuild = script.split("rebuild_images() {", 1)[1].split("\n}\n\nrefresh_workers_after_rebuild", 1)[0]
