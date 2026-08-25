@@ -396,6 +396,10 @@ jobs:
       MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The upgrade receipt resolves the v0.8.17 baseline tag to its exact
+          # source commit. A depth-1 checkout contains only the candidate.
+          fetch-depth: 0
 
       - name: Build scanner, API, worker, and UI images in product dependency order
         run: ./scanner.sh build

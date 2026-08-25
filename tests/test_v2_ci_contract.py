@@ -114,6 +114,11 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert set(workflow["jobs"]) == {"contracts", "complete-python", "images-api-ui"}
     steps = workflow["jobs"]["contracts"]["steps"]
     assert len([step for step in steps if "run" in step]) >= 10
+    image_steps = workflow["jobs"]["images-api-ui"]["steps"]
+    image_checkout = next(
+        step for step in image_steps if step.get("uses") == "actions/checkout@v6"
+    )
+    assert image_checkout["with"]["fetch-depth"] == 0
     text = _workflow_text()
     assert "scripts/run_complete_python_suite.py --collect-only" in text
     assert "scripts/run_complete_python_suite.py" in text
