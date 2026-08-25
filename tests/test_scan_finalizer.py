@@ -263,6 +263,54 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     ]
 
 
+def test_finalizer_marks_every_template_candidate_for_verification():
+    templates = _action(
+        "templates.passive", 0, capability_name="templates.passive_scan",
+    )
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    results = _results(plan)
+    results[templates.action_id] = _result_with_observation_count(templates, 2)
+    observations = {
+        templates.action_id: (
+            {
+                "kind": "template_match",
+                "template_id": "medium-candidate",
+                "name": "Medium template candidate",
+                "severity": "medium",
+                "matched_at": "https://app.example.test/medium",
+            },
+            {
+                "kind": "template_match",
+                "template_id": "info-candidate",
+                "name": "Informational template candidate",
+                "severity": "info",
+                "matched_at": "https://app.example.test/info",
+            },
+        ),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 2
+    assert all(finding["suspected"] is True for finding in report["findings"])
+    assert all(finding["verified"] is False for finding in report["findings"])
+    assert all(
+        finding["needs_verification"] is True
+        for finding in report["findings"]
+    )
+
+
 def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
     request_xss = _action(
         "verify.request_xss.0", 0, capability_name="xss.request_verify",

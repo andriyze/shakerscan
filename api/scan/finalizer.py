@@ -370,7 +370,10 @@ def _findings_for_action(
             finding.update({
                 "verified": False,
                 "suspected": True,
-                "needs_verification": severity in {"critical", "high"},
+                # A template match is candidate evidence at every severity.
+                # Severity controls prioritization, not whether the proof
+                # contract still needs to be satisfied.
+                "needs_verification": True,
                 "proof_state": "candidate",
                 "verification_reason": "Template match requires its deterministic proof contract",
             })
