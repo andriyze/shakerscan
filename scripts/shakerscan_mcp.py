@@ -130,6 +130,9 @@ class HuntMCPTool:
     properties: dict[str, dict[str, Any]]
     required: tuple[str, ...] = ()
     read_only: bool = False
+    destructive: bool = False
+    idempotent: bool = False
+    open_world: bool = False
 
     def descriptor(self) -> dict[str, Any]:
         schema: dict[str, Any] = {
@@ -143,9 +146,9 @@ class HuntMCPTool:
             "inputSchema": schema,
             "annotations": {
                 "readOnlyHint": self.read_only,
-                "destructiveHint": False,
-                "idempotentHint": self.read_only,
-                "openWorldHint": False,
+                "destructiveHint": self.destructive,
+                "idempotentHint": self.idempotent,
+                "openWorldHint": self.open_world,
             },
             "_meta": {"shakerscan/api": self.path_template, "shakerscan/maturity": "hunt_v2"},
         }
@@ -225,7 +228,8 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
     HuntMCPTool(
         "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}", "Read a Hunt and its capability manifest.",
-        {"hunt_id": {"type": "string", "format": "uuid"}}, ("hunt_id",), True,
+        {"hunt_id": {"type": "string", "format": "uuid"}},
+        ("hunt_id",), read_only=True, idempotent=True,
     ),
     HuntMCPTool(
         "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query bounded Hunt context.",
@@ -235,13 +239,25 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
             "filter": {"type": "object"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 500},
         },
-        ("hunt_id", "kind"), True,
+        ("hunt_id", "kind"), read_only=True, idempotent=True,
     ),
     HuntMCPTool(
         "shakerscan_hunt_capability", "POST", "/hunts/{hunt_id}/capabilities/{capability_name}",
         "Execute one capability from the Hunt's server-returned manifest.",
-        {"hunt_id": {"type": "string", "format": "uuid"}, "capability_name": {"type": "string"}, "input": {"type": "object"}},
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "capability_name": {
+                "type": "string", "minLength": 1, "maxLength": 128,
+                "pattern": DEFAULT_CAPABILITY_PATTERN,
+            },
+            "input": {"type": "object"},
+            "idempotency_key": {
+                "type": "string", "minLength": 8, "maxLength": 200,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            },
+        },
         ("hunt_id", "capability_name"),
+        destructive=True, idempotent=True, open_world=True,
     ),
     HuntMCPTool(
         "shakerscan_hunt_candidate", "POST", "/hunts/{hunt_id}/candidates",
@@ -260,6 +276,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         "Request registered deterministic verification for one candidate.",
         {"hunt_id": {"type": "string", "format": "uuid"}, "candidate_id": {"type": "string", "format": "uuid"}},
         ("hunt_id", "candidate_id"),
+        destructive=True, open_world=True,
     ),
     HuntMCPTool(
         "shakerscan_hunt_finish", "POST", "/hunts/{hunt_id}/finish", "Finish a Hunt with a debrief.",
@@ -268,7 +285,8 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
     HuntMCPTool(
         "shakerscan_hunt_cancel", "POST", "/hunts/{hunt_id}/cancel", "Cancel a Hunt.",
-        {"hunt_id": {"type": "string", "format": "uuid"}}, ("hunt_id",),
+        {"hunt_id": {"type": "string", "format": "uuid"}},
+        ("hunt_id",), destructive=True,
     ),
 )
 HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
@@ -622,9 +640,42 @@ class ArsenalClient:
                 marker = "{" + key + "}"
                 if marker in path:
                     path = path.replace(marker, urllib.parse.quote(str(payload.pop(key)), safe=""))
+            generated_idempotency_key: str | None = None
             if name == "shakerscan_hunt_capability":
-                payload = {"input": payload.get("input") or {}}
+                hunt_id = str(arguments["hunt_id"])
+                capability_name = str(arguments["capability_name"])
+                hunt = self.request_json("GET", f"/hunts/{urllib.parse.quote(hunt_id, safe='')}")
+                if str(hunt.get("status") or "") not in {"active", "awaiting_planner"}:
+                    raise MCPError(-32006, f"Hunt is not active (status: {hunt.get('status') or 'unknown'})")
+                manifest = hunt.get("capabilities")
+                if not isinstance(manifest, list):
+                    raise MCPError(-32005, "Hunt capability manifest is missing")
+                capability = next((
+                    item for item in manifest
+                    if isinstance(item, dict) and str(item.get("name") or "") == capability_name
+                ), None)
+                if capability is None:
+                    raise MCPError(-32006, "Capability is not allowed by this Hunt manifest")
+                input_schema = capability.get("input_schema")
+                if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+                    raise MCPError(-32005, "Hunt capability manifest has an invalid input schema")
+                capability_input = payload.get("input") or {}
+                self._validate_argument("input", capability_input, input_schema)
+                idempotency_key = str(payload.get("idempotency_key") or "").strip()
+                if not idempotency_key:
+                    idempotency_key = f"mcp-{uuid.uuid4().hex}"
+                    generated_idempotency_key = idempotency_key
+                payload = {
+                    "idempotency_key": idempotency_key,
+                    "input": capability_input,
+                }
             result = self.request_json(hunt_tool.method, path, payload or None)
+            if name == "shakerscan_hunt_capability":
+                result = {
+                    **result,
+                    "mcp_idempotency_key": payload["idempotency_key"],
+                    "mcp_generated_idempotency_key": generated_idempotency_key is not None,
+                }
             return {
                 "content": [{"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}],
                 "structuredContent": result,

@@ -120,9 +120,22 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
         "shakerscan_tool_status",
     }
     assert {tool.name for tool in mcp.HUNT_TOOLS} <= names
-    assert all(item["annotations"]["destructiveHint"] is False for item in descriptors)
     assert all(item["annotations"]["readOnlyHint"] is True for item in descriptors if item["name"] not in {tool.name for tool in mcp.HUNT_TOOLS})
     assert all(tool.command not in {"scan.submit", "asm.improve", "finding.retest"} for tool in mcp.TOOLS)
+
+    annotations = {item["name"]: item["annotations"] for item in descriptors}
+    assert annotations["shakerscan_hunt_start"] == {
+        "readOnlyHint": False, "destructiveHint": False,
+        "idempotentHint": False, "openWorldHint": False,
+    }
+    assert annotations["shakerscan_hunt_get"]["readOnlyHint"] is True
+    assert annotations["shakerscan_hunt_query"]["idempotentHint"] is True
+    assert annotations["shakerscan_hunt_capability"] == {
+        "readOnlyHint": False, "destructiveHint": True,
+        "idempotentHint": True, "openWorldHint": True,
+    }
+    assert annotations["shakerscan_hunt_verify"]["openWorldHint"] is True
+    assert annotations["shakerscan_hunt_cancel"]["destructiveHint"] is True
 
     start = next(item for item in descriptors if item["name"] == "shakerscan_hunt_start")
     schema = start["inputSchema"]
@@ -344,6 +357,123 @@ def test_mcp_hunt_start_rejects_contract_drift_and_invalid_nested_values(update)
 
     assert exc.value.code == -32602
     assert not any(path == "/hunts" for _method, path, _payload in client.calls)
+
+
+class ManifestHuntClient(FakeClient):
+    HUNT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    def __init__(self, *, status="active", capabilities=None):
+        super().__init__()
+        self.status = status
+        self.capabilities = capabilities if capabilities is not None else [{
+            "name": "http.request",
+            "risk_tier": "active",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "enum": ["GET", "HEAD"]},
+                    "path": {"type": "string", "minLength": 1, "maxLength": 4000},
+                },
+                "required": ["method", "path"],
+                "additionalProperties": False,
+            },
+        }]
+        self.action_by_key = {}
+
+    def request_json(self, method, path, payload=None):
+        if path == f"/hunts/{self.HUNT_ID}" and method == "GET":
+            self.calls.append((method, path, payload))
+            return {
+                "hunt_id": self.HUNT_ID,
+                "status": self.status,
+                "capabilities": self.capabilities,
+            }
+        if path == f"/hunts/{self.HUNT_ID}/capabilities/http.request":
+            self.calls.append((method, path, payload))
+            key = payload["idempotency_key"]
+            action_id = self.action_by_key.setdefault(key, f"action-{len(self.action_by_key) + 1}")
+            return {
+                "hunt_id": self.HUNT_ID,
+                "capability": "http.request",
+                "action_id": action_id,
+                "idempotent_replay": sum(
+                    1 for call in self.calls
+                    if call[1] == path and call[2]["idempotency_key"] == key
+                ) > 1,
+                "status": "completed",
+            }
+        return super().request_json(method, path, payload)
+
+
+def test_mcp_hunt_capability_validates_manifest_and_generates_a_returned_idempotency_key():
+    client = ManifestHuntClient()
+    result = client.call_tool("shakerscan_hunt_capability", {
+        "hunt_id": client.HUNT_ID,
+        "capability_name": "http.request",
+        "input": {"method": "GET", "path": "/rest/products"},
+    })
+
+    structured = result["structuredContent"]
+    assert structured["action_id"] == "action-1"
+    assert structured["mcp_generated_idempotency_key"] is True
+    assert structured["mcp_idempotency_key"].startswith("mcp-")
+    assert client.calls[-1][2] == {
+        "idempotency_key": structured["mcp_idempotency_key"],
+        "input": {"method": "GET", "path": "/rest/products"},
+    }
+
+
+def test_mcp_hunt_capability_replays_with_the_same_caller_key():
+    client = ManifestHuntClient()
+    arguments = {
+        "hunt_id": client.HUNT_ID,
+        "capability_name": "http.request",
+        "idempotency_key": "mcp-client-operation-1",
+        "input": {"method": "HEAD", "path": "/"},
+    }
+
+    first = client.call_tool("shakerscan_hunt_capability", arguments)
+    second = client.call_tool("shakerscan_hunt_capability", arguments)
+
+    assert first["structuredContent"]["action_id"] == second["structuredContent"]["action_id"]
+    assert second["structuredContent"]["idempotent_replay"] is True
+    assert second["structuredContent"]["mcp_generated_idempotency_key"] is False
+
+
+@pytest.mark.parametrize(
+    ("client", "arguments", "message"),
+    [
+        (
+            ManifestHuntClient(status="completed"),
+            {"capability_name": "http.request", "input": {"method": "GET", "path": "/"}},
+            "not active",
+        ),
+        (
+            ManifestHuntClient(capabilities=[]),
+            {"capability_name": "http.request", "input": {"method": "GET", "path": "/"}},
+            "not allowed",
+        ),
+        (
+            ManifestHuntClient(),
+            {"capability_name": "http.request", "input": {"method": "POST", "path": "/"}},
+            "one of",
+        ),
+        (
+            ManifestHuntClient(),
+            {"capability_name": "http.request", "input": {"method": "GET", "path": "/", "url": "https://other.example"}},
+            "Unknown input fields",
+        ),
+    ],
+)
+def test_mcp_hunt_capability_fails_closed_before_execution(client, arguments, message):
+    with pytest.raises(mcp.MCPError) as exc:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID,
+            **arguments,
+        })
+
+    assert message in exc.value.message
+    assert not any("/capabilities/" in path for _method, path, _payload in client.calls)
 
 
 def test_mcp_stdio_emits_only_json_rpc_on_stdout():
