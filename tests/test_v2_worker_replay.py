@@ -224,7 +224,7 @@ def test_pinned_replay_fails_over_in_stable_order_and_reports_the_real_peer():
 
 def test_hunt_api_never_decrypts_collection_replay_payloads():
     source = open("api/api.py", encoding="utf-8").read()
-    start = source.index("async def _hunt_replay_safe_collection")
+    start = source.index("async def _enqueue_hunt_replay_capability")
     end = source.index("\n\nasync def _validate_hunt_credential_references", start)
     replay_helper = source[start:end]
     assert "decrypt_secret" not in replay_helper
@@ -255,6 +255,6 @@ def test_worker_replay_uses_durable_store_and_exact_plan():
     assert "bind_replay_credential_headers" in handler
     assert '"receipt_context": receipt_context' in handler
     assert "ReplayExecutionAdapter(" in handler
-    assert "CapabilityExecutor().execute(" in handler
+    assert "_dispatch_registered_hunt_adapter(" in handler
     assert "adapter_managed_cancellation=True" in handler
     assert "cancelled=lambda: bool(redis_client.exists(cancel_key))" in handler

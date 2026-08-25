@@ -19,11 +19,11 @@ def _handler_source() -> str:
 def test_ssh_proposal_reserves_and_starts_before_plan_construction():
     handler = _handler_source()
 
-    assert "DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES" in handler
+    assert 'is_device_ssh_proposal = placement == "device_ssh_proposal"' in handler
     assert "DeviceExecutionAdapter(" in handler
-    assert "CapabilityExecutor().execute(" in handler
+    assert "dispatch_registered_adapter(" in handler
     assert handler.index("create_requested(") < handler.index(
-        "_execute_device_agent_tool("
+        "_execute_device_capability_operation("
     )
     assert "An SSH proposal is already in flight for this Hunt" in handler
     assert "_merge_hunt_device_ssh_proposal_context" in handler
@@ -33,7 +33,7 @@ def test_blocked_ssh_proposal_refunds_privileged_execution_dimensions():
     handler = _handler_source()
 
     refund = handler[handler.index("and not device_ssh_plan_proposed"):]
-    refund = refund[:refund.index("elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES")]
+    refund = refund[:refund.index("elif is_device_http")]
     assert "actual_charges = _hunt_nonexecuting_actual(charges)" in refund
 
 
@@ -51,12 +51,12 @@ def test_ssh_proposal_does_not_reserve_device_fragility():
     handler = _handler_source()
 
     assert "An SSH proposal is control-plane-only" in handler
-    assert "name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES" in handler
+    assert "if is_device_ssh_proposal" in handler
     success_settlement = handler[handler.index(
-        "elif name in DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES:"
+        "elif is_device_ssh_proposal:"
     ):]
     success_settlement = success_settlement[:success_settlement.index(
-        "elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES:"
+        "elif is_device_http:"
     )]
     assert 'actual_charges["tool_wall_seconds"]' in success_settlement
     assert "device_fragility_points" not in success_settlement

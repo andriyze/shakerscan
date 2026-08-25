@@ -88,12 +88,12 @@ from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.tls import inspect_tls_binding
 from capabilities.replay import ReplayExecutionAdapter
 from capabilities.request_mutation import RequestMutationVerificationAdapter
+from hunt.action_dispatcher import (
+    HUNT_ACTION_DISPATCHER,
+    HuntActionRequest,
+    RegisteredHuntAdapterFactory,
+)
 from hunt.capability_reservations import (
-    DURABLE_BROWSER_HUNT_CAPABILITIES,
-    DURABLE_AUTH_HUNT_CAPABILITIES,
-    DURABLE_HTTP_HUNT_CAPABILITIES,
-    DURABLE_SCANNER_HUNT_CAPABILITIES,
-    DURABLE_WORKER_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
     terminalize_hunt_capability,
@@ -19057,6 +19057,44 @@ def _worker_json_array(value: Any) -> list[Any]:
     return json_array_field(value)
 
 
+async def _dispatch_registered_hunt_adapter(
+    *,
+    hunt_id: str,
+    action_id: str,
+    specification: Any,
+    target: TargetBinding,
+    capability_input: Mapping[str, Any],
+    requested_budget: Mapping[str, int],
+    adapter: Any,
+    reservation_id: str | None,
+    action_digest: str | None,
+    heartbeat: Any,
+    cancelled: Any,
+    adapter_managed_cancellation: bool = False,
+) -> Any:
+    """Run a worker adapter through the target-independent Hunt dispatcher."""
+    request = HuntActionRequest(
+        hunt_id=str(hunt_id),
+        action_id=str(action_id),
+        capability_name=specification.name,
+        target=target,
+        capability_input=capability_input,
+        requested_budget=requested_budget,
+        reservation_id=reservation_id,
+        action_digest=action_digest,
+    )
+    factory = RegisteredHuntAdapterFactory({
+        specification.adapter: lambda _spec, _request: adapter,
+    })
+    return await HUNT_ACTION_DISPATCHER.execute(
+        request,
+        factory,
+        heartbeat=heartbeat,
+        cancelled=cancelled,
+        adapter_managed_cancellation=adapter_managed_cancellation,
+    )
+
+
 def _worker_terminal_replay_result(stored: Any, *, job_id: str) -> dict[str, Any]:
     receipt = dict(stored.receipt or {})
     return {
@@ -19104,6 +19142,9 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         binding_id = str(uuid.UUID(str(job_data.get("binding_id") or "")))
         selection_id = str(uuid.UUID(str(job_data.get("selection_id") or "")))
         reservation_id = str(uuid.UUID(str(job_data.get("reservation_id") or "")))
+        queued_action_digest = str(job_data.get("action_digest") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", queued_action_digest):
+            raise ReplayExecutionError("replay action digest is invalid")
         expected_payload_sha256 = str(job_data.get("expected_payload_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_payload_sha256):
             raise ReplayExecutionError("replay job collection digest is invalid")
@@ -19159,8 +19200,17 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 )
                 if not run:
                     raise ReplayExecutionError("replay Hunt does not exist")
-                if str(run["target_kind"]) not in {"web", "api"} or not run["target_id"]:
-                    raise ReplayExecutionError("collection replay requires a web or API Hunt")
+                target_kind = str(run["target_kind"])
+                if target_kind in {"web", "api"} and run["target_id"]:
+                    target_owner_id = run["target_id"]
+                    collection_owner_column = "target_id"
+                elif target_kind == "device" and run["device_target_id"]:
+                    target_owner_id = run["device_target_id"]
+                    collection_owner_column = "device_target_id"
+                else:
+                    raise ReplayExecutionError(
+                        "collection replay requires a web, API, or device HTTP Hunt"
+                    )
                 action = await conn.fetchrow(
                     """SELECT id, capability_name, status FROM hunt_actions
                        WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
@@ -19169,7 +19219,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 if not action or str(action["capability_name"]) != "collections.replay_safe":
                     raise ReplayExecutionError("replay action identity is not valid")
                 collection = await conn.fetchrow(
-                    """SELECT c.id, c.encrypted_payload, c.payload_sha256,
+                    f"""SELECT c.id, c.encrypted_payload, c.payload_sha256,
                               b.id AS binding_id, b.allowed_origins, b.environment_id,
                               e.encrypted_payload AS encrypted_environment,
                               e.payload_sha256 AS environment_sha256,
@@ -19184,11 +19234,12 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
-                       WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
+                       WHERE c.id=$1 AND c.{collection_owner_column}=$4
+                         AND c.is_active=true
                          AND b.target_id=$4 AND b.target_kind=$5
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
-                    uuid.UUID(selection_id), run["target_id"], str(run["target_kind"]),
+                    uuid.UUID(selection_id), target_owner_id, target_kind,
                 )
                 if not collection:
                     raise ReplayExecutionError(
@@ -19244,7 +19295,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         existing_reservation.action_id != action_id
                         or existing_reservation.record.owner_kind != "hunt"
                         or existing_reservation.record.owner_id != hunt_id
-                        or existing_reservation.record.capability_name != "collections.replay"
+                        or existing_reservation.record.capability_name
+                        != "collections.replay_safe"
+                        or existing_reservation.action_digest
+                        != queued_action_digest
                     ):
                         raise ReservationConflict(
                             "replay reservation identity does not match the queued action"
@@ -19253,6 +19307,18 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         result = _worker_terminal_replay_result(
                             existing_reservation, job_id=job_id,
                         )
+                        return
+                    if existing_reservation.record.status in {
+                        "reserved", "running"
+                    }:
+                        result = {
+                            "job_id": job_id,
+                            "status": existing_reservation.record.status,
+                            "error": "idempotent_redelivery_in_flight",
+                            "reservation_id": reservation_id,
+                            "durable_budget_settled": False,
+                            "idempotent_redelivery": True,
+                        }
                         return
 
         raw_payload = str(decrypt_secret(collection["encrypted_payload"]) or "")
@@ -19308,26 +19374,40 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             if isinstance(context.get("target"), Mapping) else {}
         )
         origins = tuple(str(item) for item in target_context.get("origins") or () if str(item))
-        target_url = str(target_context.get("url") or "")
+        target_url = (
+            str(queued_allowed_origins[0])
+            if target_kind == "device"
+            else str(target_context.get("url") or "")
+        )
         parsed_target = urllib.parse.urlsplit(target_url)
-        hunt_origins = tuple(
-            str(item) for item in origins if str(item)
+        hunt_origins = (
+            tuple(str(item) for item in queued_allowed_origins if str(item))
+            if target_kind == "device"
+            else tuple(str(item) for item in origins if str(item))
         )
         if any(origin not in hunt_origins for origin in queued_allowed_origins):
             raise ReplayExecutionError(
                 "request collection binding exceeds the Hunt target origins"
             )
         target = TargetBinding(
-            target_id=str(run["target_id"]),
-            target_kind=str(run["target_kind"]),
-            canonical_host=parsed_target.hostname,
+            target_id=str(target_owner_id),
+            target_kind=target_kind,
+            canonical_host=(
+                str(target_context.get("locator") or parsed_target.hostname or "")
+                if target_kind == "device"
+                else parsed_target.hostname
+            ),
             allowed_origins=queued_allowed_origins,
             allowed_addresses=tuple(
                 str(item) for item in context.get("authorized_target_addresses") or () if str(item)
             ),
             allowed_root_domains=(
-                str(target_context.get("root_domain") or parsed_target.hostname or "")
-                .lower().rstrip("."),
+                ()
+                if target_kind == "device"
+                else (
+                    str(target_context.get("root_domain") or parsed_target.hostname or "")
+                    .lower().rstrip("."),
+                )
             ),
             environment=str(target_context.get("environment") or "unknown"),
             scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None,
@@ -19425,7 +19505,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         requested = DurableBudgetReservation.request(
             owner_kind="hunt",
             owner_id=hunt_id,
-            capability_name="collections.replay",
+            capability_name="collections.replay_safe",
             amounts=requested_budget,
             reservation_id=reservation_id,
         )
@@ -19442,7 +19522,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 stored = await store.create_requested(
                     conn,
                     action_id=action_id,
-                    action_digest=plan.input_digest,
+                    action_digest=queued_action_digest,
                     record=requested,
                 )
                 if stored.record.terminal:
@@ -19631,18 +19711,29 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     persisted.record if persisted is not None else None
                 ),
                 "receipt_context": receipt_context,
+                "receipt_capability_name": replay_spec.name,
+                "receipt_adapter_name": replay_spec.adapter,
+                "receipt_adapter_version": replay_spec.adapter_version,
+                "receipt_input_digest": queued_action_digest,
             },
         )
-        execution = await CapabilityExecutor().execute(
-            CapabilityExecutionContext(
-                specification=replay_spec,
-                target=target,
-                requested_budget=persisted.record.requested,
-                adapter_managed_cancellation=True,
-            ),
-            replay_adapter,
+        execution = await _dispatch_registered_hunt_adapter(
+            hunt_id=hunt_id,
+            action_id=action_id,
+            specification=replay_spec,
+            target=target,
+            capability_input={
+                "collection_id": collection_id,
+                "request_ids": list(selector.request_ids),
+                "limit": selector.limit,
+            },
+            requested_budget=persisted.record.requested,
+            adapter=replay_adapter,
+            reservation_id=reservation_id,
+            action_digest=queued_action_digest,
             heartbeat=lambda: asyncio.sleep(0),
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
+            adapter_managed_cancellation=True,
         )
         outcome = replay_adapter.outcome
         if outcome is None:
@@ -20037,7 +20128,9 @@ async def process_canonical_scanner_capability_job(
         capability_name = str(
             job_data.get("capability_name") or ""
         ).strip().lower()
-        if capability_name not in DURABLE_SCANNER_HUNT_CAPABILITIES:
+        if not HUNT_ACTION_DISPATCHER.has_placement(
+            capability_name, "worker_scanner"
+        ):
             raise agent_tools.AgentToolError(
                 "capability is not a durable external scanner action"
             )
@@ -20317,13 +20410,16 @@ async def process_canonical_scanner_capability_job(
                 "path": safe_path,
             },
         )
-        execution = await CapabilityExecutor().execute(
-            CapabilityExecutionContext(
-                specification=spec,
-                target=target,
-                requested_budget=persisted.record.requested,
-            ),
-            scanner_adapter,
+        execution = await _dispatch_registered_hunt_adapter(
+            hunt_id=str(hunt_id),
+            action_id=str(action_id),
+            specification=spec,
+            target=target,
+            capability_input=capability_input,
+            requested_budget=persisted.record.requested,
+            adapter=scanner_adapter,
+            reservation_id=reservation_id,
+            action_digest=queued_action_digest,
             heartbeat=heartbeat_reservation,
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )
@@ -20589,7 +20685,9 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
         capability_name = str(
             job_data.get("capability_name") or ""
         ).strip().lower()
-        if capability_name not in DURABLE_BROWSER_HUNT_CAPABILITIES:
+        if not HUNT_ACTION_DISPATCHER.has_placement(
+            capability_name, "worker_browser"
+        ):
             raise BrowserCapabilityInputError(
                 "capability is not a durable browser action"
             )
@@ -20834,14 +20932,17 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         current=heartbeat,
                     )
 
-        executor = CapabilityExecutor()
-        execution = await executor.execute(
-            CapabilityExecutionContext(
-                specification=spec,
-                target=target,
-                requested_budget=persisted.record.requested,
-            ),
-            browser_adapter(prepared),
+        executable_browser_adapter = browser_adapter(prepared)
+        execution = await _dispatch_registered_hunt_adapter(
+            hunt_id=str(hunt_id),
+            action_id=str(action_id),
+            specification=spec,
+            target=target,
+            capability_input=capability_input,
+            requested_budget=persisted.record.requested,
+            adapter=executable_browser_adapter,
+            reservation_id=reservation_id,
+            action_digest=queued_action_digest,
             heartbeat=heartbeat_reservation,
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )
@@ -21080,7 +21181,9 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
         if not re.fullmatch(r"[0-9a-f]{64}", queued_action_digest):
             raise CapabilityInputError("capability action digest is invalid")
         capability_name = str(job_data.get("capability_name") or "").strip().lower()
-        if capability_name not in DURABLE_WORKER_HUNT_CAPABILITIES:
+        if not HUNT_ACTION_DISPATCHER.has_placement(
+            capability_name, "worker_network"
+        ):
             raise CapabilityInputError("capability is not a durable network action")
         capability_input = dict(job_data.get("capability_input") or {})
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
@@ -21290,21 +21393,24 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     )
 
         started_at = persisted.record.started_at or datetime.now(timezone.utc)
-        execution = await CapabilityExecutor().execute(
-            CapabilityExecutionContext(
-                specification=agent_tools.CAPABILITY_REGISTRY.require(
-                    capability_name
-                ),
-                target=target,
-                requested_budget=persisted.record.requested,
-            ),
-            NetworkExecutionAdapter(
-                prepared=prepared,
-                parser=adapter,
-                command_runner=run_streaming,
-                max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
-                max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
-            ),
+        specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        executable_network_adapter = NetworkExecutionAdapter(
+            prepared=prepared,
+            parser=adapter,
+            command_runner=run_streaming,
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+            max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
+        )
+        execution = await _dispatch_registered_hunt_adapter(
+            hunt_id=str(hunt_id),
+            action_id=str(action_id),
+            specification=specification,
+            target=target,
+            capability_input=capability_input,
+            requested_budget=persisted.record.requested,
+            adapter=executable_network_adapter,
+            reservation_id=reservation_id,
+            action_digest=queued_action_digest,
             heartbeat=heartbeat_reservation,
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )
@@ -21547,8 +21653,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         capability_name = str(
             job_data.get("capability_name") or ""
         ).strip().lower()
-        if capability_name not in (
-            DURABLE_AUTH_HUNT_CAPABILITIES | DURABLE_HTTP_HUNT_CAPABILITIES
+        if not HUNT_ACTION_DISPATCHER.has_placement(
+            capability_name, "worker_auth", "worker_http"
         ):
             raise CapabilityInputError(
                 "capability is not a durable authentication or HTTP action"
@@ -22057,13 +22163,16 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             redacted_execution=redacted_execution,
         )
         started_at = persisted.record.started_at or datetime.now(timezone.utc)
-        execution = await CapabilityExecutor().execute(
-            CapabilityExecutionContext(
-                specification=spec,
-                target=target,
-                requested_budget=persisted.record.requested,
-            ),
-            adapter,
+        execution = await _dispatch_registered_hunt_adapter(
+            hunt_id=str(hunt_id),
+            action_id=str(action_id),
+            specification=spec,
+            target=target,
+            capability_input=capability_input,
+            requested_budget=persisted.record.requested,
+            adapter=adapter,
+            reservation_id=reservation_id,
+            action_digest=queued_action_digest,
             heartbeat=heartbeat_reservation,
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
         )

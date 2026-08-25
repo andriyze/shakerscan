@@ -4091,7 +4091,7 @@ def test_device_control_authorization_executor_replaces_the_hard_block():
 
 def test_device_http_request_is_pinned_bounded_and_rate_limited():
     api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    executor = api[api.index("async def _execute_device_agent_tool"):]
+    executor = api[api.index("async def _execute_device_capability_operation"):]
     executor = executor[:executor.index("async def _device_verify_candidate_tool")]
     branch = executor[executor.index('if name == "device_http_request":'):]
     branch = branch[:branch.index('if name == "verify_service_state":')]

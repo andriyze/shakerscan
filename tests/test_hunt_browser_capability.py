@@ -17,10 +17,7 @@ from api.capabilities.browser import (
     _validate_read_only_interaction,
     browser_capability_adapter,
 )
-from api.hunt.capability_reservations import (
-    DURABLE_BROWSER_HUNT_CAPABILITIES,
-    terminalize_hunt_capability,
-)
+from api.hunt.capability_reservations import terminalize_hunt_capability
 from api.runtime.budget_reservations import DurableBudgetReservation
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import TargetBinding
@@ -45,7 +42,7 @@ def _target(
 
 
 def test_browser_registry_and_durable_set_are_explicit_and_bounded():
-    assert DURABLE_BROWSER_HUNT_CAPABILITIES == {
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_browser")} == {
         "browser.interact", "browser.navigate",
     }
     spec = CAPABILITY_REGISTRY.require("browser.navigate")
@@ -677,7 +674,7 @@ def test_browser_queue_and_worker_rebuild_authority_and_settle_atomically():
     assert "browser_capability_adapter(capability_name)" in worker
     assert "hunt_capability_action_digest(" in worker
     assert worker.index("stored.record.start(") < worker.index(
-        "CapabilityExecutor()"
+        "_dispatch_registered_hunt_adapter("
     )
     assert "heartbeat_reservation" in worker
     assert "terminalize_hunt_capability(" in worker

@@ -881,7 +881,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.replay_safe", "Replay up to 25 safe-method requests from a bound collection.",
-            "http", "passive", frozenset({"web", "api"}), "collections.replay", "1", None,
+            "http", "passive", frozenset({"web", "api", "device"}), "collections.replay", "1", None,
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},

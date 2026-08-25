@@ -25,11 +25,11 @@ def _handler_source() -> str:
 def test_device_queue_actions_reserve_before_downstream_submission():
     handler = _handler_source()
 
-    assert "DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES" in handler
+    assert 'is_device_queue = placement == "device_queue"' in handler
     assert "DeviceExecutionAdapter(" in handler
-    assert "CapabilityExecutor().execute(" in handler
+    assert "dispatch_registered_adapter(" in handler
     assert handler.index("create_requested(") < handler.index(
-        "_execute_device_agent_tool("
+        "_execute_device_capability_operation("
     )
     assert "_merge_hunt_device_queue_context" in handler
     assert 'context["device_state"] = device_state' in handler
@@ -71,7 +71,7 @@ def test_blocked_device_queue_refunds_everything_except_planner_action():
     handler = _handler_source()
 
     refund = handler[handler.index("and not device_queue_enqueued"):]
-    refund = refund[:refund.index("elif name in DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES")]
+    refund = refund[:refund.index("elif is_device_http")]
     assert "actual_charges = _hunt_nonexecuting_actual(charges)" in refund
 
 

@@ -4,11 +4,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 
-from api.hunt.capability_reservations import (
-    DURABLE_WORKER_HUNT_CAPABILITIES,
-    terminalize_hunt_capability,
-)
+from api.hunt.capability_reservations import terminalize_hunt_capability
 from api.runtime.budget_reservations import DurableBudgetReservation
+from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
 NOW = datetime(2026, 8, 22, 16, 0, tzinfo=timezone.utc)
@@ -34,7 +32,7 @@ def _running_network_reservation() -> DurableBudgetReservation:
 
 
 def test_worker_network_capability_set_is_explicit():
-    assert DURABLE_WORKER_HUNT_CAPABILITIES == {
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_network")} == {
         "ports.discover",
         "service.fingerprint",
         "subdomains.discover",
@@ -104,8 +102,8 @@ def test_api_admits_network_hold_before_queue_and_never_double_settles():
         '"action_digest"',
     ):
         assert field in enqueue
-    assert "DURABLE_WORKER_HUNT_CAPABILITIES" in handler
-    assert "DURABLE_SCANNER_HUNT_CAPABILITIES" in handler
+    assert 'is_network = placement == "worker_network"' in handler
+    assert 'is_scanner = placement == "worker_scanner"' in handler
     assert "durable_budget = api_managed_budget or worker_durable_budget" in handler
     assert 'admission_action_status = "reserved"' in handler
     assert handler.index("create_requested") < handler.index(
@@ -138,9 +136,9 @@ def test_worker_rebuilds_authority_starts_heartbeats_and_settles_atomically():
     assert "hunt_capability_action_digest(" in handler
     assert "stored.action_digest != queued_action_digest" in handler
     assert "stored.record.start(" in handler
-    assert handler.index("stored.record.start(") < handler.index("CapabilityExecutor().execute(")
+    assert handler.index("stored.record.start(") < handler.index("_dispatch_registered_hunt_adapter(")
     assert "heartbeat_reservation" in handler
-    assert "CapabilityExecutor().execute(" in handler
+    assert "_dispatch_registered_hunt_adapter(" in handler
     assert "NetworkExecutionAdapter(" in handler
     assert "capability_input=execution.redacted_execution" in handler
     assert "terminalize_hunt_capability(" in handler

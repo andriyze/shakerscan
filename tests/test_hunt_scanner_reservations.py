@@ -2,10 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from api.hunt.capability_reservations import (
-    DURABLE_SCANNER_HUNT_CAPABILITIES,
-    DURABLE_WORKER_HUNT_CAPABILITIES,
-)
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
@@ -13,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_durable_scanner_capability_set_is_explicit():
-    assert DURABLE_SCANNER_HUNT_CAPABILITIES == {
+    scanners = {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_scanner")}
+    network = {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_network")}
+    assert scanners == {
         "sqli.verify",
         "templates.scan",
         "web.content_discover",
@@ -22,8 +20,7 @@ def test_durable_scanner_capability_set_is_explicit():
         "xss.verify",
     }
     assert (
-        DURABLE_SCANNER_HUNT_CAPABILITIES
-        | DURABLE_WORKER_HUNT_CAPABILITIES
+        scanners | network
     ) >= {
         spec.name for spec in CAPABILITY_REGISTRY.process_tools()
     }
@@ -63,10 +60,10 @@ def test_api_routes_scanners_through_worker_owned_durable_settlement():
     )
     handler = source[start:end]
 
-    assert "DURABLE_SCANNER_HUNT_CAPABILITIES" in handler
+    assert 'is_scanner = placement == "worker_scanner"' in handler
     assert "await _enqueue_canonical_scanner_capability(" in handler
     scanner_branch = handler[handler.index(
-        "elif name in DURABLE_SCANNER_HUNT_CAPABILITIES:"
+        "elif is_scanner:"
     ):handler.index('elif name == "tls.inspect":')]
     assert "reservation_id=durable_reservation.record.reservation_id" in scanner_branch
     assert "action_digest=durable_action_digest" in scanner_branch
@@ -91,10 +88,10 @@ def test_scanner_worker_rebuilds_authority_and_settles_atomically():
     assert "hunt_capability_action_digest(" in handler
     assert "stored.record.start(" in handler
     assert handler.index("stored.record.start(") < handler.index(
-        "CapabilityExecutor().execute("
+        "_dispatch_registered_hunt_adapter("
     )
     assert "heartbeat_reservation" in handler
-    assert "CapabilityExecutor().execute(" in handler
+    assert "_dispatch_registered_hunt_adapter(" in handler
     assert "ScannerExecutionAdapter(" in handler
     assert "capability_input=execution.redacted_execution" in handler
     assert "terminalize_hunt_capability(" in handler

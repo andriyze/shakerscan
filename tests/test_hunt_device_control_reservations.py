@@ -15,15 +15,15 @@ def test_device_control_actions_use_atomic_durable_settlement():
     )
     handler = source[start:end]
 
-    assert "DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES" in handler
+    assert 'is_device_control = placement == "device_control"' in handler
     assert "DeviceExecutionAdapter(" in handler
-    assert "CapabilityExecutor().execute(" in handler
+    assert "dispatch_registered_adapter(" in handler
     assert "inline_device_target_binding()" in handler
     assert "_merge_hunt_device_control_context" in handler
     assert "merge_device_context = (" in handler
     assert '"context_pack=$3, updated_at=NOW() WHERE id=$1"' in handler
     assert handler.index("create_requested(") < handler.index(
-        "_execute_device_agent_tool("
+        "_execute_device_capability_operation("
     )
     assert handler.index("persist_terminal(") < handler.index(
         "UPDATE hunt_actions"
@@ -36,8 +36,8 @@ def test_device_control_context_merge_is_limited_to_read_only_evidence():
     end = source.index("\n\ndef _hunt_ledger_limits", start)
     helper = source[start:end]
 
-    assert 'persisted_state["evidence"] = persisted_evidence' in helper
-    assert 'persisted_state["next_evidence_ref"]' in helper
+    assert '"evidence": persisted_evidence' in helper
+    assert 'persisted_runtime["next_evidence_ref"]' in helper
     assert "execution_context_before" in helper
     assert "execution_context_after" in helper
-    assert "traffic_frozen" not in helper
+    assert "DeviceHuntPolicyState.from_mapping" in helper

@@ -2,10 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from api.hunt.capability_reservations import (
-    DURABLE_AUTH_HUNT_CAPABILITIES,
-    DURABLE_HTTP_HUNT_CAPABILITIES,
-)
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
@@ -18,15 +14,17 @@ def _slice(source: str, start: str, end: str) -> str:
 
 
 def test_auth_and_http_routes_derive_from_the_canonical_registry():
-    assert DURABLE_AUTH_HUNT_CAPABILITIES == {
+    auth = {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_auth")}
+    http = {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_http")}
+    assert auth == {
         "auth.session.establish",
         "auth.session.refresh",
         "auth.session.revoke",
     }
-    assert DURABLE_HTTP_HUNT_CAPABILITIES == {"authz.verify", "http.request"}
+    assert http == {"authz.verify", "http.request"}
     assert all(
         CAPABILITY_REGISTRY.require(name).hunt_executor == "worker_auth"
-        for name in DURABLE_AUTH_HUNT_CAPABILITIES
+        for name in auth
     )
     assert CAPABILITY_REGISTRY.require("http.request").hunt_executor == "worker_http"
 

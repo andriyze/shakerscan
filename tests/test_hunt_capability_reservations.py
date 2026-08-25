@@ -4,16 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from api.hunt.capability_reservations import (
-    DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES,
-    DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES,
-    DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES,
-    DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES,
-    DURABLE_INLINE_HUNT_CAPABILITIES,
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
     terminalize_hunt_capability,
 )
 from api.runtime.budget_reservations import DurableBudgetReservation
+from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
 NOW = datetime(2026, 8, 22, 15, 0, tzinfo=timezone.utc)
@@ -50,7 +46,7 @@ def _running_reservation():
 
 
 def test_inline_hunt_capability_set_is_explicit_and_bounded():
-    assert DURABLE_INLINE_HUNT_CAPABILITIES == {
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("inline")} == {
         "collections.inspect",
         "collections.select",
         "tls.inspect",
@@ -60,25 +56,25 @@ def test_inline_hunt_capability_set_is_explicit_and_bounded():
 
 
 def test_read_only_device_control_capability_set_is_explicit():
-    assert DURABLE_DEVICE_CONTROL_HUNT_CAPABILITIES == {
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("device_control")} == {
         "device.capabilities.inspect",
         "device.inspect",
     }
 
 
 def test_device_http_capability_set_is_explicit():
-    assert DURABLE_DEVICE_HTTP_HUNT_CAPABILITIES == {"device.http.probe"}
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("device_http")} == {"device.http.probe"}
 
 
 def test_device_queue_capability_set_is_explicit():
-    assert DURABLE_DEVICE_QUEUE_HUNT_CAPABILITIES == {
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("device_queue")} == {
         "device.scan",
         "device.service.verify",
     }
 
 
 def test_device_ssh_proposal_capability_set_is_explicit():
-    assert DURABLE_DEVICE_SSH_PROPOSAL_HUNT_CAPABILITIES == {
+    assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("device_ssh_proposal")} == {
         "device.ssh.propose",
     }
 
@@ -204,7 +200,7 @@ def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     assert "HttpRequestExecutionAdapter(" not in handler
     assert "TlsInspectionExecutionAdapter(" in handler
     assert "ControlPlaneExecutionAdapter(" in handler
-    assert handler.count("CapabilityExecutor().execute(") >= 4
+    assert handler.count("dispatch_registered_adapter(") >= 4
     assert "elif spec.process_tool_name:" not in handler
     assert "receipt_observations" in handler
     assert "scope_receipt_id=validated_scope_receipt_id" in handler
