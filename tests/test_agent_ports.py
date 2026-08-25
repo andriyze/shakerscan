@@ -684,8 +684,24 @@ def test_scanner_request_settlement_distinguishes_exact_from_observed():
             json.dumps({"request": {"endpoint": "https://example.test/b"}}),
         ])
     )
-    assert katana["mode"] == "observed_lower_bound"
-    assert katana["actual"] is None and katana["observed_minimum"] == 2
+    assert katana == {
+        "mode": "unavailable",
+        "actual": None,
+        "observed_minimum": 0,
+        "source": "discovery_records_are_not_wire_evidence",
+    }
+
+
+def test_katana_javascript_routes_are_not_miscounted_as_wire_requests():
+    routes = "\n".join(
+        f"https://example.test/static-route-{index}" for index in range(51)
+    )
+
+    settlement = at.scanner_request_settlement("katana", routes)
+
+    assert settlement["mode"] == "unavailable"
+    assert settlement["observed_minimum"] == 0
+    assert at.parse_scanner_output("katana", routes)["record_count"] == 51
 
 
 def test_katana_compact_output_is_typed_deduplicated_and_host_scoped():

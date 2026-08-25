@@ -1099,6 +1099,20 @@ def scanner_request_settlement(name: str, stdout: str) -> dict[str, Any]:
             "observed_minimum": actual,
             "source": "scanner_counter",
         }
+    if scanner == "katana":
+        # Katana's compact stream is a discovery feed, not a wire log.  In
+        # particular, JavaScript parsing can emit many same-origin routes that
+        # Katana never fetched.  Treating those routes as a lower bound on HTTP
+        # requests can therefore contradict the pre-launch rate/time proof and
+        # falsely turn a safely bounded crawl into a limiter overrun.  Without
+        # an explicit scanner counter we keep the settlement unavailable and
+        # conservatively charge the durable reservation.
+        return {
+            "mode": "unavailable",
+            "actual": None,
+            "observed_minimum": 0,
+            "source": "discovery_records_are_not_wire_evidence",
+        }
     typed = parse_scanner_output(scanner, text)
     observed = int(typed.get("record_count") or 0)
     if scanner == "httpx" and observed > 0:
