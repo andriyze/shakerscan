@@ -370,8 +370,6 @@ download "$REPO_RAW_BASE/.claude/commands/js-analyze.md" "$INSTALL_DIR/.claude/c
 download "$REPO_RAW_BASE/.claude/commands/research.md" "$INSTALL_DIR/.claude/commands/research.md"
 download "$REPO_RAW_BASE/.claude/commands/review-skills.md" "$INSTALL_DIR/.claude/commands/review-skills.md"
 download "$REPO_RAW_BASE/.claude/commands/save-finding.md" "$INSTALL_DIR/.claude/commands/save-finding.md"
-download "$REPO_RAW_BASE/.claude/commands/scan-full.md" "$INSTALL_DIR/.claude/commands/scan-full.md"
-download "$REPO_RAW_BASE/.claude/commands/scan-smart.md" "$INSTALL_DIR/.claude/commands/scan-smart.md"
 download "$REPO_RAW_BASE/.claude/commands/scan.md" "$INSTALL_DIR/.claude/commands/scan.md"
 download "$REPO_RAW_BASE/.claude/commands/status.md" "$INSTALL_DIR/.claude/commands/status.md"
 download "$REPO_RAW_BASE/.claude/commands/subdomains.md" "$INSTALL_DIR/.claude/commands/subdomains.md"

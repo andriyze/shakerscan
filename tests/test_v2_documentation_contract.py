@@ -49,6 +49,8 @@ def test_public_scan_commands_are_v2_and_secret_free():
 def test_legacy_slash_commands_are_removed():
     for name in ("scan-full.md", "scan-smart.md"):
         assert not (ROOT / ".claude" / "commands" / name).exists()
+        assert name not in (ROOT / "install" / "index.sh").read_text(encoding="utf-8")
+        assert name not in (ROOT / "install" / "index.html").read_text(encoding="utf-8")
 
 
 def test_inventory_separates_canonical_and_internal_surfaces():
