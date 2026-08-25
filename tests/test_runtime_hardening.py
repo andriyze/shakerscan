@@ -208,6 +208,7 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert "upgrade_acceptance_receipt.py" in script
     assert "_assert_rollback" in verifier
     assert 'choices=("clean", "dirty", "verify_dirty", "rollback")' in verifier
+    assert '"active_findings_count": 1 if upgraded else 3' in verifier
 
 
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):

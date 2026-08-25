@@ -118,7 +118,11 @@ async def _assert_stable_fixture(conn, *, upgraded: bool) -> None:
         "id": TARGET_ID,
         "url": "https://upgrade.example.test",
         "total_scans": 3,
-        "active_findings_count": 3,
+        # Candidate startup repairs this denormalized badge from the one
+        # authoritative active finding in the fixture. A restored pre-upgrade
+        # database must retain the exact legacy value until candidate migrations
+        # are run again.
+        "active_findings_count": 1 if upgraded else 3,
         "canonical_key": TARGET_CANONICAL_KEY,
     }:
         raise RuntimeError(f"previous-stable target was not preserved: {target!r}")
