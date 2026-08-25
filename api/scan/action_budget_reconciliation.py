@@ -128,4 +128,47 @@ async def scan_action_budget_reconciliation(conn: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["scan_action_budget_reconciliation"]
+async def repair_terminal_reservation_actions(conn: Any, *, limit: int = 1000) -> int:
+    """Terminalize stale Scan actions whose linked reservation already settled."""
+    if limit < 1 or limit > 1000:
+        raise ValueError("repair limit must be between 1 and 1000")
+    rows = await conn.fetch(
+        r"""
+        WITH candidates AS (
+            SELECT a.id, r.status AS reservation_status,
+                   r.failure_reason, r.execution_uncertain
+              FROM budget_reservations r
+              JOIN scan_capability_actions a
+                ON r.owner_kind='scan'
+               AND r.owner_id=a.scan_id::text
+               AND r.action_id=a.action_id
+               AND r.action_digest=a.action_digest
+             WHERE r.status IN ('committed','released','failed')
+               AND a.status NOT IN (
+                   'success','partial','skipped','blocked','failed','cancelled','timed_out'
+               )
+               AND r.updated_at < now() - INTERVAL '5 minutes'
+             ORDER BY r.updated_at, a.id
+             FOR UPDATE OF a SKIP LOCKED
+             LIMIT $1
+        )
+        UPDATE scan_capability_actions a
+           SET status=CASE WHEN c.reservation_status='released' THEN 'blocked' ELSE 'failed' END,
+               reason_code=COALESCE(NULLIF(c.failure_reason, ''), 'terminal_reservation_reconciled'),
+               result_json=COALESCE(a.result_json, '{}'::jsonb) || jsonb_build_object(
+                   'error', 'terminal_reservation_reconciled',
+                   'reservation_status', c.reservation_status,
+                   'execution_uncertain', c.execution_uncertain
+               ),
+               finished_at=COALESCE(a.finished_at, NOW()),
+               updated_at=NOW()
+          FROM candidates c
+         WHERE a.id=c.id
+        RETURNING a.id
+        """,
+        limit,
+    )
+    return len(rows)
+
+
+__all__ = ["repair_terminal_reservation_actions", "scan_action_budget_reconciliation"]

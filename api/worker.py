@@ -266,6 +266,7 @@ from runtime.request_replay_executor import (
     replay_reservation_budget,
 )
 from runtime.reservation_recovery import recover_stale_reservations
+from scan.action_budget_reconciliation import repair_terminal_reservation_actions
 from runtime.reservation_store import (
     PostgresBudgetReservationStore,
     ReservationConflict,
@@ -22522,16 +22523,22 @@ async def sweep_stale_budget_reservations() -> dict[str, int]:
                 now=datetime.now(timezone.utc),
                 limit=BUDGET_RESERVATION_SWEEP_BATCH_SIZE,
             )
+            repaired_scan_actions = await repair_terminal_reservation_actions(
+                conn,
+                limit=BUDGET_RESERVATION_SWEEP_BATCH_SIZE,
+            )
     summary = {
         "recovered": len(events),
         "released": sum(event.terminal_status == "released" for event in events),
         "failed_uncertain": sum(event.execution_uncertain for event in events),
+        "scan_actions_repaired": repaired_scan_actions,
     }
-    if events:
+    if events or repaired_scan_actions:
         print(
             "[watchdog] stale budget reservations recovered: "
             f"released={summary['released']}, "
-            f"failed_uncertain={summary['failed_uncertain']}",
+            f"failed_uncertain={summary['failed_uncertain']}, "
+            f"scan_actions_repaired={summary['scan_actions_repaired']}",
             flush=True,
         )
     return summary

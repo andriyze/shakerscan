@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from api.scan.action_budget_reconciliation import (
+    repair_terminal_reservation_actions,
     scan_action_budget_reconciliation,
 )
 
@@ -15,6 +18,11 @@ class _Conn:
     async def fetchrow(self, query):
         self.query = query
         return self.row
+
+    async def fetch(self, query, limit):
+        self.query = query
+        self.limit = limit
+        return list(self.row or [])
 
 
 def test_reconciliation_reports_only_content_free_aggregate_health():
@@ -49,3 +57,20 @@ def test_reconciliation_is_ok_when_all_invariants_hold():
 
     assert result["status"] == "ok"
     assert result["inconsistent_count"] == 0
+
+
+def test_repair_terminalizes_actions_after_terminal_reservations():
+    conn = _Conn([{"id": "a"}, {"id": "b"}])
+
+    repaired = asyncio.run(repair_terminal_reservation_actions(conn, limit=25))
+
+    assert repaired == 2
+    assert conn.limit == 25
+    assert "FOR UPDATE OF a SKIP LOCKED" in conn.query
+    assert "WHEN c.reservation_status='released' THEN 'blocked'" in conn.query
+    assert "terminal_reservation_reconciled" in conn.query
+
+
+def test_repair_rejects_unbounded_limits():
+    with pytest.raises(ValueError, match="between 1 and 1000"):
+        asyncio.run(repair_terminal_reservation_actions(_Conn([]), limit=1001))

@@ -113,6 +113,34 @@ async def _persist_owner_ledger(
             owner_id,
             encoded,
         )
+        action_status = "failed" if stored.record.status == "running" else "blocked"
+        reason_code = (
+            "stale_running_worker"
+            if stored.record.status == "running"
+            else "stale_reserved_before_execution"
+        )
+        await conn.execute(
+            """UPDATE scan_capability_actions
+               SET status=$4, reason_code=$5,
+                   result_json=COALESCE(result_json, '{}'::jsonb) || $6::jsonb,
+                   finished_at=COALESCE(finished_at, NOW()), updated_at=NOW()
+               WHERE scan_id=$1 AND action_id=$2
+                 AND reservation_id=$3::uuid
+                 AND status NOT IN (
+                    'success','partial','skipped','blocked','failed','cancelled','timed_out'
+                 )""",
+            owner_id,
+            stored.action_id,
+            stored.record.reservation_id,
+            action_status,
+            reason_code,
+            json.dumps({
+                "error": "stale_reservation_recovered",
+                "reservation_id": stored.record.reservation_id,
+                "reservation_status": "failed" if stored.record.status == "running" else "released",
+                "execution_uncertain": stored.record.status == "running",
+            }, sort_keys=True, separators=(",", ":")),
+        )
 
 
 async def recover_stale_reservations(

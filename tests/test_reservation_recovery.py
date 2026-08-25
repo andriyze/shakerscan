@@ -17,9 +17,9 @@ from api.runtime.reservation_store import StoredBudgetReservation
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
 
 
-def _stored(*, status: str, reservation_id: str, action_id: str):
+def _stored(*, status: str, reservation_id: str, action_id: str, owner_kind: str = "hunt"):
     requested = DurableBudgetReservation.request(
-        owner_kind="hunt",
+        owner_kind=owner_kind,
         owner_id="11111111-1111-4111-8111-111111111111",
         capability_name="collections.replay",
         amounts={"http_requests": 3, "agent_actions": 1},
@@ -148,6 +148,35 @@ def test_orphaned_stale_reservation_terminalizes_from_held_snapshot():
     assert conn.execute_calls == []
 
 
+def test_scan_recovery_terminalizes_the_linked_capability_action():
+    stored = _stored(
+        status="running",
+        reservation_id="44444444-4444-4444-8444-444444444444",
+        action_id="finalize.report",
+        owner_kind="scan",
+    )
+    store = Store([stored])
+    conn = Connection([
+        {"http_requests": 7, "agent_actions": 3, "candidates": 2, "verifications": 1},
+    ])
+
+    asyncio.run(recover_stale_reservations(
+        conn,
+        now=NOW + timedelta(seconds=11),
+        store=store,
+    ))
+
+    action_updates = [
+        args for query, args in conn.execute_calls
+        if "UPDATE scan_capability_actions" in query
+    ]
+    assert len(action_updates) == 1
+    assert action_updates[0][1] == "finalize.report"
+    assert action_updates[0][3] == "failed"
+    assert action_updates[0][4] == "stale_running_worker"
+    assert json.loads(action_updates[0][5])["execution_uncertain"] is True
+
+
 def test_recovery_requires_timezone_and_durable_owner_or_hold():
     stored = _stored(
         status="reserved",
@@ -178,6 +207,7 @@ def test_worker_watchdog_wires_transactional_reservation_recovery():
     helper = source[start:end]
     assert "async with conn.transaction()" in helper
     assert "await recover_stale_reservations" in helper
+    assert "await repair_terminal_reservation_actions" in helper
     assert "BUDGET_RESERVATION_SWEEP_BATCH_SIZE" in helper
     main = source[source.index("async def async_main"):]
     assert "await sweep_stale_budget_reservations()" in main
