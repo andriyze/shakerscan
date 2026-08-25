@@ -16274,7 +16274,7 @@ async def cli_main():
     ap.add_argument("--focus-rules-json", type=str, help="JSON array of focus rules to constrain endpoint scope")
     ap.add_argument("--avoid-rules-json", type=str, help="JSON array of avoid rules to exclude endpoint scope")
     ap.add_argument("--verified-findings-only", dest="verified_findings_only", action="store_true", default=None,
-                    help="Only keep findings with exploit verification evidence (default for smart scans)")
+                    help="Only keep findings with exploit verification evidence")
     ap.add_argument("--no-verified-findings-only", dest="verified_findings_only", action="store_false",
                     help="Keep all findings regardless of verification status")
     ap.add_argument("--skip-global-checks", action="store_true",
@@ -16302,15 +16302,15 @@ async def cli_main():
     # --aggressive: Maximum coverage (+ aggressive exploit level) - 2+ hours
     ap.add_argument("--full", action="store_true", help="Broad full assessment including active XSS/SQLi (1-2 hours; bounded modules and budgets apply)")
     ap.add_argument("--aggressive", action="store_true", help="Aggressive mode - maximum coverage with aggressive testing (2+ hours)")
-    ap.add_argument("--smart", action="store_true", help="Smart scan - adaptive scanning with staged templates, recursive discovery, and context-aware attacks")
+    ap.add_argument("--smart", action="store_true", help="Internal pre-V2 compatibility flag; canonical clients use one Scan contract")
     ap.add_argument("--standard", action="store_true", help="Standard scan - balanced passive coverage (5-10 min)")
     ap.add_argument("--deep", action="store_true", help="Deep scan - thorough passive assessment (30-60 min, alias for --complete)")
     # Smart scan tuning options
-    ap.add_argument("--no-early-stop", action="store_true", help="Disable early stopping in smart scan (continue even after finding many vulns)")
+    ap.add_argument("--no-early-stop", action="store_true", help="Internal pre-V2 compatibility control for detector execution")
     ap.add_argument("--thorough-params", action="store_true", help="Test more parameters (100 endpoints x 10 params vs default 50x5)")
     ap.add_argument("--oob-callback-url", dest="oob_callback_url", help="Out-of-band callback URL for blind SQLi verification (e.g., Burp Collaborator)")
     ap.add_argument("--budget-profile", choices=["fast", "balanced", "thorough", "exhaustive"], default=None,
-                    help="Depth/time budget profile. Scan type selects checks; budget controls how hard they run.")
+                    help="Resource ceiling for the deterministic Scan pipeline; it does not select an engine or module set.")
     ap.add_argument("--budget-max-duration-minutes", type=int, dest="budget_max_duration_minutes")
     ap.add_argument("--budget-discovery-depth", type=int, dest="budget_discovery_depth")
     ap.add_argument("--budget-max-urls", type=int, dest="budget_max_urls")

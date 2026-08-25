@@ -642,7 +642,7 @@ function FindingsContent() {
             <DeepLinkFilterChip label={`Scan ${scanIdFilter.slice(0, 8)}…`} onClear={() => setFilter('scan_id', undefined)} />
           )}
           {researchCampaignFilter && (
-            <DeepLinkFilterChip label={`Deep hunt run ${researchCampaignFilter.slice(0, 8)}…`} onClear={() => setFilter('research_campaign_id', undefined)} />
+            <DeepLinkFilterChip label={`Hunt run ${researchCampaignFilter.slice(0, 8)}…`} onClear={() => setFilter('research_campaign_id', undefined)} />
           )}
           {targetIdFilter && (
             <DeepLinkFilterChip

@@ -872,7 +872,7 @@ function FindingDetailContent() {
               {research && (
                 <div className="flex items-center gap-2">
                   <span>Discovered by:</span>
-                  <span className="text-indigo-300">Deep hunt</span>
+                  <span className="text-indigo-300">Hunt</span>
                   {research.campaign_id && (
                     <Link
                       href={`/deep-hunt/runs/${research.campaign_id}`}

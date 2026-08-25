@@ -3639,10 +3639,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       )}
 
-      {/* Smart Scan Coverage */}
+      {/* Historical coverage payload, rendered with canonical product language. */}
       {(smart_coverage.endpoints || smart_coverage.parameters || smart_coverage.nuclei_templates) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-4">Smart Scan Coverage</h2>
+          <h2 className="text-2xl font-bold mb-4">Scan Coverage</h2>
 
           {/* Coverage Progress Bars */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">

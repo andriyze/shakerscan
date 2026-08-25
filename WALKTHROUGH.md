@@ -85,10 +85,10 @@ deterministic replay, principal/control comparison, and linked evidence.
 | Reproduce browser/auth workflows manually | **Interactive Testing** |
 | Review evidence cleanup or exports | **Evidence** |
 | Follow scans, scheduled work, investigations, and exports | **Timeline** |
-| Start an AI-driven investigation with bounded active testing | **Deep Hunt** |
+| Start an AI-driven investigation with bounded active testing | **Hunt** |
 | Preview a natural-language operation without executing it | **AI Operations Router** |
 
-The **Campaigns** page is a read-only mission-action ledger. Start Deep Hunt from **Deep Hunt**,
+The **Campaigns** page is a read-only mission-action ledger. Start an investigation from **Hunt**,
 then continue its keyless turn loop from the coding-agent session. The UI shows the current
 transcript, evidence-backed suspected findings, and deterministic verification results. Gated
 execution is enabled in standard installs, so no extra server setting or stored LLM key is needed;
@@ -100,9 +100,9 @@ the target authorization and expiring approval prompts still apply.
 Show ShakerScan status and use the correct remote UI URL.
 Run a standard scan on my authorized staging application.
 Explain the proof and coverage gaps for scan <id>.
-Show active Deep Hunt findings for this target.
+Show active Hunt findings for this target.
 What should Continuous ASM test next?
-Run Deep Hunt on this authorized registered target.
+Run Hunt on this authorized registered target.
 Check this model artifact without executing it.
 ```
 

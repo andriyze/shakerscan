@@ -32,13 +32,15 @@ Agents must preserve these distinctions:
 | User phrase | Route |
 |---|---|
 | “scan example.com” | DAST Scan with the default resource budget |
-| “quick/standard/deep/full/aggressive/smart scan” | Compatibility input mapped to a Scan budget and explicit policy |
-| “deep hunt”, “autonomous hunt”, “investigate autonomously” | Hunt |
-| “device hunt”, “investigate/hunt this TV, camera, printer, router, or device” | Hunt with `target_kind=device` |
+| “fast/balanced/thorough scan” | Scan with the named resource ceiling |
+| “investigate autonomously”, “hunt this target” | Hunt |
+| “investigate/hunt this TV, camera, printer, router, or device” | Hunt with `target_kind=device` |
 | “verify this finding” | Deterministic finding verifier/retest |
 | “interactive testing”, “test manually”, “browser session” | Interactive Testing |
 
-`deep scan` is a legacy DAST budget alias. `Deep Hunt` and `Device Hunt` are compatibility names for Hunt.
+Older names are accepted only at explicitly documented compatibility boundaries. They never select a
+different engine. See [`compatibility.md`](compatibility.md); current clients should discover Scan and
+Hunt request shapes from `GET /scan/contracts` and `GET /hunts/contract`.
 
 ## Device targets in Hunt
 
@@ -90,14 +92,14 @@ contracts.
 The primary source labels are:
 
 - DAST
-- Deep Hunt
+- Hunt
 - Interactive
 - AI Gate
 - Model Intake
 - ASM
 - Manual
 
-Deep Hunt includes direct AI-investigator findings and scanner findings created as part of a hunt.
+Hunt includes direct AI-investigator findings and scanner findings created as part of a hunt.
 Compatibility API values such as `autonomous`, `ai_session`, and the
 `evidence.research.driven_by` marker are normalized to those display labels.
 
@@ -108,15 +110,15 @@ Finding dimensions stay separate:
 - **Source:** the workflow above
 - **Lifecycle:** Active, Resolved, False positive, Accepted risk
 
-Do not show both `DAST` and `Deep Hunt` as equal source badges for the same row. If a hunt launched
-the DAST work, the user-facing source is Deep Hunt; the underlying scanner remains available in
+Do not show both `DAST` and `Hunt` as equal source badges for the same row. If a hunt launched
+the DAST work, the user-facing source is Hunt; the underlying scanner remains available in
 technical metadata.
 
 ## Supporting surfaces
 
 - **Leads** is the hypothesis backlog used by Hunt and verification.
 - **Test Builder** is an advanced, hand-crafted experiment tool.
-- **Mission Ledger** is the read-only `/campaigns` action history; it does not launch Deep Hunt.
+- **Mission Ledger** is the read-only `/campaigns` action history; it does not launch Hunt.
 - **Evidence** stores proof objects and export/retention records.
 - **Timeline** combines activity across products.
 

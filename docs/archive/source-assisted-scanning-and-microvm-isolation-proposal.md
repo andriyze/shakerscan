@@ -1,5 +1,8 @@
 # Source-Assisted Scanning and MicroVM Isolation Proposal
 
+> **Historical proposal — not a shipped or current architecture.** It uses retired investigation
+> terminology and is retained only for design provenance.
+
 **Status:** Proposal only; no implementation is authorized by this document.
 
 **Decision:** Add Semgrep-backed source intelligence to source-assisted Deep Hunt in a future bounded

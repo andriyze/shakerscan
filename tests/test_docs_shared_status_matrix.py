@@ -6,11 +6,19 @@ ROOT = Path(__file__).resolve().parents[1]
 CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 EXECUTION_DOC = ROOT / "docs" / "dast-asm-architecture.md"
 FLEET_DOC = ROOT / "docs" / "multi-node-architecture.md"
-DEEP_HUNT_DOC = ROOT / "docs" / "deep-hunt-architecture.md"
+DEEP_HUNT_DOC = ROOT / "docs" / "archive" / "deep-hunt-architecture.md"
 FUNCTIONALITY_DOC = ROOT / "docs" / "functionality-reference.md"
 RETIRED_DOCS = [
     ROOT / "docs" / "parallel-scan-architecture.md",
     ROOT / "docs" / "continuous-asm-architecture.md",
+]
+CANONICAL_PRODUCT_DOCS = [
+    ROOT / "README.md",
+    ROOT / "WALKTHROUGH.md",
+    ROOT / "llms.txt",
+    ROOT / "docs" / "README.md",
+    ROOT / "docs" / "dast-asm-architecture.md",
+    ROOT / "docs" / "mcp.md",
 ]
 
 
@@ -34,6 +42,63 @@ def test_execution_architecture_is_consolidated_and_current():
 
     for retired in RETIRED_DOCS:
         assert not retired.exists()
+
+
+def test_canonical_docs_use_one_scan_one_hunt_vocabulary():
+    text = "\n".join(_flat(path) for path in CANONICAL_PRODUCT_DOCS)
+    lowered = text.lower()
+    assert "scan type controls modules" not in lowered
+    assert "scan type selects checks" not in lowered
+    assert "smart scan" not in lowered
+    assert "deep hunt" not in lowered
+    assert "one deterministic scan" in lowered
+    assert "get /scan/contracts" in lowered
+    assert "get /hunts/contract" in lowered
+
+
+def test_compatibility_and_history_are_explicitly_separated():
+    compatibility = _flat(ROOT / "docs" / "compatibility.md")
+    assert "not an alternate product surface" in compatibility
+    assert "cannot select another engine" in compatibility
+    assert "new secret write" in compatibility
+    assert "fail closed" in compatibility
+
+    archive = ROOT / "docs" / "archive"
+    historical = {
+        "smart-scan-policy.md",
+        "deep-hunt-architecture.md",
+        "source-assisted-scanning-and-microvm-isolation-proposal.md",
+        "AUDIT-2026-07.md",
+        "audit-evidence-2026-07.md",
+        "ai-native-refactor-audit.md",
+        "v2-re-audit-2026-08-20.md",
+    }
+    for name in historical:
+        opening = (archive / name).read_text(encoding="utf-8")[:700].lower()
+        assert "historical" in opening, name
+    for retired in (
+        "SMART_SCAN_POLICY.md",
+        "deep-hunt-architecture.md",
+        "source-assisted-scanning-and-microvm-isolation-proposal.md",
+        "AUDIT-2026-07.md",
+        "audit-evidence-2026-07.md",
+        "ai-native-refactor-audit.md",
+        "v2-re-audit-2026-08-20.md",
+    ):
+        assert not (ROOT / "docs" / retired).exists(), retired
+
+
+def test_mcp_and_encryption_docs_state_the_real_trust_boundaries():
+    mcp = _flat(ROOT / "docs" / "mcp.md")
+    assert "two deliberately different trust levels" in mcp
+    assert "Read-only Arsenal inspection" in mcp
+    assert "including state-changing and target-facing operations" in mcp
+
+    functionality = _flat(FUNCTIONALITY_DOC).lower()
+    assert "unset = plaintext" not in functionality
+    assert "plaintext, backward compatible" not in functionality
+    assert "every new secret write" in functionality
+    assert "fails new writes closed" in functionality
 
 
 def test_multi_node_doc_is_build_spec_and_honest_about_fleet_status():

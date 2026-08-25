@@ -5077,13 +5077,16 @@ class ScanOptions(BaseModel):
     avoid_rules_json: Optional[str] = None  # JSON array of scope avoid rules
     verified_findings_only: Optional[bool] = None
 
-    # Smart scan tuning options
-    no_early_stop: bool = False                    # Disable early stopping in smart scan
+    # Historical detector tuning fields; never public Scan identity or authority.
+    no_early_stop: bool = False
     thorough_params: bool = False                  # Test more parameters (50x10 vs 25x5)
     oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
     budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = Field(
         default=None,
-        description="Depth/time budget profile. Scan type controls modules; budget controls how hard to run them.",
+        description=(
+            "Resource ceiling for the deterministic Scan pipeline; it does not "
+            "select an engine or module set."
+        ),
     )
     custom_budget: Optional[dict[str, Any]] = Field(
         default=None,
@@ -59364,7 +59367,13 @@ async def _materialize_research_invariant_hypotheses(conn: Any, target_id: Any) 
 @app.get("/research/episodes/{episode_id}/benchmark")
 async def research_episode_benchmark(
     episode_id: str,
-    baseline_scan_id: str = Query(..., description="Completed Smart-scan baseline with options.benchmark_request_budget."),
+    baseline_scan_id: str = Query(
+        ...,
+        description=(
+            "Completed deterministic Scan baseline with "
+            "options.benchmark_request_budget."
+        ),
+    ),
 ):
     """Score autonomous net-new verified findings against an explicitly equal-budget DAST baseline."""
     async with db_pool.acquire() as conn:
@@ -59378,7 +59387,10 @@ async def research_episode_benchmark(
         if not baseline or baseline["target_id"] != episode_row["target_id"]:
             raise HTTPException(status_code=400, detail="Baseline scan must belong to the episode target")
         if str(baseline["status"] or "") != "completed" or str(baseline["scan_type"] or "") != "smart":
-            raise HTTPException(status_code=400, detail="Baseline must be a completed Smart scan")
+            raise HTTPException(
+                status_code=400,
+                detail="Baseline must be a completed deterministic Scan benchmark",
+            )
         options = _decode_json_value(baseline["options"]) or {}
         baseline_budget = _int_or_none(options.get("benchmark_request_budget"))
         episode_budget = int((episode.get("budget_limits") or {}).get("requests") or 0)

@@ -288,7 +288,7 @@ export default function AISettingsPanel() {
         <div>
           <h2 className="text-sm font-medium text-gray-200">AI provider & verification</h2>
           <p className="text-xs text-gray-500 mt-1">
-            Configure scan-time triage, authoritative retest verification, and smart-scan reporting behavior.
+            Configure scan-time triage, authoritative retest verification, and verified-only Scan reporting.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -652,11 +652,11 @@ export default function AISettingsPanel() {
 
         <Fieldset
           title="Verification Policy"
-          description="Controls proof-gating and escalation thresholds used by smart scan and retest workflows."
+          description="Controls proof-gating and escalation thresholds used by Scan and retest workflows."
         >
           <ToggleRow
-            label="Proof required for smart scan reports"
-            description="When on, only findings with verification evidence are kept in primary smart-scan output."
+            label="Proof required in Scan reports"
+            description="When on, only findings with verification evidence are kept in the primary Scan output."
             hint="Can reduce visible findings and attack chains when proof collection fails."
             checked={proofRequiredForSmartInput}
             onChange={setProofRequiredForSmartInput}
@@ -717,7 +717,7 @@ export default function AISettingsPanel() {
             </select>
           </Field>
           <p className="text-xs text-yellow-400/90 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1.5">
-            If proof-required is enabled, smart scans can look quieter because unverified findings are filtered out of
+            If proof-required is enabled, Scan reports can look quieter because unverified findings are filtered out of
             the primary report.
           </p>
         </Fieldset>

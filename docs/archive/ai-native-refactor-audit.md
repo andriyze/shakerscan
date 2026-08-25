@@ -1,5 +1,8 @@
 # AI-Native Refactor Baseline Audit
 
+> **Historical migration baseline.** This inventory is not current product documentation or release
+> evidence.
+
 **Pinned baseline:** `84c185538990e9403b5c972ff91b5f212799910d` (`origin/smart`, fetched
 2026-08-19)
 

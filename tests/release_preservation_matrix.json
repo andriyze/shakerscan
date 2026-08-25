@@ -195,6 +195,16 @@
         {"id":"source_gate","label":"Canonical Scan modules reject unreviewed network bypasses","pytest_selector":"tests/test_scan_target_transport_gate.py::test_canonical_scan_modules_have_no_unreviewed_network_bypass"}
       ]
     },
+    "documentation": {
+      "label": "Canonical documentation and compatibility",
+      "controls": [
+        {"id":"product_vocabulary","label":"Current product docs use one Scan and one Hunt","pytest_selector":"tests/test_docs_shared_status_matrix.py::test_canonical_docs_use_one_scan_one_hunt_vocabulary"},
+        {"id":"compatibility_archive","label":"Compatibility and historical evidence are explicitly separated","pytest_selector":"tests/test_docs_shared_status_matrix.py::test_compatibility_and_history_are_explicitly_separated"},
+        {"id":"trust_boundaries","label":"MCP and encryption trust boundaries match runtime behavior","pytest_selector":"tests/test_docs_shared_status_matrix.py::test_mcp_and_encryption_docs_state_the_real_trust_boundaries"},
+        {"id":"live_contract_routes","label":"Examples point to current generated discovery contracts","pytest_selector":"tests/test_public_api_contract_generation.py::test_public_contract_uses_current_scan_and_hunt_discovery_routes"},
+        {"id":"generated_contract","label":"OpenAPI manifest and generated client types are byte-current","pytest_selector":"tests/test_public_api_contract_generation.py::test_generated_public_contract_and_types_match_current_openapi"}
+      ]
+    },
     "mcp": {
       "label": "MCP Hunt client",
       "controls": [

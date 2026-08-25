@@ -628,7 +628,7 @@ Common fixes:
 - [ShakerScan 0.8.0 release notes](https://github.com/andriyze/shakerscan/blob/main/docs/releases/0.8.0.md)
 - [First-run walkthrough](https://github.com/andriyze/shakerscan/blob/main/WALKTHROUGH.md)
 - [Skill and agent guide](skills/README.md)
-- [Smart Scan Policy](https://github.com/andriyze/shakerscan/blob/main/docs/SMART_SCAN_POLICY.md)
+- [Canonical Scan and ASM architecture](https://github.com/andriyze/shakerscan/blob/main/docs/dast-asm-architecture.md)
 - [DAST and Continuous ASM architecture](https://github.com/andriyze/shakerscan/blob/main/docs/dast-asm-architecture.md)
 - [Connected-device security](https://github.com/andriyze/shakerscan/blob/v2/docs/connected-device-security.md)
 - [OWASP coverage matrix](https://github.com/andriyze/shakerscan/blob/main/docs/owasp-coverage-matrix.md)

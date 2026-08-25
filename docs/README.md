@@ -15,7 +15,6 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`../AGENTS.md`](../AGENTS.md) | Canonical coding-agent operations and request examples |
 | [`product-model.md`](product-model.md) | Canonical product names, natural-language routing, source labels, and compatibility terms |
 | [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
-| [`source-assisted-scanning-and-microvm-isolation-proposal.md`](source-assisted-scanning-and-microvm-isolation-proposal.md) | Proposal for Semgrep-backed source intelligence and narrowly scoped future Firecracker reuse |
 
 ## Product And Operations
 
@@ -42,10 +41,10 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`releases/0.8.4.md`](releases/0.8.4.md) | ShakerScan 0.8.4 patch-release notes and supported product boundary |
 | [`releases/0.8.2.md`](releases/0.8.2.md) | ShakerScan 0.8.2 patch-release notes and supported product boundary |
 | [`releases/0.8.0.md`](releases/0.8.0.md) | ShakerScan 0.8.0 release notes and supported product boundary |
-| [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
 | [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |
-| [`read-only-mcp.md`](read-only-mcp.md) | MCP trust boundaries: read-only Arsenal inspection and target-bound Hunt V2 |
+| [`mcp.md`](mcp.md) | MCP's separate read-only Arsenal and state-changing target-bound Hunt trust levels |
+| [`compatibility.md`](compatibility.md) | Internal legacy-input/read compatibility boundary; not a second product surface |
 
 ## Acceptance And Integrity Ledgers
 
@@ -61,20 +60,21 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) | Generic AI workflows and optional Honey calibration contract |
 | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) | Authorized interactive browser/session testing guide |
 | [`model-intake-security-review-roadmap.md`](model-intake-security-review-roadmap.md) | Model Intake controls, architecture, provider-neutral review procedure, implementation status, limitations, and acceptance gates |
-| [`AUDIT-2026-07.md`](AUDIT-2026-07.md) | 2026-07 end-to-end product/security audit: findings, fixes, and verified-good behavior |
-| [`audit-evidence-2026-07.md`](audit-evidence-2026-07.md) | Durable evidence index, reproduction commands, and remediation release gates for the 2026-07 audit |
 
 ## Architecture
 
 | Document | Status |
 |---|---|
 | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) | Scan V2 and unified Hunt architecture, pinned baseline, migration boundary, and acceptance contract |
-| [`ai-native-refactor-audit.md`](ai-native-refactor-audit.md) | Baseline inventory and legacy-dependency checklist for the one-Scan/one-Hunt migration |
-| [`v2-re-audit-2026-08-20.md`](v2-re-audit-2026-08-20.md) | Point-in-time V2 implementation re-audit and remaining runtime acceptance gates |
 | [`dast-asm-architecture.md`](dast-asm-architecture.md) | Current one-shot DAST, local scatter/gather, and Continuous ASM execution model |
 | [`connected-device-security.md`](connected-device-security.md) | Connected-device inventory, safe service assessment, policy evaluation, isolated execution, and web-origin handoff |
-| [`deep-hunt-architecture.md`](deep-hunt-architecture.md) | Deep Hunt AI-investigator engine: ReAct loop, tool arsenal, provenance gate, two-tier SUSPECTED/VERIFIED bridge, and the §5 improvement backlog |
 | [`multi-node-architecture.md`](multi-node-architecture.md) | Implemented multi-node trust, transport, scheduling, lifecycle, evidence, and acceptance design authority |
+
+## Historical Archive
+
+Point-in-time audits, retired engines, and pre-V2 mode policy live under
+[`archive/`](archive/README.md). They are migration evidence, not current product instructions or
+release proof.
 
 ## Maintenance Rule
 

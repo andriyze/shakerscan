@@ -1,5 +1,10 @@
 # Smart Scan Policy
 
+> **Historical — not current product guidance.** This pre-V2 policy is retained only to explain
+> migrated rows and old release evidence. New work uses one deterministic Scan with `fast`,
+> `balanced`, or `thorough` resource ceilings and explicit permissions; see
+> [`../dast-asm-architecture.md`](../dast-asm-architecture.md).
+
 **Status:** reconciled 2026-07-21. Resolved profile budgets, hard override ceilings, phase watchdogs,
 request-meter telemetry, adaptive throttling, and proof-aware reporting are shipped. Yield-based
 cross-phase budget reallocation below is a target policy, not current runtime behavior. Release SLOs

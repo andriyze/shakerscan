@@ -114,7 +114,7 @@ def test_public_contract_uses_current_scan_and_hunt_discovery_routes():
     assert "GET /hunt/contracts" not in manifest["operations"]
     docs = "\n".join(
         (ROOT / path).read_text(encoding="utf-8")
-        for path in ("AGENTS.md", "docs/functionality-reference.md", "docs/read-only-mcp.md")
+        for path in ("AGENTS.md", "docs/functionality-reference.md", "docs/mcp.md")
     )
     assert "GET /scan/contracts" in docs
     assert "GET /hunts/contract" in docs

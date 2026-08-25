@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end DAST benchmark runner (proposed-next-steps.md §1).
 
-Submits a Smart scan per target fixture, waits for completion, fetches the report,
+Submits one deterministic Scan per target fixture with the benchmark's fixed V2 policy and budget,
+waits for completion, fetches the report,
 and writes a compact scorecard under results/benchmark-runs/. Scores verified vs
 suspected High/Critical, coverage, blocked/timeout/error, and matches expected bug
 CLASSES (route-anchored, not app secrets) so a regression that drops Juice Shop

@@ -62,10 +62,11 @@ worker to Redis.
 - Complete large-target parity, rate, lease, cancellation, and placement soak before calling
   multi-node ASM campaigns release-proven.
 
-## 5. Deep Hunt acceptance
+## 5. Hunt acceptance
 
 The engine design authority — ReAct loop, provenance gate, the two-tier verification bridge, and this
-backlog mapped to concrete seams — is [deep-hunt-architecture.md](deep-hunt-architecture.md).
+backlog mapped to concrete seams — is the historical
+[retired investigation architecture](archive/deep-hunt-architecture.md).
 
 - Replace tool-call-as-request accounting with adapter-reported or reserved-upper-bound target-request
   metering, and add an honest whole-session deadline for keyless runs.

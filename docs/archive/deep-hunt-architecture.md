@@ -1,17 +1,19 @@
 # Legacy Deep Hunt Engine Architecture
 
+> **Historical — retired engine description.** Do not use these routes or names for new work.
+
 **Status (2026-08-20):** historical compatibility reference. The canonical architecture is
-[`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md), and all new investigations use
+[`../ai-native-architecture-rfc.md`](../ai-native-architecture-rfc.md), and all new investigations use
 `/hunts/*`. Legacy `/agent/hunt/*` writes return `410 Gone` by default; historical reads and emergency
 cancellation remain during the migration sunset.
 
 This document preserves the retired engine design content previously spread
 across `product-model.md` and `functionality-reference.md` §11.6 after the older
 `autonomous-agent-architecture.md` was retired. User-facing vocabulary lives in
-[product-model.md](product-model.md); the exhaustive route/schema inventory is in
-[functionality-reference.md](functionality-reference.md); the shared local execution model is in
-[dast-asm-architecture.md](dast-asm-architecture.md); the future acceptance backlog is
-[proposed-next-steps.md](proposed-next-steps.md) §5.
+[`../product-model.md`](../product-model.md); the exhaustive route/schema inventory is in
+[`../functionality-reference.md`](../functionality-reference.md); the shared local execution model is in
+[`../dast-asm-architecture.md`](../dast-asm-architecture.md); the future acceptance backlog is
+[`../proposed-next-steps.md`](../proposed-next-steps.md) §5.
 
 Code, schema, and tests remain authoritative when this document disagrees. Symbols (functions,
 constants, tables) are named rather than line-numbered so the references survive edits.

@@ -176,7 +176,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "e86d258d0c8e4c82275454f1c46525e1c37b614e5b938b257585509d4b93fda6",
+  "contract_sha256": "1eea3b49bb7a51ff6d6f418c1492e3a2547dc3a206d9ed9ddbc28b0e27eb6519",
   "openapi": "3.1.0",
   "operation_count": 387,
   "operations": {
@@ -2047,7 +2047,7 @@
     "GET /research/episodes/{episode_id}/benchmark": {
       "deprecated": false,
       "operation_id": "research_episode_benchmark_research_episodes__episode_id__benchmark_get",
-      "parameters_sha256": "29b570612219a6afdcfe322b801e7f091b3fd9e344672a9e3a88b0d8d4db0a92",
+      "parameters_sha256": "592718982764eaed44501ae0a0e8db4dd0497fbf9a2a0e1459cf3a202585f246",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

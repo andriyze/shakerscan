@@ -2089,7 +2089,7 @@ to run the tests.
 ### Phase 4.1 — Bounded keyless Codex guidance — **core controller and UI implemented**
 
 Model Intake may use the current coding-agent session as an optional planner, following the same suspend/reply
-shape as Deep Hunt but with a separate, smaller action catalog. The deterministic intake runs normally when
+shape as Hunt but with a separate, smaller action catalog. The deterministic intake runs normally when
 no agent is present. Agent refusal, timeout, malformed output, or absence cannot weaken a gate or prevent the
 baseline review from reaching its evidence-based result.
 

@@ -1145,7 +1145,7 @@ revalidates the live catalog and never represents state-changing Arsenal command
 candidate/verify/finish/cancel. Capability calls require the live Hunt manifest, validate its
 published input schema, and use a caller-provided or returned generated idempotency key. Target
 binding, approvals, budgets, receipts, evidence, and deterministic proof remain server-enforced.
-See [`docs/read-only-mcp.md`](read-only-mcp.md).
+See [`docs/mcp.md`](mcp.md).
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·
@@ -1265,9 +1265,10 @@ identity. These routes will be removed after remaining legacy callers migrate.
   seconds, clamped to 60-3600 seconds).
 - AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
   `AI_TRANSCRIPT_ALLOW_SENSITIVE` (default off — when on, `GET /ai/scans/{id}/transcript?include_sensitive=true` returns raw, audit-logged bodies; otherwise responses are redacted at response time).
-- Credential encryption-at-rest: `AI_CREDENTIAL_ENC_KEY` (a Fernet key; when set, AI-target and DAST
-  target-profile credential secrets are encrypted at rest with an `enc:fernet:` prefix; unset =
-  plaintext, backward compatible). Profile responses report whether their stored value is encrypted.
+- Credential encryption-at-rest: `AI_CREDENTIAL_ENC_KEY` may supply the stable Fernet key. When it
+  is unset, the runtime creates and persists an owner-only shared key under `RESULTS_DIR`. Every new
+  secret write must produce an `enc:fernet:` value or fails closed. Plaintext is accepted only when
+  reading a legacy row long enough to migrate it; it is never a supported new-write mode.
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
@@ -1294,9 +1295,10 @@ concurrency-limited with per-tool timeouts and a global deadline.
 
 ## 15. Safety model
 
-- **Authorization**: only scan targets you own or are explicitly authorized to test. `full`,
-  `aggressive`, and `smart` send active probes; AI Gate production scans and ASM BOLA require explicit
-  confirmation.
+- **Authorization**: only scan targets you own or are explicitly authorized to test. A Scan sends
+  state-changing or exploit-style probes only when its explicit policy and target-bound approval
+  permit them; a resource ceiling never grants active authority. AI Gate production scans and ASM
+  BOLA likewise require explicit confirmation.
 - **Bounded automation**: passive recon and ASM new-surface tracking can be safe-on by default;
   active exploitation uses small safe batches and requires an explicit Lab/deep policy for deep
   exploit mode. Rate tokens are reserved before active work is queued.
@@ -1307,8 +1309,8 @@ concurrency-limited with per-tool timeouts and a global deadline.
 - **AI redaction and credential handling**: sensitive headers/bodies and secret-bearing URL
   params/metadata are redacted
   before any content is sent to an AI provider, via the shared `redact_sensitive()` helper (R2a).
-  AI-target and target-profile credential secrets can be encrypted at rest, opt-in via
-  `AI_CREDENTIAL_ENC_KEY` (R2b), and
+  AI-target and target-profile credential secrets are encrypted at rest with a configured or
+  auto-generated persistent key (R2b); unavailable stable encryption fails new writes closed, and
   transcript responses are redacted at response time by default (R3). Normal DAST worker launches pass
   auth material through a short-lived `0600` auth-config file rather than raw scanner subprocess argv,
   and scan-time AI provider keys are supplied through the child environment instead of `--ai-api-key`.
@@ -1398,8 +1400,8 @@ backup, and containers. §17 inventories the canonical wrapper commands.
 - `js-analyze`: converts bundles and browser evidence into routes, APIs, libraries, secret leads,
   `custom_endpoints`, and content-discovery seeds.
 - `content-discovery`: builds generic and app-specific route/file/API lists and scanner/ffuf inputs.
-- `research-agent`: creates or continues bounded research episodes and Deep Hunt campaigns with one
-  policy-controlled decision per observation.
+- `research-agent`: compatibility skill for older prompts; it routes new investigations to canonical
+  Hunt and keeps specialized guided experiments bounded.
 - `device-hunt`: drives one authorized connected-device investigation through immutable scope,
   context, memory, fragility, health, and deterministic-evidence boundaries.
 - `device-triage`: explains and compares existing connected-device evidence without sending traffic.
@@ -1450,7 +1452,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 95 | `db/init.sql` + migrations |
+| Durable tables | 96 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2019,7 +2021,7 @@ opaque profile, and collection-reference fields.
 | `--budget-param-discovery-max-params` | - | - |
 | `--budget-param-discovery-url-limit` | - | - |
 | `--budget-phase4-max-seconds` | - | - |
-| `--budget-profile` | fast, balanced, thorough, exhaustive | Depth/time budget profile. Scan type selects checks; budget controls how hard they run. |
+| `--budget-profile` | fast, balanced, thorough, exhaustive | Resource ceiling for the deterministic Scan pipeline; it does not select an engine or module set. |
 | `--budget-request-max` | - | - |
 | `--business-logic-testing` | - | Detect business logic vulnerability indicators |
 | `--canonical-scan` | - | - |
@@ -2082,7 +2084,7 @@ opaque profile, and collection-reference fields.
 | `--network-discovery` | - | Permit bounded target-host port and network-service discovery |
 | `--network-services` | - | Enable network services detection (VPN, RDP, VNC, IoT, Industrial, databases) |
 | `--no-browser` | - | Disable browser-based scanning, use curl only (faster but less data) |
-| `--no-early-stop` | - | Disable early stopping in smart scan (continue even after finding many vulns) |
+| `--no-early-stop` | - | Internal pre-V2 compatibility control for detector execution |
 | `--no-verified-findings-only` | - | Keep all findings regardless of verification status |
 | `--nuclei` | - | Nuclei scan mode - vulnerability scan with the configured template set (10-30 min) |
 | `--oauth-client-id` | - | OAuth 2.0 client ID |
@@ -2112,7 +2114,7 @@ opaque profile, and collection-reference fields.
 | `--session-mgmt-testing` | - | Test for session management issues |
 | `--show-suppressed` | - | Include suppressed findings in output (marked with suppressed=true) |
 | `--skip-global-checks` | - | Skip duplicate global exposure/posture checks in a parallel child shard |
-| `--smart` | - | Smart scan - adaptive scanning with staged templates, recursive discovery, and context-aware attacks |
+| `--smart` | - | Internal pre-V2 compatibility flag; canonical clients use one Scan contract |
 | `--smart-bola-max-endpoints` | - | - |
 | `--smtp-security` | - | Enable SMTP security testing (STARTTLS, open relay, banner analysis) |
 | `--sqli` | - | Run only SQLi active checks (implies --active) |
@@ -2133,7 +2135,7 @@ opaque profile, and collection-reference fields.
 | `--user2-login-password` | - | Password for second user form login |
 | `--user2-login-username` | - | Username for second user form login |
 | `--vendor-risk` | - | Assess third-party/vendor supply chain risk (CDN, analytics, dependencies) |
-| `--verified-findings-only` | - | Only keep findings with exploit verification evidence (default for smart scans) |
+| `--verified-findings-only` | - | Only keep findings with exploit verification evidence |
 | `--virustotal-key` | - | VirusTotal API key for enhanced IP reputation (env: VIRUSTOTAL_API_KEY) |
 | `--vuln-auth` | - | Enable all auth/access checks (CSRF, IDOR, Rate Limiting, 2FA, Password Reset, Session, Default Creds) |
 | `--vuln-injection` | - | Enable all injection checks (Path Traversal, Deserialization) |
@@ -2670,6 +2672,7 @@ Scan feature or a second orchestration engine.
 | `nodes` | `db/init.sql` |
 | `operation_plans` | `api/retest_contract.py` |
 | `policy_profiles` | `db/init.sql` |
+| `public_api_idempotency` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |
 | `request_collection_bindings` | `db/init.sql` |
 | `request_collection_environments` | `db/init.sql` |
@@ -2711,7 +2714,7 @@ Scan feature or a second orchestration engine.
 | Getting started, install, product tour | [`README.md`](../README.md) |
 | AI-native V2 architecture and trust boundary | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) |
 | Scan execution/action/revision schemas | [`execution.py`](../api/scan/execution.py) · [`action_plan.py`](../api/scan/action_plan.py) · [`continuation.py`](../api/scan/continuation.py) |
-| Historical Smart-mode compatibility policy | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) |
+| Historical pre-V2 mode policy | [`archive/smart-scan-policy.md`](archive/smart-scan-policy.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |

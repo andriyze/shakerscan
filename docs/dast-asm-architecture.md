@@ -23,11 +23,13 @@ The API persists a scan and queues work in Redis. Workers claim jobs, execute sc
 heartbeats and result state to PostgreSQL, and persist findings through the common evidence and
 proof gates.
 
-### Single-worker scans
+### One deterministic Scan
 
-Quick, Standard, Deep, Full, Aggressive, and Smart scans can run as one worker job. Phases are
-ordered where later work depends on earlier discovery, but individual tools and checks may apply
-their own bounded concurrency.
+Every new assessment uses the same deterministic Scan pipeline. `fast`, `balanced`, and `thorough`
+are resource ceilings; active testing, network discovery, and subdomain discovery are explicit
+permissions. Historical mode names are translated only at the compatibility boundary and do not
+select a second engine or module registry. Phases are ordered where later work depends on earlier
+discovery, while individual capabilities may apply their own bounded concurrency.
 
 ### Parent, plan, shard, merge
 
@@ -44,10 +46,11 @@ Child implementation rows are hidden from normal scan lists. Scan detail exposes
 and shard rollups. A parent cannot report stronger completion or coverage than its children support:
 failed, cancelled, partial, stale, missing, or malformed shard telemetry degrades the rollup.
 
-Coverage mode adds breadth across workers without deleting Smart-scan capabilities: the backbone
-retains browser, DOM-XSS, posture, and global checks, while endpoint shards avoid repeating them.
-Use one Smart scan for stable benchmark comparisons; use Full Coverage when the acceptance target is
-scatter/gather correctness, endpoint breadth, or multi-node execution.
+Parallel coverage adds breadth across workers without changing Scan identity: the backbone retains
+browser, DOM-XSS, posture, and global checks, while endpoint shards avoid repeating them. Use one
+deterministic Scan with the benchmark's fixed policy and budget for quality comparisons. Treat
+parallel coverage as a separately bounded compound workload when validating scatter/gather
+correctness, endpoint breadth, or multi-node execution.
 
 ## Continuous ASM loop
 
@@ -98,11 +101,11 @@ Every path resolves bounded time, endpoint, parameter, payload, redirect, respon
 controls where the adapter supports them. Receipts report enforcement and metering quality rather
 than implying exactness where only an estimate or adapter-reported value exists.
 
-Full Coverage discovery is a separate placed job with a three-minute passive budget. It must finish
+Parallel-coverage discovery is a separate placed job with a three-minute passive budget. It must finish
 and persist a non-empty manifest before fan-out; a failed discovery fails the parent visibly instead
 of creating empty endpoint shards.
 
-Scope sharding partitions the parent's request ceiling across disjoint children. Full Coverage is an
+Scope sharding partitions the parent's request ceiling across disjoint children. Parallel coverage is an
 explicit compound workload: one complete backbone plus separately bounded endpoint slices. Endpoint
 children never inherit the full parent request ceiling and do not repeat crawl/browser/Nuclei work;
 the parent records the planned aggregate and backbone request budgets. The merge uses aggregate
@@ -124,7 +127,7 @@ Registry `severity_rules` may remain advisory with the current wired severity ca
 proof contracts and caps for XSS, SQLi, BOLA, auth, mass assignment, and JWT remain authoritative.
 
 Findings from ordinary assessments use the DAST source. Scanner findings launched by Continuous ASM
-use ASM context. Scanner findings driven by Deep Hunt are exposed through the Deep Hunt source so a
+use ASM context. Scanner findings driven by Hunt are exposed through the Hunt source so a
 single finding does not present competing user-facing origins.
 
 ## Cancellation, failure, and stale builds
@@ -144,7 +147,8 @@ fan-out and merge remain local-only control-plane work. Those requirements are d
 
 ## User-facing surfaces
 
-- **New Scan** selects scan type, coverage profile, active options, and custom budget overrides.
+- **New Scan** selects a resource ceiling, explicit permissions, optional parallel coverage, and
+  lower custom ceilings.
 - **Scans / Scan Detail** show one logical assessment, progress, partial/failure state, receipts,
   coverage, proof, and report output.
 - **Continuous ASM** shows target coverage, family rollups, gaps, recommendations, scheduler state,
@@ -152,12 +156,13 @@ fan-out and merge remain local-only control-plane work. Those requirements are d
 - **Schedules** manages recurring normal scans and first-class `asm_improve` waves.
 - **Dashboard** summarizes queue, worker, stale-build, ASM, and release-relevant operational state.
 
-The normal ASM action is **Improve coverage**. Deep Hunt is a separate AI-driven investigation and
+The normal ASM action is **Improve coverage**. Hunt is a separate AI-driven investigation and
 must not be presented as another ASM batch or compatibility `/research` campaign.
 
 ## Primary API surface
 
 ```text
+GET  /scan/contracts
 POST /scans
 POST /scans/batch
 GET  /scans/{id}
@@ -187,7 +192,8 @@ A release claim for this architecture requires:
 - proof-gated critical/high findings;
 - accepted-auth and distinct-principal evidence for authenticated claims;
 - a current, uniform worker fleet for benchmark evidence;
-- one-shot Smart scorecards for DAST quality and separate scatter/gather tests for parallel safety;
+- one deterministic fixed-policy scorecard for DAST quality and separate scatter/gather tests for
+  parallel safety;
 - migration and rollback validation for durable inventory, attempts, schedules, and results.
 
 Future improvements belong in [`proposed-next-steps.md`](proposed-next-steps.md), not in this current

@@ -1,5 +1,7 @@
 # 2026-07 Audit Evidence and Remediation Gates
 
+> **Historical point-in-time evidence.** These receipts apply only to the audit's pinned source.
+
 This is the durable evidence index for [`AUDIT-2026-07.md`](AUDIT-2026-07.md). Large screenshots and
 browser dumps may remain in a local `audit-results/` working directory; the release decision does not
 depend on their presence in a checkout.
