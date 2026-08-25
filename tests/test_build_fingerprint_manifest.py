@@ -38,6 +38,7 @@ def test_source_manifest_is_complete_and_hashable_from_checkout():
         "ai_gate/corpora/arcanum_evasions.json",
         "wordlists/common.txt",
         "payloads/sqli/time-based.txt",
+        "worker_handlers/non_dast.py",
         "runtime/requirements.lock",
         "runtime/entrypoint.sh",
         "runtime/scanner.Dockerfile",
@@ -48,6 +49,13 @@ def test_source_manifest_is_complete_and_hashable_from_checkout():
         "model_intake_locks/semgrep.lock",
     } <= set(files)
     assert hash_source_files(files, require_all=True)
+
+
+def test_worker_handler_package_is_copied_into_release_image():
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "scanner" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY api/worker_handlers /app/worker_handlers" in dockerfile
 
 
 def test_security_rule_guest_lock_and_guest_code_changes_invalidate_fingerprint(tmp_path):

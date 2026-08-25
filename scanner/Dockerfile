@@ -317,6 +317,7 @@ COPY api/capabilities /app/capabilities
 COPY api/hunt /app/hunt
 COPY api/runtime /app/runtime
 COPY api/scan /app/scan
+COPY api/worker_handlers /app/worker_handlers
 
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists /app/payloads
