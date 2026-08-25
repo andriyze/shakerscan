@@ -13,6 +13,7 @@ from api.scan.parallel_compiler import (
     ParallelActionPlanCompiler,
     ParallelActionPlanError,
     build_parallel_work_assignment,
+    merge_parallel_work_assignments,
     validate_parallel_partition_record,
 )
 
@@ -133,6 +134,30 @@ def _parent_assignment(assignments):
             material, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         ).encode()).hexdigest(),
     }
+
+
+def test_family_attempt_scope_distinguishes_intentional_endpoint_rechecks():
+    endpoint = "GET /v1/items/1?secret=redacted-at-source"
+    sqli = build_parallel_work_assignment(
+        endpoints=(endpoint,),
+        work_scope={"auth_state": "anonymous", "family": "sqli"},
+    )
+    same_sqli = build_parallel_work_assignment(
+        endpoints=(endpoint,),
+        work_scope={"family": "SQLI", "auth_state": "ANONYMOUS"},
+    )
+    xss = build_parallel_work_assignment(
+        endpoints=(endpoint,),
+        work_scope={"auth_state": "anonymous", "family": "xss"},
+    )
+
+    assert sqli == same_sqli
+    assert sqli["endpoint_work_ids"] != xss["endpoint_work_ids"]
+    merged = merge_parallel_work_assignments((sqli, xss))
+    assert merged["endpoint_work_ids"] == sorted({
+        *sqli["endpoint_work_ids"], *xss["endpoint_work_ids"],
+    })
+    assert endpoint not in json.dumps(merged)
 
 
 def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():

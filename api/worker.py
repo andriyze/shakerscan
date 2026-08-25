@@ -206,6 +206,7 @@ from scan.parallel_compiler import (
     ParallelActionPlanCompiler,
     ParallelActionPlanError,
     build_parallel_work_assignment,
+    merge_parallel_work_assignments,
     parallel_capability_family_scope,
     validate_parallel_partition_record,
 )
@@ -15918,6 +15919,18 @@ async def process_scan_plan_job(job_data: dict):
                 for manifest in child_work_manifests
             ),
             allowed_family_scope=parent_allowed_family_scope,
+            work_scope=(
+                {
+                    "auth_state": str(
+                        child_options.get("auth_state") or "anonymous"
+                    ),
+                    "family": str(
+                        child_options.get("coverage_attempt_family") or "all"
+                    ),
+                }
+                if plan.strategy == "coverage_family"
+                else None
+            ),
         )
         child_work_assignments[child_id] = child_work_assignment
         child_options["parallel_work_partition_digest"] = (
@@ -15943,13 +15956,19 @@ async def process_scan_plan_job(job_data: dict):
 
     if parallel_action_partition is not None:
         try:
-            parent_work_assignment = build_parallel_work_assignment(
-                endpoints=parent_endpoint_assignments,
-                request_entries=tuple(
-                    dict(entry)
-                    for manifest in parent_request_manifests
-                    for entry in manifest.entries
-                ),
+            parent_work_assignment = (
+                merge_parallel_work_assignments(tuple(
+                    child_work_assignments.values()
+                ))
+                if plan.strategy == "coverage_family"
+                else build_parallel_work_assignment(
+                    endpoints=parent_endpoint_assignments,
+                    request_entries=tuple(
+                        dict(entry)
+                        for manifest in parent_request_manifests
+                        for entry in manifest.entries
+                    ),
+                )
             )
             parent_options["parallel_action_partition_record"] = (
                 parallel_action_partition.record({

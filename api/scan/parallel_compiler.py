@@ -110,19 +110,31 @@ def build_parallel_work_assignment(
     request_entries: Sequence[Mapping[str, Any]] = (),
     work_manifest_refs: Sequence[Mapping[str, Any]] = (),
     allowed_family_scope: Sequence[str] = (),
+    work_scope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a content-free exact work binding for one parallel child."""
+    attempt_scope = {
+        str(key).strip(): str(value).strip().lower()
+        for key, value in dict(work_scope or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+
+    def scoped(value: Any) -> Any:
+        if not attempt_scope:
+            return value
+        return {"attempt_scope": attempt_scope, "value": value}
+
     endpoint_work_ids = sorted({
-        _work_item_id("endpoint", str(item).strip())
+        _work_item_id("endpoint", scoped(str(item).strip()))
         for item in endpoints
         if str(item).strip()
     })
     request_work_ids = sorted({
-        _work_item_id("request", {
+        _work_item_id("request", scoped({
             key: nested
             for key, nested in dict(item).items()
             if key != "selected_shard"
-        })
+        }))
         for item in request_entries
         if isinstance(item, Mapping)
     })
@@ -181,6 +193,41 @@ def _canonical_work_assignment(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     if str(value.get("work_partition_digest") or "") != _digest(material):
         raise ParallelActionPlanError("parallel child work partition digest is invalid")
+    return {**material, "work_partition_digest": _digest(material)}
+
+
+def merge_parallel_work_assignments(
+    assignments: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Freeze the exact union of already-scoped child work assignments."""
+    canonical = tuple(_canonical_work_assignment(item) for item in assignments)
+    refs_by_value: dict[str, dict[str, Any]] = {}
+    for assignment in canonical:
+        for reference in assignment["work_manifest_refs"]:
+            encoded = json.dumps(
+                reference, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            )
+            refs_by_value[encoded] = dict(reference)
+    material = {
+        "endpoint_work_ids": sorted({
+            work_id
+            for assignment in canonical
+            for work_id in assignment["endpoint_work_ids"]
+        }),
+        "request_work_ids": sorted({
+            work_id
+            for assignment in canonical
+            for work_id in assignment["request_work_ids"]
+        }),
+        "work_manifest_refs": [
+            refs_by_value[key] for key in sorted(refs_by_value)
+        ],
+        "allowed_family_scope": sorted({
+            family
+            for assignment in canonical
+            for family in assignment["allowed_family_scope"]
+        }),
+    }
     return {**material, "work_partition_digest": _digest(material)}
 
 
