@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 import { HUNT_BUDGET_DIMENSIONS } from '../../src/lib/huntContract.generated'
+import { isApiResponse } from './real-stack-api'
 
 
 const REAL_STACK = process.env.PLAYWRIGHT_REAL_STACK === '1'
@@ -23,7 +24,7 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
   expect(target.id).toBeTruthy()
 
   await page.goto(`/hunt?target=${encodeURIComponent(target.id)}`)
-  await expect(page.getByLabel('Target')).toHaveValue(target.id)
+  await expect(page.getByLabel('Target', { exact: true })).toHaveValue(target.id)
   await page.getByLabel('Objective').fill('Production UI real-stack Hunt acceptance.')
   await page.getByLabel('Budget profile').selectOption('fast')
   await page.getByText('Optional hard ceilings (zero disables a dimension)').click()
@@ -32,9 +33,7 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
   }
 
   const [response] = await Promise.all([
-    page.waitForResponse((candidate) => (
-      candidate.url() === `${API_URL}/hunts` && candidate.request().method() === 'POST'
-    )),
+    page.waitForResponse((candidate) => isApiResponse(candidate, API_URL, '/hunts')),
     page.getByRole('button', { name: 'Start Hunt' }).click(),
   ])
   expect(response.ok()).toBeTruthy()

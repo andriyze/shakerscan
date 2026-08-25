@@ -161,13 +161,16 @@ def test_device_views_expose_last_scan_reachability_without_assuming_online():
     api = (ROOT / "api" / "api.py").read_text()
     worker = (ROOT / "api" / "worker.py").read_text()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    presentation = (ROOT / "ui" / "src" / "lib" / "deviceScanPresentation.mjs").read_text()
     list_ui = (ROOT / "ui" / "src" / "app" / "devices" / "page.tsx").read_text()
 
     assert "AS last_reachability" in api
     assert '"reachability": device_payload.get("last_reachability")' in api
     assert 'reachability.get("status") != "online"' in worker
     assert "Device reachability not checked" in detail_ui
-    assert "service accessibility still being assessed" in detail_ui
+    assert "deviceReachabilityServiceSummary" in detail_ui
+    assert "service accessibility still being assessed" in presentation
+    assert "previously confirmed service" in presentation
     assert "Reachability: not checked" in list_ui
 
 

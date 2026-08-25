@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 
+import { isApiResponse } from './real-stack-api'
+
 
 const REAL_STACK = process.env.PLAYWRIGHT_REAL_STACK === '1'
 const API_URL = process.env.SHAKERSCAN_API_URL || 'http://localhost:8080'
@@ -16,9 +18,7 @@ test('production scan UI submits canonical V2 Scan contract', async ({ page, req
   await page.getByRole('button', { name: /Fast/ }).click()
 
   const [response] = await Promise.all([
-    page.waitForResponse((candidate) => (
-      candidate.url() === `${API_URL}/scans` && candidate.request().method() === 'POST'
-    )),
+    page.waitForResponse((candidate) => isApiResponse(candidate, API_URL, '/scans')),
     page.getByRole('button', { name: 'Run Scan' }).click(),
   ])
   expect(response.ok()).toBeTruthy()
