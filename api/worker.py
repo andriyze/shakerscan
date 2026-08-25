@@ -14987,14 +14987,17 @@ def _compile_parallel_child_action_plan(
         shard_authority=child_job.shard.payload(),
         action_scope=action_scope,
         family_scope=family_scope,
-        include_finalizer=False,
+        # A shard is an independently executed work unit. Freeze one offline,
+        # report-only finalizer into its immutable plan so the merge stage gets
+        # a durable shard report instead of an unterminated action graph.
+        include_finalizer=True,
         action_budgets={},
     )
     return allocate_scan_action_plan(
         raw_plan,
         child_job.shard.sub_budget,
         assign_residual_to_finalizer=False,
-        require_finalizer=False,
+        require_finalizer=True,
     ).plan
 
 

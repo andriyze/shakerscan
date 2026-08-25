@@ -80,9 +80,17 @@ def _children(*, reordered=False):
     return tuple(result)
 
 
-def _projected_plans(partition, parent):
+def _projected_plans(partition, parent, *, structural_finalizer=None):
     result = {}
     global_ids = set(partition.globally_assigned_action_ids)
+    finalizer = structural_finalizer or next(
+        (
+            action for action in parent.actions
+            if action.capability_name == "scan.finalize"
+        ),
+        None,
+    )
+    assert finalizer is not None
     for child in partition.children:
         selected = [
             action for action in parent.actions
@@ -102,6 +110,12 @@ def _projected_plans(partition, parent):
             )
             for index, action in enumerate(selected)
         )
+        actions = (*actions, replace(
+            finalizer,
+            ordinal=len(actions),
+            dependencies=tuple(action.action_id for action in actions),
+            action_digest=None,
+        ))
         result[child.scan_id] = replace(
             parent, scan_id=child.scan_id, actions=actions, plan_digest=None,
         )
@@ -344,22 +358,38 @@ def test_parallel_partition_accepts_only_preallocated_continuation_actions():
         continuation_allocation=continuation,
         strategy="scope",
     )
-    plans = _projected_plans(partition, parent)
+    finalizer = next(
+        action for action in ScanActionPlanCompiler().compile(
+            scan_id=PARENT_ID,
+            execution_plan=contract.execution_plan,
+            target_binding=_target(),
+        ).actions
+        if action.capability_name == "scan.finalize"
+    )
+    plans = _projected_plans(
+        partition, parent, structural_finalizer=finalizer,
+    )
     endpoint_id = CHILD_IDS[1]
     seed = parent.actions[0]
     continuation_action = replace(
         seed,
         action_id="verify.xss",
         capability_name="xss.verify",
-        ordinal=len(plans[endpoint_id].actions),
+        ordinal=len(plans[endpoint_id].actions) - 1,
         dependencies=(),
         required=True,
         action_digest=None,
     )
+    endpoint_actions = plans[endpoint_id].actions[:-1]
+    endpoint_actions = (*endpoint_actions, continuation_action)
+    endpoint_actions = (*endpoint_actions, replace(
+        plans[endpoint_id].actions[-1],
+        ordinal=len(endpoint_actions),
+        dependencies=tuple(action.action_id for action in endpoint_actions),
+        action_digest=None,
+    ))
     plans[endpoint_id] = replace(
-        plans[endpoint_id],
-        actions=(*plans[endpoint_id].actions, continuation_action),
-        plan_digest=None,
+        plans[endpoint_id], actions=endpoint_actions, plan_digest=None,
     )
     assignments = _assignments(children)
 
@@ -385,12 +415,17 @@ def test_parallel_partition_accepts_only_preallocated_continuation_actions():
         capability_name="rogue.execute",
         action_digest=None,
     )
+    rogue_actions = (*plans[endpoint_id].actions[:-2], rogue)
+    rogue_actions = (*rogue_actions, replace(
+        plans[endpoint_id].actions[-1],
+        ordinal=len(rogue_actions),
+        dependencies=tuple(action.action_id for action in rogue_actions),
+        action_digest=None,
+    ))
     rogue_plans = {
         **plans,
         endpoint_id: replace(
-            plans[endpoint_id],
-            actions=(*plans[endpoint_id].actions[:-1], rogue),
-            plan_digest=None,
+            plans[endpoint_id], actions=rogue_actions, plan_digest=None,
         ),
     }
     with pytest.raises(ParallelActionPlanError, match="outside parent authority"):
@@ -410,7 +445,7 @@ def test_parallel_partition_rejects_a_cloned_full_parent_plan_on_every_child():
         child.scan_id: replace(parent, scan_id=child.scan_id, plan_digest=None)
         for child in partition.children
     }
-    with pytest.raises(ParallelActionPlanError, match="parent-owned finalization"):
+    with pytest.raises(ParallelActionPlanError, match="duplicates a global"):
         partition.record(clones)
 
 
@@ -454,9 +489,18 @@ def test_parallel_partition_rejects_duplicate_global_and_extra_capability_family
     plans = _projected_plans(partition, parent)
     endpoint_id = CHILD_IDS[1]
     duplicate = parent.actions[0]
-    endpoint_actions = (replace(
+    duplicate = replace(
         duplicate, ordinal=0, dependencies=(), action_digest=None,
-    ),)
+    )
+    endpoint_actions = (
+        duplicate,
+        replace(
+            plans[endpoint_id].actions[-1],
+            ordinal=1,
+            dependencies=(duplicate.action_id,),
+            action_digest=None,
+        ),
+    )
     duplicate_plans = {
         **plans,
         endpoint_id: replace(
@@ -534,10 +578,17 @@ def test_parallel_partition_rejects_wrong_work_digest_and_unassigned_required_ac
         kept = tuple(
             action for action in plan.actions if action.action_id != "verify.xss"
         )
+        kept_ids = {action.action_id for action in kept}
         incomplete[child.scan_id] = replace(
             plan,
             actions=tuple(replace(
-                action, ordinal=index, action_digest=None,
+                action,
+                ordinal=index,
+                dependencies=tuple(
+                    dependency for dependency in action.dependencies
+                    if dependency in kept_ids
+                ),
+                action_digest=None,
             ) for index, action in enumerate(kept)),
             plan_digest=None,
         )

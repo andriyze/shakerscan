@@ -2435,7 +2435,7 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
             "request_max": 50,
             "max_urls": 20,
             "browser_max_pages": 0,
-            "phase4_max_seconds": 0,
+            "phase4_max_seconds": 1,
         },
     })
 
@@ -2457,9 +2457,11 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_browser_actions"] == 0
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_tcp_ports"] == 0
     action_plan = worker._compile_parallel_child_action_plan(child, persisted)
-    # This endpoint shard has no executable family work. Parent finalization is
-    # deliberately absent from child plans compiled with include_finalizer=False.
-    assert action_plan.actions == ()
+    # Even an endpoint shard with no target actions must produce one durable,
+    # offline report for the parent merge barrier.
+    assert [action.capability_name for action in action_plan.actions] == [
+        "scan.finalize"
+    ]
 
 
 def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
@@ -2578,7 +2580,8 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
     )
     plan = worker._compile_parallel_child_action_plan(child, options)
 
-    assert "finalize.report" not in {action.action_id for action in plan.actions}
+    assert plan.actions[-1].action_id == "finalize.report"
+    assert plan.actions[-1].capability_name == "scan.finalize"
     collection = next(
         action for action in plan.actions
         if action.capability_name == "collections.replay_safe"
@@ -2908,7 +2911,7 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
         child["role"] for child in record["children"]
     ] == ["global", "endpoint"]
     assert all(
-        "finalize.report" not in child["expected_action_ids"]
+        child["expected_action_ids"][-1] == "finalize.report"
         for child in record["children"]
     )
     assert all(child["work_partition_digest"] for child in record["children"])

@@ -379,18 +379,37 @@ class ParallelActionPartition:
                 raise ParallelActionPlanError(
                     "child action plan owner differs from its partition"
                 )
-            if any(action.action_id in parent_owned_ids for action in plan.actions):
+            finalizers = [
+                action for action in plan.actions
+                if action.capability_name == "scan.finalize"
+            ]
+            if (
+                len(finalizers) != 1
+                or finalizers[0].action_id != "finalize.report"
+                or plan.actions[-1] != finalizers[0]
+            ):
                 raise ParallelActionPlanError(
-                    "parent-owned finalization cannot execute on a parallel child"
+                    "parallel child must end with exactly one report finalizer"
+                )
+            if any(
+                action.action_id in parent_owned_ids
+                and action.capability_name != "scan.finalize"
+                for action in plan.actions
+            ):
+                raise ParallelActionPlanError(
+                    "parent-owned action cannot execute on a parallel child"
                 )
             action_projection_ids = {
                 _projection_id(action.action_id) for action in plan.actions
+                if action.capability_name != "scan.finalize"
             }
             unauthorized_projection = {
                 _projection_id(action.action_id)
                 for action in plan.actions
                 if (
-                    _projection_id(action.action_id) not in parent_projection_ids
+                    action.capability_name != "scan.finalize"
+                    and _projection_id(action.action_id)
+                    not in parent_projection_ids
                     and action.capability_name not in continuation_capabilities
                 )
             }
@@ -399,7 +418,8 @@ class ParallelActionPartition:
                     "parallel child introduced an action outside parent authority"
                 )
             if any(
-                action.capability_name not in parent_capabilities
+                action.capability_name != "scan.finalize"
+                and action.capability_name not in parent_capabilities
                 and action.capability_name not in continuation_capabilities
                 for action in plan.actions
             ):
@@ -447,6 +467,7 @@ class ParallelActionPartition:
             actual_families = sorted({
                 _capability_family(action.capability_name)
                 for action in plan.actions
+                if action.capability_name != "scan.finalize"
             })
             declared_families = set(assignment["allowed_family_scope"])
             if declared_families and not set(actual_families) <= declared_families:
@@ -640,7 +661,9 @@ class ParallelActionPlanCompiler:
             remaining["state_changing_requests"], weights, minimum=0,
         )
         tool = _weighted_shares(
-            remaining["tool_wall_seconds"], weights, minimum=0,
+            # Every child owns one offline scan.finalize action. Reserve its
+            # minimum wall-time before distributing the remaining tool budget.
+            remaining["tool_wall_seconds"], weights, minimum=1,
         )
         browser = [0] * len(child_specs)
         browser[global_index] = remaining["browser_actions"]
@@ -816,7 +839,17 @@ def validate_parallel_partition_record(
             action_ids, child_global, endpoint_ids, request_ids, refs, families,
         )):
             raise ParallelActionPlanError("parallel action partition child fields are invalid")
-        if parent_owned.intersection(action_ids):
+        if semantic_authority_v2 and (
+            action_ids.count("finalize.report") != 1
+            or action_ids[-1:] != ["finalize.report"]
+        ):
+            raise ParallelActionPlanError(
+                "parallel child report finalizer is invalid"
+            )
+        if parent_owned.intersection(
+            action_id for action_id in action_ids
+            if action_id != "finalize.report"
+        ):
             raise ParallelActionPlanError(
                 "parent-owned action appears in a child action plan"
             )
@@ -833,7 +866,10 @@ def validate_parallel_partition_record(
                     "child introduced an unassigned global action"
                 )
             global_occurrences[action_id] += 1
-        observed_projection_ids.update(_projection_id(item) for item in action_ids)
+        observed_projection_ids.update(
+            _projection_id(item) for item in action_ids
+            if item != "finalize.report"
+        )
         assignment = _canonical_work_assignment({
             "endpoint_work_ids": endpoint_ids,
             "request_work_ids": request_ids,
@@ -862,6 +898,7 @@ def validate_parallel_partition_record(
                 or not set({
                     _capability_family(action.capability_name)
                     for action in plan.actions
+                    if action.capability_name != "scan.finalize"
                 }) <= set(families)
                 or _digest({
                     "work_partition_digest": assignment["work_partition_digest"],
@@ -877,14 +914,16 @@ def validate_parallel_partition_record(
                 projection = _projection_id(action.action_id)
                 capability = action.capability_name
                 if semantic_authority_v2 and (
-                    projection not in allowed_parent_actions
+                    capability != "scan.finalize"
+                    and projection not in allowed_parent_actions
                     and capability not in allowed_continuation
                 ):
                     raise ParallelActionPlanError(
                         "persisted child action exceeds parent authority"
                     )
                 if semantic_authority_v2 and (
-                    capability not in allowed_parent_capabilities
+                    capability != "scan.finalize"
+                    and capability not in allowed_parent_capabilities
                     and capability not in allowed_continuation
                 ):
                     raise ParallelActionPlanError(
