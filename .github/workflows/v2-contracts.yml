@@ -67,6 +67,9 @@ on:
       - tests/**
       - tests/test_v2_ci_contract.py
       - scripts/release_gates.py
+      - scripts/generate_scan_contract.py
+      - scripts/generate_hunt_contract.py
+      - ui/**
       - .github/workflows/v2-*.yml
   pull_request:
     paths:
@@ -132,6 +135,9 @@ on:
       - tests/**
       - tests/test_v2_ci_contract.py
       - scripts/release_gates.py
+      - scripts/generate_scan_contract.py
+      - scripts/generate_hunt_contract.py
+      - ui/**
       - .github/workflows/v2-*.yml
   workflow_dispatch:
 
@@ -143,7 +149,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      ui: ${{ steps.filter.outputs.ui }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify V2 changes without rebuilding unrelated products
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "ui=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_sha="$PR_BASE_SHA"
+          if [[ -z "$base_sha" || "$base_sha" == "null" ]]; then
+            base_sha="$BEFORE_SHA"
+          fi
+          if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
+            base_sha="$(git rev-parse HEAD^)"
+          fi
+          backend=false
+          ui=false
+          while IFS= read -r changed; do
+            case "$changed" in
+              ui/*|scripts/generate_scan_contract.py|scripts/generate_hunt_contract.py|tests/test_ui_*|tests/test_scan_contract_generation.py)
+                ui=true
+                ;;
+              api/api.py|api/scan/contracts.py|tests/test_scan_openapi_contract.py|.github/workflows/v2-contracts.yml)
+                backend=true
+                ui=true
+                ;;
+              *)
+                backend=true
+                ;;
+            esac
+          done < <(git diff --name-only "$base_sha" HEAD)
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
+
   contracts:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -350,6 +407,8 @@ jobs:
           if-no-files-found: ignore
 
   complete-python:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -385,11 +444,35 @@ jobs:
           path: artifacts/
           if-no-files-found: error
 
+  ui-contract:
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up supported Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Run generated contracts, UI unit tests, and production build
+        run: |
+          npm --prefix ui ci
+          python3 scripts/generate_scan_contract.py --check
+          python3 scripts/generate_hunt_contract.py --check
+          npm --prefix ui run test:unit
+          npm --prefix ui run build
+
   # Building the scanner toolchain and booting the complete Compose stack is a
   # candidate acceptance gate, not per-commit feedback. Pushes and PR updates
   # already run the focused contracts and exhaustive Python suite above; the
   # release workflows independently rebuild the exact approved candidate.
   images-api-ui:
+    needs: changes
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -405,6 +488,13 @@ jobs:
           # The upgrade receipt resolves the v0.8.17 baseline tag to its exact
           # source commit. A depth-1 checkout contains only the candidate.
           fetch-depth: 0
+
+      - name: Set up supported Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
 
       - name: Build scanner, API, worker, and UI images in product dependency order
         run: ./scanner.sh build
@@ -505,7 +595,13 @@ jobs:
       - name: Type-check and build the production UI
         run: |
           npm --prefix ui ci
+          npm --prefix ui run test:unit
           npm --prefix ui run build
+
+      - name: Run production-stack browser acceptance
+        run: |
+          npx --prefix ui playwright install --with-deps chromium
+          PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
 
       - name: Run deterministic Model Intake V2 gate
         run: |

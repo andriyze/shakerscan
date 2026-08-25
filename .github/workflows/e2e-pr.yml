@@ -29,7 +29,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect relevant backend changes
+      - name: Detect relevant backend and UI changes
         id: changes
         shell: bash
         run: |
@@ -42,13 +42,23 @@ jobs:
           else
             echo "backend=true" >> "$GITHUB_OUTPUT"
           fi
+          if git diff --quiet \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            -- ui api/api.py api/scan/contracts.py \
+               scripts/generate_scan_contract.py scripts/generate_hunt_contract.py \
+               .github/workflows/e2e-pr.yml .github/workflows/v2-contracts.yml; then
+            echo "ui=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ui=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Skip smoke tests for unrelated changes
-        if: steps.changes.outputs.backend != 'true'
-        run: echo "No E2E-relevant backend changes; smoke test is not required."
+        if: steps.changes.outputs.backend != 'true' && steps.changes.outputs.ui != 'true'
+        run: echo "No E2E-relevant backend or UI changes; smoke test is not required."
 
       - name: Start ShakerScan stack
-        if: steps.changes.outputs.backend == 'true'
+        if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true'
         run: |
           docker compose up -d --build
           for i in $(seq 1 90); do
@@ -83,10 +93,27 @@ jobs:
             PYTHONPATH=/app/_src/api:/app/_src/scanner:/app/_src \
               python -m pytest -q -p no:cacheprovider tests'
 
+      - name: Set up supported Node runtime
+        if: steps.changes.outputs.ui == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Run UI contracts and browser acceptance
+        if: steps.changes.outputs.ui == 'true'
+        run: |
+          npm --prefix ui ci
+          npm --prefix ui run test:unit
+          npm --prefix ui run build
+          npx --prefix ui playwright install --with-deps chromium
+          PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
+
       - name: Dump stack logs on failure
-        if: failure() && steps.changes.outputs.backend == 'true'
-        run: docker compose logs --tail=300 api worker || true
+        if: failure() && (steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true')
+        run: docker compose logs --tail=300 api worker ui || true
 
       - name: Stop E2E stack
-        if: always() && steps.changes.outputs.backend == 'true'
+        if: always() && (steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true')
         run: docker compose down -v

@@ -259,10 +259,11 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - name: Audit and build UI
+      - name: Audit, test, and build UI
         run: |
           npm --prefix ui ci
           npm --prefix ui audit --omit=dev --audit-level=high
+          npm --prefix ui run test:unit
           npm --prefix ui run build
 
       - name: Exercise the complete curl-installed stack

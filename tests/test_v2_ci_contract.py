@@ -39,6 +39,7 @@ def test_v2_workflow_watches_runtime_scanner_and_gate_paths():
         "tests/test_api_scan_option_masking.py",
         "tests/test_api_helpers.py",
         "tests/**",
+        "ui/**",
     ):
         assert text.count(f"- {path}") >= 2, path
 
@@ -111,7 +112,18 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     workflow = yaml.safe_load(_workflow_text())
 
     assert workflow["name"] == "V2 migration contracts"
-    assert set(workflow["jobs"]) == {"contracts", "complete-python", "images-api-ui"}
+    assert set(workflow["jobs"]) == {
+        "changes", "contracts", "complete-python", "ui-contract", "images-api-ui",
+    }
+    assert workflow["jobs"]["contracts"]["if"] == (
+        "needs.changes.outputs.backend == 'true'"
+    )
+    assert workflow["jobs"]["complete-python"]["if"] == (
+        "needs.changes.outputs.backend == 'true'"
+    )
+    assert workflow["jobs"]["ui-contract"]["if"] == (
+        "needs.changes.outputs.ui == 'true'"
+    )
     assert (
         workflow["jobs"]["images-api-ui"]["if"]
         == "github.event_name == 'workflow_dispatch'"
@@ -135,6 +147,9 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "python -m playwright install --with-deps chromium" in text
     assert "scripts/docker_api_overlay_smoke.sh" in text
     assert "npm --prefix ui run build" in text
+    assert "npm --prefix ui run test:unit" in text
+    assert "npm --prefix ui run test:browser" in text
+    assert "node-version: 24" in text
     assert "python tests/e2e/run_e2e.py" in text
     assert "--area model_intake" in text
     assert "--scorecard artifacts/v2-model-intake-scorecard.json" in text
@@ -143,6 +158,27 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "name: external-wire-${{ github.sha }}" in text
     assert "tests/e2e/run_scan_action_resume.py" in text
     assert "name: v2-scan-action-resume" in text
+
+
+def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
+    smoke = (ROOT / ".github" / "workflows" / "e2e-pr.yml").read_text(
+        encoding="utf-8",
+    )
+    release = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+        encoding="utf-8",
+    )
+    full_e2e = (ROOT / ".github" / "workflows" / "e2e.yml").read_text(
+        encoding="utf-8",
+    )
+
+    assert 'echo "ui=true" >> "$GITHUB_OUTPUT"' in smoke
+    assert "steps.changes.outputs.ui == 'true'" in smoke
+    assert "npm --prefix ui run test:unit" in smoke
+    assert "npm --prefix ui run test:browser" in smoke
+    assert "node-version: 24" in smoke
+    assert "npm --prefix ui run test:unit" in release
+    assert "npm --prefix ui run test:unit" in full_e2e
+    assert "npm --prefix ui run test:browser" in full_e2e
 
 
 def test_release_candidate_requires_candidate_image_external_wire_acceptance():

@@ -58,6 +58,13 @@ jobs:
             exit 1
           }
 
+      - name: Set up supported Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
       - name: Start ShakerScan and pinned Juice Shop
         run: |
           docker compose --profile e2e up -d --build
@@ -81,6 +88,13 @@ jobs:
           mkdir -p artifacts
           python3 tests/e2e/run_e2e.py --area all \
             --scorecard artifacts/e2e-scorecard.json
+
+      - name: Run exact-candidate UI unit and browser acceptance
+        run: |
+          npm --prefix ui ci
+          npm --prefix ui run test:unit
+          npx --prefix ui playwright install --with-deps chromium
+          PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
 
       - name: Upload exact-SHA E2E scorecard
         if: always()

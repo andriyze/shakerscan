@@ -30,6 +30,8 @@ node_modules/
 .next/
 *.tsbuildinfo
 ui/next-env.d.ts
+ui/test-results/
+ui/playwright-report/
 *.log
 bun.lockb
 
