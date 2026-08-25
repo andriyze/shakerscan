@@ -22,3 +22,13 @@ test('legacy history is clearly read-only and links its deterministic scans', ()
   assert.match(hunt, /href=\{`\/scans\/\$\{scanId\}`\}/)
   assert.match(hunt, /Open current Hunt launcher/)
 })
+
+test('canonical Hunt history has durable exact-run links and audit details', () => {
+  assert.match(hunt, /listHuntsV2\(\{ targetId: selectedChoice\.id, limit: 12 \}\)/)
+  assert.match(hunt, /searchParams\.get\('run'\)/)
+  assert.match(hunt, /getHuntV2\(runId\)/)
+  assert.match(hunt, /Recent Hunts for this target/)
+  assert.match(hunt, /&run=\$\{encodeURIComponent\(run\.hunt_id\)\}/)
+  assert.match(hunt, /Run ID/)
+  assert.match(hunt, /Back to launcher and history/)
+})

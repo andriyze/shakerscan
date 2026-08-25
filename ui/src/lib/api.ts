@@ -3912,11 +3912,28 @@ export interface HuntV2 {
   final_debrief?: { summary?: string; next_actions?: string[] }
   stop_reason?: string | null
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
+  created_at?: string
+  updated_at?: string
 }
 
 export async function getHuntV2(huntId: string): Promise<HuntV2> {
   const res = await fetch(`${API_URL}/hunts/${huntId}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load Hunt'))
+  return res.json()
+}
+
+export async function listHuntsV2(params: {
+  targetId?: string
+  status?: HuntV2['status']
+  limit?: number
+} = {}): Promise<{ hunts: HuntV2[]; count: number }> {
+  const search = new URLSearchParams()
+  if (params.targetId) search.set('target_id', params.targetId)
+  if (params.status) search.set('status', params.status)
+  if (params.limit) search.set('limit', String(params.limit))
+  const suffix = search.size ? `?${search.toString()}` : ''
+  const res = await fetch(`${API_URL}/hunts${suffix}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to list Hunts'))
   return res.json()
 }
 

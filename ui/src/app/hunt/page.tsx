@@ -11,6 +11,7 @@ import {
   getDeviceAgentSession,
   getHuntV2,
   getTargets,
+  listHuntsV2,
   listCredentialProfiles,
   type CredentialPrincipalSlot,
   type CredentialProfile,
@@ -138,6 +139,52 @@ function LegacyDeviceRun({ run }: { run: DeviceAgentSession }) {
   )
 }
 
+function HuntHistory({
+  targetId,
+  runs,
+  loading,
+}: {
+  targetId: string
+  runs: HuntV2[]
+  loading: boolean
+}) {
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-medium text-white">Recent Hunts for this target</h2>
+          <p className="mt-1 text-xs text-gray-500">Open a durable run to inspect its policy, budget use, capabilities, scans, and outcome.</p>
+        </div>
+        <span className="text-xs text-gray-500">{runs.length} shown</span>
+      </div>
+      {loading ? (
+        <p className="mt-4 text-sm text-gray-500">Loading Hunt history…</p>
+      ) : runs.length === 0 ? (
+        <p className="mt-4 text-sm text-gray-500">No canonical Hunts have been recorded for this target.</p>
+      ) : (
+        <div className="mt-4 divide-y divide-gray-800 rounded-lg border border-gray-800">
+          {runs.map((run) => (
+            <Link
+              key={run.hunt_id}
+              href={`/hunt?target=${encodeURIComponent(targetId)}&run=${encodeURIComponent(run.hunt_id)}`}
+              className="block px-4 py-3 hover:bg-gray-800/60"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-medium text-gray-200">{run.objective}</span>
+                <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{run.status.replaceAll('_', ' ')}</span>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {run.target_kind} · {run.budget_profile} · {run.budget_used.agent_actions || 0} capability calls
+                {run.created_at ? ` · ${new Date(run.created_at).toLocaleString()}` : ''}
+              </p>
+            </Link>
+          ))}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 const ZEROABLE_BUDGETS = HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)
 
 function HuntContent() {
@@ -175,6 +222,8 @@ function HuntContent() {
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
+  const [huntHistory, setHuntHistory] = useState<HuntV2[]>([])
+  const [huntHistoryLoading, setHuntHistoryLoading] = useState(false)
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -230,6 +279,23 @@ function HuntContent() {
     return () => { cancelled = true }
   }, [searchParams])
 
+  useEffect(() => {
+    const runId = searchParams.get('run')
+    if (!runId) return
+    let cancelled = false
+    setError(null)
+    getHuntV2(runId)
+      .then((run) => {
+        if (cancelled) return
+        setHunt(run)
+        setTargetId(run.target_id)
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load Hunt')
+      })
+    return () => { cancelled = true }
+  }, [searchParams])
+
   const choices = useMemo<TargetChoice[]>(() => [
     ...webTargets.map((target) => ({
       id: target.id,
@@ -248,6 +314,21 @@ function HuntContent() {
   const targetKind: HuntTargetKind = selectedChoice?.sourceKind === 'device'
     ? 'device'
     : webTargetKind
+
+  useEffect(() => {
+    let cancelled = false
+    setHuntHistory([])
+    if (!selectedChoice) {
+      setHuntHistoryLoading(false)
+      return () => { cancelled = true }
+    }
+    setHuntHistoryLoading(true)
+    listHuntsV2({ targetId: selectedChoice.id, limit: 12 })
+      .then(({ hunts }) => { if (!cancelled) setHuntHistory(hunts) })
+      .catch(() => { if (!cancelled) setHuntHistory([]) })
+      .finally(() => { if (!cancelled) setHuntHistoryLoading(false) })
+    return () => { cancelled = true }
+  }, [selectedChoice?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -452,7 +533,8 @@ function HuntContent() {
       ) : legacyDeviceRun ? (
         <LegacyDeviceRun run={legacyDeviceRun} />
       ) : !hunt ? (
-        <Card className="space-y-5 p-5">
+        <>
+          <Card className="space-y-5 p-5">
           {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (
             <EmptyState message="No targets available" hint="Add a web or connected-device target first." />
           ) : (
@@ -717,7 +799,15 @@ function HuntContent() {
               </div>
             </>
           )}
-        </Card>
+          </Card>
+          {selectedChoice && (
+            <HuntHistory
+              targetId={selectedChoice.id}
+              runs={huntHistory}
+              loading={huntHistoryLoading}
+            />
+          )}
+        </>
       ) : (
         <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
           <div className="space-y-5">
@@ -727,7 +817,7 @@ function HuntContent() {
                   <p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p>
                   <h2 className="mt-1 font-medium text-white">{hunt.objective}</h2>
                 </div>
-                <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{hunt.status}</span>
+                <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{hunt.status.replaceAll('_', ' ')}</span>
               </div>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded bg-gray-950 p-3">
@@ -740,7 +830,29 @@ function HuntContent() {
                     {hunt.budget_used.agent_actions || 0} / {hunt.budget.max_capability_calls || 0}
                   </span>
                 </div>
+                <div className="col-span-2 rounded bg-gray-950 p-3">
+                  <span className="block text-xs text-gray-500">Run ID</span>
+                  <code className="break-all text-xs text-gray-300">{hunt.hunt_id}</code>
+                </div>
               </div>
+              {hunt.created_at && <p className="text-xs text-gray-500">Started {new Date(hunt.created_at).toLocaleString()}</p>}
+              {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
+              {hunt.queued_scan?.scan_id && (
+                <Link href={`/scans/${hunt.queued_scan.scan_id}`} className="block rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-200 hover:bg-blue-500/10">
+                  Open queued Scan {hunt.queued_scan.scan_id.slice(0, 8)} · {hunt.queued_scan.status}
+                </Link>
+              )}
+              {hunt.final_debrief?.summary && (
+                <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Final debrief</p>
+                  <p className="mt-2 text-sm text-gray-300">{hunt.final_debrief.summary}</p>
+                  {hunt.final_debrief.next_actions && hunt.final_debrief.next_actions.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-400">
+                      {hunt.final_debrief.next_actions.map((action) => <li key={action}>{action}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
                 <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
                 The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
@@ -748,6 +860,9 @@ function HuntContent() {
               {['active', 'awaiting_planner'].includes(hunt.status) && (
                 <Button variant="danger" onClick={cancel}>Cancel Hunt</Button>
               )}
+              <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
+                Back to launcher and history
+              </Link>
             </Card>
 
             {hunt.target_kind === 'device' && shellPlans.length > 0 && (
