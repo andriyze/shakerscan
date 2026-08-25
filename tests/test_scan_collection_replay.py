@@ -461,7 +461,7 @@ def test_scan_api_allows_canonical_parallel_replay_and_freezes_binding():
     source = (root / "api" / "api.py").read_text()
     worker = (root / "api" / "worker.py").read_text()
     submit_start = source.index('async def _submit_scan')
-    submit_end = source.index('\n\n@app.post("/scans/batch")', submit_start)
+    submit_end = source.index("\nasync def submit_batch_endpoint", submit_start)
     submit = source[submit_start:submit_end]
 
     assert "confirmed_active_collection_replay" in submit

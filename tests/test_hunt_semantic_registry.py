@@ -86,14 +86,25 @@ def test_registry_input_schema_rejects_hallucinated_flags_and_wrong_shapes():
 
 
 def test_hunt_handler_validates_registry_input_before_reservation_or_action_write():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index('\n\n@app.post("/hunts/{hunt_id}/shell-plans', start)
-    handler = source[start:end]
-    validation = handler.index("HUNT_ACTION_DISPATCHER.registry.validate_hunt_input")
-    assert validation < handler.index("create_requested")
-    assert validation < handler.index("INSERT INTO hunt_actions")
-    assert "HUNT_ACTION_DISPATCHER.placement(name)" in handler
+    route_source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
+    service_source = (ROOT / "api" / "hunt" / "action_service.py").read_text(
+        encoding="utf-8"
+    )
+    prepare_start = service_source.index("    def prepare(")
+    prepare_end = service_source.index("\n    async def execute(", prepare_start)
+    prepare = service_source[prepare_start:prepare_end]
+    route_start = route_source.index("async def execute_hunt_capability(")
+    route_end = route_source.index(
+        "\n\nasync def _execute_hunt_capability_lifecycle(", route_start
+    )
+    route = route_source[route_start:route_end]
+
+    assert prepare.index("registry.validate_hunt_input") < prepare.index(
+        "HuntActionLifecycle("
+    )
+    assert "HUNT_ACTION_SERVICE.execute(" in route
+    assert "_execute_hunt_capability_lifecycle(" in route
+    assert "INSERT INTO hunt_actions" not in route
 
 
 def test_hunt_capability_actions_require_retry_safe_idempotency_keys():
