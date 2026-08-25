@@ -474,6 +474,25 @@ jobs:
           path: artifacts/v2-scan-reservation-identity.json
           if-no-files-found: error
 
+      - name: Prove Scan action resume without repeated target traffic
+        run: |
+          docker compose cp \
+            tests/e2e/run_scan_action_resume.py \
+            api:/tmp/run_scan_action_resume.py
+          docker compose exec -T -w /app api \
+            python /tmp/run_scan_action_resume.py --json \
+            > artifacts/v2-scan-action-resume.json
+          test "$(jq -r '.passed' artifacts/v2-scan-action-resume.json)" = true
+          test "$(jq -r '.repeated_target_requests' artifacts/v2-scan-action-resume.json)" = 0
+
+      - name: Upload Scan action resume receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-scan-action-resume
+          path: artifacts/v2-scan-action-resume.json
+          if-no-files-found: error
+
       - name: Type-check and build the production UI
         run: |
           npm --prefix ui ci

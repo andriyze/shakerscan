@@ -132,6 +132,8 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "name: v2-model-intake-e2e" in text
     assert "python tests/e2e/run_external_wire_acceptance.py --json" in text
     assert "name: external-wire-${{ github.sha }}" in text
+    assert "tests/e2e/run_scan_action_resume.py" in text
+    assert "name: v2-scan-action-resume" in text
 
 
 def test_release_candidate_requires_candidate_image_external_wire_acceptance():
