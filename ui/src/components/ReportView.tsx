@@ -563,7 +563,37 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const partiallyPersistedFindings = rawFindings.length > 0 && persistedFindings.length > 0 && rawFindingsWithoutRecords.length > 0
   const result = scanData.result || {}
   const triage = scanData.triage || {}
+  const coverage = scanData.coverage || {}
   const coverageGaps = scanData.coverage_gaps || {}
+  const explicitCoverageGapIssues = Array.isArray(coverageGaps.issues)
+    ? coverageGaps.issues.filter((item: any) => typeof item === 'string' && item.trim())
+    : []
+  const coverageActionRows = Array.isArray(coverage?.capability_coverage?.actions)
+    ? coverage.capability_coverage.actions.filter(
+      (item: any) => item && typeof item === 'object' && String(item.status || '') !== 'success',
+    )
+    : []
+  const actionGapReasonCodes = new Set(
+    coverageActionRows.map((item: any) => String(item.reason_code || '')).filter(Boolean),
+  )
+  const canonicalActionGapIssues = coverageActionRows.map((item: any) => {
+    const capability = formatScanToken(
+      String(item.capability_name || item.action_id || 'Capability').replace(/\./g, ' '),
+    )
+      .replace(/^Dns\b/, 'DNS')
+      .replace(/^Http\b/, 'HTTP')
+    const status = formatScanToken(item.status || 'incomplete')
+    const reason = item.reason_code ? ` — ${formatScanToken(item.reason_code)}` : ''
+    return `${capability}: ${status}${reason}`
+  })
+  const canonicalCoverageReasonIssues = (Array.isArray(coverage.reasons) ? coverage.reasons : [])
+    .filter((item: any) => typeof item === 'string' && item.trim() && !actionGapReasonCodes.has(item))
+    .map((item: string) => formatScanToken(item))
+  const coverageGapIssues = Array.from(new Set([
+    ...explicitCoverageGapIssues,
+    ...canonicalActionGapIssues,
+    ...canonicalCoverageReasonIssues,
+  ]))
   const js_dependencies = scanData.js_dependencies || {}
   const js_secrets = scanData.js_secrets || {}
   const cicd_exposure = scanData.cicd_exposure || {}
@@ -631,11 +661,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const budgetProfile = scan_config.budget_profile || scan.options?.budget_profile || resolved_budget.budget_profile
   const canonicalBudgetUsed = scanData.scan_metadata?.budget_used || {}
   const canonicalBudgetLimit = scan.options?.scan_execution_plan?.budget || scan.options?.resolved_scan_budget || {}
-  const attemptedHttpRequests = requestBudget.attempted_requests ?? canonicalBudgetUsed.http_requests ?? 0
+  const executionBudget = scan.execution_explanation?.budget || {}
+  const executionHttpRequests = executionBudget?.consumed?.http_requests
+  const attemptedHttpRequests = scanData.parallel && executionHttpRequests !== undefined
+    ? executionHttpRequests
+    : requestBudget.attempted_requests ?? canonicalBudgetUsed.http_requests ?? executionHttpRequests ?? 0
   const httpRequestLimit = requestBudget.request_limit
     ?? resolved_budget.request_max
     ?? canonicalBudgetLimit.max_http_requests
-  const coverage = scanData.coverage || {}
+    ?? executionBudget?.limit?.http_requests
   const smart_coverage = (scanData.smart_coverage || {}) as ScanCoverage
   const attack_chains = scanData.attack_chains || scanData.result?.attack_chains || null
   const client_side_vulns = scanData.client_side_vulns || {}
@@ -1047,7 +1081,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5 mt-6">
           <div className="bg-gray-700/50 rounded-lg p-4">
             <h3 className="text-sm text-gray-400 mb-1">Status</h3>
-            <p className="text-lg font-semibold capitalize">{scan.status}</p>
+            <p className="text-lg font-semibold capitalize">
+              {scan.status === 'completed' && scan_metadata.partial === true
+                ? 'Completed with partial coverage'
+                : scan.status}
+            </p>
           </div>
           <div className="bg-gray-700/50 rounded-lg p-4">
             <h3 className="text-sm text-gray-400 mb-1">Workflow</h3>
@@ -2217,7 +2255,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Triage + Coverage Gaps */}
-      {(triage?.confirmed?.count !== undefined || (coverageGaps?.issues || []).length > 0) && (
+      {(triage?.confirmed?.count !== undefined || coverageGapIssues.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Triage & Coverage</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
@@ -2244,9 +2282,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
           <div>
             <h3 className="text-sm text-gray-400 mb-2">Coverage Gaps</h3>
-            {(coverageGaps?.issues || []).length > 0 ? (
+            {coverageGapIssues.length > 0 ? (
               <ul className="list-disc list-inside text-sm text-gray-300 space-y-1">
-                {coverageGaps.issues.map((issue: string, idx: number) => (
+                {coverageGapIssues.map((issue: string, idx: number) => (
                   <li key={idx}>{issue}</li>
                 ))}
               </ul>

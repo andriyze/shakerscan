@@ -19,6 +19,7 @@ from api.scan.parallel_compiler import (
     build_parallel_work_assignment,
     merge_parallel_action_executions,
     merge_parallel_work_assignments,
+    summarize_parallel_action_coverage,
     validate_parallel_partition_record,
 )
 
@@ -824,6 +825,9 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
     assert merged["partial"] is False
     assert merged["incomplete_child_scan_ids"] == []
     assert merged["merge_digest"]
+    coverage = summarize_parallel_action_coverage(merged)
+    assert coverage["status"] == "complete"
+    assert coverage["grade_reliability"] == {"reliable": True, "reasons": []}
 
     lost = dict(reports)
     lost[CHILD_IDS[2]] = None
@@ -837,6 +841,10 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
     )
     assert partial["partial"] is True
     assert partial["incomplete_child_scan_ids"] == [CHILD_IDS[2]]
+    assert summarize_parallel_action_coverage(partial)["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["parallel_child_incomplete"],
+    }
 
     rogue = json.loads(json.dumps(reports))
     rogue[CHILD_IDS[1]]["canonical_action_execution"]["actions"].append({
@@ -850,3 +858,50 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
             child_results=rogue,
             child_statuses={scan_id: "completed" for scan_id in plans},
         )
+
+
+def test_parallel_coverage_uses_merged_terminal_actions_not_parent_placeholders():
+    coverage = summarize_parallel_action_coverage({
+        "partial": True,
+        "actions": [
+            {
+                "action_id": "baseline.http",
+                "capability_name": "http.request",
+                "required": True,
+                "status": "success",
+                "reason_code": None,
+            },
+            {
+                "action_id": "inputs.collection_00",
+                "capability_name": "collections.replay_safe",
+                "required": True,
+                "status": "failed",
+                "reason_code": "adapter_failed",
+            },
+            {
+                "action_id": "discover.web_crawl",
+                "capability_name": "web.crawl",
+                "required": False,
+                "status": "skipped",
+                "reason_code": "insufficient_plan_budget",
+            },
+        ],
+    })
+
+    assert coverage["status"] == "partial"
+    assert coverage["capability_coverage"] == {
+        "total": 3,
+        "required": 2,
+        "completed": 1,
+        "partial": 0,
+        "blocked": 0,
+        "failed": 1,
+        "skipped": 1,
+        "cancelled": 0,
+        "pending": 0,
+        "actions": coverage["capability_coverage"]["actions"],
+    }
+    assert coverage["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["adapter_failed", "parallel_child_incomplete"],
+    }

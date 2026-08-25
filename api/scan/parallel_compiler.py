@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -1633,3 +1634,92 @@ def merge_parallel_action_executions(
         "partial": bool(incomplete_children),
     }
     return {**payload, "merge_digest": _digest(payload)}
+
+
+def summarize_parallel_action_coverage(
+    execution: Mapping[str, Any] | None,
+    *,
+    additional_reliability_reasons: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Project one truthful parent coverage block from the verified child merge.
+
+    A parallel parent's original action rows are allocation placeholders.  Only
+    the partition-bound child merge proves which actions actually terminated.
+    This projection intentionally contains no child IDs or observation bodies.
+    """
+    merge = dict(execution or {})
+    actions = [
+        dict(item) for item in merge.get("actions") or ()
+        if isinstance(item, Mapping) and str(item.get("action_id") or "").strip()
+    ]
+    counts = Counter(str(item.get("status") or "missing") for item in actions)
+    required = [item for item in actions if item.get("required") is True]
+    required_incomplete = [
+        item for item in required if str(item.get("status") or "missing") != "success"
+    ]
+    reliability_reasons = {
+        str(item.get("reason_code") or "missing_terminal_result")
+        for item in required_incomplete
+    }
+    reliability_reasons.update(
+        str(item).strip()[:100]
+        for item in additional_reliability_reasons
+        if str(item).strip()
+    )
+    if merge.get("partial") is True:
+        reliability_reasons.add("parallel_child_incomplete")
+    sorted_reasons = sorted(reliability_reasons)
+    optional_gaps = [
+        {
+            "action_id": str(item.get("action_id")),
+            "capability_name": str(item.get("capability_name") or "unknown"),
+            "status": str(item.get("status") or "missing"),
+            "reason_code": item.get("reason_code"),
+        }
+        for item in actions
+        if item.get("required") is not True
+        and str(item.get("status") or "missing") != "success"
+    ]
+    return {
+        "status": "partial" if sorted_reasons else "complete",
+        "reasons": sorted_reasons,
+        "planned_action_count": len(actions),
+        "terminal_action_count": sum(
+            counts.get(status, 0)
+            for status in (
+                "success", "partial", "skipped", "blocked", "failed",
+                "cancelled", "timed_out",
+            )
+        ),
+        "finalization_action_id": "finalize.report",
+        "capability_coverage": {
+            "total": len(actions),
+            "required": len(required),
+            "completed": counts.get("success", 0),
+            "partial": counts.get("partial", 0) + counts.get("timed_out", 0),
+            "blocked": counts.get("blocked", 0),
+            "failed": counts.get("failed", 0),
+            "skipped": counts.get("skipped", 0),
+            "cancelled": counts.get("cancelled", 0),
+            "pending": sum(
+                counts.get(status, 0)
+                for status in ("planned", "leased", "running", "missing")
+            ),
+            "actions": [
+                {
+                    "action_id": str(item.get("action_id")),
+                    "capability_name": str(item.get("capability_name") or "unknown"),
+                    "required": item.get("required") is True,
+                    "status": str(item.get("status") or "missing"),
+                    "reason_code": item.get("reason_code"),
+                }
+                for item in actions
+            ],
+        },
+        "grade_reliability": {
+            "reliable": not sorted_reasons,
+            "reasons": sorted_reasons,
+        },
+        "optional_gaps": optional_gaps,
+        "active_zero_attempt_actions": [],
+    }

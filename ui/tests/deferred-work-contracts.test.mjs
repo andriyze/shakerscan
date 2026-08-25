@@ -100,7 +100,22 @@ test('parent and family coverage preserve attempted, completed, and proof facts'
     selected: 8,
     tested: 7,
     telemetryShards: 2,
+    attemptTelemetryAvailable: true,
     contributingShards: 3,
+    complete: false,
+  })
+
+  assert.deepEqual(contracts.normalizeParentCoverage({
+    assigned_endpoints: 7,
+    shards_with_contribution: 2,
+  }), {
+    assigned: 7,
+    attempted: 0,
+    selected: 0,
+    tested: 0,
+    telemetryShards: 0,
+    attemptTelemetryAvailable: false,
+    contributingShards: 2,
     complete: false,
   })
 

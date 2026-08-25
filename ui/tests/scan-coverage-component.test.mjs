@@ -15,6 +15,8 @@ test('scan coverage is a bounded report component with canonical language', () =
   assert.match(coverage, /no parameters inventoried/)
   assert.match(coverage, /run_approximate/)
   assert.match(coverage, /\sestimated\s/)
+  assert.match(coverage, /endpointTelemetryUnavailable/)
+  assert.match(coverage, /Attempt telemetry unavailable/)
 })
 
 test('coverage bars clamp malformed persisted percentages', () => {

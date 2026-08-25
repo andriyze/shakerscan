@@ -7,6 +7,8 @@ from datetime import date, datetime
 import json
 from typing import Any, Mapping, Sequence
 
+from .parallel_compiler import summarize_parallel_action_coverage
+
 
 EXPLANATION_SCHEMA = "scan-execution-explanation/v1"
 ACTION_LIST_SCHEMA = "scan-action-list/v1"
@@ -56,6 +58,7 @@ _REASON_LABELS = {
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",
     "missing_terminal_result": "A required capability has no terminal result",
+    "parallel_child_incomplete": "At least one parallel shard completed with partial coverage",
 }
 
 
@@ -232,9 +235,15 @@ def build_scan_execution_explanation(
     """
     plan = _object(plan_payload)
     report_payload = _object(report)
-    execution = _object(report_payload.get("canonical_action_execution"))
+    report_execution = _object(report_payload.get("canonical_action_execution"))
+    parallel_execution = _object(
+        _object(report_payload.get("parallel")).get("canonical_action_execution")
+    )
+    parallel_actions = _array(parallel_execution.get("actions"))
+    execution = parallel_execution if parallel_actions else report_execution
     raw_revision = _object(
-        plan_revision or execution.get("plan_revision")
+        plan_revision or report_execution.get("plan_revision")
+        or execution.get("plan_revision")
     )
     public_revision = {
         "schema_version": _text(raw_revision.get("schema_version"), maximum=80),
@@ -264,7 +273,10 @@ def build_scan_execution_explanation(
         for item in (_object(raw) for raw in _array(execution.get("actions")))
         if item.get("action_id")
     }
-    finalization = _object(execution.get("finalization_action"))
+    finalization = _object(
+        execution.get("finalization_action")
+        or report_execution.get("finalization_action")
+    )
     if finalization.get("action_id"):
         report_actions.setdefault(str(finalization["action_id"]), finalization)
     indexed = {
@@ -275,6 +287,54 @@ def build_scan_execution_explanation(
         _object(raw) for raw in _array(plan.get("actions"))
         if _object(raw).get("action_id")
     ]
+    if parallel_actions:
+        parent_actions = {
+            str(item.get("action_id")): item for item in planned
+            if item.get("action_id")
+        }
+        planned = []
+        for ordinal, raw in enumerate(parallel_actions):
+            terminal = _object(raw)
+            action_id = str(terminal.get("action_id") or "")
+            if not action_id:
+                continue
+            parent_action = parent_actions.get(action_id, {})
+            planned.append({
+                **parent_action,
+                "action_id": action_id,
+                "ordinal": ordinal,
+                "stage": terminal.get("stage") or parent_action.get("stage"),
+                "capability_name": (
+                    terminal.get("capability_name")
+                    or parent_action.get("capability_name")
+                ),
+                "required": bool(
+                    terminal.get("required", parent_action.get("required", False))
+                ),
+                "supporting": bool(
+                    terminal.get("supporting", parent_action.get("supporting", False))
+                ),
+                "requested_budget": (
+                    parent_action.get("requested_budget")
+                    or terminal.get("budget_reserved")
+                ),
+                "admission_status": terminal.get("status") or "planned",
+            })
+        if finalization.get("action_id"):
+            final_action_id = str(finalization["action_id"])
+            parent_finalizer = parent_actions.get(final_action_id, {})
+            planned.append({
+                **parent_finalizer,
+                "action_id": final_action_id,
+                "ordinal": len(planned),
+                "stage": parent_finalizer.get("stage") or "finalize_evidence",
+                "capability_name": (
+                    parent_finalizer.get("capability_name") or "scan.finalize"
+                ),
+                "required": True,
+                "supporting": False,
+                "admission_status": finalization.get("status") or "planned",
+            })
     if not planned:
         planned = [
             {**row, "ordinal": row.get("ordinal", index)}
@@ -300,11 +360,15 @@ def build_scan_execution_explanation(
         if row and terminal:
             if row_status in _TERMINAL and report_status in _TERMINAL and row_status != report_status:
                 parity_ok = False
-        reason = (
-            _text(row.get("reason_code"), maximum=100)
-            or _text(terminal.get("reason_code"), maximum=100)
-            or _text(raw_plan.get("reason_code"), maximum=100)
-        )
+        if report_status in _TERMINAL:
+            # The terminal receipt supersedes placeholder/admission reasons.  A
+            # successful child action must not inherit a stale parent-plan gap.
+            reason = _text(terminal.get("reason_code"), maximum=100)
+        else:
+            reason = (
+                _text(row.get("reason_code"), maximum=100)
+                or _text(raw_plan.get("reason_code"), maximum=100)
+            )
         placement = _object(raw_plan.get("placement") or row.get("placement_json"))
         result_payload = _object(row.get("result_json"))
         observation = (
@@ -391,7 +455,9 @@ def build_scan_execution_explanation(
                 "reservation_status": reservation_status,
             },
             "observation": observation,
-            "receipt": _receipt_projection(row.get("receipt_json"), row),
+            "receipt": _receipt_projection(
+                terminal.get("receipt") or row.get("receipt_json"), row,
+            ),
             "result_digest": _text(row.get("result_digest"), maximum=64),
             "action_digest": _text(
                 raw_plan.get("action_digest") or row.get("action_digest"), maximum=64,
@@ -462,7 +528,9 @@ def build_scan_execution_explanation(
     required_incomplete = [
         item for item in required_rows if item["status"] not in _SUCCESS
     ]
-    work_manifests = _work_manifests(execution)
+    work_manifests = _work_manifests(
+        report_execution if parallel_actions else execution
+    )
     candidate_count = sum(
         item["entry_count"] for item in work_manifests
         if item["kind"] == "candidate" and item["status"] != "cancelled"
@@ -477,7 +545,17 @@ def build_scan_execution_explanation(
             if name in _TRAFFIC_DIMENSIONS
         )
     ]
-    report_coverage = _object(report_payload.get("coverage"))
+    report_coverage = (
+        summarize_parallel_action_coverage(
+            parallel_execution,
+            additional_reliability_reasons=_array(
+                _object(_object(report_payload.get("coverage")).get("grade_reliability"))
+                .get("reasons")
+            ),
+        )
+        if parallel_actions
+        else _object(report_payload.get("coverage"))
+    )
     report_reliability = _object(report_coverage.get("grade_reliability"))
     reliability_reasons = sorted({
         str(item.get("reason_code") or "missing_terminal_result")

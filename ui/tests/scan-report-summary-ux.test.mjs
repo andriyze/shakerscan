@@ -19,5 +19,13 @@ test('HTTP usage falls back to canonical finalizer budget usage', () => {
   assert.match(report, /scanData\.scan_metadata\?\.budget_used/)
   assert.match(report, /canonicalBudgetUsed\.http_requests/)
   assert.match(report, /canonicalBudgetLimit\.max_http_requests/)
+  assert.match(report, /scan\.execution_explanation\?\.budget/)
+  assert.match(report, /scanData\.parallel && executionHttpRequests !== undefined/)
   assert.match(report, /\{attemptedHttpRequests\}\/\{httpRequestLimit\} requests used/)
+})
+
+test('parallel reports render canonical action gaps and partial status', () => {
+  assert.match(report, /coverageActionRows/)
+  assert.match(report, /coverageGapIssues/)
+  assert.match(report, /Completed with partial coverage/)
 })

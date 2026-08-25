@@ -527,6 +527,7 @@ try:
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
     )
+    from scan.parallel_compiler import summarize_parallel_action_coverage
     from scan.surface_manifest import build_scan_surface_manifest
     from scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -646,6 +647,7 @@ except ModuleNotFoundError:
         PostgresScanStageCheckpointStore,
         ScanStageCheckpointError,
     )
+    from api.scan.parallel_compiler import summarize_parallel_action_coverage
     from api.scan.surface_manifest import build_scan_surface_manifest
     from api.scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -2741,6 +2743,32 @@ def _infer_nuclei_templates_run(scan_result: dict[str, Any]) -> tuple[int, str |
 def _normalize_scan_result_for_api(scan_result: Any) -> Any:
     if not isinstance(scan_result, dict):
         return scan_result
+
+    parallel = scan_result.get("parallel")
+    merge = (
+        parallel.get("canonical_action_execution")
+        if isinstance(parallel, dict) else None
+    )
+    if isinstance(merge, dict) and isinstance(merge.get("actions"), list):
+        current_coverage = (
+            scan_result.get("coverage")
+            if isinstance(scan_result.get("coverage"), dict) else {}
+        )
+        current_reliability = (
+            current_coverage.get("grade_reliability")
+            if isinstance(current_coverage.get("grade_reliability"), dict) else {}
+        )
+        extra_reasons = list(current_reliability.get("reasons") or ())
+        verification = (
+            scan_result.get("verification_summary")
+            if isinstance(scan_result.get("verification_summary"), dict) else {}
+        )
+        if int(verification.get("unproven_critical_high") or 0) > 0:
+            extra_reasons.append("unproven_critical_high")
+        scan_result["coverage"] = summarize_parallel_action_coverage(
+            merge,
+            additional_reliability_reasons=extra_reasons,
+        )
 
     inferred_nuclei_run, inferred_source = _infer_nuclei_templates_run(scan_result)
     if inferred_nuclei_run > 0:

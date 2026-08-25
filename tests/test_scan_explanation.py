@@ -287,3 +287,100 @@ def test_public_endpoint_projections_have_stable_schemas():
     assert capability_list_response(explanation)["schema_version"] == "scan-capability-coverage/v1"
     assert coverage_response(explanation)["schema_version"] == "scan-coverage-explanation/v1"
     assert capability_list_response(explanation)["capabilities"][0]["capability_name"] == "http.request"
+
+
+def test_parallel_parent_explanation_uses_verified_child_merge():
+    plan = _plan()
+    plan["actions"].insert(-1, {
+        "action_id": "inputs.collection_00",
+        "action_digest": "9" * 64,
+        "stage": "discover_surface",
+        "ordinal": 2,
+        "capability_name": "collections.replay_safe",
+        "output_schema": "request-collection-replay/v2",
+        "required": True,
+        "supporting": True,
+        "dependencies": [],
+        "requested_budget": {"http_requests": 4, "tool_wall_seconds": 60},
+        "placement": {"eligible_backends": ["local", "broker"]},
+        "admission_status": "planned",
+    })
+    report = {
+        "canonical_action_execution": {
+            "plan_digest": "child-backbone",
+            "actions": [],
+            "finalization_action": {
+                "action_id": "finalize.report",
+                "status": "success",
+            },
+        },
+        "coverage": {
+            "status": "complete",
+            "grade_reliability": {"reliable": True, "reasons": []},
+        },
+        "parallel": {
+            "canonical_action_execution": {
+                "partial": True,
+                "actions": [
+                    {
+                        "action_id": "baseline.http",
+                        "stage": "deterministic_baseline",
+                        "capability_name": "http.request",
+                        "required": True,
+                        "status": "success",
+                        "reason_code": None,
+                        "budget_reserved": {"http_requests": 4},
+                        "budget_consumed": {"http_requests": 2},
+                    },
+                    {
+                        "action_id": "verify.xss.0",
+                        "stage": "active_verification",
+                        "capability_name": "xss.verify",
+                        "required": False,
+                        "status": "skipped",
+                        "reason_code": "insufficient_plan_budget",
+                    },
+                    {
+                        "action_id": "inputs.collection_00",
+                        "stage": "discover_surface",
+                        "capability_name": "collections.replay_safe",
+                        "required": True,
+                        "status": "failed",
+                        "reason_code": "adapter_failed",
+                        "budget_reserved": {"http_requests": 4},
+                        "budget_consumed": {"http_requests": 4},
+                    },
+                ],
+            },
+        },
+    }
+
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="completed",
+        plan_payload=plan,
+        action_rows=[],
+        report=report,
+    )
+
+    matrix = explanation["coverage"]["capability_coverage"]
+    assert matrix["total"] == 3
+    assert matrix["completed"] == 1
+    assert matrix["failed"] == 1
+    assert matrix["skipped"] == 1
+    assert matrix["pending"] == 0
+    collection = next(
+        item for item in explanation["actions"]
+        if item["action_id"] == "inputs.collection_00"
+    )
+    assert collection["status"] == "failed"
+    assert collection["reason_code"] == "adapter_failed"
+    assert explanation["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["adapter_failed", "parallel_child_incomplete"],
+        "reason_labels": [
+            "The capability adapter failed",
+            "At least one parallel shard completed with partial coverage",
+        ],
+        "warning": "The grade is provisional because required coverage did not complete cleanly.",
+    }

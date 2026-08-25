@@ -108,12 +108,14 @@ export function normalizeParentCoverage(contribution: Record<string, unknown>) {
   const assigned = count(contribution.assigned_endpoints)
   const attempted = count(contribution.attempted_endpoints)
   const selected = count(contribution.active_endpoints_selected)
+  const telemetryShards = count(contribution.telemetry_shards)
   return {
     assigned,
     attempted,
     selected,
     tested: attempted || selected,
-    telemetryShards: count(contribution.telemetry_shards),
+    telemetryShards,
+    attemptTelemetryAvailable: telemetryShards > 0 || attempted > 0,
     contributingShards: count(contribution.shards_with_contribution),
     complete: assigned > 0 && (attempted || selected) >= assigned,
   }

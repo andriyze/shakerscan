@@ -1,6 +1,7 @@
 type CountMap = Record<string, number>
 
 type CoverageDimension = {
+  basis?: string
   coverage?: number
   tested?: number
   discovered?: number
@@ -22,6 +23,8 @@ export type ScanCoverage = {
   nuclei_templates?: TemplateCoverage
   auth_states_tested?: string[]
   discovery_sources?: string[]
+  aggregated_from_shards?: number
+  coverage_reports_from_shards?: number
 }
 
 type Props = {
@@ -87,6 +90,12 @@ export default function ScanCoverageSection({ coverage }: Props) {
   if (!coverage.endpoints && !coverage.parameters && !coverage.nuclei_templates) return null
   const templates = coverage.nuclei_templates
   const approximate = Boolean(templates?.run_approximate)
+  const endpointTelemetryUnavailable = Boolean(
+    coverage.endpoints &&
+    Number(coverage.aggregated_from_shards || 0) > 0 &&
+    Number(coverage.coverage_reports_from_shards || 0) === 0 &&
+    Number(coverage.endpoints.discovered || 0) > 0,
+  )
   const categories = Object.entries(templates?.by_category || {}).sort(([, left], [, right]) => right - left)
 
   return (
@@ -98,11 +107,15 @@ export default function ScanCoverageSection({ coverage }: Props) {
           <div className="rounded-lg bg-gray-900 p-4">
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-400">Endpoint Coverage</h3>
-              <span className="text-lg font-bold text-white">{Math.round(percentage(coverage.endpoints.coverage))}%</span>
+              <span className="text-lg font-bold text-white">
+                {endpointTelemetryUnavailable ? '—' : `${Math.round(percentage(coverage.endpoints.coverage))}%`}
+              </span>
             </div>
-            <Progress value={coverage.endpoints.coverage} className="bg-blue-500" />
+            {!endpointTelemetryUnavailable && <Progress value={coverage.endpoints.coverage} className="bg-blue-500" />}
             <p className="text-xs text-gray-500">
-              {coverage.endpoints.tested || 0} tested / {coverage.endpoints.discovered || 0} discovered
+              {endpointTelemetryUnavailable
+                ? `Attempt telemetry unavailable · ${coverage.endpoints.discovered || 0} ${coverage.endpoints.basis === 'assigned_custom_endpoints' ? 'assigned' : 'discovered'}`
+                : `${coverage.endpoints.tested || 0} tested / ${coverage.endpoints.discovered || 0} discovered`}
             </p>
           </div>
         )}

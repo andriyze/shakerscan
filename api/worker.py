@@ -214,6 +214,7 @@ from scan.parallel_compiler import (
     merge_parallel_action_executions,
     merge_parallel_work_assignments,
     parallel_capability_family_scope,
+    summarize_parallel_action_coverage,
     validate_parallel_partition_record,
 )
 from scan.external_process import fit_reservation_scaled_profile
@@ -17055,6 +17056,25 @@ async def process_scan_merge_job(job_data: dict):
         'shards_partial': partial_n,
         'canonical_action_execution': canonical_action_merge,
     }
+    if canonical_action_merge is not None:
+        existing_coverage = (
+            merged.get('coverage') if isinstance(merged.get('coverage'), dict) else {}
+        )
+        existing_reliability = (
+            existing_coverage.get('grade_reliability')
+            if isinstance(existing_coverage.get('grade_reliability'), dict) else {}
+        )
+        extra_reasons = list(existing_reliability.get('reasons') or ())
+        verification = (
+            merged.get('verification_summary')
+            if isinstance(merged.get('verification_summary'), dict) else {}
+        )
+        if int(verification.get('unproven_critical_high') or 0) > 0:
+            extra_reasons.append('unproven_critical_high')
+        merged['coverage'] = summarize_parallel_action_coverage(
+            canonical_action_merge,
+            additional_reliability_reasons=extra_reasons,
+        )
 
     # Coverage-aware merge: the parent must reflect the whole fan-out, not just
     # the base shard. For scope/coverage shards, use the assigned endpoint

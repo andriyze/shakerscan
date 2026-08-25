@@ -1101,6 +1101,7 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
   const activeBudget = coverageNumber(contribution.active_max_seconds)
   const duration = coverageNumber(contribution.duration_seconds)
   const telemetry = normalizedCoverage.telemetryShards
+  const attemptTelemetryAvailable = normalizedCoverage.attemptTelemetryAvailable
   const contributing = normalizedCoverage.contributingShards
   const statusSummary = formatAttemptStatuses(contribution.attempt_statuses)
 
@@ -1109,7 +1110,11 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
       <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Endpoint work</div>
         <div className="mt-1 text-gray-200">
-          {attempted || selected || 0} attempted{assigned ? ` · ${assigned} assigned` : ''}
+          {attemptTelemetryAvailable
+            ? `${attempted || selected || 0} attempted${assigned ? ` · ${assigned} assigned` : ''}`
+            : assigned
+              ? `Attempt telemetry unavailable · ${assigned} assigned`
+              : 'No endpoint work assigned'}
         </div>
         {statusSummary && <div className="mt-1 text-gray-500">{statusSummary}</div>}
       </div>
@@ -1151,8 +1156,11 @@ function ShardCard({ shard }: { shard: any }) {
   const activeSeconds = coverageNumber(contribution.active_max_seconds)
   const statusSummary = formatAttemptStatuses(contribution.attempt_statuses)
   const duration = shard.duration_seconds ? formatDuration(shard.duration_seconds) : null
+  const hasAttemptTelemetry = contribution.per_endpoint_telemetry === true || attempted > 0
   const endpointSummary = assigned || attempted
-    ? `${attempted || selected || 0}${assigned ? ` / ${assigned}` : ''}`
+    ? hasAttemptTelemetry
+      ? `${attempted || selected || 0}${assigned ? ` / ${assigned}` : ''}`
+      : `${assigned} assigned · attempts unavailable`
     : selected || worklistTotal
       ? `${selected}${worklistTotal ? ` / ${worklistTotal}` : ''}`
       : null
@@ -1368,7 +1376,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const planRevision = explanation?.plan_revision || {}
   const completed = Number(matrix.completed || 0)
   const total = Number(matrix.total || Math.max(0, actions.length - 1))
-  const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) > 0
+  const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) + Number(matrix.pending || 0) > 0
   const apiRecordUrl = `${API_URL}/scans/${scan.id}/actions`
 
   return (
@@ -1377,7 +1385,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
         <div>
           <h2 className="text-sm font-semibold text-gray-200">What this scan ran</h2>
           <p className="mt-1 text-xs text-gray-500">
-            {completed} of {total} security capabilities completed
+            {completed} of {total} planned security actions completed
             {hasGap ? ' · coverage gaps are explained below' : ''}.
           </p>
         </div>

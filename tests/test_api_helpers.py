@@ -2464,6 +2464,44 @@ def test_normalize_scan_result_backfills_staged_nuclei_coverage():
     ]
 
 
+def test_normalize_parallel_result_replaces_stale_backbone_coverage():
+    report = {
+        "coverage": {
+            "status": "complete",
+            "grade_reliability": {"reliable": True, "reasons": []},
+        },
+        "parallel": {
+            "canonical_action_execution": {
+                "partial": True,
+                "actions": [
+                    {
+                        "action_id": "baseline.http",
+                        "capability_name": "http.request",
+                        "required": True,
+                        "status": "success",
+                    },
+                    {
+                        "action_id": "inputs.collection_00",
+                        "capability_name": "collections.replay_safe",
+                        "required": True,
+                        "status": "failed",
+                        "reason_code": "adapter_failed",
+                    },
+                ],
+            },
+        },
+    }
+
+    normalized = api_module._normalize_scan_result_for_api(report)
+
+    assert normalized["coverage"]["status"] == "partial"
+    assert normalized["coverage"]["capability_coverage"]["pending"] == 0
+    assert normalized["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["adapter_failed", "parallel_child_incomplete"],
+    }
+
+
 def test_scan_worker_container_name_filter_excludes_gungnir_worker():
     assert api_module._is_scan_worker_container_name("shakerscan-worker-1") is True
     assert api_module._is_scan_worker_container_name("/shakerscan-worker-5") is True
