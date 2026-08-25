@@ -1,127 +1,18 @@
-# ShakerScan 0.8.17 Release Readiness
+# ShakerScan 2.0.0 Release Readiness
 
-**Status (2026-08-09):** 0.8.17 is a pending corrective candidate. The literal clean 0.8.16
-two-VPS acceptance proved broker enrollment, three-way shard execution, physical worker loss and
-reclaim, central artifacts, and datastore isolation, but exposed that official scanner/API builds
-did not pass the release version into the Dockerfile. A completed scan therefore reported
-`scanner dev`. Version 0.8.17 must pass CodeQL, the frozen full-stack E2E, complete release
-validation, native multi-architecture publication, independent manifest/label checks, and a second
-literal clean two-VPS acceptance before the stable channel advances.
-That acceptance also found a long-running broker Model Intake scan could starve its asyncio
-heartbeat task and be reaped after five minutes despite a healthy worker. The candidate now uses a
-dedicated native lease-heartbeat thread and includes a blocking-work regression test.
-Version 0.8.9 passed CodeQL, all frozen gates, dependency audits, clean/dirty upgrade smokes,
-multi-architecture publication, and independent manifest checks. Its bounded clean-build retry also
-recovered the registry boundary that stopped 0.8.8. The stable channel was deliberately not advanced:
-the subsequent whole-product audit found that `shakerscan agent`, the installed Claude session hook,
-and `shakerscan mcp` still defaulted to loopback even when `--remote` intentionally bound the API only
-to Tailscale. That made a healthy remote install appear unavailable to those agent-facing paths.
+**Status (2026-08-25): candidate preparation; not approved for publication.** The V2 source and
+manual product audit are in progress on the `v2` branch. `VERSION` and release notes are prepared for
+2.0.0, but no release tag, candidate image publication, GitHub Release, `latest` alias, hosted
+installer change, or stable-channel promotion is authorized by this document. The stable installer
+must remain on 0.8.18 until every frozen-candidate gate below has a successful exact-SHA receipt.
 
-The 0.8.15 candidate carries forward 0.8.9's narrow Redis `NOGROUP` route-lifecycle handling and
-routes installed agent/MCP entry points through the persisted host bind. It also corrects installed
-documentation links and remaining detailed-skill loopback examples for engineering files omitted
-from the minimal curl runtime, and reconciles the human architecture prose with the current Redis
-Streams and API-controller implementation. The 0.8.10 workflow was cancelled before publication
-when those final detailed-skill examples were found. The 0.8.11 workflow was cancelled before
-publication when the final host-security audit found that standalone and Fleet launchers made the
-Model Intake sandbox evidence queue world-writable. Version 0.8.15 replaces that permission parity
-with a stable non-root image identity, an operator-identity mapping on non-root/Desktop installs,
-and an owner-only `0700` queue.
-The 0.8.12 clean Linux/root suite then rejected a `Path.chown` call that the non-root macOS test path
-could not reach. Version 0.8.15 uses `os.chown`, adds a direct root-branch regression, and must repeat
-the complete clean-root suite. Full
-frozen-candidate gates and clean published-image acceptance remain required before advancing
-`install/STABLE_VERSION`.
-
-Version 0.8.13 passed those frozen gates and published correct multi-architecture images. Its first
-literal clean curl installation was healthy, but converting the fresh standalone control plane to
-a broker fleet exposed a startup-order defect: the API became healthy just before bundled MinIO's
-initializer created the artifact bucket, and the one-shot write probe returned HTTP 503 and rolled
-the conversion back. Version 0.8.14 implemented a bounded retry, then stopped during pre-publication
-validation because a runtime regression test hardcoded the historical stable version `0.8.7`.
-No 0.8.14 images were published. Version 0.8.15 carries the Fleet fix, validates the stable channel
-against its published ledger row instead of a fixed version, still fails closed on a genuinely
-unavailable bundled or external S3 plane, and covers both a transient HTTP failure and a not-ready
-probe response.
-
-The 0.8.15 clean acceptance proved the managed broker control plane and MinIO readiness fix under a
-literal hosted-installer deployment. It also exposed three defects that unit-only release gates did
-not make visible: broker scan reports used the fallback `dev` label, a safetensors-selected Model
-Intake review ran ModelScan against only that preferred artifact while the immutable snapshot also
-contained a legacy PyTorch `.bin`, and the default DAST scan list still displayed Model Intake
-evidence rows. Version 0.8.16 added the correct Dockerfile identity input, scanned every serialized
-alternate in the snapshot, and separated the default DAST and Model Intake lists while preserving
-an explicit API opt-in for evidence workflows. Its clean acceptance then proved the latter changes
-and exposed the missing official build argument. Version 0.8.17 supplies that argument to both
-scanner and API images and reads it back from every native release artifact before publication.
-
-### 0.8.8 unpublished-candidate evidence motivating the build hardening
-
-- Metadata resolution, source checkout, generated documentation, and the frozen installer smoke
-  passed on exact candidate `0edc1b720dc98a49c90ff12b4fded0e347f7bb66`.
-- The clean scanner build downloaded only 5 MiB of Playwright's 821 MiB checksum-pinned base layer
-  over 23 minutes before the registry connection reset. The build exited nonzero; API/UI/signer
-  builds, audits, publication, GitHub Release, and stable promotion did not run.
-- The candidate workflow retries only narrowly classified transient base-image pulls. Dockerfile,
-  self-test, unit-test, and image-build failures stop on their first deterministic failure; they are
-  not repeated in a way that duplicates or obscures the root cause.
-
-### 0.8.7 post-publish evidence motivating this patch
-
-- The hosted installer populated empty homes on both VPSs from immutable `v0.8.7`, selected only
-  published 0.8.7 images, and reached healthy, fingerprint-current standalone state.
-- Managed HTTPS initialized with a publicly trusted certificate, and a short-lived single-use token
-  enrolled the broker worker without Redis, PostgreSQL, or object-store credentials.
-- The remote node reached healthy state with three active non-local-build workers and zero image or
-  desired-state drift.
-- Exact-node Smart coverage against the authorized Honey target materialized its discovery and
-  parallel work, and all three replicas leased work concurrently under the fair-share allocator.
-- An empty placement route was pruned while another worker polled it; `lease_job` propagated Redis
-  `NOGROUP` and the broker endpoint returned HTTP 500. This is a release blocker, not accepted Fleet
-  evidence.
-
-### 0.8.5 post-publish evidence motivating this patch
-
-- The literal hosted installer populated empty homes on both VPSs from immutable `v0.8.5` runtime
-  files, pulled only 0.8.5 images, and reached healthy API, UI, PostgreSQL, Redis, signer, sandbox,
-  and current local-worker state.
-- Managed HTTPS Fleet initialization at `m.shakerscan.com` succeeded, and a short-lived single-use
-  token enrolled the clean worker without installing Redis, PostgreSQL, or object-store credentials.
-- The joined node reached healthy, current, non-local-build state on the exact published scanner
-  digest and reconciled from one to three active remote workers.
-- Exact-node Smart coverage submission created its discovery child, global backbone, and three
-  endpoint children. The backbone leased the remote node, but its 1,000-request reservation consumed
-  the whole default domain cap; the other children remained queued. The parent and all four children
-  cancelled cleanly. This is a release blocker, not accepted parallel evidence.
-
-### 0.8.4 post-publish evidence motivating this patch
-
-- The literal hosted installer command populated empty ShakerScan homes on control-plane and worker
-  VPS hosts, selected `0.8.4`, pulled only the published images, and reached healthy API, UI,
-  PostgreSQL, Redis, and current-worker state.
-- Broker Fleet enrollment over managed HTTPS joined one remote node without distributing datastore
-  credentials. Scaling reached three current remote workers; exact remote placement exercised three
-  concurrent shard workers; removing one worker container caused bounded agent reconciliation back
-  to desired capacity. This is control-plane-plus-one-node evidence, not the separate two-remote-node
-  matrix required by **FLEET-01**.
-- Automatic Model Intake completely acquired the pinned public
-  `hf-internal-testing/tiny-random-bert` revision, persisted centralized artifacts and findings, and
-  produced JSON, HTML, and SARIF reports. Runtime qualification correctly remained `INCOMPLETE` on
-  a host without hardware virtualization. The static report exposed ModelScan's missing `h5py`
-  extra on the repository's TensorFlow HDF5 artifact instead of falsely passing it.
-- A bounded Smart coverage scan of the authorized Honey target ran its backbone and two endpoint
-  shards concurrently on three distinct broker workers and merged their results centrally. Its
-  deliberate two-minute budget produced an honest partial outcome. The run also exposed the Nuclei
-  availability-message defect; actual unmetered Nuclei traffic remained blocked by the enforced
-  request budget.
-
-This is the single live release checklist. Code, migrations, generated inventories, runtime
-receipts, and fresh test output are authoritative. Earlier branch results are useful for finding
-regressions but do not satisfy a frozen-candidate gate.
+This is the live release checklist. Source, migrations, generated inventories, immutable runtime
+receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
+useful regression evidence, but do not qualify the frozen 2.0.0 candidate.
 
 ## Supported product boundary
 
-ShakerScan 0.8.17 is a trusted-operator, self-hosted security scanner.
+ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -129,134 +20,129 @@ ShakerScan 0.8.17 is a trusted-operator, self-hosted security scanner.
   another person who can access its process, API, UI, database, Docker socket, configuration, or
   result files.
 - Results can contain sensitive request, response, authentication, payload, model, and evidence
-  data. Comprehensive historical secret rewriting is not promised.
-- Active DAST requires target authorization. Deep Hunt always requires a target-bound, expiring
-  approval; ordinary local scans use the configured approval policy and visible active-test warning.
-- Model Intake is release-gated for deterministic static review, artifact/report generation, and
-  the opt-in AMD64 Linux/KVM Firecracker tier. Unsupported formats, incomplete evidence, unavailable
-  required tools, or missing runtime qualification fail closed. Technical review does not replace
-  publisher trust, privacy, legal, business, or deployed-data-plane approval.
-- Fleet production support is the outbound-only HTTPS `broker` transport. Built-in WireGuard remains
-  preview code outside the 0.8.17 support boundary until it passes a separate physical acceptance
-  matrix.
-- AI Gate remains preview in this release.
+  data. Public credential and collection responses are metadata-only; comprehensive rewriting of
+  arbitrary historical evidence is not promised.
+- Active DAST, Hunt, and connected-device testing require ownership or explicit authorization for
+  the exact target. Silence, missing telemetry, and blocked work remain inconclusive.
+- Model Intake is release-gated for deterministic static review, artifacts/reports, and the opt-in
+  AMD64 Linux/KVM Firecracker tier. Incomplete evidence or unavailable required controls fail closed.
+- Fleet production support is the outbound-only HTTPS `broker` transport. WireGuard remains preview
+  code outside the 2.0.0 support boundary pending its own physical acceptance.
+- AI Gate remains preview in 2.0.0.
 
 ## Stop-ship contract
 
 | ID | Requirement | Required evidence |
 |---|---|---|
-| **SCAN-01** | Deterministic evidence controls verified status and high-impact severity. AI, labels, and caller state cannot manufacture proof. | Adversarial promotion, replay, severity-cap, and no-phantom-chain tests. |
-| **SCAN-02** | Coverage distinguishes completed, skipped, blocked, cancelled, failed, partial, and unobserved work. Missing telemetry is never clean coverage. | Parent/shard/ASM rollup and malformed/absent telemetry tests. |
-| **SCAN-03** | Active work enforces scope, time, request, payload, redirect, cancellation, and mutation-restoration bounds. | Contract tests plus current-build physical scans. |
-| **SCAN-04** | Authenticated detector claims require server-observed accepted authentication and distinct-principal proof. | Current-fleet authenticated benchmark receipts. |
-| **MODEL-01** | Model acquisition, scanners, reports, policy, signing, and Firecracker evidence fail closed and remain bound to one immutable subject. | Full suites plus multiple real public-model runs on AMD64 KVM through UI, API, and agent skill paths. |
-| **MODEL-02** | Reports are decision-first, readable, and complete: controls, scanner details, CVEs, licenses, packages, network attempts, runtime evidence, gaps, and artifacts agree. | Browser QA and programmatic cross-checks of JSON, HTML, SARIF, AIBOM, SPDX, CycloneDX, license BOM, and notices. |
-| **FLEET-01** | Broker enrollment, placement, leases, artifacts, lifecycle controls, credentials, and build truth fail closed across real Linux hosts. | Automated contracts plus optional multi-node operational acceptance for exact-node placement, scaling, drain/resume, fault/reclaim, dedupe, artifacts, tokens, and public-store isolation. |
-| **UPGRADE-01** | Required schema failures stop startup; clean and repeated dirty upgrades preserve configuration, results, volumes, targets, findings, and Fleet identity. | Installer/upgrade/rollback smoke and deliberate migration-failure tests. |
-| **DEP-01** | Supported runtimes contain no unaccepted high/critical production dependency findings. | Locked Python audit, production npm audit, image/tool inventory, and documented exceptions if any. |
-| **BUILD-01** | Release-critical tools, rules, templates, images, source SHA, and final digests are reproducible and auditable. | Candidate image self-tests, inventory comparison, labels, SBOM/provenance, and published manifest inspection. |
-| **VAL-01** | One exact frozen commit passes every applicable gate on a uniform current fleet. | Candidate SHA and content-free validation receipts. |
-| **REL-01** | Publication fails closed on the wrong SHA/version; public docs describe the product consistently. | Workflow checks, docs/link checks, tag/version match, release notes, and post-publish validation. |
+| **SCAN-01** | One canonical Scan plan controls local, broker, and parallel execution. No legacy identity or caller-supplied argv regains authority. | Contract, compatibility-sunset, dispatcher, and exact-image parity receipts. |
+| **SCAN-02** | Scope, destination, redirect, time, request, payload, host, mutation, cancellation, and multi-dimensional budget bounds fail closed. | Unit/fault gates plus counting-target external-wire acceptance. |
+| **SCAN-03** | Verified status and high-impact severity require deterministic proof. AI, labels, and stale findings cannot manufacture proof. | Adversarial promotion, replay, linkage, severity-cap, and finding-detail checks. |
+| **SCAN-04** | Coverage distinguishes completed, skipped, blocked, cancelled, failed, partial, and unobserved work. | Parent/shard/ASM rollups and multiple live scan configurations. |
+| **HUNT-01** | One target-kind-aware Hunt runtime exposes only canonical registered capabilities and cannot broaden target/approval scope. | MCP/CLI/UI Hunt smoke across web and device targets, plus fail-closed negative calls. |
+| **DATA-01** | Targets, scans, findings, credentials, collections, evidence, campaigns, and historical rows remain target-bound, redacted, bounded, and navigable. | API cross-checks and multiple real UI detail records from each source. |
+| **DEVICE-01** | Device inventory, positive reachability, service evidence, policies, collections, credentials, and HTTP handoff stay separate from Web DAST metrics. | Current device worker, LG TV scan/Hunt, saved-profile/collection, and policy UI receipts. |
+| **MODEL-01** | Model acquisition, scanners, reports, signing, policy, and Firecracker evidence remain bound to one immutable subject and fail closed. | Full suites, fixture/public-model E2E, artifact cross-checks, and host-readiness UI. |
+| **FLEET-01** | Broker enrollment, leases, placement, credentials, artifacts, cancellation, and build truth fail closed across real Linux hosts. | Automated contracts and exact-SHA real-fleet parity; physical fault acceptance when available. |
+| **UPGRADE-01** | Clean, repeated dirty upgrades and rollback preserve state; required-schema failures stop startup. | Published-baseline upgrade/rollback receipt and migration-failure tests. |
+| **DEP-01** | Supported runtimes contain no unaccepted high/critical production dependency findings. | Locked Python audit, production npm audit, and candidate image inventory. |
+| **BUILD-01** | UI, API, workers, signer, tools, rules, templates, version, source SHA, and image digests are reproducible and identical where required. | Candidate build self-tests, complete suite, generated inventory, SBOM/provenance, and identity checks. |
+| **REL-01** | Publication fails closed on wrong SHA/version/digest and never advances stable before public acceptance. | Candidate receipt, promotion checks, public-install smoke, notes, ledger, and separate stable PR. |
 
-Do not waive untrustworthy proof, false-clean coverage, unsafe unbounded execution, migration startup
-after a required-schema failure, stale-fleet evidence, failed core DAST acceptance, failed Model
-Intake containment/evidence binding, failed Fleet lease isolation, or unaccepted critical/high
-production dependency findings.
+Do not waive untrustworthy proof, false-clean coverage, unsafe unbounded execution, stale-fleet
+evidence, migration startup after required-schema failure, failed core DAST/Hunt/device acceptance,
+failed Model Intake containment, digest drift, or unaccepted high/critical production dependencies.
+
+## Preliminary preparation evidence
+
+These checks were run during the working audit and must be repeated if product/runtime code changes
+after the candidate is frozen:
+
+- [x] Complete candidate-runtime Python suite: 1,080 package-native and 3,635 compatibility tests.
+- [x] Named release gates pass after exercising their canonical `api` package layout.
+- [x] UI tests (158) and production Next.js build pass.
+- [x] Production npm and locked Python dependency audits report no known vulnerabilities.
+- [x] Generated capability inventory is current.
+- [x] Frozen-source installer smoke passes without retired V1 command files.
+- [x] Clean, duplicate-dirty, verification, and rollback migration scenarios pass from v0.8.17.
+- [x] Manual MCP initialize/tool-list/read-only execution was exercised; target inventory is bounded.
+- [ ] The latest exact V2 migration workflow completes successfully without cancellation by a later push.
+- [ ] Final live stack is rebuilt at the exact candidate SHA with uniform current fingerprints.
+- [ ] Final UI/API/CLI/MCP/Hunt/device/DAST submissions and navigation checks are recorded.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v0.8.17`.
+Run every item against the exact commit intended for `v2.0.0`. Any product, migration, runtime,
+test, workflow, or operational change creates a new candidate and invalidates earlier candidate
+receipts.
 
-### Code, dependencies, and builds
+### Code, dependencies, builds, and migration
 
-- [ ] Full Python unit/contract suite passes without hiding release-critical modules behind skips.
-- [ ] UI tests and production build pass; `npm audit --omit=dev --audit-level=high` is clean.
-- [ ] Locked Python dependency audit is clean or has an explicit time-bounded exception.
-- [ ] `python3 scripts/generate_capability_inventory.py --check` passes.
-- [ ] Documentation index and links pass.
-- [ ] Every installed agent skill validates.
-- [ ] `make release-gates` passes.
-- [ ] Scanner, API, UI, signer, and Firecracker guest candidate builds pass self-tests.
-- [ ] The API image contains the pinned Docker CLI; scanner/worker images contain no Docker client.
-- [ ] Clean installer, duplicate dirty upgrade, migration failure, backup, and rollback tests pass.
+- [ ] `scripts/run_complete_python_suite.py` passes inside the locked candidate worker image.
+- [ ] `make release-gates`, UI tests/build, dependency audits, and capability-inventory check pass.
+- [ ] Scanner, API overlay, UI, signer, and fixed Firecracker guest build and self-test.
+- [ ] External adapter wire acceptance proves observed request/connection ceilings for all adapters.
+- [ ] Clean installer, duplicate dirty upgrade, required-migration failure, backup, and rollback pass.
+- [ ] CodeQL, security/static checks, commit policy, V2 contracts, full E2E, and real-fleet parity are
+  successful for the same 40-character source SHA.
 
-### Web scanning and agent workflows
+### Manual UI acceptance
 
-- [ ] The manual full E2E workflow passes on a uniform current fleet.
-- [ ] One current-fleet Smart Juice Shop benchmark meets its scorecard.
-- [ ] One authenticated crAPI benchmark records accepted distinct-principal evidence.
-- [ ] Deep Hunt and agent skill smoke tests prove bounded submission, status, evidence, and refusal
-      behavior without bypassing deterministic proof.
-- [ ] Desktop and narrow-width browser QA covers dashboard, scan creation/detail, findings, ASM,
-      Deep Hunt, settings, errors, loading states, and navigation.
+- [ ] Desktop and narrow viewport cover every sidebar route, loading/empty/error state, modal, filter,
+  pagination control, and internal link without console/runtime errors.
+- [ ] Dashboard, Docs, Targets, New Scan, Scans, Scan Detail, Findings, Finding Detail, Credentials,
+  Request Collections, Devices, Device Detail/Policies, Schedules, Interactive, Exposure, Coverage,
+  Hunt, Evidence, Timeline, Campaigns, AI Gate, Model Intake, Policy Profiles, Exceptions, Arsenal,
+  AI Ops Router, Settings, Fleet guidance, and Application Graph are inspected.
+- [ ] Multiple existing Juice Shop, Honey, Hunt, AI Gate, and LG TV records have coherent target,
+  status, shard, progress, finding, evidence, provenance, and navigation data.
+- [ ] Running parent scans do not become failed because an unfinished shard is absent or stale; true
+  terminal failures explain which shard/action failed and preserve trustworthy partial results.
+- [ ] Historical pathological labels and large device/evidence records remain bounded in list views;
+  full redacted detail loads only on demand.
 
-### Model Intake
+### API, CLI, MCP, and agent acceptance
 
-- [ ] Local macOS fixture E2E passes and reports Firecracker as unsupported without presenting that
-      host limitation as a model failure.
-- [ ] Public-model acquisition E2E passes with complete and intentionally capped inputs; truncation
-      is never mislabeled as a hash mismatch.
-- [ ] On the AMD64 KVM host, all three maintained real-model acceptance cases run through automatic
-      UI, API, and agent skill paths using the frozen commit.
-- [ ] At least one safetensors case and two unsafe `.bin` conversion cases exercise static scans,
-      dependency resolution, conversion/equivalence, Firecracker calibration, repeat inference,
-      network/resource telemetry, evidence freeze, and report generation.
-- [ ] Automatic and Advanced/manual UI paths are tested at desktop and narrow widths, including
-      runner readiness/setup guidance, progress, restart-safe resume, failure recovery, and exports.
-- [ ] Report cross-check confirms that executive outcome, control matrix, detailed scanner tables,
-      severity-colored CVEs, packages/licenses, network attempts, runtime receipt, artifacts, and
-      external follow-up agree across formats.
-- [ ] No documented example model name is embedded in provider-neutral product scope or policy.
+- [ ] Health and worker endpoints report one current build; stale-worker submission fails closed.
+- [ ] Scan, target, finding, evidence, credential, collection, Hunt, device, Model Intake, and Fleet
+  responses are target-bound, redacted, paginated/bounded, and agree with UI records.
+- [ ] Source and installed CLI paths exercise status/doctor/help plus Scan, Hunt, credential,
+  collection, and evidence commands, including negative validation without queueing unintended work.
+- [ ] MCP initializes, exposes the fixed read-only catalog plus bounded Hunt tools, paginates large
+  inventories, rejects malformed/out-of-scope input, and can inspect an existing Hunt.
+- [ ] AI Ops preview reports missing inputs, safety, blast radius, and confirmations without executing
+  an unconfirmed plan.
 
-### Fleet (optional operational acceptance)
+### Live authorized workloads
 
-- [ ] Control plane and at least two broker nodes run the exact frozen source/image identity.
-- [ ] Preflight proves artifact PUT/GET/DELETE, uniform transport, private Redis/PostgreSQL, and
-      isolated lease reclaim/duplicate completion.
-- [ ] Bounded join-token use, exhaustion, revocation, credential rotation, and revoked-node refusal
-      pass without exposing secrets in logs or receipts.
-- [ ] Fleet-wide scaling, per-node scaling, drain/resume, digest-pinned rollout, and state/error
-      recovery pass and restore the original desired capacity.
-- [ ] Automatic, remote-fleet, control-plane-local, and exact-node placement produce durable
-      execution snapshots and centralized results/artifacts.
-- [ ] Physical worker loss causes bounded reclaim; stale ownership cannot heartbeat, acknowledge,
-      upload artifacts, or complete a duplicate result.
-- [ ] Finding dedupe, parent/shard merge, cancellation, and centralized artifact verification pass
-      across nodes.
-- [ ] Fleet UI with and without the session-only operator token reports authoritative locked,
-      loading, empty, healthy, unhealthy, drift, work, event, and lifecycle states.
-- [ ] WireGuard remains labeled preview and is not counted as accepted Fleet evidence.
+- [ ] Juice Shop and `honey.shakerscan.com` are exercised through the UI with materially different
+  policy/budget/collection configurations on a current fleet.
+- [ ] Saved request collections and exact-target credential profiles are selected where applicable;
+  reusable secret values never enter UI, canonical requests, queues, logs, or receipts.
+- [ ] A bounded Web/API Hunt and an LG TV device/Hunt path exercise saved collections/credentials and
+  preserve device/Web namespace separation.
+- [ ] Every new submission records its scan/Hunt ID and browser link. Long-running scans are not
+  polled as part of the submission turn; results are evaluated in a later acceptance pass.
 
-## Publication
+### Model Intake and Fleet
 
-After all frozen-source gates are green, follow [the release process](release-process.md). In short:
+- [ ] Local fixture E2E reports Firecracker unsupported precisely on macOS and incomplete, not passed.
+- [ ] Public-model E2E and report/artifact parity pass on an authorized networked runner.
+- [ ] AMD64 Linux/KVM qualification passes on a compatible host or remains an explicit stop-ship item
+  for the claimed support tier.
+- [ ] Exact-SHA broker parity covers local/broker/parallel semantics, worker loss/reclaim, lease
+  authority, centralized artifacts, finding dedupe, and build identity.
 
-1. Merge through protected `main`; do not put functional changes in a `release:` commit.
-2. Run **Release candidate** for the exact full SHA. It builds once, publishes only
-   `candidate-<sha>-<run-id>` manifests, and emits an immutable digest receipt. It cannot create a version
-   tag, `latest`, a Git tag, a GitHub Release, or change the stable installer.
-3. Optionally deploy those candidate digests to a multi-node fleet and retain its content-free
-   operational acceptance receipt.
-4. Run **Promote release** with the candidate SHA and run ID. It retags the already-tested digests
-   as `0.8.17` and creates the GitHub Release. It does not rebuild and does not move `latest`.
-5. Perform clean-install, stateful-upgrade, rollback, UI, and public-host smoke against the exact
-   published version. Retain the smoke receipt.
-6. In a separate PR, change `install/STABLE_VERSION` only. Then run **Promote stable channel**. It verifies the public release,
-   stable-version PR, and smoke receipt before moving `latest` by digest without rebuilding.
-7. Replace `pending candidate` in `RELEASES.md` with the tagged commit and published digests in a
-   provenance-only follow-up.
+## Publication sequence (not authorized by preparation)
 
-## Post-publish installation and cleanup
+1. Freeze one exact candidate SHA after all implementation and manual fixes.
+2. Obtain successful exact-SHA full E2E, CodeQL, and V2 real-fleet parity runs.
+3. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
+4. Complete candidate-image, upgrade, Model Intake, UI/API/CLI/MCP, and public-install acceptance.
+5. Run **Promote release** to map version tags to accepted digests without rebuilding.
+6. Record the published SHA/digests in `RELEASES.md` and verify the GitHub Release.
+7. Only in a separate stable-channel change, update `install/STABLE_VERSION` and run **Promote stable
+   channel** with the public smoke receipt.
 
-- [ ] Deploy and verify the hosted installer separately; repository/image publication does not
-      update `install.shakerscan.com`.
-- [ ] Clean-install `0.8.17` into an empty home and verify doctor, status, UI/API, MCP, agent launch,
-      skills, one Quick scan, and Model Intake readiness.
-- [ ] Upgrade a stateful installation and verify preserved targets, scans, findings, settings,
-      evidence, and Fleet credentials.
-- [ ] Retest the exact released commit locally on macOS and on the Linux acceptance hosts.
-- [ ] Remove temporary ShakerScan test deployments and credentials from the acceptance hosts.
-- [ ] Terminate the temporary KVM EC2 instance only after its final Model Intake and Fleet evidence
-      is retained.
-- [ ] Do not destroy user-owned VPS instances unless the owner separately confirms that permanent
-      provider-level deletion is intended.
+Stop before step 3 unless the user explicitly authorizes release publication. This preparation task
+does not authorize tagging, candidate publication, GitHub Release creation, `latest`, hosted
+installer deployment, or stable-channel promotion.
