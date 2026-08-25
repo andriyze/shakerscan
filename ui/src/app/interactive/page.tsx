@@ -775,8 +775,9 @@ export default function InteractiveSessionPage() {
         <h2 className="text-lg font-semibold text-white">Step 1. Session Setup</h2>
         <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
           <div className="space-y-3">
-            <label className="block text-sm text-gray-300">Target URL</label>
+            <label htmlFor="interactive-target-url" className="block text-sm text-gray-300">Target URL</label>
             <input
+              id="interactive-target-url"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
               placeholder="https://target.example"
@@ -811,9 +812,10 @@ export default function InteractiveSessionPage() {
             </div>
 
             <div className="border-t border-gray-800 pt-3 space-y-2">
-              <label className="block text-sm text-gray-300">Attach Existing Session</label>
+              <label htmlFor="interactive-session-id" className="block text-sm text-gray-300">Attach Existing Session</label>
               <div className="flex gap-2">
                 <input
+                  id="interactive-session-id"
                   value={sessionInput}
                   onChange={(e) => setSessionInput(e.target.value)}
                   placeholder="session_id"
@@ -1216,6 +1218,7 @@ export default function InteractiveSessionPage() {
           {invariantsError && <ErrorState message={invariantsError} />}
           <div className="grid gap-2 lg:grid-cols-[minmax(18rem,1fr)_auto_auto]">
             <textarea
+              aria-label="Authorization invariant rule"
               value={invariantRule}
               onChange={(event) => setInvariantRule(event.target.value)}
               rows={2}
@@ -1323,6 +1326,7 @@ export default function InteractiveSessionPage() {
 
                 <div className="space-y-2">
                   <input
+                    aria-label={`${user} bearer token`}
                     type="password"
                     autoComplete="off"
                     value={authForms[user].token}
@@ -1331,6 +1335,7 @@ export default function InteractiveSessionPage() {
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                   <input
+                    aria-label={`${user} authorization header`}
                     type="password"
                     autoComplete="off"
                     value={authForms[user].authHeader}
@@ -1339,6 +1344,7 @@ export default function InteractiveSessionPage() {
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                   />
                   <input
+                    aria-label={`${user} cookies`}
                     type="password"
                     autoComplete="off"
                     value={authForms[user].cookies}
@@ -1368,6 +1374,7 @@ export default function InteractiveSessionPage() {
           <div className="space-y-3">
             <div className="grid gap-3 md:grid-cols-[1fr_auto_auto]">
               <input
+                aria-label="Endpoint path"
                 value={endpoint}
                 onChange={(e) => setEndpoint(e.target.value)}
                 placeholder="/api/resource/123"
@@ -1395,6 +1402,7 @@ export default function InteractiveSessionPage() {
             </div>
 
             <textarea
+              aria-label="Optional endpoint JSON body"
               value={endpointBody}
               onChange={(e) => setEndpointBody(e.target.value)}
               placeholder='Optional JSON body, e.g. {"id": 1}'
@@ -1461,6 +1469,7 @@ export default function InteractiveSessionPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="space-y-3">
             <input
+              aria-label="Finding title"
               value={findingForm.title}
               onChange={(e) => setFindingForm(prev => ({ ...prev, title: e.target.value }))}
               placeholder="Finding title"
@@ -1478,12 +1487,14 @@ export default function InteractiveSessionPage() {
                 ))}
               </select>
               <input
+                aria-label="Finding category"
                 value={findingForm.category}
                 onChange={(e) => setFindingForm(prev => ({ ...prev, category: e.target.value }))}
                 placeholder="Category (e.g., BOLA)"
                 className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
               />
               <input
+                aria-label="Finding CWE"
                 value={findingForm.cwe}
                 onChange={(e) => setFindingForm(prev => ({ ...prev, cwe: e.target.value }))}
                 placeholder="CWE-639"
@@ -1491,12 +1502,14 @@ export default function InteractiveSessionPage() {
               />
             </div>
             <input
+              aria-label="Vulnerable URL"
               value={findingForm.url}
               onChange={(e) => setFindingForm(prev => ({ ...prev, url: e.target.value }))}
               placeholder="Vulnerable URL"
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <textarea
+              aria-label="Finding description"
               value={findingForm.description}
               onChange={(e) => setFindingForm(prev => ({ ...prev, description: e.target.value }))}
               placeholder="Description"
@@ -1504,6 +1517,7 @@ export default function InteractiveSessionPage() {
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <textarea
+              aria-label="Exploit evidence"
               value={findingForm.evidence}
               onChange={(e) => setFindingForm(prev => ({ ...prev, evidence: e.target.value }))}
               placeholder="Exploit evidence"
@@ -1514,6 +1528,7 @@ export default function InteractiveSessionPage() {
 
           <div className="space-y-3">
             <textarea
+              aria-label="Raw HTTP request"
               value={findingForm.request}
               onChange={(e) => setFindingForm(prev => ({ ...prev, request: e.target.value }))}
               placeholder="Raw HTTP request"
@@ -1521,6 +1536,7 @@ export default function InteractiveSessionPage() {
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm font-mono text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <textarea
+              aria-label="Raw HTTP response"
               value={findingForm.response}
               onChange={(e) => setFindingForm(prev => ({ ...prev, response: e.target.value }))}
               placeholder="Raw HTTP response"
@@ -1528,6 +1544,7 @@ export default function InteractiveSessionPage() {
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm font-mono text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <textarea
+              aria-label="Remediation guidance"
               value={findingForm.remediation}
               onChange={(e) => setFindingForm(prev => ({ ...prev, remediation: e.target.value }))}
               placeholder="Remediation guidance"
@@ -1535,6 +1552,7 @@ export default function InteractiveSessionPage() {
               className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <textarea
+              aria-label="Analyst notes"
               value={findingForm.notes}
               onChange={(e) => setFindingForm(prev => ({ ...prev, notes: e.target.value }))}
               placeholder="Analyst notes"
