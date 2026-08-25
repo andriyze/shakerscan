@@ -2068,7 +2068,7 @@ def test_worker_waits_for_fast_queue_handoff_confirmation(monkeypatch):
 
 
 class _FakePlanConn:
-    def __init__(self, parent_id, target_id, campaign_id):
+    def __init__(self, parent_id, target_id, campaign_id, parent_action_plan=None):
         self.parent_id = parent_id
         self.target_id = target_id
         self.campaign_id = campaign_id
@@ -2076,6 +2076,7 @@ class _FakePlanConn:
         self.inserted_children = []
         self.persisted_action_scan_ids = set()
         self.persisted_manifest_rows = []
+        self.parent_action_plan = parent_action_plan
 
     async def fetchrow(self, query, *args):
         if "SELECT target_id, target_url, status FROM scans" in query:
@@ -2083,6 +2084,14 @@ class _FakePlanConn:
                 "target_id": self.target_id,
                 "target_url": "https://example.test",
                 "status": "pending",
+            }
+        if "SELECT budget_used_json, scan_action_plan_json" in query:
+            if self.parent_action_plan is None:
+                return None
+            return {
+                "budget_used_json": {},
+                "scan_action_plan_json": self.parent_action_plan.canonical_dict(),
+                "scan_action_plan_digest": self.parent_action_plan.plan_digest,
             }
         if "SET scan_action_plan_json=" in query:
             self.persisted_action_scan_ids.add(str(args[0]))
@@ -2574,7 +2583,13 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
 
     parent_id = "51515151-5151-4151-8151-515151515151"
     target_id = uuid.UUID("31313131-3131-4131-8131-313131313131")
-    contract = resolve_scan_contract(budget_profile="balanced")
+    from scan.action_plan import ScanActionPlanCompiler
+    from scan.budget_allocator import allocate_scan_action_plan
+
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"exclude_families": ["nuclei"]},
+    )
     target = TargetBinding(
         target_id=str(target_id),
         target_kind="web",
@@ -2589,6 +2604,14 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
         target=target,
         execution_plan=contract.execution_plan,
     )
+    parent_action_plan = allocate_scan_action_plan(
+        ScanActionPlanCompiler().compile(
+            scan_id=parent_id,
+            execution_plan=contract.execution_plan,
+            target_binding=target,
+        ),
+        contract.budget,
+    ).plan
     parent_queue = parent_job.payload()
     parent_queue.update({
         "type": worker.parallel_scan.PLAN_JOB_TYPE,
@@ -2616,7 +2639,9 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
             "address_binding_source": "submission_dns_snapshot",
         },
     })
-    conn = _FakePlanConn(parent_id, target_id, uuid.uuid4())
+    conn = _FakePlanConn(
+        parent_id, target_id, uuid.uuid4(), parent_action_plan,
+    )
     redis = _FakeJobRedis()
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
@@ -2639,13 +2664,35 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
     assert all(args[9] == "v2" for args in conn.inserted_children)
     assert all(json.loads(args[12])["schema_version"] == "scan-job/v2" for args in conn.inserted_children)
     assert all(len(args[13]) == 64 for args in conn.inserted_children)
+    queued_by_scan = {
+        item["scan_id"]: CanonicalScanJob.from_queue_payload(item)
+        for item in queued
+    }
+    assert all(
+        json.loads(args[11])
+        == queued_by_scan[str(args[0])].shard.sub_budget.payload()
+        for args in conn.inserted_children
+    )
     assert conn.persisted_action_scan_ids == {
         str(uuid.UUID(str(args[0]))) for args in conn.inserted_children
     }
-    assert len(conn.persisted_manifest_rows) == 6
+    assert len(conn.persisted_manifest_rows) == 4
     assert {kind for _scan_id, kind in conn.persisted_manifest_rows} == {
-        "endpoint", "candidate", "template",
+        "endpoint", "candidate",
     }
+    parent_update = next(
+        json.loads(args[2])
+        for query, args in conn.executions
+        if "UPDATE scans SET current_phase" in query
+        and "sharded:" in str(args)
+    )
+    record = parent_update["parallel_action_partition_record"]
+    assert record["partition_digest"] == parent_update[
+        "parallel_action_partition_digest"
+    ]
+    assert [
+        child["role"] for child in record["children"]
+    ] == ["global", "endpoint"]
 
 
 def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypatch):

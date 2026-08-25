@@ -321,6 +321,20 @@ def derive_scan_shard_budget(
     options: Mapping[str, Any], parent_budget: ScanBudget,
 ) -> "ScanShardBudget":
     """Derive a child ceiling without allowing compatibility options to expand its parent."""
+    exact_partition = options.get("parallel_budget_partition")
+    if isinstance(exact_partition, Mapping):
+        raw_partition = dict(exact_partition)
+        _exact_keys(
+            raw_partition, _SHARD_BUDGET_KEYS,
+            name="parallel_budget_partition",
+        )
+        partition = ScanShardBudget(**raw_partition)
+        for name in _BUDGET_KEYS:
+            if getattr(partition, name) > getattr(parent_budget, name):
+                raise CanonicalScanJobError(
+                    f"parallel budget partition {name} exceeds parent authority"
+                )
+        return partition
     custom = options.get("custom_budget")
     custom = dict(custom) if isinstance(custom, Mapping) else {}
     resolved = options.get("resolved_budget")

@@ -174,6 +174,7 @@ from scan.authorization import (
 from scan.action_plan import (
     ScanAction,
     ScanActionPlan,
+    ScanActionPlanError,
     ScanActionPlanCompiler,
     credential_profile_action_refs,
     request_collection_action_refs,
@@ -196,6 +197,11 @@ from scan.manifest_store import PostgresScanManifestStore
 from scan.parallel_inputs import (
     ParallelScanInputError,
     partition_request_manifests,
+)
+from scan.parallel_compiler import (
+    ParallelActionPlanCompiler,
+    ParallelActionPlanError,
+    validate_parallel_partition_record,
 )
 from scan.external_process import fit_reservation_scaled_profile
 from scan.work_manifests import (
@@ -15066,10 +15072,7 @@ def _compile_parallel_child_action_plan(
         )
     if child_job.shard.parallel_discovery:
         action_scope = "discovery"
-    elif (
-        child_options.get("parallel_backbone") is True
-        or child_options.get("skip_global_checks") is not True
-    ):
+    elif child_options.get("parallel_action_partition_role") == "global":
         action_scope = "full"
     else:
         action_scope = "endpoint"
@@ -15349,7 +15352,8 @@ async def process_scan_plan_job(job_data: dict):
 
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT target_id, target_url, status FROM scans WHERE id = $1", uuid.UUID(parent_id)
+            "SELECT target_id, target_url, status FROM scans WHERE id = $1",
+            uuid.UUID(parent_id),
         )
     if not row:
         print(f"[{parent_id[:8]}] parent scan not found; plan job skipped", flush=True)
@@ -15364,6 +15368,39 @@ async def process_scan_plan_job(job_data: dict):
         return
     target_id = str(row['target_id']) if row and row['target_id'] else None
     target_url = (row['target_url'] if row else None) or target
+    parent_action_plan: ScanActionPlan | None = None
+    parent_authority_row: Mapping[str, Any] = row
+    if canonical_parent_job is not None:
+        async with db_pool.acquire() as conn:
+            authority_row = await conn.fetchrow(
+                """
+                SELECT budget_used_json, scan_action_plan_json,
+                       scan_action_plan_digest
+                FROM scans WHERE id=$1
+                """,
+                uuid.UUID(parent_id),
+            )
+        if authority_row is None:
+            raise ExecutionScopeError(
+                "canonical parallel parent authority row is unavailable"
+            )
+        parent_authority_row = authority_row
+        try:
+            parent_action_plan = ScanActionPlan.from_dict(
+                _as_report_dict(authority_row.get("scan_action_plan_json"))
+            )
+        except (ScanActionPlanError, TypeError, ValueError) as exc:
+            raise ExecutionScopeError(
+                "canonical parallel parent has no valid persisted action plan"
+            ) from exc
+        if (
+            parent_action_plan.scan_id != parent_id
+            or str(authority_row.get("scan_action_plan_digest") or "")
+            != parent_action_plan.plan_digest
+        ):
+            raise ExecutionScopeError(
+                "canonical parallel parent action-plan identity is inconsistent"
+            )
 
     # Count the plan/discovery stage as a running job. This stage runs the discover-once
     # recon (coverage) and the fan-out planning before any shard exists; without marking
@@ -15381,11 +15418,21 @@ async def process_scan_plan_job(job_data: dict):
     )
     r.expire(f"job:{parent_job_id}", 86400)
 
-    requested_strategy = parallel_scan.resolve_auto_strategy(
-        options,
-        scan_type,
-        options.get('shard_strategy') or 'auto',
-        active_testing=active_testing,
+    requested_strategy = (
+        ParallelActionPlanCompiler.resolve_strategy(
+            canonical_parent_job.execution_plan,
+            requested=options.get('shard_strategy') or 'auto',
+            known_endpoint_count=len(parallel_scan._normalize_endpoint_list(
+                options.get("custom_endpoints")
+            )),
+        )
+        if canonical_parent_job is not None
+        else parallel_scan.resolve_auto_strategy(
+            options,
+            scan_type,
+            options.get('shard_strategy') or 'auto',
+            active_testing=active_testing,
+        )
     )
     plan_stage = str(job_data.get('plan_stage') or 'start')
     canonical_subdomain_discovery = bool(
@@ -15474,7 +15521,7 @@ async def process_scan_plan_job(job_data: dict):
             )
             discovery_generation = 'v2'
             discovery_policy = canonical_parent_job.execution_plan.canonical_dict()['policy']
-            discovery_budget = canonical_parent_job.execution_plan.canonical_dict()['budget']
+            discovery_budget = discovery_job.shard.sub_budget.payload()
             discovery_job_payload = discovery_job.payload()
             discovery_job_digest = discovery_job.payload_digest
         else:
@@ -15953,6 +16000,67 @@ async def process_scan_plan_job(job_data: dict):
         (str(uuid.uuid4()), str(uuid.uuid4()), shard.index)
         for shard in plan.shards
     )
+    parallel_action_partition = None
+    if canonical_parent_job is not None:
+        if parent_action_plan is None:
+            raise ExecutionScopeError(
+                "canonical parallel planning lost parent action authority"
+            )
+        try:
+            parallel_action_partition = ParallelActionPlanCompiler().compile(
+                parent_execution_plan=canonical_parent_job.execution_plan,
+                parent_action_plan=parent_action_plan,
+                target_binding=canonical_parent_job.target,
+                child_specs=tuple({
+                    "scan_id": child_id,
+                    "index": shard.index,
+                    "label": shard.label,
+                    "options": shard.options,
+                } for shard, (child_id, _job_id, _index) in zip(
+                    plan.shards, child_identities, strict=True,
+                )),
+                consumed_budget=_as_report_dict(
+                    parent_authority_row.get("budget_used_json")
+                ),
+                strategy=plan.strategy,
+                available_worker_count=int(
+                    job_data.get('parallel_worker_count') or 0
+                ),
+            )
+        except ParallelActionPlanError as exc:
+            raise ExecutionScopeError(
+                f"canonical parallel action partition rejected: {exc}"
+            ) from exc
+        for shard, child_partition in zip(
+            plan.shards, parallel_action_partition.children, strict=True,
+        ):
+            shard.options = dict(shard.options)
+            shard.options.update({
+                "parallel_action_partition_schema": (
+                    parallel_action_partition.schema_version
+                ),
+                "parallel_action_partition_digest": (
+                    parallel_action_partition.partition_digest
+                ),
+                "parallel_action_partition_role": child_partition.role,
+                "parallel_budget_partition": child_partition.budget.payload(),
+                "skip_global_checks": child_partition.role != "global",
+            })
+        parent_options["parallel_action_partition"] = (
+            parallel_action_partition.canonical_dict()
+        )
+        parent_options["parallel_action_partition_digest"] = (
+            parallel_action_partition.partition_digest
+        )
+        parent_options['parallel_planned_request_budget'] = sum(
+            child.budget.max_http_requests
+            for child in parallel_action_partition.children
+        )
+        parent_options['parallel_backbone_request_budget'] = next(
+            child.budget.max_http_requests
+            for child in parallel_action_partition.children
+            if child.role == "global"
+        )
     request_partitions: dict[int, Mapping[str, ScanWorkManifest]] = {}
     if canonical_parent_job is not None and isinstance(
         parent_options.get("request_manifest_refs"), Mapping,
@@ -16074,6 +16182,24 @@ async def process_scan_plan_job(job_data: dict):
             child_action_plan, child_work_manifests, shard.index,
         ))
 
+    if parallel_action_partition is not None:
+        try:
+            parent_options["parallel_action_partition_record"] = (
+                parallel_action_partition.record({
+                    child_id: child_action_plan
+                    for (
+                        child_id, _child_job_id, _child_options, _payload,
+                        _child_job, child_action_plan, _child_work_manifests,
+                        _shard_index,
+                    ) in child_jobs
+                    if child_action_plan is not None
+                })
+            )
+        except ParallelActionPlanError as exc:
+            raise ExecutionScopeError(
+                f"canonical parallel child action plans rejected: {exc}"
+            ) from exc
+
     # Publish barrier part 1: make the complete expected child set durable in one
     # transaction before any worker can observe a queue message.
     async with db_pool.acquire() as conn:
@@ -16110,7 +16236,10 @@ async def process_scan_plan_job(job_data: dict):
                      uuid.UUID(parent_id), shard_index, plan.shard_count,
                      'v2' if child_job else 'legacy',
                      json.dumps(child_plan['policy'] if child_plan else {}),
-                     json.dumps(child_plan['budget'] if child_plan else {}),
+                     json.dumps(
+                         child_job.shard.sub_budget.payload()
+                         if child_job and child_job.shard else {}
+                     ),
                      json.dumps(child_job.payload() if child_job else {}),
                      child_job.payload_digest if child_job else None)
                 for child_manifest in child_work_manifests:
@@ -16534,7 +16663,8 @@ async def process_scan_merge_job(job_data: dict):
         children = await conn.fetch("""
             SELECT id, status, result, score, grade, findings_count, shard_index,
                    options, started_at, completed_at, campaign_id, error_message,
-                   current_phase, executing_node_id, worker_id
+                   current_phase, executing_node_id, worker_id,
+                   scan_action_plan_digest
             FROM scans
             WHERE parent_scan_id = $1 AND scan_role='shard'
             ORDER BY shard_index
@@ -16545,6 +16675,50 @@ async def process_scan_merge_job(job_data: dict):
     parent_job_id = parent['job_id'] or parent_id
     campaign_id = str(parent['campaign_id']) if parent['campaign_id'] else None
     parent_options = _as_report_dict(parent['options']) or {}
+    partition_record = parent_options.get("parallel_action_partition_record")
+    if isinstance(partition_record, Mapping):
+        try:
+            validate_parallel_partition_record(
+                partition_record,
+                parent_scan_id=parent_id,
+                child_plan_digests={
+                    str(child["id"]): str(
+                        child.get("scan_action_plan_digest") or ""
+                    )
+                    for child in children
+                },
+            )
+        except ParallelActionPlanError as exc:
+            error = f"Parallel action partition verification failed: {exc}"[:1000]
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans SET status='failed', progress=100,
+                        current_phase='parallel_partition_failed',
+                        completed_at=NOW(), error_message=$2,
+                        result=$3::jsonb
+                    WHERE id=$1 AND status <> 'cancelled'
+                    """,
+                    uuid.UUID(parent_id),
+                    error,
+                    json.dumps({
+                        "technical_outcome": "INCOMPLETE",
+                        "error": error,
+                        "parallel": {
+                            "degraded": True,
+                            "partition_verified": False,
+                        },
+                    }),
+                )
+            r.hset(f"job:{parent_job_id}", mapping={
+                "status": "failed",
+                "progress": "100",
+                "current_phase": "parallel_partition_failed",
+                "error": error,
+            })
+            r.expire(f"job:{parent_job_id}", 86400)
+            print(f"[merge {parent_id[:8]}] {error}", flush=True)
+            return
 
     # Aggregate findings (union, deduped by canonical fingerprint) and pick the
     # richest completed child report as the base skeleton for the merged report.

@@ -1417,8 +1417,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 396 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 332 | `api/**/*.py` |
+| Public REST operations | 397 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 333 | `api/**/*.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1606,6 +1606,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
 | `POST` | `/fleet/acceptance/lease-probe` | `run_fleet_acceptance_lease_probe` |
 | `POST` | `/fleet/broker/nodes/{node_id}/lease` | `lease_broker_job` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel` | `cancel_broker_scan_action` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/heartbeat` | `heartbeat_broker_scan_action` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease` | `lease_broker_scan_action` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/observations` | `get_broker_scan_action_observations` |
