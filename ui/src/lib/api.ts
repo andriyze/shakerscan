@@ -5416,7 +5416,19 @@ export async function scanDevice(deviceId: string, payload: {
 export async function getDeviceRequestCollections(deviceId: string): Promise<{ collections: DeviceRequestCollection[]; count: number }> {
   const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load imported request collections'))
-  return res.json()
+  const payload = await res.json() as { collections?: DeviceRequestCollection[]; count?: number }
+  const collections = (payload.collections || []).map((collection) => ({
+    ...collection,
+    summary: {
+      ...collection.summary,
+      methods: collection.summary?.methods || {},
+      port_hints: Array.isArray(collection.summary?.port_hints) ? collection.summary.port_hints : [],
+      environment_variable_names: Array.isArray(collection.summary?.environment_variable_names) ? collection.summary.environment_variable_names : [],
+      collection_variable_names: Array.isArray(collection.summary?.collection_variable_names) ? collection.summary.collection_variable_names : [],
+      requests: Array.isArray(collection.summary?.requests) ? collection.summary.requests : [],
+    },
+  }))
+  return { collections, count: payload.count ?? collections.length }
 }
 
 export async function createDeviceRequestCollection(deviceId: string, payload: {
