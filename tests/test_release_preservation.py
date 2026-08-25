@@ -112,6 +112,16 @@ def test_every_matrix_live_evidence_names_a_real_acceptance_check():
         path.read_text(encoding="utf-8")
         for path in sorted((ROOT / "ui" / "tests" / "browser").glob("*.spec.ts"))
     )
+    route_manifest = json.loads(
+        (ROOT / "ui" / "test-manifests" / "ui-route-action-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifested_smoke_routes = {
+        route["smokePath"]
+        for route in route_manifest["routes"]
+        if route.get("smokePath")
+    }
     for program in MATRIX["programs"].values():
         for control in program["controls"]:
             if control.get("e2e"):
@@ -125,7 +135,8 @@ def test_every_matrix_live_evidence_names_a_real_acceptance_check():
                     route = title.removesuffix(
                         " renders without an application exception"
                     )
-                    assert f"'{route}'" in browser_source, title
+                    assert route in manifested_smoke_routes, title
+                    assert "routeManifest.routes.flatMap" in browser_source, title
                 else:
                     assert title in browser_source, title
 
