@@ -2309,7 +2309,10 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     from scan.contracts import resolve_scan_contract
     from scan.jobs import CanonicalScanJob
 
-    contract = resolve_scan_contract(budget_profile="balanced")
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"exclude_families": ["nuclei"]},
+    )
     parent = CanonicalScanJob.create(
         job_id="parent-job",
         scan_id="parent-scan",
@@ -2355,8 +2358,9 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_browser_actions"] == 0
     assert persisted["canonical_shard_authority"]["sub_budget"]["max_tcp_ports"] == 0
     action_plan = worker._compile_parallel_child_action_plan(child, persisted)
-    assert [action.action_id for action in action_plan.actions] == ["finalize.report"]
-    assert action_plan.actions[0].input_binding_digest
+    # This endpoint shard has no executable family work. Parent finalization is
+    # deliberately absent from child plans compiled with include_finalizer=False.
+    assert action_plan.actions == ()
 
 
 def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
