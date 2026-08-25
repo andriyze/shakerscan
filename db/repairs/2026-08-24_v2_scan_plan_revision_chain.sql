@@ -58,6 +58,9 @@ BEGIN
         WHERE conname='scan_action_plan_revisions_immutable_shape_check'
           AND conrelid='scan_action_plan_revisions'::regclass
     ) THEN
+        -- Historical revision-1 rows predate content-addressed discovery
+        -- evidence and cannot be truthfully backfilled. NOT VALID preserves
+        -- them while PostgreSQL still checks every new or changed row.
         ALTER TABLE scan_action_plan_revisions
         ADD CONSTRAINT scan_action_plan_revisions_immutable_shape_check
         CHECK (
@@ -78,7 +81,7 @@ BEGIN
                 AND jsonb_array_length(work_manifest_refs_json) > 0
                 AND continuation_plan_digest IS NOT NULL
             )
-        );
+        ) NOT VALID;
     END IF;
 END $$;
 

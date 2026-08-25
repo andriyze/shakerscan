@@ -195,6 +195,10 @@ BEGIN
          WHERE conname='scan_action_plan_revisions_immutable_shape_check'
            AND conrelid='scan_action_plan_revisions'::regclass
     ) THEN
+        -- Pre-chain V2 databases can contain immutable revision-1 history
+        -- without discovery/work-manifest digests. Those values cannot be
+        -- reconstructed without inventing evidence, so retain the history and
+        -- enforce the complete shape on every row written after this upgrade.
         ALTER TABLE scan_action_plan_revisions
         ADD CONSTRAINT scan_action_plan_revisions_immutable_shape_check
         CHECK (
@@ -215,7 +219,7 @@ BEGIN
                 AND jsonb_array_length(work_manifest_refs_json) > 0
                 AND continuation_plan_digest IS NOT NULL
             )
-        );
+        ) NOT VALID;
     END IF;
 END $$;
 CREATE TABLE IF NOT EXISTS app_schema_migrations (

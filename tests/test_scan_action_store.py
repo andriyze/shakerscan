@@ -358,6 +358,13 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "discovery_result_digest" in source
         assert "work_manifest_refs_json" in source
         assert "scan_action_plan_revisions_immutable_shape_check" in source
+    # Existing V2 databases contain pre-content-addressed revision-1 rows whose
+    # missing discovery evidence cannot be truthfully reconstructed. Upgrade
+    # migrations must grandfather those immutable historical rows while still
+    # enforcing the complete shape on every new row.
+    assert "scan_action_plan_revisions_immutable_shape_check" in SCAN_ACTION_SCHEMA_SQL
+    assert ") NOT VALID;" in SCAN_ACTION_SCHEMA_SQL
+    assert ") NOT VALID;" in revision_repair_sql
 
 
 def test_action_store_rolls_back_failed_continuation_and_resumes_only_incomplete_actions():
