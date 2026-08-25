@@ -220,6 +220,20 @@ def test_execution_explanation_marks_required_partial_grade_unreliable():
     assert explanation["transport_parity"]["broker_eligible"] is True
 
 
+def test_terminal_scan_labels_never_started_stages_not_run():
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="failed",
+        plan_payload=_plan(),
+        action_rows=[],
+    )
+
+    assert [stage["status"] for stage in explanation["stage_timeline"]] == [
+        "not_run", "complete_with_gaps", "not_run",
+    ]
+    assert explanation["coverage"]["capability_coverage"]["pending"] == 1
+
+
 def test_execution_explanation_preserves_final_report_grade_reliability():
     rows = _rows()
     rows[0]["status"] = "success"

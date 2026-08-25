@@ -471,6 +471,9 @@ def build_scan_execution_explanation(
         if action["stage"] not in stage_order:
             stage_order.append(action["stage"])
     stages: list[dict[str, Any]] = []
+    scan_is_terminal = str(scan_status or "").strip().lower() in {
+        "completed", "failed", "cancelled",
+    }
     for index, stage in enumerate(stage_order):
         rows = [item for item in actions if item["stage"] == stage]
         counts = Counter(str(item["status"]) for item in rows)
@@ -481,7 +484,7 @@ def build_scan_execution_explanation(
         elif any(status in counts for status in ("running", "leased")):
             status = "running"
         elif "planned" in counts or "missing" in counts:
-            status = "pending"
+            status = "not_run" if scan_is_terminal else "pending"
         elif any(status in counts for status in ("partial", "timed_out")):
             status = "partial"
         elif "skipped" in counts:
@@ -489,7 +492,7 @@ def build_scan_execution_explanation(
         elif rows and all(item["status"] in _TERMINAL for item in rows):
             status = "complete"
         else:
-            status = "pending"
+            status = "not_run" if scan_is_terminal else "pending"
         stages.append({
             "index": index,
             "stage": stage,
