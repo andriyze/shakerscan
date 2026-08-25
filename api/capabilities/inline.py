@@ -13,6 +13,21 @@ from runtime.capability_registry import CapabilitySpec
 InlineOperation = Callable[[], Awaitable[Mapping[str, Any]]]
 
 
+def _blocked_error(exc: BaseException) -> str:
+    """Return one bounded, operator-actionable guard reason.
+
+    FastAPI's HTTPException keeps the intended public explanation in
+    ``detail``.  Persist that explanation for idempotent action replays instead
+    of reducing every safety block to the exception class name.  Arbitrary
+    structured details are deliberately not serialized here.
+    """
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()[:500]
+    message = str(exc).strip()
+    return message[:500] if message else f"blocked:{type(exc).__name__}"
+
+
 class _InlineAdapter:
     def __init__(
         self,
@@ -228,7 +243,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             if result.get(key) is not None:
                 observation[key] = result[key]
         error = (
-            f"blocked:{type(self.blocked_exception).__name__}"
+            _blocked_error(self.blocked_exception)
             if self.blocked_exception is not None
             else str(result.get("error") or "").strip()
         )
@@ -352,7 +367,7 @@ class DeviceExecutionAdapter(_InlineAdapter):
         if result.get("requires_user_confirmation"):
             observation["requires_user_confirmation"] = True
         error = (
-            f"blocked:{type(self.blocked_exception).__name__}"
+            _blocked_error(self.blocked_exception)
             if self.blocked_exception is not None
             else str(result.get("error") or "").strip()
         )

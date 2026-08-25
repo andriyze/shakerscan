@@ -41158,6 +41158,17 @@ async def _execute_hunt_capability_lifecycle(
                 receipt_contract_payload["receipt_observations"] = [
                     dict(item) for item in capability_execution.observations
                 ]
+                if (
+                    capability_execution.errors
+                    and not receipt_contract_payload.get("error")
+                ):
+                    # Keep the bounded public guard reason in the durable action
+                    # so an idempotent replay and the Hunt UI explain why a
+                    # capability was blocked.  Adapter faults are already
+                    # normalized to non-sensitive type-only errors.
+                    receipt_contract_payload["error"] = str(
+                        capability_execution.errors[0]
+                    )[:500]
             downstream_receipt: dict[str, Any] = {}
             if is_device_queue:
                 queued_result = (

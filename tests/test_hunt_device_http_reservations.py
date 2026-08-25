@@ -46,6 +46,14 @@ def test_device_http_attempt_is_charged_and_persisted_even_when_transport_fails(
     assert 'context.get("device_policy_state")' in handler
 
 
+def test_device_http_guard_reason_survives_durable_action_replay():
+    handler = _handler_source()
+
+    assert 'capability_execution.errors' in handler
+    assert 'receipt_contract_payload["error"]' in handler
+    assert 'existing_summary.get("error")' in handler
+
+
 def test_device_http_receipts_strip_query_values_but_keep_digest_binding():
     handler = _handler_source()
 

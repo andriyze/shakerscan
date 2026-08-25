@@ -359,6 +359,7 @@ def test_collection_control_adapter_refunds_wall_time_for_a_guard_block():
     assert result.status == "blocked"
     assert result.actual_budget == {"agent_actions": 1}
     assert isinstance(adapter.blocked_exception, ExpectedControlBlock)
+    assert result.errors == ("collection changed",)
 
 
 class ExpectedDeviceBlock(Exception):
@@ -392,6 +393,7 @@ def test_device_adapter_refunds_execution_dimensions_for_precondition_block():
     assert result.actual_budget == {"agent_actions": 1}
     assert adapter.blocked_exception is not None
     assert result.observations[0]["kind"] == "device_capability"
+    assert result.errors == ("traffic frozen",)
 
 
 def test_device_adapter_charges_reserved_queue_envelope_after_acceptance():
