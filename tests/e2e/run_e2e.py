@@ -553,7 +553,6 @@ def run_platform() -> H.Scorecard:
             "time_of_day": future.strftime("%H:%M"),
             "timezone": "UTC",
             "schedule_kind": "normal_scan",
-            "scan_type": "scan",
             "scan_options": {"budget_profile": "fast"},
             "jitter_minutes": 0,
         })
