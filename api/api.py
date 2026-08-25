@@ -32237,6 +32237,7 @@ async def list_domains():
             SELECT DISTINCT root_domain
             FROM targets
             WHERE root_domain IS NOT NULL AND is_active = true
+              AND char_length(btrim(root_domain)) BETWEEN 1 AND 253
               AND COALESCE(discovery_source, 'manual') <> 'model-intake'
             ORDER BY root_domain
         """)
@@ -32246,12 +32247,11 @@ async def list_domains():
             WHERE endpoint_url IS NOT NULL AND is_active = true
         """)
 
-    return {
-        'domains': sorted({
-            *(r['root_domain'] for r in rows),
-            *(extract_root_domain(r['endpoint_url']) for r in ai_rows if r['endpoint_url'])
-        })
+    domains = {
+        *(r['root_domain'].strip() for r in rows if r['root_domain']),
+        *(extract_root_domain(r['endpoint_url']).strip() for r in ai_rows if r['endpoint_url'])
     }
+    return {'domains': sorted(domain for domain in domains if 0 < len(domain) <= 253)}
 
 
 @app.post("/targets")
@@ -72571,6 +72571,11 @@ def normalize_target_url(target: str) -> tuple[str, str | None]:
 
     # Lowercase host for consistent canonicalization
     host = host.lower()
+    # DNS names are bounded to 253 visible characters. Apart from producing an
+    # unusable target, accepting an unbounded host lets one historical row turn
+    # lightweight domain-filter responses into multi-megabyte UI payloads.
+    if len(host.rstrip('.')) > 253:
+        raise TargetNormalizationError("Invalid target URL: hostname exceeds 253 characters")
 
     # Validate scheme (only http/https allowed when explicitly provided)
     scheme = parsed.scheme.lower() if has_scheme else "https"

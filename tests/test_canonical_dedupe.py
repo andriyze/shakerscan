@@ -99,6 +99,8 @@ def test_web_target_apis_exclude_model_intake_subjects_by_default(monkeypatch):
     assert target_queries
     assert all("COALESCE(discovery_source, 'manual') <> 'model-intake'" in query or "COALESCE(t.discovery_source, 'manual') <> 'model-intake'" in query for query in target_queries)
     assert all("COALESCE(discovery_source, 'manual') <> 'model-intake'" in query for query in conn.fetchval_queries)
+    domain_query = next(query for query in target_queries if "SELECT DISTINCT root_domain" in query)
+    assert "char_length(btrim(root_domain)) BETWEEN 1 AND 253" in domain_query
 
 
 def test_target_dedupe_plan_excludes_model_intake_subjects():

@@ -19653,6 +19653,13 @@ def test_normalize_target_url_preserves_operator_choice_for_all_http_targets():
         assert norm
 
 
+def test_normalize_target_url_rejects_oversized_hostname():
+    oversized = f"https://{'a' * 254}.example"
+
+    with pytest.raises(api_module.TargetNormalizationError, match="hostname exceeds 253 characters"):
+        api_module.normalize_target_url(oversized)
+
+
 def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     """A new origin may reuse a target whose stored root classification differs."""
     existing_id = uuid.uuid4()
