@@ -5,6 +5,7 @@ import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '..')
 const detail = fs.readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
+const experiment = fs.readFileSync(path.join(root, 'src/app/deep-hunt/experiment/page.tsx'), 'utf8')
 
 test('scan detail explains stages, placement, budgets, evidence, and grade reliability', () => {
   assert.match(detail, /function ExecutionPlanCard/)
@@ -35,4 +36,9 @@ test('terminal shard rollups never render stale queued or running phases', () =>
   assert.match(detail, /const terminal = \['completed', 'failed', 'cancelled'\]\.includes\(shardStatus\)/)
   assert.match(detail, /const staleTerminalPhases = new Set\(\['pending', 'queued', 'running'\]\)/)
   assert.match(detail, /<span>\{phaseLabel\}<\/span>/)
+})
+
+test('bounded experiment timeout has an accessible name', () => {
+  assert.match(experiment, /id="experiment-timeout-label"/)
+  assert.match(experiment, /aria-labelledby="experiment-timeout-label"/)
 })

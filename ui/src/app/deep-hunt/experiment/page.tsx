@@ -266,7 +266,7 @@ export default function ExperimentBuilderPage() {
             <div className="mt-5 grid gap-3 text-sm">
               <div className="flex min-w-0 items-start gap-2"><Target className="mt-0.5 h-4 w-4 flex-none text-gray-500" /><div className="min-w-0"><div className="text-xs text-gray-600">Target</div><div className="truncate text-gray-300" title={selectedTarget?.url}>{selectedTarget?.name || selectedTarget?.url || 'Not selected'}</div></div></div>
               <div className="flex items-start gap-2"><FlaskConical className="mt-0.5 h-4 w-4 text-gray-500" /><div><div className="text-xs text-gray-600">Sequence</div><div className="text-gray-300">{steps.length} steps · maximum 4 requests</div></div></div>
-              <div className="flex items-start gap-2"><Clock3 className="mt-0.5 h-4 w-4 text-gray-500" /><div className="min-w-0 flex-1"><div className="flex justify-between text-xs text-gray-600"><span>Per-request timeout</span><span>{timeout}s</span></div><input type="range" min={1} max={15} value={timeout} onChange={(e) => setTimeoutValue(Number(e.target.value))} className="mt-2 w-full" /></div></div>
+              <div className="flex items-start gap-2"><Clock3 className="mt-0.5 h-4 w-4 text-gray-500" /><div className="min-w-0 flex-1"><div className="flex justify-between text-xs text-gray-600"><span id="experiment-timeout-label">Per-request timeout</span><span>{timeout}s</span></div><input aria-labelledby="experiment-timeout-label" type="range" min={1} max={15} value={timeout} onChange={(e) => setTimeoutValue(Number(e.target.value))} className="mt-2 w-full" /></div></div>
             </div>
 
             <div className="mt-5 border-t border-gray-800 pt-4">
