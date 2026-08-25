@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -42,6 +43,8 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_TARGET_PAGE_SIZE = 20
+DEFAULT_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
+DEFAULT_CAPABILITY_PATTERN = r"^[a-z0-9][a-z0-9_.:-]{0,127}$"
 
 
 def _bounded_text(value: Any, limit: int) -> str | None:
@@ -216,15 +219,9 @@ TOOL_BY_NAME = {tool.name: tool for tool in TOOLS}
 
 HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     HuntMCPTool(
-        "shakerscan_hunt_start", "POST", "/hunts", "Start one target-bound Hunt.",
-        {
-            "target_id": {"type": "string", "format": "uuid"},
-            "objective": {"type": "string"},
-            "budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough"]},
-            "approval_receipt_id": {"type": "string", "format": "uuid"},
-            "request_collection_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 16},
-        },
-        ("target_id", "objective", "budget_profile"),
+        "shakerscan_hunt_start", "POST", "/hunts",
+        "Start one target-bound Hunt using the live Hunt V2 authority contract.",
+        {},
     ),
     HuntMCPTool(
         "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}", "Read a Hunt and its capability manifest.",
@@ -275,6 +272,126 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
 )
 HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
+
+
+def _positive_int(value: Any, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
+
+
+def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
+    """Generate the MCP Hunt-start surface from the server's live authority contract."""
+    schema_version = str(contract.get("schema_version") or "").strip()
+    target_kinds = contract.get("target_kinds")
+    policy_fields = contract.get("policy_fields")
+    credential_fields = contract.get("credential_ref_fields")
+    profiles = contract.get("budget_profiles")
+    dimensions = contract.get("budget_dimensions")
+    limits = contract.get("limits") if isinstance(contract.get("limits"), dict) else {}
+    patterns = contract.get("patterns") if isinstance(contract.get("patterns"), dict) else {}
+    if (
+        not schema_version
+        or not isinstance(target_kinds, list)
+        or not target_kinds
+        or not all(isinstance(item, str) and item for item in target_kinds)
+        or not isinstance(policy_fields, list)
+        or not isinstance(credential_fields, list)
+        or not isinstance(profiles, dict)
+        or not profiles
+        or not isinstance(dimensions, list)
+    ):
+        raise MCPError(-32005, "Hunt start contract is missing required fields")
+
+    profile_names = sorted(str(name) for name in profiles if str(name))
+    profile_ceilings: dict[str, int] = {}
+    for raw_profile in profiles.values():
+        if not isinstance(raw_profile, dict):
+            raise MCPError(-32005, "Hunt budget profile contract is invalid")
+        for name, amount in raw_profile.items():
+            if isinstance(amount, int) and not isinstance(amount, bool):
+                profile_ceilings[str(name)] = max(profile_ceilings.get(str(name), 0), amount)
+
+    budget_properties: dict[str, dict[str, Any]] = {}
+    for raw_dimension in dimensions:
+        if not isinstance(raw_dimension, dict):
+            raise MCPError(-32005, "Hunt budget dimension contract is invalid")
+        name = str(raw_dimension.get("name") or "").strip()
+        if not name or name not in profile_ceilings:
+            raise MCPError(-32005, "Hunt budget dimension has no profile ceiling")
+        budget_properties[name] = {
+            "type": "integer",
+            "minimum": int(raw_dimension.get("minimum") or 0),
+            "maximum": profile_ceilings[name],
+            "description": str(raw_dimension.get("label") or name),
+        }
+
+    identifier_pattern = str(patterns.get("identifier") or DEFAULT_IDENTIFIER_PATTERN)
+    capability_pattern = str(patterns.get("capability") or DEFAULT_CAPABILITY_PATTERN)
+    identifier_schema = {
+        "type": "string", "minLength": 1, "maxLength": 256,
+        "pattern": identifier_pattern,
+    }
+    policy_properties = {
+        str(name): (
+            dict(identifier_schema)
+            if str(name).endswith("_id")
+            else {"type": "boolean"}
+        )
+        for name in policy_fields
+    }
+    credential_properties = {
+        str(name): dict(identifier_schema) for name in credential_fields
+    }
+    properties: dict[str, dict[str, Any]] = {
+        "schema_version": {"type": "string", "enum": [schema_version]},
+        "target_id": dict(identifier_schema),
+        "target_kind": {"type": "string", "enum": sorted(target_kinds)},
+        "goal": {
+            "type": "string", "minLength": 1,
+            "maxLength": _positive_int(limits.get("goal_chars"), 20_000),
+        },
+        "budget_profile": {"type": "string", "enum": profile_names},
+        "budgets": {
+            "type": "object",
+            "properties": budget_properties,
+            "additionalProperties": False,
+        },
+        "policy": {
+            "type": "object",
+            "properties": policy_properties,
+            "additionalProperties": False,
+        },
+        "credential_refs": {
+            "type": "object",
+            "properties": credential_properties,
+            "additionalProperties": False,
+            "maxProperties": _positive_int(limits.get("credential_refs"), 16),
+        },
+        "capabilities": {
+            "type": "array",
+            "items": {
+                "type": "string", "minLength": 1, "maxLength": 128,
+                "pattern": capability_pattern,
+            },
+            "maxItems": _positive_int(limits.get("capabilities"), 128),
+            "uniqueItems": True,
+        },
+        "request_collection_ids": {
+            "type": "array",
+            "items": dict(identifier_schema),
+            "maxItems": _positive_int(limits.get("request_collections"), 32),
+            "uniqueItems": True,
+        },
+    }
+    return HuntMCPTool(
+        "shakerscan_hunt_start", "POST", "/hunts",
+        "Start one target-bound Hunt using the live Hunt V2 authority contract.",
+        properties,
+        ("schema_version", "target_id", "target_kind", "goal", "budget_profile", "policy"),
+    )
+
+
+def _hunt_tools(contract: dict[str, Any]) -> tuple[HuntMCPTool, ...]:
+    return (_hunt_start_tool(contract), *HUNT_TOOLS[1:])
 
 
 class MCPError(Exception):
@@ -399,6 +516,21 @@ class ArsenalClient:
                 raise MCPError(-32602, f"Tool argument {name} must be at least {minimum}")
             if maximum is not None and value > maximum:
                 raise MCPError(-32602, f"Tool argument {name} must be at most {maximum}")
+        if expected == "string":
+            minimum = schema.get("minLength")
+            maximum = schema.get("maxLength")
+            if minimum is not None and len(value) < minimum:
+                raise MCPError(-32602, f"Tool argument {name} must contain at least {minimum} character(s)")
+            if maximum is not None and len(value) > maximum:
+                raise MCPError(-32602, f"Tool argument {name} allows at most {maximum} character(s)")
+            pattern = schema.get("pattern")
+            if isinstance(pattern, str):
+                try:
+                    matches = re.fullmatch(pattern, value) is not None
+                except re.error as exc:
+                    raise MCPError(-32005, f"Live schema for {name} has an invalid pattern") from exc
+                if not matches:
+                    raise MCPError(-32602, f"Tool argument {name} has an invalid value")
         if schema.get("format") == "uuid" and isinstance(value, str):
             try:
                 parsed = uuid.UUID(value)
@@ -413,9 +545,35 @@ class ArsenalClient:
                 raise MCPError(-32602, f"Tool argument {name} needs at least {minimum} item(s)")
             if maximum is not None and len(value) > maximum:
                 raise MCPError(-32602, f"Tool argument {name} allows at most {maximum} item(s)")
+            if schema.get("uniqueItems"):
+                serialized = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
+                if len(serialized) != len(set(serialized)):
+                    raise MCPError(-32602, f"Tool argument {name} must not contain duplicate items")
             item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
-            for item in value:
-                ArsenalClient._validate_argument(name, item, item_schema)
+            for index, item in enumerate(value):
+                ArsenalClient._validate_argument(f"{name}[{index}]", item, item_schema)
+        if expected == "object":
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            required = schema.get("required") if isinstance(schema.get("required"), list) else []
+            unknown = sorted(set(value) - set(properties)) if schema.get("additionalProperties") is False else []
+            missing = sorted(set(required) - set(value))
+            if unknown:
+                raise MCPError(-32602, f"Unknown {name} fields: {', '.join(unknown)}")
+            if missing:
+                raise MCPError(-32602, f"Missing required {name} fields: {', '.join(missing)}")
+            maximum = schema.get("maxProperties")
+            if maximum is not None and len(value) > maximum:
+                raise MCPError(-32602, f"Tool argument {name} allows at most {maximum} field(s)")
+            for key, item in value.items():
+                child_schema = properties.get(key)
+                if isinstance(child_schema, dict):
+                    ArsenalClient._validate_argument(f"{name}.{key}", item, child_schema)
+
+    def hunt_contract(self) -> dict[str, Any]:
+        contract = self.request_json("GET", "/hunts/contract")
+        # Constructing the generated descriptor is also the fail-closed contract validation.
+        _hunt_start_tool(contract)
+        return contract
 
     def list_tools(self) -> list[dict[str, Any]]:
         catalog = self.catalog()
@@ -427,11 +585,13 @@ class ArsenalClient:
             if command.get("status") != "read_only" or command.get("risk_tier") != "read_only" or command.get("method") != "GET":
                 raise MCPError(-32006, f"Arsenal command {tool.command} is no longer read-only")
             descriptors.append(tool.descriptor())
-        return descriptors + [tool.descriptor() for tool in HUNT_TOOLS]
+        return descriptors + [tool.descriptor() for tool in _hunt_tools(self.hunt_contract())]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         hunt_tool = HUNT_TOOL_BY_NAME.get(name)
         if hunt_tool:
+            if name == "shakerscan_hunt_start":
+                hunt_tool = _hunt_start_tool(self.hunt_contract())
             unknown = sorted(set(arguments) - set(hunt_tool.properties))
             missing = sorted(set(hunt_tool.required) - set(arguments))
             if unknown:
@@ -441,6 +601,22 @@ class ArsenalClient:
             for key, value in arguments.items():
                 self._validate_argument(key, value, hunt_tool.properties[key])
             payload = dict(arguments)
+            if name == "shakerscan_hunt_start":
+                # MCP exposes only the canonical V2 names. Populate optional containers and
+                # explicit policy booleans so the REST request is complete and audit-friendly.
+                raw_policy = dict(payload.get("policy") or {})
+                payload["policy"] = {
+                    "active_testing": False,
+                    "allow_state_changing_http": False,
+                    "network_discovery": False,
+                    "allow_oob_interactions": False,
+                    "authorization_confirmed": False,
+                    **raw_policy,
+                }
+                payload.setdefault("budgets", {})
+                payload.setdefault("credential_refs", {})
+                payload.setdefault("capabilities", [])
+                payload.setdefault("request_collection_ids", [])
             path = hunt_tool.path_template
             for key in ("hunt_id", "capability_name", "candidate_id"):
                 marker = "{" + key + "}"

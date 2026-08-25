@@ -29,6 +29,58 @@ def _catalog(*, drift_command=None):
     return {"commands": commands}
 
 
+def _hunt_contract():
+    budget = {
+        "max_duration_seconds": 900,
+        "max_capability_calls": 20,
+        "max_http_requests": 500,
+        "max_active_actions": 4,
+        "max_candidates": 20,
+        "max_verifications": 4,
+        "max_tcp_ports": 100,
+        "max_browser_actions": 20,
+        "max_state_changing_requests": 4,
+        "max_device_fragility_points": 20,
+        "max_hosts": 50,
+        "max_udp_ports": 100,
+        "max_oob_interactions": 10,
+    }
+    return {
+        "schema_version": "hunt-start/v2",
+        "budget_schema_version": "hunt-budget/v3",
+        "target_kinds": ["api", "device", "network", "web"],
+        "policy_fields": [
+            "active_testing", "allow_oob_interactions", "allow_state_changing_http",
+            "approval_receipt_id", "authorization_confirmed", "network_discovery",
+            "scope_receipt_id",
+        ],
+        "credential_ref_fields": [
+            "authorization_header_credential_id", "cookie_credential_id",
+            "oauth_credential_profile_id", "primary_credential_profile_id",
+            "secondary_credential_profile_id", "service_credential_profile_id",
+            "ssh_credential_profile_id", "web_credential_profile_id",
+        ],
+        "limits": {
+            "goal_chars": 20_000, "capabilities": 128,
+            "request_collections": 32, "credential_refs": 16,
+        },
+        "patterns": {
+            "identifier": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$",
+            "capability": r"^[a-z0-9][a-z0-9_.:-]{0,127}$",
+        },
+        "budget_profiles": {
+            "fast": budget,
+            "balanced": {key: value * 2 for key, value in budget.items()},
+            "thorough": {key: value * 4 for key, value in budget.items()},
+        },
+        "budget_dimensions": [
+            {"name": key, "label": key.replace("_", " ").title(), "minimum": 0}
+            for key in budget
+        ],
+        "policy_derived_zeros": {},
+    }
+
+
 class FakeClient(mcp.ArsenalClient):
     def __init__(self, *, drift_command=None):
         super().__init__("http://127.0.0.1:8080")
@@ -39,6 +91,9 @@ class FakeClient(mcp.ArsenalClient):
         self.calls.append((method, path, payload))
         if path == "/arsenal/commands":
             return _catalog(drift_command=self.drift_command)
+        if path == "/hunts/contract":
+            assert method == "GET"
+            return _hunt_contract()
         assert method == "POST"
         assert path == "/arsenal/execute"
         command = payload["command"]
@@ -68,6 +123,16 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
     assert all(item["annotations"]["destructiveHint"] is False for item in descriptors)
     assert all(item["annotations"]["readOnlyHint"] is True for item in descriptors if item["name"] not in {tool.name for tool in mcp.HUNT_TOOLS})
     assert all(tool.command not in {"scan.submit", "asm.improve", "finding.retest"} for tool in mcp.TOOLS)
+
+    start = next(item for item in descriptors if item["name"] == "shakerscan_hunt_start")
+    schema = start["inputSchema"]
+    assert schema["required"] == [
+        "schema_version", "target_id", "target_kind", "goal", "budget_profile", "policy",
+    ]
+    assert schema["properties"]["target_kind"]["enum"] == ["api", "device", "network", "web"]
+    assert "max_http_requests" in schema["properties"]["budgets"]["properties"]
+    assert "primary_credential_profile_id" in schema["properties"]["credential_refs"]["properties"]
+    assert schema["properties"]["request_collection_ids"]["maxItems"] == 32
 
 
 def test_mcp_catalog_drift_fails_closed():
@@ -209,6 +274,76 @@ def test_mcp_hunt_tools_wrap_canonical_api_and_validate_ids():
 
     with pytest.raises(mcp.MCPError):
         client.call_tool("shakerscan_hunt_get", {"hunt_id": "not-a-uuid"})
+
+
+def test_mcp_hunt_start_dispatches_complete_canonical_v2_request():
+    class HuntClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if path == "/hunts":
+                self.calls.append((method, path, payload))
+                return {"hunt_id": "hunt-1", "status": "active"}
+            return super().request_json(method, path, payload)
+
+    client = HuntClient()
+    result = client.call_tool("shakerscan_hunt_start", {
+        "schema_version": "hunt-start/v2",
+        "target_id": "target-1",
+        "target_kind": "web",
+        "goal": "Inspect the authorized web target.",
+        "budget_profile": "fast",
+        "policy": {},
+    })
+
+    assert result["structuredContent"]["status"] == "active"
+    assert client.calls[-1] == (
+        "POST", "/hunts", {
+            "schema_version": "hunt-start/v2",
+            "target_id": "target-1",
+            "target_kind": "web",
+            "goal": "Inspect the authorized web target.",
+            "budget_profile": "fast",
+            "policy": {
+                "active_testing": False,
+                "allow_state_changing_http": False,
+                "network_discovery": False,
+                "allow_oob_interactions": False,
+                "authorization_confirmed": False,
+            },
+            "budgets": {},
+            "credential_refs": {},
+            "capabilities": [],
+            "request_collection_ids": [],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"objective": "stale alias"},
+        {"policy": {"active_testing": "yes"}},
+        {"credential_refs": {"password": "secret"}},
+        {"budgets": {"unknown_budget": 1}},
+        {"request_collection_ids": ["collection-1", "collection-1"]},
+    ],
+)
+def test_mcp_hunt_start_rejects_contract_drift_and_invalid_nested_values(update):
+    payload = {
+        "schema_version": "hunt-start/v2",
+        "target_id": "target-1",
+        "target_kind": "web",
+        "goal": "Inspect the authorized web target.",
+        "budget_profile": "fast",
+        "policy": {},
+    }
+    payload.update(update)
+    client = FakeClient()
+
+    with pytest.raises(mcp.MCPError) as exc:
+        client.call_tool("shakerscan_hunt_start", payload)
+
+    assert exc.value.code == -32602
+    assert not any(path == "/hunts" for _method, path, _payload in client.calls)
 
 
 def test_mcp_stdio_emits_only_json_rpc_on_stdout():

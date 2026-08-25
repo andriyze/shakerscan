@@ -146,6 +146,17 @@ def hunt_start_public_contract() -> dict[str, Any]:
         "budget_schema_version": HUNT_BUDGET_SCHEMA,
         "target_kinds": sorted(_ALLOWED_TARGET_KINDS),
         "policy_fields": sorted(_ALLOWED_POLICY_KEYS),
+        "credential_ref_fields": sorted(_ALLOWED_CREDENTIAL_REF_KEYS),
+        "limits": {
+            "goal_chars": MAX_GOAL_CHARS,
+            "capabilities": MAX_CAPABILITIES,
+            "request_collections": MAX_COLLECTIONS,
+            "credential_refs": MAX_CREDENTIAL_REFS,
+        },
+        "patterns": {
+            "identifier": _ID_RE.pattern,
+            "capability": _CAPABILITY_RE.pattern,
+        },
         "budget_profiles": {
             name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
         },
