@@ -29,6 +29,17 @@ ADVANCED_FLAGS = (
 class ScanCliError(RuntimeError):
     """A content-safe command validation or API error."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        api_detail: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.api_detail = api_detail
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -64,6 +75,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Attach an exact-target saved request selection (maximum sixteen)",
     )
     parser.add_argument("--approval-receipt", metavar="UUID")
+    parser.add_argument(
+        "--idempotency-key",
+        metavar="KEY",
+        help="Stable retry key (never put credentials or other secrets in this value)",
+    )
     parser.add_argument("--endpoint", action="append", default=[], metavar="SPEC")
     parser.add_argument("--require-current-workers", action="store_true")
     parser.add_argument(
@@ -111,6 +127,7 @@ def _request_json(
     url: str,
     *,
     payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Accept": "application/json",
@@ -122,6 +139,8 @@ def _request_json(
         headers["Content-Type"] = "application/json"
         data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         method = "POST"
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -133,9 +152,19 @@ def _request_json(
         except (json.JSONDecodeError, UnicodeDecodeError):
             error = {}
         detail = error.get("detail") if isinstance(error, dict) else None
+        api_detail = detail
         if isinstance(detail, dict):
             detail = detail.get("message") or detail.get("error") or detail
-        raise ScanCliError(f"API rejected the request (HTTP {exc.code}): {detail or 'unknown error'}") from exc
+        if isinstance(detail, list):
+            detail = "; ".join(
+                str(item.get("msg") or "invalid request")
+                for item in detail if isinstance(item, dict)
+            )
+        raise ScanCliError(
+            f"API rejected the request (HTTP {exc.code}): {detail or 'unknown error'}",
+            http_status=exc.code,
+            api_detail=api_detail,
+        ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ScanCliError(f"could not reach the ShakerScan API: {exc.reason if hasattr(exc, 'reason') else exc}") from exc
     try:
@@ -205,6 +234,21 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
         raise ScanCliError("state-changing HTTP requires --active-testing")
     if args.network_discovery and not args.active_testing:
         raise ScanCliError("network discovery requires --active-testing")
+    if args.auth_state_shards and args.execution not in {"parallel", "coverage"}:
+        raise ScanCliError(
+            "--auth-state-shards requires --execution parallel or coverage"
+        )
+    if args.idempotency_key is not None:
+        key = args.idempotency_key
+        if not 8 <= len(key) <= 200:
+            raise ScanCliError("--idempotency-key must contain 8 to 200 characters")
+        if not key[0].isalnum() or any(
+            not (character.isalnum() or character in "_.:-") for character in key
+        ):
+            raise ScanCliError(
+                "--idempotency-key must start with an alphanumeric character and "
+                "use only letters, numbers, underscore, dot, colon, or hyphen"
+            )
     if (args.allow_state_changing_http or args.network_discovery or args.credential_profile) and not args.approval_receipt:
         raise ScanCliError("the selected authority requires --approval-receipt")
     if args.node_id and args.placement != "auto":
@@ -298,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         response = _request_json(
             f"{api_url}/scans",
             payload=payload,
+            idempotency_key=args.idempotency_key,
         )
         scan_id = str(response.get("scan_id") or "")
         status = str(response.get("status") or "")
@@ -311,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
             "budget_profile": args.budget_profile,
             "active_testing": bool(args.active_testing),
             "ui_url": f"{args.ui_url.rstrip('/')}/scans/{scan_id}",
+            **(
+                {"idempotency_key": args.idempotency_key}
+                if args.idempotency_key else {}
+            ),
         }
         if args.json:
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
@@ -322,10 +371,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except ScanCliError as exc:
         if args.json:
-            print(json.dumps({
+            error = {
                 "schema_version": ERROR_SCHEMA,
                 "error": str(exc),
-            }, sort_keys=True, separators=(",", ":")), file=sys.stderr)
+            }
+            if exc.http_status is not None:
+                error["http_status"] = exc.http_status
+            if exc.api_detail is not None:
+                error["api_detail"] = exc.api_detail
+            print(
+                json.dumps(error, sort_keys=True, separators=(",", ":")),
+                file=sys.stderr,
+            )
         else:
             print(f"Error: {exc}", file=sys.stderr)
         return 1

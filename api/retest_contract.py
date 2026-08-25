@@ -1017,6 +1017,32 @@ async def run_schema_migrations(pool) -> None:
                 )
             """)
 
+            # Public CLI/UI clients can safely retry a timed-out write without
+            # duplicating scans, Hunts, credential rotations, or collection
+            # mutations. Store only opaque/body digests and public responses;
+            # credential and collection request bodies never enter this table.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS public_api_idempotency (
+                    method TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    key_sha256 TEXT NOT NULL CHECK (key_sha256 ~ '^[0-9a-f]{64}$'),
+                    request_sha256 TEXT NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+                    state TEXT NOT NULL DEFAULT 'processing'
+                        CHECK (state IN ('processing','completed')),
+                    response_status INTEGER,
+                    response_headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    response_body BYTEA,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ,
+                    PRIMARY KEY (method, path, key_sha256)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_public_api_idempotency_updated
+                ON public_api_idempotency(updated_at)
+            """)
+
             # findings table verification columns
             await conn.execute("""
                 ALTER TABLE findings

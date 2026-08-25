@@ -376,7 +376,8 @@ are removed; historical compatibility records remain readable for audit purposes
 builds the report exclusively from the immutable plan/revision chain, terminal action results,
 receipts, observation manifests, and private-work manifest references. The same evidence bundle can
 be rebuilt with `scanner.sh report-rebuild` while outbound sockets are disabled; mismatched plan,
-result, revision, or observation digests fail closed.
+result, revision, or observation digests fail closed. File output uses an atomic same-directory
+write, refuses to overwrite by default, and requires an explicit `--force` replacement.
 
 **Scoring & grading** (`scanner/grading.py`): evidence-backed findings are scored on a CVSS-style
 scale with context and exploit-maturity modifiers. AI notes and suspected candidates cannot promote
@@ -1170,6 +1171,13 @@ See [`docs/read-only-mcp.md`](read-only-mcp.md).
 Every Hunt capability call carries a client-generated opaque `idempotency_key`. Repeating the same
 key with the same semantic input returns the original durable action; reusing it for a different
 capability or input fails closed.
+
+All release-critical public V2 writes also accept the optional `Idempotency-Key` header published in
+OpenAPI. The server binds its SHA-256 digest to the exact method, concrete path, and request-body
+digest, stores no request body or raw key, and replays only an already-public successful JSON
+response. This makes installed Scan, Hunt start, credential create/rotate, and collection mutations
+safe to retry after a lost response. A key reused with different input returns `409`; an in-flight
+duplicate returns a bounded `idempotency_request_in_progress` response instead of executing twice.
 
 Legacy device SSH, header, cookie, and form profiles are backfilled to same-ID generic profiles.
 Their older encrypted JSON envelopes are canonicalized without returning or logging plaintext;

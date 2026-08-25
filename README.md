@@ -88,6 +88,12 @@ internal decisions. Legacy `--type`, `scan-full`, and `scan-smart` writes have b
 web UI or REST API for authentication values so secrets do not enter shell history. Credential create and
 rotation requests are read from a file or stdin, never secret-bearing command-line flags. Hunt,
 credential, and collection commands read their accepted fields from the running server contracts.
+`credentials test` is deliberately a content-free storage, lifecycle, target-binding, and capability
+admission check; it does not attempt a live login. Exercise a profile only through a separately
+authorized, target-bound Scan or Hunt capability. Mutating CLI commands accept an opaque
+`--idempotency-key`; retrying the exact method, path, and request with that key returns the original
+successful public response, while different input with the same key fails closed. Never put a
+credential or other secret in a retry key.
 
 ### Use the web UI
 
@@ -489,6 +495,7 @@ hunt start|call               Start a Hunt or call one returned capability
 credentials create|rotate|test  Manage encrypted exact-target profiles
 collections upload|bind|select  Manage encrypted request collections
 evidence export                Export content-free evidence manifests or bundles
+report-rebuild <bundle>        Rebuild a deterministic Scan report fully offline
 doctor | install-deps         Diagnose or install local prerequisites
 env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime

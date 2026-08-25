@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
@@ -22,6 +24,31 @@ MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 class CliError(RuntimeError):
     """A safe, user-facing CLI failure."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str = "client_error",
+        http_status: int | None = None,
+        api_detail: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.http_status = http_status
+        self.api_detail = api_detail
+
+    def public_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "schema_version": "shakerscan-cli-error/v1",
+            "error": self.error_type,
+            "message": str(self),
+        }
+        if self.http_status is not None:
+            result["http_status"] = self.http_status
+        if self.api_detail is not None:
+            result["api_detail"] = self.api_detail
+        return result
+
 
 class ApiClient:
     def __init__(self, base_url: str, *, timeout: float = 60.0) -> None:
@@ -37,6 +64,7 @@ class ApiClient:
         path: str,
         *,
         payload: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> Any:
         body = None
         headers = {"Accept": "application/json"}
@@ -45,6 +73,8 @@ class ApiClient:
             if len(body) > MAX_REQUEST_BYTES:
                 raise CliError("request JSON exceeds the 52 MiB CLI limit")
             headers["Content-Type"] = "application/json"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         request = urllib.request.Request(
             f"{self.base_url}{path}", data=body, headers=headers, method=method,
         )
@@ -53,10 +83,20 @@ class ApiClient:
                 raw = response.read(MAX_JSON_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raw = exc.read(MAX_JSON_BYTES + 1)
-            detail = _safe_api_error(raw, fallback=f"API returned HTTP {exc.code}")
-            raise CliError(detail) from exc
+            message, detail = _safe_api_error(
+                raw, fallback=f"API returned HTTP {exc.code}"
+            )
+            raise CliError(
+                message,
+                error_type="api_error",
+                http_status=exc.code,
+                api_detail=detail,
+            ) from exc
         except urllib.error.URLError as exc:
-            raise CliError(f"cannot reach ShakerScan API: {exc.reason}") from exc
+            raise CliError(
+                f"cannot reach ShakerScan API: {exc.reason}",
+                error_type="network_error",
+            ) from exc
         if len(raw) > MAX_JSON_BYTES:
             raise CliError("API response exceeds the 4 MiB CLI limit")
         if not raw:
@@ -69,8 +109,16 @@ class ApiClient:
     def get(self, path: str) -> Any:
         return self.request("GET", path)
 
-    def post(self, path: str, payload: Mapping[str, Any]) -> Any:
-        return self.request("POST", path, payload=payload)
+    def post(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> Any:
+        return self.request(
+            "POST", path, payload=payload, idempotency_key=idempotency_key,
+        )
 
     def download(self, path: str, *, max_bytes: int = MAX_REQUEST_BYTES) -> tuple[bytes, str]:
         request = urllib.request.Request(
@@ -83,23 +131,34 @@ class ApiClient:
                 content_type = str(response.headers.get("Content-Type") or "")
         except urllib.error.HTTPError as exc:
             raw = exc.read(MAX_JSON_BYTES + 1)
-            detail = _safe_api_error(raw, fallback=f"API returned HTTP {exc.code}")
-            raise CliError(detail) from exc
+            message, detail = _safe_api_error(
+                raw, fallback=f"API returned HTTP {exc.code}"
+            )
+            raise CliError(
+                message,
+                error_type="api_error",
+                http_status=exc.code,
+                api_detail=detail,
+            ) from exc
         except urllib.error.URLError as exc:
-            raise CliError(f"cannot reach ShakerScan API: {exc.reason}") from exc
+            raise CliError(
+                f"cannot reach ShakerScan API: {exc.reason}",
+                error_type="network_error",
+            ) from exc
         if len(raw) > max_bytes:
             raise CliError("evidence export exceeds the 52 MiB CLI limit")
         return raw, content_type
 
 
-def _safe_api_error(raw: bytes, *, fallback: str) -> str:
+def _safe_api_error(raw: bytes, *, fallback: str) -> tuple[str, Any]:
     try:
         value = json.loads(raw[:MAX_JSON_BYTES])
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return fallback
+        return fallback, None
     detail = value.get("detail") if isinstance(value, Mapping) else None
     if isinstance(detail, str) and detail.strip():
-        return detail.strip()[:2_000]
+        message = detail.strip()[:2_000]
+        return message, message
     if isinstance(detail, list):
         messages = [
             str(item.get("msg") or "invalid request")
@@ -107,8 +166,36 @@ def _safe_api_error(raw: bytes, *, fallback: str) -> str:
             if isinstance(item, Mapping)
         ]
         if messages:
-            return "; ".join(messages)[:2_000]
-    return fallback
+            return "; ".join(messages)[:2_000], detail
+    if isinstance(detail, Mapping):
+        message = str(
+            detail.get("message") or detail.get("error") or fallback
+        )[:2_000]
+        return message, dict(detail)
+    return fallback, detail
+
+
+def _validate_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    key = str(value)
+    if not 8 <= len(key) <= 200:
+        raise CliError("idempotency key must contain 8 to 200 characters")
+    if not key[0].isalnum() or any(
+        not (character.isalnum() or character in "_.:-") for character in key
+    ):
+        raise CliError(
+            "idempotency key must start with an alphanumeric character and use only "
+            "letters, numbers, underscore, dot, colon, or hyphen"
+        )
+    return key
+
+
+def _content_idempotency_key(*values: Any) -> str:
+    material = json.dumps(
+        values, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return "cli-" + hashlib.sha256(material).hexdigest()
 
 
 def _read_json(path: str | None, *, default: Any) -> Any:
@@ -259,7 +346,11 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         contract = client.get("/hunts/contract")
         if not isinstance(contract, Mapping):
             raise CliError("running server returned an invalid Hunt contract")
-        return client.post("/hunts", _hunt_start_payload(args, contract))
+        return client.post(
+            "/hunts",
+            _hunt_start_payload(args, contract),
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
+        )
     if args.hunt_command == "call":
         run = client.get(f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}")
         if not isinstance(run, Mapping):
@@ -273,7 +364,9 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         inputs = _read_json(args.input, default={})
         if not isinstance(inputs, dict):
             raise CliError("Hunt capability input must be one JSON object")
-        key = args.idempotency_key or f"cli-{uuid.uuid4()}"
+        key = _validate_idempotency_key(args.idempotency_key) or _content_idempotency_key(
+            args.hunt_id, args.capability_name, inputs,
+        )
         response = client.post(
             "/hunts/{}/capabilities/{}".format(
                 urllib.parse.quote(args.hunt_id, safe=""),
@@ -292,7 +385,11 @@ def _run_credentials(args: argparse.Namespace, client: ApiClient) -> Any:
             _read_json(args.request, default={}), schema,
             label="credential create request",
         )
-        return client.post("/credential-profiles", payload)
+        return client.post(
+            "/credential-profiles",
+            payload,
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
+        )
     if args.credentials_command == "rotate":
         schema = _openapi_schema(client, "CredentialProfileRotate")
         payload = _validate_schema_object(
@@ -300,7 +397,11 @@ def _run_credentials(args: argparse.Namespace, client: ApiClient) -> Any:
             label="credential rotation request",
         )
         profile_id = urllib.parse.quote(args.profile_id, safe="")
-        return client.post(f"/credential-profiles/{profile_id}/rotate", payload)
+        return client.post(
+            f"/credential-profiles/{profile_id}/rotate",
+            payload,
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
+        )
     if args.credentials_command == "test":
         profile_id = urllib.parse.quote(args.profile_id, safe="")
         result = client.get(f"/credential-profiles/{profile_id}")
@@ -363,7 +464,9 @@ def _collection_upload_payload(
 def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
     if args.collections_command == "upload":
         return client.post(
-            "/request-collections", _collection_upload_payload(args, client),
+            "/request-collections",
+            _collection_upload_payload(args, client),
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
     collection_id = urllib.parse.quote(args.collection_id, safe="")
     if args.collections_command == "bind":
@@ -382,7 +485,9 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
             payload, schema, label="request collection binding",
         )
         return client.post(
-            f"/request-collections/{collection_id}/bindings", payload,
+            f"/request-collections/{collection_id}/bindings",
+            payload,
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
     if args.collections_command == "select":
         schema = _openapi_schema(client, "RequestCollectionSelect")
@@ -402,7 +507,11 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
         payload = _validate_schema_object(
             payload, schema, label="request collection selection",
         )
-        return client.post(f"/request-collections/{collection_id}/select", payload)
+        return client.post(
+            f"/request-collections/{collection_id}/select",
+            payload,
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
+        )
     raise CliError("unknown collections command")
 
 
@@ -410,13 +519,28 @@ def _write_export(path: str, value: bytes, *, force: bool) -> Path:
     output = Path(path).expanduser()
     if output.exists() and not force:
         raise CliError("evidence export output already exists; use --force to replace it")
+    temporary: Path | None = None
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_bytes(value)
-        temporary.replace(output)
+        if force:
+            temporary.replace(output)
+        else:
+            os.link(temporary, output)
+            temporary.unlink()
+    except FileExistsError as exc:
+        raise CliError(
+            "evidence export output already exists; use --force to replace it"
+        ) from exc
     except OSError as exc:
         raise CliError(f"cannot write evidence export: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     return output.resolve()
 
 
@@ -466,6 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_commands = hunt.add_subparsers(dest="hunt_command", required=True)
     hunt_start = hunt_commands.add_parser("start", help="Start a target-bound Hunt")
     hunt_start.add_argument("--request", metavar="FILE", help="Complete JSON contract; use - for stdin")
+    hunt_start.add_argument("--idempotency-key")
     hunt_start.add_argument("--target-id")
     hunt_start.add_argument("--target-kind")
     hunt_start.add_argument("--goal", default="Investigate the authorized target.")
@@ -498,11 +623,13 @@ def build_parser() -> argparse.ArgumentParser:
         "create", help="Create from server-contract JSON read from a file or stdin",
     )
     credential_create.add_argument("--request", required=True, metavar="FILE")
+    credential_create.add_argument("--idempotency-key")
     credential_rotate = credential_commands.add_parser(
         "rotate", help="Rotate from server-contract JSON read from a file or stdin",
     )
     credential_rotate.add_argument("profile_id")
     credential_rotate.add_argument("--request", required=True, metavar="FILE")
+    credential_rotate.add_argument("--idempotency-key")
     credential_test = credential_commands.add_parser(
         "test", help="Run a content-free storage and execution-admission check",
     )
@@ -527,6 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
     collection_upload.add_argument("--environment-name")
     collection_upload.add_argument("--base-url")
     collection_upload.add_argument("--import-limit", type=int, default=5_000)
+    collection_upload.add_argument("--idempotency-key")
     collection_bind = collection_commands.add_parser(
         "bind", help="Bind a collection to one exact target and origin set",
     )
@@ -536,6 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
     collection_bind.add_argument("--target-id")
     collection_bind.add_argument("--allowed-origin", action="append", default=[])
     collection_bind.add_argument("--environment-id")
+    collection_bind.add_argument("--idempotency-key")
     collection_select = collection_commands.add_parser(
         "select", help="Preview one redacted bounded request selection",
     )
@@ -548,6 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
     collection_select.add_argument("--tag", action="append", default=[])
     collection_select.add_argument("--include-mutating", action="store_true")
     collection_select.add_argument("--limit", type=int, default=500)
+    collection_select.add_argument("--idempotency-key")
 
     evidence = products.add_parser(
         "evidence", help="Export content-free evidence manifests or bundles",
@@ -585,7 +715,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except CliError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
         return 2
 
 

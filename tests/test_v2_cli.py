@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 
 import pytest
@@ -151,3 +152,79 @@ def test_evidence_export_writes_atomically_without_implicit_overwrite(tmp_path):
         v2_cli._write_export(str(output), b"changed", force=False)
     v2_cli._write_export(str(output), b"changed", force=True)
     assert output.read_bytes() == b"changed"
+
+
+def test_hunt_call_retry_without_explicit_key_is_content_stable():
+    args = _parse(
+        "hunt", "call", "hunt-1", "collections.inspect", "--input", "-",
+    )
+
+    class FakeClient:
+        def get(self, path):
+            assert path == "/hunts/hunt-1"
+            return {"capabilities": [{"name": "collections.inspect"}]}
+
+        def post(self, path, payload, **_kwargs):
+            return {"path": path, "payload": payload}
+
+    original_stdin = sys.stdin
+    try:
+        class Input:
+            class Buffer:
+                @staticmethod
+                def read(_limit):
+                    return b'{"limit":0}'
+
+            buffer = Buffer()
+
+        sys.stdin = Input()
+        first = v2_cli._run_hunt(args, FakeClient())
+        second = v2_cli._run_hunt(args, FakeClient())
+    finally:
+        sys.stdin = original_stdin
+
+    assert first["idempotency_key"] == second["idempotency_key"]
+    assert first["response"]["payload"]["input"]["limit"] == 0
+
+
+def test_cli_errors_are_stable_json_and_preserve_api_shape(monkeypatch, capsys):
+    args = [
+        "--api-url", "http://localhost:8080",
+        "credentials", "test", "profile-1",
+    ]
+
+    def fail(_path):
+        raise v2_cli.CliError(
+            "profile unavailable",
+            error_type="api_error",
+            http_status=409,
+            api_detail={"error": "profile_conflict"},
+        )
+
+    monkeypatch.setattr(v2_cli.ApiClient, "get", lambda self, path: fail(path))
+    assert v2_cli.main(args) == 2
+    assert json.loads(capsys.readouterr().err) == {
+        "api_detail": {"error": "profile_conflict"},
+        "error": "api_error",
+        "http_status": 409,
+        "message": "profile unavailable",
+        "schema_version": "shakerscan-cli-error/v1",
+    }
+
+
+def test_mutating_commands_accept_only_secret_safe_retry_key_flags():
+    help_text = v2_cli.build_parser().format_help()
+    assert "--password" not in help_text
+    assert "--secret" not in help_text
+    assert "--token" not in help_text
+
+    for values in (
+        ("hunt", "start", "--idempotency-key", "retry-key-01"),
+        ("credentials", "create", "--request", "-", "--idempotency-key", "retry-key-02"),
+        ("credentials", "rotate", "profile-1", "--request", "-", "--idempotency-key", "retry-key-03"),
+        ("collections", "upload", "fixture.json", "--idempotency-key", "retry-key-04"),
+        ("collections", "bind", "collection-1", "--idempotency-key", "retry-key-05"),
+        ("collections", "select", "collection-1", "--idempotency-key", "retry-key-06"),
+    ):
+        parsed = _parse(*values)
+        assert parsed.idempotency_key.startswith("retry-key-")

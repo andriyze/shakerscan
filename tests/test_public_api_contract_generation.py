@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
@@ -23,6 +24,7 @@ from api.public_api_contract import (  # noqa: E402
     PUBLIC_V2_SURFACE_PREFIXES,
     PUBLIC_V2_WRITE_BODY_LIMITS,
     PublicV2BodyLimitMiddleware,
+    PublicV2IdempotencyMiddleware,
     public_v2_surface,
     public_v2_write_body_limit,
     public_v2_write_paths,
@@ -174,6 +176,21 @@ def test_every_release_critical_write_has_a_body_limit():
         assert limit == PUBLIC_V2_WRITE_BODY_LIMITS[public_v2_surface(path)], key
 
 
+def test_every_release_critical_write_publishes_durable_retry_header():
+    openapi = api_module.app.openapi()
+    for key in public_v2_write_paths(openapi):
+        method, path = key.split(" ", 1)
+        parameters = openapi["paths"][path][method.lower()].get("parameters") or []
+        header = next((
+            item for item in parameters
+            if item.get("in") == "header" and item.get("name") == "Idempotency-Key"
+        ), None)
+        assert header is not None, key
+        assert header["required"] is False
+        assert header["schema"]["minLength"] == 8
+        assert header["schema"]["maxLength"] == 200
+
+
 async def _run_body_limit_request(
     *, method: str, path: str, chunks: list[bytes], content_length: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -241,6 +258,108 @@ def test_body_limit_enforces_streamed_bytes_without_content_length():
     ))
     assert called is False
     assert sent[0]["status"] == 413
+
+
+class _IdempotencyConnection:
+    def __init__(self):
+        self.rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    async def fetchrow(self, query, *args):
+        key = tuple(args[:3])
+        if "INSERT INTO public_api_idempotency" in query:
+            if key in self.rows:
+                return None
+            self.rows[key] = {
+                "method": args[0], "path": args[1], "key_sha256": args[2],
+                "request_sha256": args[3], "state": "processing",
+            }
+            return {"method": args[0]}
+        if "SELECT * FROM public_api_idempotency" in query:
+            return self.rows.get(key)
+        if "updated_at <" in query:
+            return None
+        raise AssertionError(query)
+
+    async def execute(self, query, *args):
+        key = tuple(args[:3])
+        if "UPDATE public_api_idempotency" in query:
+            row = self.rows[key]
+            row.update({
+                "state": "completed",
+                "response_status": args[4],
+                "response_headers": json.loads(args[5]),
+                "response_body": args[6],
+            })
+            return "UPDATE 1"
+        if "DELETE FROM public_api_idempotency" in query:
+            self.rows.pop(key, None)
+            return "DELETE 1"
+        raise AssertionError(query)
+
+
+class _Acquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _IdempotencyPool:
+    def __init__(self):
+        self.conn = _IdempotencyConnection()
+
+    def acquire(self):
+        return _Acquire(self.conn)
+
+
+async def _idempotency_exchange(middleware, app, body):
+    messages = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive():
+        return messages.pop(0)
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware({
+        "type": "http", "method": "POST", "path": "/scans",
+        "headers": [(b"idempotency-key", b"retry-scan-0001")],
+        "app": app,
+    }, receive, send)
+    return sent
+
+
+def test_public_write_idempotency_replays_exact_response_and_rejects_key_reuse():
+    calls = 0
+
+    async def endpoint(_scope, _receive, send):
+        nonlocal calls
+        calls += 1
+        body = b'{"scan_id":"scan-1","status":"queued"}'
+        await send({
+            "type": "http.response.start", "status": 200,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    app = SimpleNamespace(state=SimpleNamespace(db_pool=_IdempotencyPool()))
+    middleware = PublicV2IdempotencyMiddleware(endpoint)
+    first = asyncio.run(_idempotency_exchange(middleware, app, b'{"target":"a"}'))
+    replay = asyncio.run(_idempotency_exchange(middleware, app, b'{"target":"a"}'))
+    conflict = asyncio.run(_idempotency_exchange(middleware, app, b'{"target":"b"}'))
+
+    assert calls == 1
+    assert first[0]["status"] == replay[0]["status"] == 200
+    assert first[1]["body"] == replay[1]["body"]
+    assert (b"idempotency-replayed", b"true") in replay[0]["headers"]
+    assert conflict[0]["status"] == 409
+    assert json.loads(conflict[1]["body"])["detail"]["error"] == "idempotency_key_reused"
 
 
 def test_secret_named_public_fields_are_limited_to_encrypted_credential_writes():

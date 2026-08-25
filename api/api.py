@@ -4738,11 +4738,15 @@ except ModuleNotFoundError:
 try:
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
+        PublicV2IdempotencyMiddleware,
+        add_public_v2_idempotency_openapi,
         public_v2_surface,
     )
 except ModuleNotFoundError:
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
+        PublicV2IdempotencyMiddleware,
+        add_public_v2_idempotency_openapi,
         public_v2_surface,
     )
 
@@ -4864,7 +4868,17 @@ app.add_middleware(
 
 
 app.add_middleware(LegacyHuntIsolationMiddleware)
+app.add_middleware(PublicV2IdempotencyMiddleware)
 app.add_middleware(PublicV2BodyLimitMiddleware)
+
+_fastapi_openapi = app.openapi
+
+
+def _public_v2_openapi() -> dict[str, Any]:
+    return add_public_v2_idempotency_openapi(_fastapi_openapi())
+
+
+app.openapi = _public_v2_openapi
 
 
 @app.exception_handler(RequestValidationError)

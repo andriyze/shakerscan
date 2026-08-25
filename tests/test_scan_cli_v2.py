@@ -28,8 +28,8 @@ def _contract() -> dict:
 def _run(monkeypatch, argv):
     calls = []
 
-    def request(url, *, payload=None):
-        calls.append((url, payload))
+    def request(url, *, payload=None, idempotency_key=None):
+        calls.append((url, payload, idempotency_key))
         if payload is None:
             return _contract()
         return {"scan_id": "00000000-0000-0000-0000-000000000001", "status": "queued"}
@@ -122,3 +122,51 @@ def test_cli_help_exposes_v2_authority_without_raw_secret_flags():
     assert "--auth-header" not in help_text
     assert "--type" not in help_text
     assert "--compatibility-alias" not in help_text
+
+
+def test_scan_cli_retry_key_is_forwarded_and_returned(monkeypatch, capsys):
+    result, calls = _run(monkeypatch, [
+        "https://example.com", "--json", "--idempotency-key", "scan-retry-0001",
+    ])
+
+    assert result == 0
+    assert calls[-1][2] == "scan-retry-0001"
+    assert json.loads(capsys.readouterr().out)["idempotency_key"] == "scan-retry-0001"
+
+
+def test_auth_state_shards_require_explicit_parallel_execution():
+    args = scan_cli._parser().parse_args([
+        "https://example.com",
+        "--api-url", "http://api.test:8080",
+        "--ui-url", "http://ui.test:3000",
+        "--auth-state-shards",
+    ])
+
+    with pytest.raises(scan_cli.ScanCliError, match="requires --execution"):
+        scan_cli._payload(args)
+
+
+def test_scan_api_error_json_preserves_sanitized_status_and_detail(monkeypatch, capsys):
+    def failed(*_args, **_kwargs):
+        raise scan_cli.ScanCliError(
+            "API rejected the request (HTTP 409): retry conflict",
+            http_status=409,
+            api_detail={"error": "idempotency_key_reused", "message": "retry conflict"},
+        )
+
+    monkeypatch.setattr(scan_cli, "_request_json", failed)
+    result = scan_cli.main([
+        "--api-url", "http://api.test:8080",
+        "--ui-url", "http://ui.test:3000",
+        "https://example.com", "--json",
+    ])
+
+    assert result == 1
+    assert json.loads(capsys.readouterr().err) == {
+        "api_detail": {
+            "error": "idempotency_key_reused", "message": "retry conflict",
+        },
+        "error": "API rejected the request (HTTP 409): retry conflict",
+        "http_status": 409,
+        "schema_version": "scan-start-error/v1",
+    }

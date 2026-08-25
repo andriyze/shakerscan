@@ -226,3 +226,20 @@ def test_offline_rebuild_command_writes_verified_report(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(report_path.read_text(encoding="utf-8")) == expected
+
+    repeated = subprocess.run(
+        [
+            sys.executable,
+            "scripts/rebuild_scan_report.py",
+            str(bundle_path),
+            "--output",
+            str(report_path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert repeated.returncode == 2
+    assert "use --force" in repeated.stderr
+    assert json.loads(report_path.read_text(encoding="utf-8")) == expected

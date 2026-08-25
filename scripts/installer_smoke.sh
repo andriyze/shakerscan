@@ -38,6 +38,9 @@ required_files=(
   scripts/planner_evals.py
   scripts/fleet_cli.py
   scripts/fleet_acceptance.py
+  scripts/scan_cli.py
+  scripts/v2_cli.py
+  scripts/rebuild_scan_report.py
   scripts/model_intake_runner_cli.py
   scripts/build-model-intake-guest-rootfs.sh
   scripts/provision-model-intake-firecracker.sh
@@ -50,6 +53,33 @@ required_files=(
   api/model_intake_runner_receipts.py
   api/model_intake_firecracker_runner.py
   api/model_intake_runner_service.py
+  api/scan/__init__.py
+  api/scan/action_plan.py
+  api/scan/capability_result.py
+  api/scan/continuation.py
+  api/scan/execution.py
+  api/scan/external_process.py
+  api/scan/finalizer.py
+  api/scan/report_rebuild.py
+  api/scan/surface_manifest.py
+  api/scan/work_manifests.py
+  api/runtime/__init__.py
+  api/runtime/budget_reservations.py
+  api/runtime/budgets.py
+  api/runtime/capability_registry.py
+  api/runtime/credentials.py
+  api/runtime/models.py
+  api/runtime/observation_manifests.py
+  api/runtime/receipts.py
+  api/runtime/v2_runtime_hardening.py
+  scanner/scanner_tools/__init__.py
+  scanner/scanner_tools/build_fingerprint.py
+  scanner/scanner_tools/device_postman.py
+  scanner/scanner_tools/request_replay.py
+  scanner/scanner_tools/url_redaction.py
+  scanner/scanner_tools/v2_fingerprint_hardening.py
+  scanner/scanner_tools/v2_request_replay_hardening.py
+  scanner/manifests.py
   runner/guest/Dockerfile
   runner/guest/guest-init
   runner/guest/guest_worker.py
@@ -111,7 +141,31 @@ python3 -m py_compile \
   "$SHAKERSCAN_HOME/scripts/planner_evals.py" \
   "$SHAKERSCAN_HOME/scripts/fleet_cli.py" \
   "$SHAKERSCAN_HOME/scripts/fleet_acceptance.py" \
+  "$SHAKERSCAN_HOME/scripts/scan_cli.py" \
+  "$SHAKERSCAN_HOME/scripts/v2_cli.py" \
+  "$SHAKERSCAN_HOME/scripts/rebuild_scan_report.py" \
   "$SHAKERSCAN_HOME/scripts/model_intake_runner_cli.py"
+
+help_commands=(
+  "scan --help"
+  "hunt --help"
+  "hunt start --help"
+  "hunt call --help"
+  "credentials create --help"
+  "credentials rotate --help"
+  "credentials test --help"
+  "collections upload --help"
+  "collections bind --help"
+  "collections select --help"
+  "evidence export --help"
+  "report-rebuild --help"
+)
+for command in "${help_commands[@]}"; do
+  # Help exits before dependency checks or service access and is therefore a
+  # non-mutating installed-wrapper contract.
+  read -r -a arguments <<<"$command"
+  "$SHAKERSCAN_BIN_DIR/shakerscan" "${arguments[@]}" >/dev/null
+done
 
 env_output="$("$SHAKERSCAN_BIN_DIR/shakerscan" env)"
 grep -F "Runtime directory: $SHAKERSCAN_HOME" <<<"$env_output" >/dev/null
