@@ -20,6 +20,7 @@ import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
+import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -635,9 +636,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
     ?? resolved_budget.request_max
     ?? canonicalBudgetLimit.max_http_requests
   const coverage = scanData.coverage || {}
-  const smart_coverage = scanData.smart_coverage || {}
-  const nucleiTemplates = smart_coverage.nuclei_templates || {}
-  const nucleiRunApproximate = Boolean(nucleiTemplates.run_approximate)
+  const smart_coverage = (scanData.smart_coverage || {}) as ScanCoverage
   const attack_chains = scanData.attack_chains || scanData.result?.attack_chains || null
   const client_side_vulns = scanData.client_side_vulns || {}
   const auth_checks = scanData.auth_checks || {}
@@ -3640,194 +3639,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Historical coverage payload, rendered with canonical product language. */}
-      {(smart_coverage.endpoints || smart_coverage.parameters || smart_coverage.nuclei_templates) && (
-        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-4">Scan Coverage</h2>
-
-          {/* Coverage Progress Bars */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-            {/* Endpoint Coverage */}
-            {smart_coverage.endpoints && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-gray-400">Endpoint Coverage</h3>
-                  <span className="text-lg font-bold text-white">
-                    {Math.round((smart_coverage.endpoints.coverage || 0) * 100)}%
-                  </span>
-                </div>
-                <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
-                  <div
-                    className="bg-blue-500 h-2 rounded-full transition-all"
-                    style={{ width: `${Math.min((smart_coverage.endpoints.coverage || 0) * 100, 100)}%` }}
-                  />
-                </div>
-                <p className="text-xs text-gray-500">
-                  {smart_coverage.endpoints.tested || 0} tested / {smart_coverage.endpoints.discovered || 0} discovered
-                </p>
-              </div>
-            )}
-
-            {/* Parameter Coverage */}
-            {smart_coverage.parameters && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-gray-400">Parameter Testing</h3>
-                  <span className="text-lg font-bold text-white">
-                    {(smart_coverage.parameters.discovered || 0) > 0
-                      ? `${Math.round((smart_coverage.parameters.coverage || 0) * 100)}%`
-                      : '—'}
-                  </span>
-                </div>
-                <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
-                  <div
-                    className="bg-green-500 h-2 rounded-full transition-all"
-                    style={{ width: `${Math.min((smart_coverage.parameters.coverage || 0) * 100, 100)}%` }}
-                  />
-                </div>
-                <p className="text-xs text-gray-500">
-                  {(smart_coverage.parameters.discovered || 0) > 0
-                    ? `${smart_coverage.parameters.tested || 0} probe attempts across ${smart_coverage.parameters.discovered} discovered parameters`
-                    : `${smart_coverage.parameters.tested || 0} active parameter probes · no parameters inventoried`}
-                </p>
-              </div>
-            )}
-
-            {/* Nuclei Template Hit Rate */}
-            {smart_coverage.nuclei_templates && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-gray-400">Template Hit Rate</h3>
-                  <span className="text-lg font-bold text-white">
-                    {Math.round((nucleiTemplates.hit_rate || 0) * 100)}%
-                  </span>
-                </div>
-                <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
-                  <div
-                    className={`h-2 rounded-full transition-all ${
-                      (nucleiTemplates.hit_rate || 0) > 0.1 ? 'bg-red-500' :
-                      (nucleiTemplates.hit_rate || 0) > 0.05 ? 'bg-yellow-500' : 'bg-green-500'
-                    }`}
-                    style={{ width: `${Math.min((nucleiTemplates.hit_rate || 0) * 100, 100)}%` }}
-                  />
-                </div>
-                <p className="flex items-center gap-2 text-xs text-gray-500">
-                  <span>
-                    {nucleiTemplates.matched || 0} matched / {nucleiRunApproximate ? '~' : ''}{nucleiTemplates.run || 0} run
-                  </span>
-                  {nucleiRunApproximate && (
-                    <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
-                      estimated
-                    </span>
-                  )}
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* Breakdown by Method and Location */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            {/* Endpoints by Method */}
-            {smart_coverage.endpoints?.by_method && Object.keys(smart_coverage.endpoints.by_method).length > 0 && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-gray-400 mb-3">Endpoints by Method</h3>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(smart_coverage.endpoints.by_method).map(([method, count]: [string, any]) => (
-                    <span
-                      key={method}
-                      className={`px-2 py-1 text-xs font-mono rounded ${
-                        method === 'GET' ? 'bg-green-900/50 text-green-300' :
-                        method === 'POST' ? 'bg-blue-900/50 text-blue-300' :
-                        method === 'PUT' ? 'bg-yellow-900/50 text-yellow-300' :
-                        method === 'DELETE' ? 'bg-red-900/50 text-red-300' :
-                        method === 'PATCH' ? 'bg-purple-900/50 text-purple-300' :
-                        'bg-gray-700 text-gray-300'
-                      }`}
-                    >
-                      {method}: {count}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Parameters by Location */}
-            {smart_coverage.parameters?.by_location && Object.keys(smart_coverage.parameters.by_location).length > 0 && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-gray-400 mb-3">Parameters by Location</h3>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(smart_coverage.parameters.by_location).map(([location, count]: [string, any]) => (
-                    <span
-                      key={location}
-                      className={`px-2 py-1 text-xs font-mono rounded ${
-                        location === 'query' ? 'bg-blue-900/50 text-blue-300' :
-                        location === 'body' ? 'bg-purple-900/50 text-purple-300' :
-                        location === 'path' ? 'bg-green-900/50 text-green-300' :
-                        location === 'header' ? 'bg-yellow-900/50 text-yellow-300' :
-                        'bg-gray-700 text-gray-300'
-                      }`}
-                    >
-                      {location}: {count}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Nuclei Categories */}
-          {smart_coverage.nuclei_templates?.by_category && Object.keys(smart_coverage.nuclei_templates.by_category).length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-gray-400 mb-3">Templates by Category</h3>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(smart_coverage.nuclei_templates.by_category)
-                  .sort(([, a]: [string, any], [, b]: [string, any]) => b - a)
-                  .slice(0, 12)
-                  .map(([category, count]: [string, any]) => (
-                    <span key={category} className="px-2 py-1 bg-gray-900 text-gray-300 text-xs rounded">
-                      {category}: {count}
-                    </span>
-                  ))}
-                {Object.keys(smart_coverage.nuclei_templates.by_category).length > 12 && (
-                  <span className="px-2 py-1 text-gray-500 text-xs">
-                    +{Object.keys(smart_coverage.nuclei_templates.by_category).length - 12} more
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Auth States and Discovery Sources */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Auth States Tested */}
-            {smart_coverage.auth_states_tested?.length > 0 && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-gray-400 mb-2">Auth States Tested</h3>
-                <div className="flex flex-wrap gap-2">
-                  {smart_coverage.auth_states_tested.map((state: string, i: number) => (
-                    <span key={i} className="px-2 py-1 bg-yellow-900/30 text-yellow-400 rounded text-xs">
-                      {state}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Discovery Sources */}
-            {smart_coverage.discovery_sources?.length > 0 && (
-              <div className="bg-gray-900 rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-gray-400 mb-2">Discovery Sources</h3>
-                <div className="flex flex-wrap gap-2">
-                  {smart_coverage.discovery_sources.map((source: string, i: number) => (
-                    <span key={i} className="px-2 py-1 bg-blue-900/30 text-blue-400 rounded text-xs">
-                      {source}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <ScanCoverageSection coverage={smart_coverage} />
 
       {/* Attack Chains Analysis */}
       {attack_chains && !isAIScan && !isModelIntakeScan && (
