@@ -5567,6 +5567,9 @@ def test_public_evidence_instance_summary_bounds_proof_payload():
         "principal_pair": {"owner": "profile-a", "attacker": "profile-b"},
         "metadata_json": {"large": "value" * 1000},
         "proof_observation": {
+            "family": "top-level-family-is-retained",
+            "verdict": "suspected",
+            "contract_id": "top-level.contract",
             "objective": "An attacker cannot read another user's basket",
             "expected_signal": "Attacker receives 403",
             "falsifier": "Attacker receives the owner's basket",
@@ -5590,6 +5593,9 @@ def test_public_evidence_instance_summary_bounds_proof_payload():
     assert summary["principal_pair"] == {}
     assert summary["metadata_json"] == {}
     assert "comparisons" not in summary["proof_observation"]
+    assert summary["proof_observation"]["family"] == "top-level-family-is-retained"
+    assert summary["proof_observation"]["verdict"] == "suspected"
+    assert summary["proof_observation"]["contract_id"] == "top-level.contract"
     assert summary["proof_observation"]["family_proof"] == {
         "family": "bola",
         "cwe": "CWE-639",

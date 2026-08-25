@@ -46344,7 +46344,11 @@ def _public_evidence_instance_summary(row: Any) -> dict[str, Any]:
     comparisons = proof.get("comparisons") if isinstance(proof, dict) else []
     payload["proof_observation"] = {
         key: proof.get(key)
-        for key in ("objective", "expected_signal", "falsifier")
+        for key in (
+            "objective", "expected_signal", "falsifier", "family", "cwe",
+            "verdict", "reason", "promotable", "proof_basis", "contract_id",
+            "schema_version",
+        )
         if proof.get(key) is not None
     }
     if family_proof:

@@ -57,7 +57,11 @@ function formatBytes(n?: number): string {
 }
 
 function proofObs(inst: EvidenceInstance) { return asObject(inst.proof_observation) }
-function familyProof(inst: EvidenceInstance) { return asObject(proofObs(inst).family_proof) }
+function familyProof(inst: EvidenceInstance) {
+  const po = proofObs(inst)
+  const nested = asObject(po.family_proof)
+  return Object.keys(nested).length ? nested : po
+}
 function evidenceFamily(inst: EvidenceInstance): string {
   return humanFamily(text(familyProof(inst).family)) || humanSource(inst.created_by) || 'Evidence'
 }
