@@ -175,10 +175,13 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
     assert "steps.changes.outputs.ui == 'true'" in smoke
     assert "npm --prefix ui run test:unit" in smoke
     assert "npm --prefix ui run test:browser" in smoke
+    assert "python3 tests/e2e/run_e2e.py --area hunt" in smoke
     assert "node-version: 24" in smoke
     assert "npm --prefix ui run test:unit" in release
     assert "npm --prefix ui run test:unit" in full_e2e
     assert "npm --prefix ui run test:browser" in full_e2e
+    assert 'PLAYWRIGHT_REAL_STACK: "1"' in full_e2e
+    assert "artifacts/playwright.json" in full_e2e
 
 
 def test_release_candidate_requires_candidate_image_external_wire_acceptance():

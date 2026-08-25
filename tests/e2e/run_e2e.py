@@ -6,6 +6,7 @@ Usage:
     python -m tests.e2e.run_e2e --area model_intake
     python -m tests.e2e.run_e2e --area ai_gate
     python -m tests.e2e.run_e2e --area dast
+    python -m tests.e2e.run_e2e --area hunt
     python -m tests.e2e.run_e2e --area platform
 
 Exit code is non-zero if any area's gate fails (hard CI gate). See
@@ -14,8 +15,11 @@ docs/E2E_TEST_PLAN.md.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -961,6 +965,632 @@ def _dast_fixture_authority(
     return fixture_target, approval_id, selections
 
 
+def _hunt_fixture_authority(
+    fixture_target: str = FIXTURES_BASE,
+    *,
+    allowed_host: str = HONEY_HOST,
+    risk_tier: str = "active",
+) -> tuple[str, str, str]:
+    """Create one reusable, target-bound, bounded Hunt approval."""
+    _, target = H.post("/targets", {
+        "url": fixture_target,
+        "name": f"E2E canonical Hunt fixture {_RUN_NONCE}",
+    })
+    target_id = str(target.get("id") or "")
+    if not target_id:
+        raise RuntimeError(f"Hunt fixture target rejected: {target}")
+    _, scope_response = H.post("/arsenal/scope/preview", {
+        "url": fixture_target,
+        "target_id": target_id,
+        "allowed_hosts": [allowed_host],
+        "environment": "lab",
+    })
+    scope_id = str((scope_response.get("scope_receipt") or {}).get("receipt_id") or "")
+    if not scope_id:
+        raise RuntimeError(f"Hunt fixture scope rejected: {scope_response}")
+    _, approval_response = H.post("/arsenal/approvals", {
+        "scope_receipt_id": scope_id,
+        "risk_tier": risk_tier,
+        "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+        # No action_name: this receipt authorizes the admitted Hunt and its
+        # individually revalidated capability calls until expiry or revocation.
+        "approved_by": "hunt-e2e",
+        "expires_at": (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat(),
+    })
+    approval_id = str(
+        (approval_response.get("approval_receipt") or {}).get("id") or ""
+    )
+    if not approval_id:
+        raise RuntimeError(f"Hunt fixture approval rejected: {approval_response}")
+    return target_id, scope_id, approval_id
+
+
+def _hunt_start_payload(
+    target_id: str,
+    *,
+    active: bool = False,
+    approval_id: str | None = None,
+    scope_id: str | None = None,
+    goal: str,
+    target_kind: str = "web",
+    network_discovery: bool = False,
+    credential_refs: dict[str, str] | None = None,
+    request_collection_ids: list[str] | None = None,
+    capabilities: list[str] | None = None,
+) -> dict:
+    credentials_requested = bool(credential_refs)
+    privileged = active or network_discovery or credentials_requested
+    return {
+        "schema_version": "hunt-start/v2",
+        "target_id": target_id,
+        "target_kind": target_kind,
+        "goal": goal,
+        "budget_profile": "fast",
+        "budgets": {
+            "max_active_actions": 4 if privileged else 0,
+            "max_state_changing_requests": 0,
+            "max_hosts": 1 if network_discovery else 0,
+            "max_tcp_ports": 100 if network_discovery else 0,
+            "max_udp_ports": 0,
+            "max_oob_interactions": 0,
+            "max_device_fragility_points": 5 if target_kind == "device" else 0,
+        },
+        "policy": {
+            "active_testing": active or network_discovery,
+            "allow_state_changing_http": False,
+            "network_discovery": network_discovery,
+            "allow_oob_interactions": False,
+            "authorization_confirmed": privileged,
+            "approval_receipt_id": approval_id,
+            "scope_receipt_id": scope_id,
+        },
+        "credential_refs": credential_refs or {},
+        "capabilities": capabilities or [],
+        "request_collection_ids": request_collection_ids or [],
+    }
+
+
+def _hunt_api_collection_fixture(
+    target_id: str,
+) -> tuple[str, str, str]:
+    """Create two exact principals and one API-bound safe request collection."""
+    profile_ids: list[str] = []
+    for slot, token in (("primary", "parity-owner"), ("secondary", "parity-attacker")):
+        status, created = H.post("/credential-profiles", {
+            "target_kind": "api",
+            "target_id": target_id,
+            "name": f"Hunt E2E {slot} {_RUN_NONCE}",
+            "auth_kind": "authorization_header",
+            "principal_slot": slot,
+            "principal_label": f"e2e-{slot}",
+            "secret": f"Bearer {token}",
+            "allowed_capabilities": ["http.request", "request.replay"],
+            "created_by": "hunt-e2e",
+        })
+        profile_id = str((created.get("profile") or {}).get("id") or "")
+        if status != 201 or not profile_id:
+            raise RuntimeError(f"Hunt {slot} credential rejected: {created}")
+        profile_ids.append(profile_id)
+
+    status, collection = H.post("/request-collections", {
+        "target_id": target_id,
+        "name": f"Hunt API replay E2E {_RUN_NONCE}",
+        "format": "postman_collection",
+        "document": {
+            "info": {
+                "name": "Hunt API replay E2E",
+                "schema": (
+                    "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+                ),
+            },
+            "item": [{
+                "name": "Exact principal-safe order read",
+                "request": {
+                    "method": "GET",
+                    "header": [{"key": "X-E2E-Collection", "value": "hunt-v2"}],
+                    "url": f"{FIXTURES_BASE}/authz/orders/owner-order?shape=hunt",
+                },
+            }],
+        },
+    })
+    collection_id = str(collection.get("id") or "")
+    if status != 200 or not collection_id:
+        raise RuntimeError(f"Hunt API collection rejected: {collection}")
+    _, bound = H.post(f"/request-collections/{collection_id}/bindings", {
+        "target_kind": "api",
+        "target_id": target_id,
+        "allowed_origins": [FIXTURES_BASE],
+    })
+    if not (bound.get("binding") or {}).get("id"):
+        raise RuntimeError(f"Hunt API collection binding rejected: {bound}")
+    return collection_id, profile_ids[0], profile_ids[1]
+
+
+def _load_real_mcp_adapter():
+    root = Path(__file__).resolve().parents[2]
+    path = root / "scripts" / "shakerscan_mcp.py"
+    module_name = f"_shakerscan_mcp_e2e_{os.getpid()}"
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load installed MCP adapter")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_hunt() -> H.Scorecard:
+    """Exercise canonical Hunt authority through REST, CLI, and MCP clients."""
+    sc = H.Scorecard("hunt")
+    print("\n== Hunt V2 e2e ==", flush=True)
+    target_id = scope_id = approval_id = ""
+    try:
+        target_id, scope_id, approval_id = _hunt_fixture_authority()
+    except Exception as exc:
+        sc.error("H-0 target-bound fixture authority", exc)
+        return sc
+
+    # Direct REST: explicit passive zeros, one durable inline action, duplicate
+    # redelivery, receipt query, and a clean finish.
+    try:
+        status, passive = H.post("/hunts", _hunt_start_payload(
+            target_id,
+            goal="Passive real-stack Hunt acceptance.",
+        ))
+        hunt_id = str(passive.get("hunt_id") or "")
+        budget = passive.get("budget") or {}
+        policy = passive.get("policy") or {}
+        sc.check(
+            "H-1 passive REST Hunt preserves zero authority",
+            status == 200
+            and bool(hunt_id)
+            and policy.get("active_testing") is False
+            and all(int(budget.get(key) or 0) == 0 for key in (
+                "max_active_actions", "max_state_changing_requests", "max_hosts",
+                "max_tcp_ports", "max_udp_ports", "max_oob_interactions",
+                "max_device_fragility_points",
+            )),
+            f"status={status} hunt={hunt_id} budget={budget}",
+        )
+        key = f"e2e-rest-inline-{_RUN_NONCE}"
+        call_status, first = H.post(
+            f"/hunts/{hunt_id}/capabilities/collections.inspect",
+            {"idempotency_key": key, "input": {}},
+            timeout=90,
+        )
+        replay_status, replay = H.post(
+            f"/hunts/{hunt_id}/capabilities/collections.inspect",
+            {"idempotency_key": key, "input": {}},
+            timeout=90,
+        )
+        sc.check(
+            "H-2 passive action persists receipt and duplicate delivery is idempotent",
+            call_status == replay_status == 200
+            and bool(first.get("action_id"))
+            and bool(first.get("receipt_id"))
+            and replay.get("action_id") == first.get("action_id")
+            and replay.get("idempotent_replay") is True,
+            f"first={first} replay={replay}",
+        )
+        invalid_status, _invalid = H.post(
+            f"/hunts/{hunt_id}/capabilities/http.request",
+            {
+                "idempotency_key": f"e2e-target-smuggle-{_RUN_NONCE}",
+                "input": {
+                    "method": "GET", "path": "/", "url": "https://other.invalid",
+                },
+            },
+        )
+        sc.check(
+            "H-3 planner cannot supply a capability target",
+            invalid_status == 422,
+            f"status={invalid_status}",
+        )
+        _, receipts = H.post(f"/hunts/{hunt_id}/query", {
+            "kind": "receipts", "limit": 20,
+        })
+        serialized_receipts = json.dumps(receipts).lower()
+        sc.check(
+            "H-4 REST Hunt receipt query remains content-free",
+            int(receipts.get("count") or 0) >= 1
+            and "authorization: bearer" not in serialized_receipts
+            and "password=" not in serialized_receipts,
+            f"count={receipts.get('count')}",
+        )
+        _, finished = H.post(f"/hunts/{hunt_id}/finish", {
+            "summary": "Passive acceptance completed.", "next_actions": [],
+        })
+        sc.check(
+            "H-5 passive REST Hunt completes",
+            finished.get("status") == "completed",
+            f"status={finished.get('status')}",
+        )
+    except Exception as exc:
+        sc.error("H-1 through H-5 passive REST lifecycle", exc)
+
+    # Privileged REST: use one active server-returned verifier, revoke the exact
+    # reusable approval, and prove a second active action fails before dispatch.
+    try:
+        status, active = H.post("/hunts", _hunt_start_payload(
+            target_id,
+            active=True,
+            approval_id=approval_id,
+            scope_id=scope_id,
+            goal="Privileged verifier and revocation acceptance.",
+        ))
+        active_hunt_id = str(active.get("hunt_id") or "")
+        allowed = {
+            str(item.get("name"))
+            for item in active.get("capabilities") or []
+            if isinstance(item, dict)
+        }
+        sc.check(
+            "H-6 active REST Hunt receives bounded verifier authority",
+            status == 200 and bool(active_hunt_id) and "xss.verify" in allowed,
+            f"status={status} capabilities={sorted(allowed)}",
+        )
+        call_status, action = H.post(
+            f"/hunts/{active_hunt_id}/capabilities/xss.verify",
+            {
+                "idempotency_key": f"e2e-active-xss-{_RUN_NONCE}",
+                "input": {"severity": "low"},
+            },
+            timeout=180,
+        )
+        sc.check(
+            "H-7 privileged verifier settles a durable action and receipt",
+            call_status == 200
+            and bool(action.get("action_id"))
+            and bool(action.get("receipt_id"))
+            and action.get("status") in {"completed", "partial"},
+            f"status={call_status} action={action}",
+        )
+        revoke_status, revoked = H.post(
+            f"/arsenal/approvals/{approval_id}/revoke",
+            {"revoked_by": "hunt-e2e", "reason": "prove fail-closed redelivery"},
+        )
+        second_status, second = H.post(
+            f"/hunts/{active_hunt_id}/capabilities/xss.verify",
+            {
+                "idempotency_key": f"e2e-active-after-revoke-{_RUN_NONCE}",
+                "input": {"severity": "low"},
+            },
+        )
+        sc.check(
+            "H-8 revoked approval blocks the next privileged action",
+            revoke_status == 200
+            and revoked.get("revoked") is True
+            and second_status == 400
+            and "revoked" in json.dumps(second).lower(),
+            f"revoke={revoke_status} second={second_status} body={second}",
+        )
+        _, finished = H.post(f"/hunts/{active_hunt_id}/finish", {
+            "summary": "Active verifier and revocation acceptance completed.",
+            "next_actions": [],
+        })
+        sc.check(
+            "H-9 privileged REST Hunt completes after authority revocation",
+            finished.get("status") == "completed",
+            f"status={finished.get('status')}",
+        )
+    except Exception as exc:
+        sc.error("H-6 through H-9 privileged REST lifecycle", exc)
+
+    # Installed wrapper: start and call through scanner.sh, parsing only stable
+    # JSON. This covers runtime API discovery rather than calling v2_cli directly.
+    try:
+        root = Path(__file__).resolve().parents[2]
+        cli_path = Path(
+            os.environ.get("SHAKERSCAN_E2E_CLI") or (root / "scanner.sh")
+        )
+        cli_env = dict(os.environ)
+        if os.environ.get("SHAKERSCAN_E2E_CLI_HOME"):
+            cli_env["HOME"] = str(os.environ["SHAKERSCAN_E2E_CLI_HOME"])
+        cli_start = subprocess.run(
+            [
+                str(cli_path), "hunt", "start",
+                "--target-id", target_id,
+                "--target-kind", "web",
+                "--budget-profile", "fast",
+                "--budget", "max_active_actions=0",
+                "--budget", "max_state_changing_requests=0",
+                "--budget", "max-hosts=0",
+            ],
+            cwd=root,
+            env=cli_env,
+            text=True,
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        # A misspelled server dimension must fail locally and preserve a stable
+        # non-zero exit before the valid wrapper acceptance below.
+        sc.check(
+            "H-10 installed CLI rejects contract drift with stable exit code",
+            cli_start.returncode == 2
+            and "budget dimension" in cli_start.stderr.lower(),
+            f"exit={cli_start.returncode}",
+        )
+        valid_cli_start = subprocess.run(
+            [
+                str(cli_path), "hunt", "start",
+                "--target-id", target_id,
+                "--target-kind", "web",
+                "--budget-profile", "fast",
+                "--budget", "max_active_actions=0",
+                "--budget", "max_state_changing_requests=0",
+                "--budget", "max_hosts=0",
+            ],
+            cwd=root,
+            env=cli_env,
+            text=True,
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        cli_hunt = json.loads(valid_cli_start.stdout or "{}")
+        cli_hunt_id = str(cli_hunt.get("hunt_id") or "")
+        cli_call = subprocess.run(
+            [
+                str(cli_path), "hunt", "call", cli_hunt_id,
+                "collections.inspect", "--idempotency-key",
+                f"e2e-cli-inline-{_RUN_NONCE}",
+            ],
+            cwd=root,
+            env=cli_env,
+            text=True,
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        cli_action = json.loads(cli_call.stdout or "{}")
+        sc.check(
+            "H-11 installed CLI start and call produce valid V2 authority",
+            valid_cli_start.returncode == cli_call.returncode == 0
+            and bool(cli_hunt_id)
+            and cli_action.get("response", {}).get("status") == "completed",
+            f"start_exit={valid_cli_start.returncode} call_exit={cli_call.returncode}",
+        )
+        H.post(f"/hunts/{cli_hunt_id}/finish", {
+            "summary": "Installed CLI acceptance completed.", "next_actions": [],
+        })
+    except Exception as exc:
+        sc.error("H-10 through H-11 installed CLI acceptance", exc)
+
+    # MCP adapter: invoke its real client implementation against this API, then
+    # compare the same canonical policy/manifest/action lifecycle.
+    try:
+        mcp = _load_real_mcp_adapter()
+        client = mcp.ArsenalClient(H.API)
+        started = client.call_tool("shakerscan_hunt_start", {
+            "schema_version": "hunt-start/v2",
+            "target_id": target_id,
+            "target_kind": "web",
+            "goal": "MCP real-stack Hunt acceptance.",
+            "budget_profile": "fast",
+            "budgets": {
+                "max_active_actions": 0,
+                "max_state_changing_requests": 0,
+                "max_hosts": 0,
+            },
+            "policy": {},
+        })["structuredContent"]
+        mcp_hunt_id = str(started.get("hunt_id") or "")
+        action = client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": mcp_hunt_id,
+            "capability_name": "collections.inspect",
+            "idempotency_key": f"e2e-mcp-inline-{_RUN_NONCE}",
+            "input": {},
+        })["structuredContent"]
+        queried = client.call_tool("shakerscan_hunt_query", {
+            "hunt_id": mcp_hunt_id, "kind": "receipts", "limit": 20,
+        })["structuredContent"]
+        finished = client.call_tool("shakerscan_hunt_finish", {
+            "hunt_id": mcp_hunt_id,
+            "summary": "MCP acceptance completed.",
+            "next_actions": [],
+        })["structuredContent"]
+        sc.check(
+            "H-12 MCP start, query, capability, and finish use the real V2 API",
+            bool(mcp_hunt_id)
+            and action.get("status") == "completed"
+            and int(queried.get("count") or 0) >= 1
+            and finished.get("status") == "completed",
+            f"hunt={mcp_hunt_id} action={action.get('status')}",
+        )
+    except Exception as exc:
+        sc.error("H-12 MCP real-stack acceptance", exc)
+
+    # API/collection Hunt: bind an exact safe request to the API origin, use
+    # two worker-only principals, and prove method/query/header/body/principal
+    # preservation from the fixture's independent traffic ledger.
+    try:
+        api_target_id, api_scope_id, api_approval_id = _hunt_fixture_authority(
+            risk_tier="credential",
+        )
+        collection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
+            api_target_id,
+        )
+        FX.reset_parity_traffic()
+        status, api_hunt = H.post("/hunts", _hunt_start_payload(
+            api_target_id,
+            goal="Exact API collection and principal replay acceptance.",
+            target_kind="api",
+            approval_id=api_approval_id,
+            scope_id=api_scope_id,
+            credential_refs={
+                "primary_credential_profile_id": primary_id,
+                "secondary_credential_profile_id": secondary_id,
+            },
+            request_collection_ids=[collection_id],
+            capabilities=["collections.inspect", "collections.replay_safe"],
+        ))
+        api_hunt_id = str(api_hunt.get("hunt_id") or "")
+        actions: list[dict] = []
+        for principal in ("primary", "secondary"):
+            action_status, action = H.post(
+                f"/hunts/{api_hunt_id}/capabilities/collections.replay_safe",
+                {
+                    "idempotency_key": f"e2e-api-{principal}-{_RUN_NONCE}",
+                    "input": {
+                        "collection_id": collection_id,
+                        "methods": ["GET"],
+                        "path_regex": r"/authz/orders/owner-order$",
+                        "limit": 1,
+                        "as_principal": principal,
+                    },
+                },
+                timeout=120,
+            )
+            actions.append({"http_status": action_status, **action})
+        traffic = FX.parity_traffic()
+        relevant = [
+            item for item in traffic
+            if item.get("path") == "/authz/orders/owner-order"
+        ]
+        sc.check(
+            "H-13 API collection replay preserves exact request and two principals",
+            status == 200
+            and bool(api_hunt_id)
+            and all(
+                item.get("http_status") == 200
+                and item.get("status") in {"completed", "partial"}
+                and item.get("receipt_id")
+                for item in actions
+            )
+            and {item.get("principal") for item in relevant} >= {"owner", "attacker"}
+            and all(
+                item.get("method") == "GET"
+                and item.get("query_keys") == ["shape"]
+                and item.get("collection_marker") == "hunt-v2"
+                and int(item.get("content_length") or 0) == 0
+                for item in relevant
+            ),
+            f"actions={actions} traffic={relevant}",
+        )
+        H.post(f"/hunts/{api_hunt_id}/finish", {
+            "summary": "API collection acceptance completed.", "next_actions": [],
+        })
+    except Exception as exc:
+        sc.error("H-13 API collection and principal acceptance", exc)
+
+    # Network Hunt: the only target input is the registered target; the planner
+    # supplies a bounded port list. Cancelling the Hunt prevents all later work.
+    try:
+        network_target_id, network_scope_id, network_approval_id = (
+            _hunt_fixture_authority(risk_tier="active")
+        )
+        status, network_hunt = H.post("/hunts", _hunt_start_payload(
+            network_target_id,
+            goal="Registered-address network service acceptance.",
+            target_kind="network",
+            network_discovery=True,
+            approval_id=network_approval_id,
+            scope_id=network_scope_id,
+            capabilities=["service.fingerprint"],
+        ))
+        network_hunt_id = str(network_hunt.get("hunt_id") or "")
+        action_status, action = H.post(
+            f"/hunts/{network_hunt_id}/capabilities/service.fingerprint",
+            {
+                "idempotency_key": f"e2e-network-service-{_RUN_NONCE}",
+                "input": {"ports": [FIXTURES_PORT], "profile": "version_light"},
+            },
+            timeout=180,
+        )
+        _, cancelled = H.post(f"/hunts/{network_hunt_id}/cancel", {})
+        after_status, _after = H.post(
+            f"/hunts/{network_hunt_id}/capabilities/service.fingerprint",
+            {
+                "idempotency_key": f"e2e-network-after-cancel-{_RUN_NONCE}",
+                "input": {"ports": [FIXTURES_PORT], "profile": "version_light"},
+            },
+        )
+        sc.check(
+            "H-14 network Hunt binds registered addresses and cancellation stops new work",
+            status == 200
+            and action_status == 200
+            and action.get("status") in {"completed", "partial"}
+            and bool(action.get("receipt_id"))
+            and cancelled.get("status") == "cancelled"
+            and after_status == 409,
+            (
+                f"start={status} action={action_status}/{action.get('status')} "
+                f"cancel={cancelled.get('status')} after={after_status}"
+            ),
+        )
+    except Exception as exc:
+        sc.error("H-14 network and cancellation acceptance", exc)
+
+    # Device Hunt: no separate device-agent engine. New work persists typed
+    # canonical policy/runtime state and removes the legacy device_state view.
+    device_id = ""
+    try:
+        pid = os.getpid()
+        stamp = int(_time.time())
+        locator = (
+            f"127.{1 + pid % 250}.{1 + stamp % 250}."
+            f"{1 + (pid + stamp) % 250}"
+        )
+        device_status, created = H.post("/devices", {
+            "name": f"LG TV Hunt E2E {_RUN_NONCE}",
+            "primary_locator": locator,
+            "device_class": "tv",
+            "manufacturer": "LG",
+            "model": "release-fixture",
+            "identity_confidence": "high",
+            "environment": "lab",
+        })
+        device_id = str((created.get("device") or {}).get("id") or "")
+        status, device_hunt = H.post("/hunts", _hunt_start_payload(
+            device_id,
+            goal="Canonical typed device Hunt acceptance.",
+            target_kind="device",
+            capabilities=["device.inspect", "device.capabilities.inspect"],
+        ))
+        device_hunt_id = str(device_hunt.get("hunt_id") or "")
+        action_status, action = H.post(
+            f"/hunts/{device_hunt_id}/capabilities/device.inspect",
+            {
+                "idempotency_key": f"e2e-device-inspect-{_RUN_NONCE}",
+                "input": {},
+            },
+        )
+        current = H.get(f"/hunts/{device_hunt_id}")
+        context = current.get("context_pack") or {}
+        sc.check(
+            "H-15 device Hunt uses canonical typed state and one action receipt",
+            device_status == 200
+            and status == 200
+            and action_status == 200
+            and action.get("status") == "completed"
+            and bool(action.get("receipt_id"))
+            and isinstance(context.get("device_policy_state"), dict)
+            and context.get("device_policy_state", {}).get("schema_version")
+                == "hunt-device-policy/v2"
+            and isinstance(context.get("device_runtime"), dict)
+            and context.get("device_runtime", {}).get("schema_version")
+                == "hunt-device-runtime/v2"
+            and "device_state" not in context,
+            f"create={device_status} start={status} action={action_status} context={context}",
+        )
+        H.post(f"/hunts/{device_hunt_id}/finish", {
+            "summary": "Device Hunt acceptance completed.", "next_actions": [],
+        })
+    except Exception as exc:
+        sc.error("H-15 canonical device Hunt acceptance", exc)
+    finally:
+        if device_id:
+            H.delete(f"/devices/{device_id}")
+
+    return sc
+
+
 def run_dast() -> H.Scorecard:
     sc = H.Scorecard("dast")
     print("\n== DAST e2e ==", flush=True)
@@ -1131,6 +1761,7 @@ AREAS = {
     "model_intake": run_model_intake,
     "ai_gate": run_ai_gate,
     "dast": run_dast,
+    "hunt": run_hunt,
 }
 
 

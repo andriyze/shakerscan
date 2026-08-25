@@ -86,6 +86,39 @@
         {"id":"report_rebuild","label":"Offline report rebuild","pytest_selector":"tests/test_scan_report_rebuild.py::test_offline_bundle_rebuilds_the_byte_stable_report"},
         {"id":"evidence_integrity","label":"Hashed, redacted evidence objects","pytest_selector":"tests/test_evidence_objects.py::test_evidence_object_is_hashed_redaction_profiled_and_retention_classed"}
       ]
+    },
+    "hunt": {
+      "label": "Canonical Hunt runtime",
+      "controls": [
+        {"id":"passive","label":"Passive zero-authority lifecycle","e2e":{"area":"hunt","row":"H-1 passive REST Hunt preserves zero authority"},"pytest_selector":"tests/test_hunt_zero_budget_contract.py::test_one_hunt_policy_model_is_canonical"},
+        {"id":"privileged","label":"Privileged verifier lifecycle","e2e":{"area":"hunt","row":"H-7 privileged verifier settles a durable action and receipt"},"pytest_selector":"tests/test_hunt_capability_reservations.py::test_successful_inline_hunt_capability_commits_matching_redacted_receipt"},
+        {"id":"revocation","label":"Revoked authority fails closed","e2e":{"area":"hunt","row":"H-8 revoked approval blocks the next privileged action"},"pytest_selector":"tests/test_api_helpers.py::test_revoked_approval_fails_closed_before_scope_or_action_validation"},
+        {"id":"redelivery","label":"Duplicate capability delivery is idempotent","e2e":{"area":"hunt","row":"H-2 passive action persists receipt and duplicate delivery is idempotent"},"pytest_selector":"tests/test_hunt_action_dispatcher.py::test_public_hunt_route_returns_the_canonical_action_result_on_first_and_retry"},
+        {"id":"api_collection","label":"API collection preserves request and principals","e2e":{"area":"hunt","row":"H-13 API collection replay preserves exact request and two principals"},"pytest_selector":"tests/test_v2_worker_replay.py::test_pinned_transport_preserves_exact_headers_and_body_without_dns"},
+        {"id":"network","label":"Network actions bind registered targets and cancellation","e2e":{"area":"hunt","row":"H-14 network Hunt binds registered addresses and cancellation stops new work"},"pytest_selector":"tests/test_hunt_network_reservations.py::test_worker_rebuilds_authority_starts_heartbeats_and_settles_atomically"},
+        {"id":"device","label":"Device actions use canonical typed state","e2e":{"area":"hunt","row":"H-15 device Hunt uses canonical typed state and one action receipt"},"pytest_selector":"tests/test_hunt_action_dispatcher.py::test_native_device_hunts_never_seed_legacy_agent_state"},
+        {"id":"stale_lease","label":"Stale reservations terminalize deterministically","pytest_selector":"tests/test_reservation_recovery.py::test_orphaned_stale_reservation_terminalizes_from_held_snapshot"},
+        {"id":"worker_loss","label":"Accepted device work survives response loss","pytest_selector":"tests/test_hunt_device_queue_reservations.py::test_device_queue_recovers_a_job_accepted_before_response_failure"}
+      ]
+    },
+    "mcp": {
+      "label": "MCP Hunt client",
+      "controls": [
+        {"id":"real_client","label":"Real MCP start, query, action, and finish","e2e":{"area":"hunt","row":"H-12 MCP start, query, capability, and finish use the real V2 API"},"pytest_selector":"tests/test_mcp_hunt_asgi_contract.py::test_mcp_hunt_start_is_accepted_by_real_asgi_models"}
+      ]
+    },
+    "cli": {
+      "label": "Installed CLI Hunt client",
+      "controls": [
+        {"id":"real_client","label":"Installed wrapper start and call","e2e":{"area":"hunt","row":"H-11 installed CLI start and call produce valid V2 authority"},"pytest_selector":"tests/test_v2_cli.py::test_hunt_start_cli_uses_server_contract_and_preserves_explicit_zero"},
+        {"id":"fail_closed","label":"Installed CLI rejects contract drift","e2e":{"area":"hunt","row":"H-10 installed CLI rejects contract drift with stable exit code"},"pytest_selector":"tests/test_v2_cli.py::test_hunt_start_cli_rejects_client_only_budget_or_target_kind"}
+      ]
+    },
+    "ui": {
+      "label": "Production browser UI",
+      "controls": [
+        {"id":"hunt_start","label":"Production UI submits canonical passive Hunt","playwright":{"title":"production Hunt UI submits canonical passive V2 authority"},"pytest_selector":"tests/test_hunt_skill_contract.py::test_every_hunt_skill_json_example_satisfies_hunt_start_v2"}
+      ]
     }
   }
 }

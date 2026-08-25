@@ -86,6 +86,9 @@ def _record_traffic(handler: http.server.BaseHTTPRequestHandler, method: str) ->
         "content_type": str(handler.headers.get("Content-Type") or "")[:100],
         "content_length": int(handler.headers.get("Content-Length") or 0),
         "principal": principal,
+        "collection_marker": str(
+            handler.headers.get("X-E2E-Collection") or ""
+        )[:80],
         "client_lane": str(handler.headers.get("X-ShakerScan-Parity-Lane") or "")[:80],
         "timestamp_ns": time.time_ns(),
     }

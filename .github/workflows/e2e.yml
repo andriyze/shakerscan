@@ -90,18 +90,25 @@ jobs:
             --scorecard artifacts/e2e-scorecard.json
 
       - name: Run exact-candidate UI unit and browser acceptance
+        env:
+          PLAYWRIGHT_REAL_STACK: "1"
+          SHAKERSCAN_API_URL: http://localhost:8080
+          SHAKERSCAN_E2E_HUNT_TARGET: http://host.docker.internal:18099
         run: |
           npm --prefix ui ci
           npm --prefix ui run test:unit
           npx --prefix ui playwright install --with-deps chromium
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
+          cp ui/test-results/browser-results.json artifacts/playwright.json
 
       - name: Upload exact-SHA E2E scorecard
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: full-e2e-${{ inputs.candidate_sha }}
-          path: artifacts/e2e-scorecard.json
+          path: |
+            artifacts/e2e-scorecard.json
+            artifacts/playwright.json
           if-no-files-found: error
           retention-days: 30
 

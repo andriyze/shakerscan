@@ -73,6 +73,7 @@ jobs:
           python3 tests/e2e/run_e2e.py --area platform
           python3 tests/e2e/run_e2e.py --area model_intake
           python3 tests/e2e/run_e2e.py --area ai_gate
+          python3 tests/e2e/run_e2e.py --area hunt
 
       - name: Run Model Intake cryptographic trust contracts
         if: steps.changes.outputs.backend == 'true'

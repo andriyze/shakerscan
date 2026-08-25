@@ -108,11 +108,48 @@ def _e2e_result(spec: Mapping[str, Any], scorecard: Mapping[str, Any]) -> dict[s
     }
 
 
+def _playwright_result(spec: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str, Any]:
+    title = str(spec.get("title") or "")
+    matches: list[Mapping[str, Any]] = []
+
+    def walk(suites: Any) -> None:
+        for suite in suites if isinstance(suites, list) else ():
+            if not isinstance(suite, Mapping):
+                continue
+            for item in suite.get("specs") or ():
+                if isinstance(item, Mapping) and str(item.get("title") or "") == title:
+                    matches.append(item)
+            walk(suite.get("suites"))
+
+    walk(report.get("suites"))
+    passed = bool(matches)
+    for item in matches:
+        tests = item.get("tests") or ()
+        if not tests:
+            passed = False
+            continue
+        for test in tests:
+            if not isinstance(test, Mapping):
+                passed = False
+                continue
+            results = test.get("results") or ()
+            if test.get("expectedStatus") != "passed" or not results:
+                passed = False
+                continue
+            if any(
+                not isinstance(result, Mapping) or result.get("status") != "passed"
+                for result in results
+            ):
+                passed = False
+    return {"title": title, "matched": len(matches), "passed": passed}
+
+
 def build_receipt(
     *,
     matrix: Mapping[str, Any],
     junit_path: Path,
     scorecard_path: Path,
+    playwright_path: Path | None,
     source_sha: str,
     images: Mapping[str, str],
 ) -> dict[str, Any]:
@@ -134,6 +171,7 @@ def build_receipt(
         raise PreservationError("unsupported E2E scorecard schema")
     if scorecard.get("gate") != "pass":
         raise PreservationError("full E2E scorecard did not pass")
+    playwright = _read_json(playwright_path) if playwright_path is not None else None
 
     programs: list[dict[str, Any]] = []
     failed: list[str] = []
@@ -151,6 +189,16 @@ def build_receipt(
                 if not isinstance(control["e2e"], Mapping):
                     raise PreservationError(f"invalid E2E evidence in {control['id']}")
                 evidence.append(_e2e_result(control["e2e"], scorecard))
+            if control.get("playwright"):
+                if not isinstance(control["playwright"], Mapping):
+                    raise PreservationError(
+                        f"invalid Playwright evidence in {control['id']}"
+                    )
+                if playwright is None:
+                    raise PreservationError(
+                        "production browser acceptance evidence is required"
+                    )
+                evidence.append(_playwright_result(control["playwright"], playwright))
             passed = bool(evidence) and all(item["passed"] for item in evidence)
             if not passed:
                 failed.append(f"{program_id}.{control['id']}")
@@ -179,6 +227,9 @@ def build_receipt(
         "evidence": {
             "junit_sha256": _sha256(junit_path),
             "e2e_scorecard_sha256": _sha256(scorecard_path),
+            "playwright_json_sha256": (
+                _sha256(playwright_path) if playwright_path is not None else None
+            ),
             "junit_test_count": len(cases),
         },
         "status": "pass" if not failed else "fail",
@@ -206,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--matrix", required=True, type=Path)
     parser.add_argument("--junit", required=True, type=Path)
     parser.add_argument("--e2e-scorecard", required=True, type=Path)
+    parser.add_argument("--playwright-json", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--image", action="append", default=[])
     parser.add_argument("--output", required=True, type=Path)
@@ -215,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             matrix=_read_json(args.matrix),
             junit_path=args.junit,
             scorecard_path=args.e2e_scorecard,
+            playwright_path=args.playwright_json,
             source_sha=args.source_sha,
             images=_images(args.image),
         )

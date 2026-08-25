@@ -101,11 +101,24 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
             --format '{{(index .IPAM.Config 0).Gateway}}')"
     fi
     SHAKERSCAN_API="http://127.0.0.1:$API_PORT" \
+        SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan" \
+        SHAKERSCAN_E2E_CLI_HOME="$SMOKE_HOME" \
         SHAKERSCAN_E2E_HONEY_HOST="$fixture_host" \
         SHAKERSCAN_E2E_DAST_TARGET="http://juice-shop:3000" \
         SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN="$token" \
         python3 "$ROOT_DIR/tests/e2e/run_e2e.py" --area all --scorecard "$scorecard_path"
     check_equal "exact-image E2E gate" "$(jq -r '.gate' "$scorecard_path")" "pass"
+    if [ -n "${INSTALLED_STACK_SMOKE_BROWSER_JSON:-}" ]; then
+        PLAYWRIGHT_BASE_URL="http://127.0.0.1:$UI_PORT" \
+            CI=1 \
+            PLAYWRIGHT_REAL_STACK=1 \
+            SHAKERSCAN_API_URL="http://127.0.0.1:$API_PORT" \
+            SHAKERSCAN_E2E_HUNT_TARGET="http://$fixture_host:${SHAKERSCAN_E2E_FIXTURES_PORT:-18099}" \
+            npm --prefix "$ROOT_DIR/ui" run test:browser
+        mkdir -p "$(dirname "$INSTALLED_STACK_SMOKE_BROWSER_JSON")"
+        cp "$ROOT_DIR/ui/test-results/browser-results.json" \
+            "$INSTALLED_STACK_SMOKE_BROWSER_JSON"
+    fi
 fi
 
 echo "installed-stack smoke passed: release identity, local Model Intake session, and Firecracker guidance"

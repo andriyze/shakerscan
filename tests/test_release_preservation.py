@@ -46,7 +46,20 @@ def _write_evidence(tmp_path: Path, *, fail_row: str | None = None):
             for name, rows in areas.items()
         ],
     }))
-    return junit, scorecard
+    playwright = tmp_path / "playwright.json"
+    playwright.write_text(json.dumps({
+        "suites": [{
+            "title": "browser",
+            "specs": [{
+                "title": "production Hunt UI submits canonical passive V2 authority",
+                "tests": [{
+                    "expectedStatus": "passed",
+                    "results": [{"status": "passed"}],
+                }],
+            }],
+        }],
+    }))
+    return junit, scorecard, playwright
 
 
 def _images():
@@ -56,9 +69,10 @@ def _images():
 
 
 def test_complete_matrix_builds_content_free_candidate_bound_receipt(tmp_path):
-    junit, scorecard = _write_evidence(tmp_path)
+    junit, scorecard, playwright = _write_evidence(tmp_path)
     receipt = build_receipt(
         matrix=MATRIX, junit_path=junit, scorecard_path=scorecard,
+        playwright_path=playwright,
         source_sha="a" * 40, images=_images(),
     )
     assert receipt["status"] == "pass"
@@ -85,33 +99,65 @@ def test_every_matrix_pytest_selector_names_a_real_test():
 
 
 def test_receipt_fails_closed_on_missing_test_or_failed_e2e(tmp_path):
-    junit, scorecard = _write_evidence(tmp_path)
+    junit, scorecard, playwright = _write_evidence(tmp_path)
     tree = ET.parse(junit)
     first = next(tree.getroot().iter("testcase"))
     tree.getroot().remove(first)
     tree.write(junit)
     receipt = build_receipt(
         matrix=MATRIX, junit_path=junit, scorecard_path=scorecard,
+        playwright_path=playwright,
         source_sha="b" * 40, images=_images(),
     )
     assert receipt["status"] == "fail"
     assert receipt["failed_controls"]
 
-    _, failed_scorecard = _write_evidence(tmp_path, fail_row="MI-2 correct digest verifies")
+    _, failed_scorecard, failed_playwright = _write_evidence(
+        tmp_path, fail_row="MI-2 correct digest verifies",
+    )
     with pytest.raises(PreservationError, match="did not pass"):
         build_receipt(
             matrix=MATRIX, junit_path=junit, scorecard_path=failed_scorecard,
+            playwright_path=failed_playwright,
             source_sha="b" * 40, images=_images(),
         )
 
 
 def test_receipt_requires_exact_candidate_image_identities(tmp_path):
-    junit, scorecard = _write_evidence(tmp_path)
+    junit, scorecard, playwright = _write_evidence(tmp_path)
     with pytest.raises(PreservationError, match="exact scanner"):
         build_receipt(
             matrix=MATRIX, junit_path=junit, scorecard_path=scorecard,
+            playwright_path=playwright,
             source_sha="c" * 40, images={"scanner": "latest"},
         )
+
+
+def test_receipt_requires_passing_production_browser_evidence(tmp_path):
+    junit, scorecard, playwright = _write_evidence(tmp_path)
+    with pytest.raises(PreservationError, match="browser acceptance"):
+        build_receipt(
+            matrix=MATRIX,
+            junit_path=junit,
+            scorecard_path=scorecard,
+            playwright_path=None,
+            source_sha="d" * 40,
+            images=_images(),
+        )
+
+    report = json.loads(playwright.read_text())
+    report["suites"][0]["specs"][0]["tests"][0]["results"][0]["status"] = "failed"
+    playwright.write_text(json.dumps(report))
+    receipt = build_receipt(
+        matrix=MATRIX,
+        junit_path=junit,
+        scorecard_path=scorecard,
+        playwright_path=playwright,
+        source_sha="d" * 40,
+        images=_images(),
+    )
+    assert receipt["status"] == "fail"
+    assert "ui.hunt_start" in receipt["failed_controls"]
 
 
 def test_release_workflows_require_and_publish_preservation_evidence():
@@ -127,6 +173,8 @@ def test_release_workflows_require_and_publish_preservation_evidence():
         "tests/release_preservation_matrix.json",
         "artifacts/v2-full-python.xml",
         "artifacts/external-e2e/e2e-scorecard.json",
+        "artifacts/external-e2e/playwright.json",
+        "--playwright-json",
         '--image "scanner=$scanner_id"',
         '--image "api=$api_id"',
         '--image "ui=$ui_id"',

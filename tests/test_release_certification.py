@@ -53,7 +53,7 @@ def _evidence(tmp_path: Path):
         "gate": "pass",
         "areas": [
             {"area": area, "gate": "pass", "rows": []}
-            for area in ("platform", "model_intake", "ai_gate", "dast")
+            for area in ("platform", "model_intake", "ai_gate", "dast", "hunt")
         ],
     }
     paths = {

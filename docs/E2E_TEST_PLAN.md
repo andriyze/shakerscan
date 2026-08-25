@@ -26,7 +26,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 
 ## Harness (Phase 0)
 
-`tests/e2e/` — a runner invoked as `python -m tests.e2e.run_e2e --area {all|platform|model_intake|ai_gate|dast}`:
+`tests/e2e/` — a runner invoked as `python -m tests.e2e.run_e2e --area {all|platform|model_intake|ai_gate|dast|hunt}`:
 
 1. **Preflight** — assert `/health` and a current, uniform worker fleet. Target failures then surface
    as real scan failures; optional external prerequisites are enabled explicitly.

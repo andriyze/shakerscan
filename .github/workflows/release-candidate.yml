@@ -291,6 +291,7 @@ jobs:
             --matrix tests/release_preservation_matrix.json \
             --junit artifacts/v2-full-python.xml \
             --e2e-scorecard artifacts/external-e2e/e2e-scorecard.json \
+            --playwright-json artifacts/external-e2e/playwright.json \
             --source-sha "$CANDIDATE_SHA" \
             --image "scanner=$scanner_id" \
             --image "api=$api_id" \
@@ -739,11 +740,22 @@ jobs:
             UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt.json" \
             scripts/upgrade_smoke.sh
 
+      - name: Set up supported Node browser runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
       - name: Run full user-visible E2E on exact final manifests
         env:
           INSTALLED_STACK_SMOKE_E2E: "1"
           INSTALLED_STACK_SMOKE_E2E_SCORECARD: ${{ github.workspace }}/artifacts/certification/e2e-scorecard.json
-        run: make installed-stack-smoke
+          INSTALLED_STACK_SMOKE_BROWSER_JSON: ${{ github.workspace }}/artifacts/certification/playwright.json
+        run: |
+          npm --prefix ui ci
+          npx --prefix ui playwright install --with-deps chromium
+          make installed-stack-smoke
 
       - name: Build exact-digest preservation receipt
         env:
@@ -755,6 +767,7 @@ jobs:
             --matrix tests/release_preservation_matrix.json \
             --junit artifacts/certification/v2-full-python.xml \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
+            --playwright-json artifacts/certification/playwright.json \
             --source-sha "$CANDIDATE_SHA" \
             --image "scanner=$(jq -r '.images.scanner' "$receipt")" \
             --image "api=$(jq -r '.images.api' "$receipt")" \

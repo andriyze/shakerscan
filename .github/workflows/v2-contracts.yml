@@ -599,6 +599,9 @@ jobs:
           npm --prefix ui run build
 
       - name: Run production-stack browser acceptance
+        env:
+          PLAYWRIGHT_REAL_STACK: "1"
+          SHAKERSCAN_API_URL: http://127.0.0.1:8080
         run: |
           npx --prefix ui playwright install --with-deps chromium
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser

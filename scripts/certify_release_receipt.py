@@ -96,7 +96,7 @@ def certify_receipt(
         raise CertificationError("exact-manifest installed-stack E2E did not pass")
     areas = e2e.get("areas")
     if not isinstance(areas, list) or {item.get("area") for item in areas if isinstance(item, Mapping)} != {
-        "platform", "model_intake", "ai_gate", "dast",
+        "platform", "model_intake", "ai_gate", "dast", "hunt",
     }:
         raise CertificationError("exact-manifest E2E did not cover every release area")
     if any(
