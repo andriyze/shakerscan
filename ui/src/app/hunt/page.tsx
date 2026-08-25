@@ -63,6 +63,11 @@ function positiveInteger(value: string): number | undefined {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+function huntStatusLabel(status: HuntV2['status']): string {
+  if (status === 'active') return 'open for planner'
+  return status.replaceAll('_', ' ')
+}
+
 function LegacyDeviceRun({ run }: { run: DeviceAgentSession }) {
   return (
     <div className="grid gap-5 lg:grid-cols-[0.9fr_1.5fr]">
@@ -173,7 +178,7 @@ function HuntHistory({
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm font-medium text-gray-200">{run.objective}</span>
-                <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{run.status.replaceAll('_', ' ')}</span>
+                <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{huntStatusLabel(run.status)}</span>
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 {run.target_kind} · {run.budget_profile} · {run.budget_used.agent_actions || 0} capability calls
@@ -819,7 +824,7 @@ function HuntContent() {
                   <p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p>
                   <h2 className="mt-1 font-medium text-white">{hunt.objective}</h2>
                 </div>
-                <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{hunt.status.replaceAll('_', ' ')}</span>
+                <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{huntStatusLabel(hunt.status)}</span>
               </div>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded bg-gray-950 p-3">
@@ -838,6 +843,11 @@ function HuntContent() {
                 </div>
               </div>
               {hunt.created_at && <p className="text-xs text-gray-500">Started {new Date(hunt.created_at).toLocaleString()}</p>}
+              {hunt.status === 'active' && (
+                <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
+                  This Hunt is open for planner actions. It is not running background traffic; network activity occurs only when the current coding agent submits a permitted capability call.
+                </p>
+              )}
               {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
               {hunt.queued_scan?.scan_id && (
                 <Link href={`/scans/${hunt.queued_scan.scan_id}`} className="block rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-200 hover:bg-blue-500/10">

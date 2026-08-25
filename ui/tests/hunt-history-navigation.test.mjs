@@ -32,3 +32,9 @@ test('canonical Hunt history has durable exact-run links and audit details', () 
   assert.match(hunt, /Run ID/)
   assert.match(hunt, /Back to launcher and history/)
 })
+
+test('open Hunt sessions do not imply background network execution', () => {
+  assert.match(hunt, /if \(status === 'active'\) return 'open for planner'/)
+  assert.match(hunt, /It is not running background traffic/)
+  assert.match(hunt, /network activity occurs only when the current coding agent submits a permitted capability call/)
+})
