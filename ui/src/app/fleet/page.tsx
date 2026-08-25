@@ -33,6 +33,7 @@ import {
   type FleetSummary,
   type WorkerStats,
 } from '@/lib/api'
+import { SHAKERSCAN_DOCUMENTATION_BLOB_URL } from '@/lib/repository'
 import {
   Badge,
   Button,
@@ -391,7 +392,7 @@ export default function FleetPage() {
                   Read the installed guide →
                 </Link>
                 <a
-                  href="https://github.com/andriyze/shakerscan/blob/main/docs/multi-node-guide.md"
+                  href={`${SHAKERSCAN_DOCUMENTATION_BLOB_URL}/docs/multi-node-guide.md`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-medium text-blue-400 hover:text-blue-300"

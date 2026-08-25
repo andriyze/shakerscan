@@ -5,10 +5,9 @@ import { BookOpen, ExternalLink } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Card, PageHeader } from '@/components/ui'
+import { SHAKERSCAN_DOCUMENTATION_BLOB_URL } from '@/lib/repository'
 
 export const dynamic = 'force-dynamic'
-
-const REPOSITORY_BLOB_URL = 'https://github.com/andriyze/shakerscan/blob/main'
 
 async function loadReadme(): Promise<string | null> {
   const configuredPath = process.env.SHAKERSCAN_README_PATH?.trim()
@@ -52,7 +51,7 @@ function documentationHref(href?: string): string {
   if (!href) return '#'
   if (href.startsWith('#') || /^(https?:|mailto:)/i.test(href)) return href
   const normalized = href.replace(/^\.\//, '')
-  return `${REPOSITORY_BLOB_URL}/${normalized}`
+  return `${SHAKERSCAN_DOCUMENTATION_BLOB_URL}/${normalized}`
 }
 
 const markdownComponents: Components = {
@@ -135,7 +134,7 @@ export default async function DocsPage() {
         description="Installation, first steps, workflow selection, safety boundaries, and operator reference."
         actions={
           <a
-            href={`${REPOSITORY_BLOB_URL}/README.md`}
+            href={`${SHAKERSCAN_DOCUMENTATION_BLOB_URL}/README.md`}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-300 transition-colors hover:border-gray-600 hover:bg-gray-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
