@@ -19791,7 +19791,7 @@ def test_bulk_finding_update_reports_rows_actually_changed(monkeypatch):
         async def fetch(self, _query, status, notes, ids):
             assert status == "resolved" and notes == "audit"
             assert len(ids) == 2  # duplicate request ID is de-duplicated
-            return [{"id": ids[0], "device_target_id": None}]  # second UUID does not exist
+            return [{"id": ids[0], "target_id": None, "device_target_id": None}]  # second UUID does not exist
 
     class Acquire:
         async def __aenter__(self):
@@ -19822,6 +19822,29 @@ def test_bulk_finding_update_reports_rows_actually_changed(monkeypatch):
         "not_found": 1,
         "status": "resolved",
     }
+
+
+def test_finding_owner_count_refreshes_web_and_device_namespaces():
+    calls = []
+
+    class Conn:
+        async def execute(self, query, owner_ids):
+            calls.append((query, owner_ids))
+
+    web_id = uuid.UUID("00000000-0000-4000-8000-000000000011")
+    device_id = uuid.UUID("00000000-0000-4000-8000-000000000012")
+    rows = [
+        {"target_id": web_id, "device_target_id": None},
+        {"target_id": web_id, "device_target_id": device_id},
+    ]
+
+    asyncio.run(api_module._refresh_finding_owner_counts(Conn(), rows))
+
+    assert len(calls) == 2
+    assert "UPDATE targets" in calls[0][0]
+    assert calls[0][1] == [web_id]
+    assert "UPDATE device_targets" in calls[1][0]
+    assert calls[1][1] == [device_id]
 
 
 def test_all_public_limit_parameters_have_explicit_lower_bounds():

@@ -208,6 +208,19 @@ def test_hypothesis_proof_link_migration_adds_durable_promoted_finding_ids():
     assert "promoted_finding_ids JSONB NOT NULL DEFAULT '[]'::jsonb" in statement
 
 
+def test_active_finding_count_reconciliation_repairs_web_and_device_badges():
+    conn = _FakeMigrationConn([])
+
+    asyncio.run(retest_contract._reconcile_active_finding_counts(conn))
+
+    statements = [query for query, _args in conn.executed]
+    assert len(statements) == 2
+    assert "UPDATE targets" in statements[0]
+    assert "f.target_id=t.id" in statements[0]
+    assert "UPDATE device_targets" in statements[1]
+    assert "f.device_target_id=d.id" in statements[1]
+
+
 def test_canonical_key_invariant_repairs_rewrites_and_recreates_index(monkeypatch):
     conn = _FailingCanonicalInvariantConn([])
 

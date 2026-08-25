@@ -935,6 +935,24 @@ async def _ensure_target_canonical_key_invariant(conn) -> None:
     )
 
 
+async def _reconcile_active_finding_counts(conn) -> None:
+    """Repair denormalized owner badges from the authoritative finding rows."""
+    await conn.execute("""
+        UPDATE targets t
+        SET active_findings_count=(
+            SELECT COUNT(*) FROM findings f
+            WHERE f.target_id=t.id AND f.status='active'
+        )
+    """)
+    await conn.execute("""
+        UPDATE device_targets d
+        SET active_findings_count=(
+            SELECT COUNT(*) FROM findings f
+            WHERE f.device_target_id=d.id AND f.status='active'
+        )
+    """)
+
+
 async def run_schema_migrations(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
@@ -2753,6 +2771,7 @@ async def run_schema_migrations(pool) -> None:
                 AFTER INSERT OR UPDATE OF status, device_target_id OR DELETE ON findings
                 FOR EACH ROW EXECUTE FUNCTION refresh_device_active_findings_count()
             """)
+            await _reconcile_active_finding_counts(conn)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS device_services (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

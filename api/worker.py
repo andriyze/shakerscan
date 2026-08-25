@@ -3199,6 +3199,18 @@ async def persist_application_graph(target_id: str, scan_id: str, result: dict) 
         return {}
 
 
+async def _refresh_target_active_finding_count(conn: Any, target_id: uuid.UUID) -> None:
+    await conn.execute(
+        """UPDATE targets t
+           SET active_findings_count=(
+               SELECT COUNT(*) FROM findings f
+               WHERE f.target_id=t.id AND f.status='active'
+           ), updated_at=NOW()
+           WHERE t.id=$1""",
+        target_id,
+    )
+
+
 async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
     """Save findings to database with deduplication. Returns count of saved findings."""
     if not findings:
@@ -3412,6 +3424,12 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
             # error inside a transaction poisons it even when caught, so the evidence
             # write must be outside (and best-effort) to never roll the finding back.
             await _persist_evidence_object(conn, scan_uuid, evidence_finding_id, finding, evidence_with_triage)
+
+        # Scan completion is persisted before this function runs, so the
+        # update_target_stats trigger has not seen this batch yet. Reconcile
+        # after the canonical finding writes to keep target badges and filters
+        # consistent with GET /findings.
+        await _refresh_target_active_finding_count(conn, target_uuid)
 
     return saved
 

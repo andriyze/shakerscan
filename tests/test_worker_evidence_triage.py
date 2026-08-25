@@ -3,6 +3,8 @@ Tests for worker.py helpers that fold precision/verification triage fields into
 the persisted evidence JSONB and canonicalize JSON for signature comparison.
 """
 
+import asyncio
+import inspect
 import os
 import sys
 import types
@@ -95,3 +97,20 @@ def test_canonicalize_jsonish_handles_none():
 def test_canonicalize_jsonish_non_json_string_passthrough():
     # A non-JSON string should fall through without raising.
     assert worker._canonicalize_jsonish("plain text") == "plain text"
+
+
+def test_worker_refreshes_target_count_after_canonical_finding_writes():
+    calls = []
+
+    class Conn:
+        async def execute(self, query, target_id):
+            calls.append((query, target_id))
+
+    target_id = worker.uuid.UUID("00000000-0000-4000-8000-000000000021")
+    asyncio.run(worker._refresh_target_active_finding_count(Conn(), target_id))
+
+    assert len(calls) == 1
+    assert "UPDATE targets" in calls[0][0]
+    assert "status='active'" in calls[0][0]
+    assert calls[0][1] == target_id
+    assert "await _refresh_target_active_finding_count(conn, target_uuid)" in inspect.getsource(worker.save_findings)

@@ -69555,6 +69555,30 @@ async def _refresh_device_active_finding_counts(conn: Any, device_ids: Sequence[
     )
 
 
+async def _refresh_web_active_finding_counts(conn: Any, target_ids: Sequence[Any]) -> None:
+    normalized = sorted({item for item in target_ids if item is not None}, key=str)
+    if not normalized:
+        return
+    await conn.execute(
+        """UPDATE targets t
+           SET active_findings_count=(
+               SELECT COUNT(*) FROM findings f
+               WHERE f.target_id=t.id AND f.status='active'
+           ), updated_at=NOW()
+           WHERE t.id=ANY($1::uuid[])""",
+        normalized,
+    )
+
+
+async def _refresh_finding_owner_counts(conn: Any, rows: Sequence[Any]) -> None:
+    await _refresh_web_active_finding_counts(
+        conn, [row["target_id"] for row in rows]
+    )
+    await _refresh_device_active_finding_counts(
+        conn, [row["device_target_id"] for row in rows]
+    )
+
+
 @app.patch("/findings/{finding_id:path}")
 async def update_finding(
     finding_id: str,
@@ -69595,7 +69619,7 @@ async def update_finding(
                     analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
                     updated_at = NOW()
                 WHERE id = $4
-                RETURNING id, device_target_id
+                RETURNING id, target_id, device_target_id
             """, request.status, request.notes, request.analyst_verdict, finding_uuid)
             if result:
                 updated_id = result['id']
@@ -69617,7 +69641,7 @@ async def update_finding(
                         analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
                         updated_at = NOW()
                     WHERE fingerprint = $4 AND scan_id = $5
-                    RETURNING id, device_target_id
+                    RETURNING id, target_id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, finding_id, scan_uuid)
             else:
                 result = await conn.fetchrow("""
@@ -69635,7 +69659,7 @@ async def update_finding(
                         SELECT id FROM findings WHERE fingerprint = $4
                         ORDER BY last_seen_at DESC LIMIT 1
                     )
-                    RETURNING id, device_target_id
+                    RETURNING id, target_id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, finding_id)
             if result:
                 updated_id = result['id']
@@ -69656,7 +69680,7 @@ async def update_finding(
                         analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
                         updated_at = NOW()
                     WHERE fingerprint = $4 AND scan_id = $5
-                    RETURNING id, device_target_id
+                    RETURNING id, target_id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, suffix, scan_uuid)
             else:
                 result = await conn.fetchrow("""
@@ -69674,14 +69698,14 @@ async def update_finding(
                         SELECT id FROM findings WHERE fingerprint = $4
                         ORDER BY last_seen_at DESC LIMIT 1
                     )
-                    RETURNING id, device_target_id
+                    RETURNING id, target_id, device_target_id
                 """, request.status, request.notes, request.analyst_verdict, suffix)
             if result:
                 updated_id = result['id']
 
         if not updated_id:
             raise HTTPException(status_code=404, detail="Finding not found")
-        await _refresh_device_active_finding_counts(conn, [result["device_target_id"]])
+        await _refresh_finding_owner_counts(conn, [result])
 
     return {'id': str(updated_id), 'status': request.status, 'analyst_verdict': request.analyst_verdict}
 
@@ -69696,7 +69720,7 @@ async def delete_finding(finding_id: str):
         try:
             finding_uuid = uuid.UUID(finding_id)
             result = await conn.fetchrow(
-                "DELETE FROM findings WHERE id = $1 RETURNING id, device_target_id", finding_uuid
+                "DELETE FROM findings WHERE id = $1 RETURNING id, target_id, device_target_id", finding_uuid
             )
             if result:
                 deleted_id = result['id']
@@ -69711,7 +69735,7 @@ async def delete_finding(finding_id: str):
                     SELECT id FROM findings WHERE fingerprint = $1
                     ORDER BY last_seen_at DESC LIMIT 1
                 )
-                RETURNING id, device_target_id
+                RETURNING id, target_id, device_target_id
             """, finding_id)
             if result:
                 deleted_id = result['id']
@@ -69725,14 +69749,14 @@ async def delete_finding(finding_id: str):
                     SELECT id FROM findings WHERE fingerprint = $1
                     ORDER BY last_seen_at DESC LIMIT 1
                 )
-                RETURNING id, device_target_id
+                RETURNING id, target_id, device_target_id
             """, suffix)
             if result:
                 deleted_id = result['id']
 
         if not deleted_id:
             raise HTTPException(status_code=404, detail="Finding not found")
-        await _refresh_device_active_finding_counts(conn, [result["device_target_id"]])
+        await _refresh_finding_owner_counts(conn, [result])
 
     return {'id': str(deleted_id), 'status': 'deleted'}
 
@@ -69773,7 +69797,7 @@ async def cleanup_findings(request: FindingsCleanup):
         else:
             # Use subquery to select IDs, then delete by ID
             ids = await conn.fetch(f"""
-                SELECT f.id, f.device_target_id
+                SELECT f.id, f.target_id, f.device_target_id
                 FROM findings f
                 LEFT JOIN targets t ON f.target_id = t.id
                 WHERE {where}
@@ -69783,9 +69807,7 @@ async def cleanup_findings(request: FindingsCleanup):
                 await conn.execute(
                     "DELETE FROM findings WHERE id = ANY($1)", id_list
                 )
-                await _refresh_device_active_finding_counts(
-                    conn, [row["device_target_id"] for row in ids]
-                )
+                await _refresh_finding_owner_counts(conn, ids)
             return {'deleted': len(ids), 'dry_run': False}
 
 
@@ -69822,11 +69844,9 @@ async def bulk_update_findings(request: BulkFindingUpdateRequest):
                 notes = COALESCE($2, notes),
                 updated_at = NOW()
             WHERE id = ANY($3)
-            RETURNING id, device_target_id
+            RETURNING id, target_id, device_target_id
         """, request.status, request.notes, ids)
-        await _refresh_device_active_finding_counts(
-            conn, [row["device_target_id"] for row in updated_rows]
-        )
+        await _refresh_finding_owner_counts(conn, updated_rows)
 
     return {
         'updated': len(updated_rows),
@@ -69909,6 +69929,7 @@ async def create_manual_finding(request: ManualFindingCreate):
                         resurfaced_count = resurfaced_count + 1, updated_at = NOW()
                     WHERE id = $1
                 """, existing['id'])
+                await _refresh_web_active_finding_counts(conn, [target_id])
                 return {
                     'id': str(existing['id']),
                     'fingerprint': fingerprint,
