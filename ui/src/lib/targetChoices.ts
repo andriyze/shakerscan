@@ -18,3 +18,16 @@ export function usableWebTargets<T extends { url?: unknown; is_active?: boolean 
     && isUsableWebTarget(target.url)
   ))
 }
+
+export function boundedTargetDisplay(
+  target: { name?: unknown; url?: unknown },
+  options: { maxLength?: number; stripScheme?: boolean } = {},
+): string {
+  const maxLength = Math.max(16, options.maxLength ?? 160)
+  const name = typeof target.name === 'string' ? target.name.trim() : ''
+  const rawUrl = typeof target.url === 'string' ? target.url.trim() : ''
+  const url = options.stripScheme ? rawUrl.replace(/^https?:\/\//i, '') : rawUrl
+  const display = name ? `${name} — ${url}` : url
+  if (display.length <= maxLength) return display
+  return `${display.slice(0, maxLength - 1)}…`
+}

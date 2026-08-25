@@ -9,7 +9,7 @@ import {
 import { executeArsenalCommand, getTargets, type ArsenalExecuteResult } from '@/lib/api'
 import { Badge, Button, Card, ErrorState } from '@/components/ui'
 import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
-import { isWebTarget } from '@/lib/targets'
+import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
 
 interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
 type StepRole = 'control' | 'mutation' | 'verify'
@@ -161,7 +161,7 @@ export default function ExperimentBuilderPage() {
     setFalsifier(params.get('falsifier') || '')
     if (initialPath !== '/') setSteps([blankStep(0, initialPath), blankStep(1, initialPath)])
     getTargets().then((data) => {
-      const list = ((data?.targets || data || []) as TargetLite[]).filter(isWebTarget)
+      const list = usableWebTargets((data?.targets || data || []) as TargetLite[])
       setTargets(list)
     }).catch(() => undefined)
   }, [])
@@ -229,7 +229,7 @@ export default function ExperimentBuilderPage() {
                 <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-gray-200">
                   <option value="">Choose a target…</option>
                   {!targets.length ? <option value="">No registered targets</option> : null}
-                  {targets.map((target) => <option key={target.id} value={target.id}>{target.name ? `${target.name} — ` : ''}{target.url}</option>)}
+                  {targets.map((target) => <option key={target.id} value={target.id}>{boundedTargetDisplay(target)}</option>)}
                 </select>
               </label>
               <label className="text-xs font-medium text-gray-400">What are you trying to learn?

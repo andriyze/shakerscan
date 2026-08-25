@@ -18,7 +18,7 @@ import {
 } from '@/lib/api'
 import { Badge, Button, Card, EmptyState, ErrorState, Skeleton, buttonClasses } from '@/components/ui'
 import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
-import { isWebTarget } from '@/lib/targets'
+import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
 
 interface TargetLite { id: string; url: string; name?: string | null; discovery_source?: string | null }
 
@@ -172,7 +172,7 @@ function LeadInspector({ lead, contracts, target, busy, onTransition }: {
           </div>
           <h2 className="mt-3 text-xl font-semibold text-white">{h.title || familyLabel(h.family)}</h2>
           <p className="mt-2 text-sm leading-6 text-gray-400">{h.description || 'Validate this lead with a bounded control and test sequence.'}</p>
-          {target ? <p className="mt-2 truncate text-xs text-gray-500" title={target.url}>Target: {target.name || target.url}</p> : null}
+          {target ? <p className="mt-2 truncate text-xs text-gray-500" title={boundedTargetDisplay(target, { maxLength: 240 })}>Target: {boundedTargetDisplay(target)}</p> : null}
           <div className="mt-4 flex flex-wrap gap-2">
             {needsAuth ? <Badge className="bg-violet-500/15 text-violet-300"><LockKeyhole className="mr-1 h-3 w-3" />Two-account context</Badge> : null}
             <Badge className="bg-gray-800 text-gray-300"><Route className="mr-1 h-3 w-3" />{h.source.replaceAll('_', ' ')}</Badge>
@@ -250,7 +250,7 @@ export default function InvestigationWorkspacePage() {
 
   useEffect(() => {
     Promise.all([getTargets(), getFamilyProofContracts()]).then(([targetData, proofData]) => {
-      const list = ((targetData?.targets || targetData || []) as TargetLite[]).filter(isWebTarget)
+      const list = usableWebTargets((targetData?.targets || targetData || []) as TargetLite[])
       setTargets(list)
       setContracts(proofData)
     }).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load investigation context'))

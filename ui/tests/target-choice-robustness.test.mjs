@@ -2,10 +2,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 
-import { usableWebTargets } from '../src/lib/targetChoices.ts'
+import { boundedTargetDisplay, usableWebTargets } from '../src/lib/targetChoices.ts'
 
 const credentialsPage = fs.readFileSync(new URL('../src/app/credentials/page.tsx', import.meta.url), 'utf8')
 const collectionsPage = fs.readFileSync(new URL('../src/app/request-collections/page.tsx', import.meta.url), 'utf8')
+const evidencePanel = fs.readFileSync(new URL('../src/components/EvidenceRetentionPanel.tsx', import.meta.url), 'utf8')
+const timelinePage = fs.readFileSync(new URL('../src/app/timeline/page.tsx', import.meta.url), 'utf8')
+const schedulesPage = fs.readFileSync(new URL('../src/app/schedules/page.tsx', import.meta.url), 'utf8')
 
 test('target-bound forms hide inactive and unnamed web targets', () => {
   const usable = usableWebTargets([
@@ -26,4 +29,17 @@ test('secret-bearing forms require an explicit target choice', () => {
   }
   assert.match(credentialsPage, /Choose a bound target/)
   assert.match(collectionsPage, /Choose a collection owner/)
+})
+
+test('historical malformed target labels stay bounded in read-only selectors', () => {
+  const label = boundedTargetDisplay({
+    name: 'Historical fuzz target',
+    url: `https://${'a'.repeat(65_000)}.example`,
+  })
+  assert.equal(label.length, 160)
+  assert.ok(label.endsWith('…'))
+  assert.equal(boundedTargetDisplay({ url: 'https://example.test' }, { stripScheme: true }), 'example.test')
+  for (const surface of [evidencePanel, timelinePage, schedulesPage]) {
+    assert.match(surface, /boundedTargetDisplay/)
+  }
 })

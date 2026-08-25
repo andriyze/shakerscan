@@ -20,6 +20,7 @@ import {
   evidenceRetentionSweepRecoveryState,
 } from '@/lib/evidenceRetention'
 import { Button, ConfirmDialog, RetentionClassBadge, SectionCard, useToast } from '@/components/ui'
+import { boundedTargetDisplay } from '@/lib/targetChoices'
 
 const RETENTION_CLASSES = ['standard', 'short', 'sensitive', 'audit', 'legal_hold']
 
@@ -403,7 +404,7 @@ export default function EvidenceRetentionPanel({
                   <option value="">{targetsLoading ? 'Loading targets…' : 'Select a target…'}</option>
                   {targets.map((target) => (
                     <option key={target.id} value={target.id}>
-                      {target.name ? `${target.name} — ` : ''}{target.url.replace(/^https?:\/\//, '')}
+                      {boundedTargetDisplay(target, { stripScheme: true })}
                       {target.is_active ? '' : ' (inactive)'}
                     </option>
                   ))}

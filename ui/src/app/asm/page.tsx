@@ -52,6 +52,7 @@ import {
   type HypothesisSituationReport,
   type Target,
 } from '@/lib/api'
+import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { normalizeFamilyCoverage, safeRemediationHref } from '@/lib/deferredWorkContracts'
 import {
@@ -263,7 +264,7 @@ function RollupView({
                         onClick={() => onSelect(target.id)}
                         className="text-left text-blue-400 hover:text-blue-300"
                       >
-                        {target.name || target.url}
+                        {boundedTargetDisplay(target)}
                       </button>
                       <div className="text-xs text-gray-500">{target.root_domain}</div>
                     </td>

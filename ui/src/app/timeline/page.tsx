@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, Suspense } from 'react'
 import Link from 'next/link'
 import { getMissionTimeline, getTargets, formatDate, type Target, type TimelineEvent } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { boundedTargetDisplay } from '@/lib/targetChoices'
 import {
   Card,
   EmptyState,
@@ -205,7 +206,7 @@ function TimelineContent() {
                   <option value="">All targets</option>
                   {targets.map((target) => (
                     <option key={target.id} value={target.id}>
-                      {target.name ? `${target.name} — ` : ''}{target.url}
+                      {boundedTargetDisplay(target)}
                     </option>
                   ))}
                 </Select>

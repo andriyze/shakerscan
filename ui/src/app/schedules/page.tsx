@@ -9,7 +9,7 @@ import {
 } from '@/lib/api'
 import { Plus } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Modal, PageHeader, Select, useToast } from '@/components/ui'
-import { isWebTarget } from '@/lib/targets'
+import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
 import { utcTimeToLocalLabel } from '@/lib/format'
 import {
   buildAsmScheduleOptions,
@@ -174,7 +174,7 @@ function SchedulesContent() {
   useEffect(() => {
     if (showCreateModal) {
       getTargets().then(data => {
-        setTargets((data.targets || []).filter(isWebTarget))
+        setTargets(usableWebTargets(data.targets || []))
         // Pre-select first target if none selected
         if (!formTargetId && data.targets?.length > 0) {
           setFormTargetId(data.targets[0].id)
@@ -562,7 +562,7 @@ function SchedulesContent() {
                     <option value="">Select target...</option>
                     {targets.map((t) => (
                       <option key={t.id} value={t.id}>
-                        {t.url.replace(/^https?:\/\//, '')} {t.name ? `(${t.name})` : ''}
+                        {boundedTargetDisplay(t, { stripScheme: true })}
                       </option>
                     ))}
                   </select>
