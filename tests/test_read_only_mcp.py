@@ -185,6 +185,7 @@ def test_mcp_server_protocol_and_notifications():
 
     assert initialized["result"]["protocolVersion"] == "2024-11-05"
     assert initialized["result"]["capabilities"] == {"tools": {"listChanged": False}}
+    assert initialized["result"]["serverInfo"]["version"] == (ROOT / "VERSION").read_text().strip()
     assert notification is None
     assert len(tools["result"]["tools"]) == 7 + len(mcp.HUNT_TOOLS)
 

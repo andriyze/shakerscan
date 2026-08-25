@@ -17,11 +17,25 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, BinaryIO
 
 
 SERVER_NAME = "shakerscan"
-SERVER_VERSION = "2026-08-19.v2"
+
+
+def _server_version() -> str:
+    """Use the same release identity as the installed/source runtime."""
+    try:
+        version = (Path(__file__).resolve().parents[1] / "VERSION").read_text(
+            encoding="utf-8",
+        ).strip()
+    except OSError:
+        return "development"
+    return version or "development"
+
+
+SERVER_VERSION = _server_version()
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_API_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT_SECONDS = 20.0
