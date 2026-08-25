@@ -5560,6 +5560,45 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     assert proof_bundle["finding_created_automatically"] is False
 
 
+def test_public_evidence_instance_summary_bounds_proof_payload():
+    row = {
+        "id": "2f50bd5c-00c5-4c3f-b2ef-64267e71ed22",
+        "request_response_refs": ["request-object", "response-object"],
+        "principal_pair": {"owner": "profile-a", "attacker": "profile-b"},
+        "metadata_json": {"large": "value" * 1000},
+        "proof_observation": {
+            "objective": "An attacker cannot read another user's basket",
+            "expected_signal": "Attacker receives 403",
+            "falsifier": "Attacker receives the owner's basket",
+            "comparisons": [{"response_body": "large-body" * 1000}],
+            "family_proof": {
+                "family": "bola",
+                "cwe": "CWE-639",
+                "verdict": "verified",
+                "reproduction_count": 2,
+                "restoration_verified": True,
+                "internal_debug": "not-list-data",
+            },
+        },
+    }
+
+    summary = api_module._public_evidence_instance_summary(row)
+
+    assert summary["proof_payload_included"] is False
+    assert summary["comparison_count"] == 1
+    assert summary["request_response_refs"] == []
+    assert summary["principal_pair"] == {}
+    assert summary["metadata_json"] == {}
+    assert "comparisons" not in summary["proof_observation"]
+    assert summary["proof_observation"]["family_proof"] == {
+        "family": "bola",
+        "cwe": "CWE-639",
+        "verdict": "verified",
+        "reproduction_count": 2,
+        "restoration_verified": True,
+    }
+
+
 def test_authz_replay_requires_distinct_slotted_session_profiles():
     expected = {"user1", "user2"}
     raw_session_users = {

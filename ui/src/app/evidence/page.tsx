@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState, Fragment, Suspense } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, Suspense } from 'react'
 import Link from 'next/link'
-import { getEvidenceInstances, getFindingEvidence, formatDate, type EvidenceInstance, type EvidenceObject } from '@/lib/api'
+import { getEvidenceInstance, getEvidenceInstances, getFindingEvidence, formatDate, type EvidenceInstance, type EvidenceObject } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import {
   Badge,
@@ -77,6 +77,10 @@ function EvidenceContent() {
   const [proofFilter, setProofFilter] = useState<ProofFilter>('verified')
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [expandedInstance, setExpandedInstance] = useState<EvidenceInstance | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState(false)
+  const detailRequestId = useRef(0)
 
   const findingFilter = (filters.finding_id || '').trim()
   const toolReceiptFilter = (filters.tool_receipt_id || '').trim()
@@ -93,6 +97,7 @@ function EvidenceContent() {
           : getEvidenceInstances({
               tool_receipt_id: toolReceiptFilter || undefined,
               limit: 200,
+              summary_only: true,
             }).catch(() => ({ evidence_instances: [] as EvidenceInstance[] })),
         // A finding's durable proof is stored as evidence OBJECTS, not instances,
         // so a finding deep-link must load objects or it looks empty. See getFindingEvidence.
@@ -313,7 +318,29 @@ function EvidenceContent() {
                           <td className="px-3 py-2 text-right">
                             <button
                               type="button"
-                              onClick={() => setExpandedId(expanded ? null : inst.id)}
+                              onClick={async () => {
+                                if (expanded) {
+                                  detailRequestId.current += 1
+                                  setExpandedId(null)
+                                  setExpandedInstance(null)
+                                  setDetailError(false)
+                                  return
+                                }
+                                setExpandedId(inst.id)
+                                setExpandedInstance(null)
+                                setDetailError(false)
+                                setDetailLoading(true)
+                                const requestId = detailRequestId.current + 1
+                                detailRequestId.current = requestId
+                                try {
+                                  const detail = await getEvidenceInstance(inst.id)
+                                  if (detailRequestId.current === requestId) setExpandedInstance(detail)
+                                } catch {
+                                  if (detailRequestId.current === requestId) setDetailError(true)
+                                } finally {
+                                  if (detailRequestId.current === requestId) setDetailLoading(false)
+                                }
+                              }}
                               aria-expanded={expanded}
                               className="text-xs text-blue-400 hover:text-blue-300"
                             >
@@ -324,10 +351,16 @@ function EvidenceContent() {
                         {expanded && (
                           <tr className="bg-gray-950/60">
                             <td colSpan={7} className="px-3 py-3">
-                              <EvidenceDetail
-                                inst={inst}
-                                onViewObject={inst.evidence_object_id ? () => setModalObjectId(inst.evidence_object_id!) : undefined}
-                              />
+                              {detailLoading ? (
+                                <div className="flex items-center gap-2 text-xs text-gray-400"><Spinner className="h-4 w-4" /> Loading full proof…</div>
+                              ) : detailError ? (
+                                <p className="text-xs text-red-300">Full proof could not be loaded. Collapse and retry this row.</p>
+                              ) : expandedInstance ? (
+                                <EvidenceDetail
+                                  inst={expandedInstance}
+                                  onViewObject={expandedInstance.evidence_object_id ? () => setModalObjectId(expandedInstance.evidence_object_id!) : undefined}
+                                />
+                              ) : null}
                             </td>
                           </tr>
                         )}

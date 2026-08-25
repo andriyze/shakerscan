@@ -654,6 +654,8 @@ export interface EvidenceInstance {
   metadata_json?: Record<string, unknown>
   created_by?: string | null
   created_at?: string | null
+  comparison_count?: number
+  proof_payload_included?: boolean
 }
 
 export interface EvidenceExportManifest {
@@ -3276,14 +3278,22 @@ export async function getEvidenceInstances(params?: {
   finding_id?: string
   tool_receipt_id?: string
   limit?: number
+  summary_only?: boolean
 }): Promise<{ evidence_instances: EvidenceInstance[]; count: number; execution_enabled: boolean }> {
   const searchParams = new URLSearchParams()
   if (params?.finding_id) searchParams.set('finding_id', params.finding_id)
   if (params?.tool_receipt_id) searchParams.set('tool_receipt_id', params.tool_receipt_id)
   if (params?.limit) searchParams.set('limit', String(params.limit))
+  if (params?.summary_only) searchParams.set('summary_only', 'true')
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/evidence/instances${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence instances'))
+  return res.json()
+}
+
+export async function getEvidenceInstance(id: string): Promise<EvidenceInstance> {
+  const res = await fetch(`${API_URL}/evidence/instances/${encodeURIComponent(id)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence instance'))
   return res.json()
 }
 

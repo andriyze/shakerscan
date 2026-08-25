@@ -46329,6 +46329,42 @@ def _public_evidence_instance_row(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _public_evidence_instance_summary(row: Any) -> dict[str, Any]:
+    """Bound list payloads while retaining the fields needed to triage evidence.
+
+    Full proof observations can contain multiple request/response comparisons and
+    body samples.  They remain available from the instance detail endpoint, but
+    should not be repeated across a 200-row browse response.
+    """
+    payload = _public_evidence_instance_row(row)
+    proof = payload.get("proof_observation") or {}
+    family_proof = proof.get("family_proof") if isinstance(proof, dict) else {}
+    if not isinstance(family_proof, dict):
+        family_proof = {}
+    comparisons = proof.get("comparisons") if isinstance(proof, dict) else []
+    payload["proof_observation"] = {
+        key: proof.get(key)
+        for key in ("objective", "expected_signal", "falsifier")
+        if proof.get(key) is not None
+    }
+    if family_proof:
+        payload["proof_observation"]["family_proof"] = {
+            key: family_proof.get(key)
+            for key in (
+                "family", "cwe", "verdict", "reason", "promotable",
+                "proof_source", "reproduction_count", "restoration_verified",
+            )
+            if family_proof.get(key) is not None
+        }
+    payload["comparison_count"] = len(comparisons) if isinstance(comparisons, list) else 0
+    payload["proof_payload_included"] = False
+    # These can also be large and are not rendered by the browse table.
+    payload["request_response_refs"] = []
+    payload["principal_pair"] = {}
+    payload["metadata_json"] = {}
+    return payload
+
+
 def _canonical_evidence_instance(req: EvidenceInstanceRequest) -> dict[str, Any]:
     payload = req.model_dump(mode="json")
     request_refs = _clean_string_list(payload.get("request_response_refs"), max_items=100)
@@ -67876,6 +67912,7 @@ async def list_evidence_instances(
     finding_id: Optional[str] = Query(None),
     tool_receipt_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    summary_only: bool = Query(False),
 ):
     """List concrete evidence instances split from canonical findings."""
     try:
@@ -67898,10 +67935,27 @@ async def list_evidence_instances(
             tool_receipt_uuid,
         )
     return {
-        "evidence_instances": [_public_evidence_instance_row(row) for row in rows],
+        "evidence_instances": [
+            _public_evidence_instance_summary(row) if summary_only else _public_evidence_instance_row(row)
+            for row in rows
+        ],
         "count": len(rows),
         "execution_enabled": False,
     }
+
+
+@app.get("/evidence/instances/{instance_id}")
+async def get_evidence_instance(instance_id: str):
+    """Return one full, redacted proof observation for on-demand inspection."""
+    try:
+        instance_uuid = uuid.UUID(instance_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="instance_id must be a UUID") from exc
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM evidence_instances WHERE id = $1", instance_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Evidence instance not found")
+    return _public_evidence_instance_row(row)
 
 
 @app.post("/evidence/instances")
