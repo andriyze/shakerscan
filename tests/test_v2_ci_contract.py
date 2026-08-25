@@ -139,6 +139,7 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert "scripts/run_complete_python_suite.py --collect-only" in text
     assert "scripts/run_complete_python_suite.py" in text
     assert "PYTHONPATH=.:api:scanner python -m pytest" in text
+    assert "requests==2.34.2" in text
     assert "--coverage --artifacts-dir artifacts" in text
     runner = (ROOT / "scripts" / "run_complete_python_suite.py").read_text()
     assert 'artifacts / "v2-full-python.xml"' in runner
