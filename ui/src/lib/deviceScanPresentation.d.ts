@@ -8,3 +8,8 @@ export type DeviceScorePresentation = {
 
 export function deviceScorePresentation(scan: unknown): DeviceScorePresentation
 export function deviceActivityLogLines(activity: unknown): string[]
+export function deviceReachabilityServiceSummary(options?: {
+  serviceAccessible?: boolean | null
+  selectedScan?: boolean
+  retainedServiceCount?: number
+}): string

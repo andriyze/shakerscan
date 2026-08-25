@@ -78,3 +78,24 @@ export function deviceActivityLogLines(activity) {
     return [`[device] ${context ? `${context} · ` : ''}${message}`]
   })
 }
+
+
+/**
+ * Distinguish the latest reachability observation from retained inventory.
+ * A current timeout or closed-port result does not erase services that an
+ * earlier completed scan positively confirmed.
+ * @param {{ serviceAccessible?: boolean | null, selectedScan?: boolean, retainedServiceCount?: number }} options
+ * @returns {string}
+ */
+export function deviceReachabilityServiceSummary({ serviceAccessible, selectedScan = false, retainedServiceCount = 0 } = {}) {
+  if (serviceAccessible === true) return 'at least one service responded'
+  if (serviceAccessible !== false) return 'service accessibility still being assessed'
+  if (selectedScan) return 'this scan found no currently responding TCP service with complete visibility'
+  const retained = Number.isInteger(retainedServiceCount) && retainedServiceCount > 0
+    ? retainedServiceCount
+    : 0
+  if (retained > 0) {
+    return `latest check found no currently responding TCP service; ${retained} previously confirmed service${retained === 1 ? '' : 's'} retained below`
+  }
+  return 'latest check found no currently responding TCP service with complete visibility'
+}

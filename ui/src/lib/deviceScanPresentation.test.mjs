@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { deviceActivityLogLines, deviceScorePresentation } from './deviceScanPresentation.mjs'
+import { deviceActivityLogLines, deviceReachabilityServiceSummary, deviceScorePresentation } from './deviceScanPresentation.mjs'
 
 
 function deviceScan({ reachability = 'online', complete = true, decision = 'allow' } = {}) {
@@ -75,4 +75,19 @@ test('device activity becomes readable content-free report logs', () => {
     '[device] 40% · tcp scope · Checking common and device-specific TCP ports',
     '[device] 100% · complete · Device scan completed',
   ])
+})
+
+
+test('latest device reachability is not confused with retained service history', () => {
+  assert.equal(deviceReachabilityServiceSummary({
+    serviceAccessible: false,
+    retainedServiceCount: 3,
+  }), 'latest check found no currently responding TCP service; 3 previously confirmed services retained below')
+  assert.equal(deviceReachabilityServiceSummary({
+    serviceAccessible: false,
+    selectedScan: true,
+    retainedServiceCount: 3,
+  }), 'this scan found no currently responding TCP service with complete visibility')
+  assert.equal(deviceReachabilityServiceSummary({ serviceAccessible: true }), 'at least one service responded')
+  assert.equal(deviceReachabilityServiceSummary({ serviceAccessible: null }), 'service accessibility still being assessed')
 })

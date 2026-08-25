@@ -6,7 +6,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
-import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { deviceReachabilityServiceSummary, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -361,6 +361,11 @@ function DeviceDetailContent() {
       ? 'border-red-500/25 bg-red-500/5 text-red-100'
       : 'border-amber-500/25 bg-amber-500/5 text-amber-100'
   const ReachabilityIcon = reachability?.status === 'online' ? Wifi : reachability?.status === 'unreachable' ? WifiOff : CircleHelp
+  const serviceAccessSummary = deviceReachabilityServiceSummary({
+    serviceAccessible: reachability?.service_accessible,
+    selectedScan: Boolean(selectedScanId),
+    retainedServiceCount: visibleServices.length,
+  })
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -404,7 +409,7 @@ function DeviceDetailContent() {
       )}
 
       <Card className={`mb-6 border p-4 ${reachabilityTone}`}>
-        <div className="flex items-start gap-3"><ReachabilityIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-medium">{reachability ? `Device ${reachability.status === 'online' ? 'online' : reachability.status}` : 'Device reachability not checked'}</p><p className="mt-1 text-sm opacity-75">{reachability?.reason || 'Run a device scan to require a positive network response before port and policy checks begin.'}</p>{reachability?.status === 'online' && <p className="mt-2 text-xs opacity-70">Network accessible · {reachability.service_accessible === true ? 'at least one service responded' : reachability.service_accessible === false ? 'no listening TCP service found with complete visibility' : 'service accessibility still being assessed'} · {reachability.confidence} confidence</p>}</div></div>
+        <div className="flex items-start gap-3"><ReachabilityIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-medium">{reachability ? `Device ${reachability.status === 'online' ? 'online' : reachability.status}` : 'Device reachability not checked'}</p><p className="mt-1 text-sm opacity-75">{reachability?.reason || 'Run a device scan to require a positive network response before port and policy checks begin.'}</p>{reachability?.status === 'online' && <p className="mt-2 text-xs opacity-70">Network accessible · {serviceAccessSummary} · {reachability.confidence} confidence</p>}</div></div>
       </Card>
 
       <Card className="mb-6 border-blue-500/25 bg-blue-500/5 p-5">
