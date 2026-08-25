@@ -993,7 +993,11 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
 
     assert "restart_worker_count" in script
     assert 'restart_workers="$(restart_worker_count)"' in script
-    assert 'start_services "$restart_workers"' in script
+    assert 'restart_device_workers="$(running_device_worker_count)"' in script
+    assert 'start_services "$restart_workers" "$restart_device_workers"' in script
+    assert 'if [ "$restore_device_workers" -gt 0 ]; then' in script
+    assert "Recreating connected-device worker from the selected image" in script
+    assert "compose --profile devices up --no-build -d --force-recreate device-worker" in script
     assert 'remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."' in script
     assert "refresh_workers_after_rebuild" in script
     assert 'existing_workers="$(running_scan_worker_count)"' in script
@@ -1012,6 +1016,80 @@ def test_scanner_sh_restart_and_rebuild_recreate_api_scaled_workers():
     assert 'refresh_running_service_after_rebuild model-intake-signer "$existing_model_intake_signer"' in script
     assert 'compose up --no-build -d --no-deps --force-recreate "$service"' in script
     assert "Run './scanner.sh restart' if you also need to recreate API/UI containers." not in script
+
+
+def test_scanner_sh_restart_preserves_opted_in_device_capacity_on_current_image():
+    script = (ROOT / "scanner.sh").read_text()
+    compose_up = script.split("compose_up() {", 1)[1].split("\n}", 1)[0]
+    start_services = script.split("start_services() {", 1)[1].split("\n}", 1)[0]
+    restart_services = script.split("restart_services() {", 1)[1].split("\n}", 1)[0]
+
+    harness = r'''
+set -eu
+RED=''
+GREEN=''
+YELLOW=''
+BLUE=''
+NC=''
+WORKERS=1
+USE_PREBUILT=0
+API_IMAGE_REPO=release-api
+SCANNER_IMAGE_REPO=release-worker
+UI_IMAGE_REPO=release-ui
+SCANNER_IMAGE_TAG=release-tag
+prepare_runtime_files() { printf 'prepare\n'; }
+persist_remote_access_env() { :; }
+resolve_start_workers() { printf '1\n'; }
+restart_worker_count() { printf '3\n'; }
+set_build_env() { :; }
+pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
+build_local_images() { printf 'build-local\n'; }
+local_application_images_ready() { return 0; }
+record_runtime_mode() { printf 'record:%s\n' "$1"; }
+compose() { printf 'compose:%s\n' "$*"; }
+compose_up() {
+__COMPOSE_UP__
+}
+api_probe_url() { printf 'http://api'; }
+ui_probe_url() { printf 'http://ui'; }
+api_base_url() { printf 'http://api'; }
+ui_base_url() { printf 'http://ui'; }
+wait_for_url() { :; }
+verify_running_build_identity() { :; }
+verify_specialized_worker_identity() { printf 'specialized:%s:%s\n' "$1" "$2"; }
+running_compose_service_count() { printf '1\n'; }
+running_device_worker_count() { printf '1\n'; }
+stop_services() { printf 'stop\n'; }
+start_services() {
+__START_SERVICES__
+}
+restart_services() {
+__RESTART_SERVICES__
+}
+restart_services
+'''
+    harness = (
+        harness.replace("__COMPOSE_UP__", compose_up)
+        .replace("__START_SERVICES__", start_services)
+        .replace("__RESTART_SERVICES__", restart_services)
+    )
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout
+    primary_up = "compose:up --no-build -d --scale worker=3"
+    device_up = "compose:--profile devices up --no-build -d --force-recreate device-worker"
+    assert output.count("build-local") == 0
+    assert output.count(device_up) == 1
+    assert output.index(primary_up) < output.index(device_up)
+    assert "specialized:1:1" in output
 
 
 def test_local_and_release_device_workers_use_stable_readiness_identity():

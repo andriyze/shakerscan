@@ -1947,6 +1947,7 @@ print_help() {
 start_services() {
     local start_workers
     local requested_workers="${1:-}"
+    local restore_device_workers="${2:-0}"
 
     prepare_runtime_files
     persist_remote_access_env
@@ -1977,6 +1978,10 @@ start_services() {
         fi
     fi
     compose_up -d --scale worker=$start_workers
+    if [ "$restore_device_workers" -gt 0 ]; then
+        echo -e "${YELLOW}Recreating connected-device worker from the selected image...${NC}"
+        compose --profile devices up --no-build -d --force-recreate device-worker || return 1
+    fi
     echo ""
     wait_for_url "API" "$(api_probe_url)/health" 120
     wait_for_url "UI" "$(ui_probe_url)" 120
@@ -2003,11 +2008,17 @@ stop_services() {
 }
 
 restart_services() {
-    local restart_workers
+    local restart_workers restart_device_workers
     prepare_runtime_files
     restart_workers="$(restart_worker_count)"
+    # The connected-device worker is opt-in and its Compose profile is not
+    # included in an ordinary `compose down`. Remember that the operator had
+    # enabled it, then replace it from the selected image after the primary
+    # stack returns. Otherwise `restart` can leave this lane stale and wait for
+    # specialized-worker build identity until the timeout expires.
+    restart_device_workers="$(running_device_worker_count)"
     stop_services
-    start_services "$restart_workers"
+    start_services "$restart_workers" "$restart_device_workers"
 }
 
 # Reload source into running containers without a full stop/start.
