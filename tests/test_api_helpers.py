@@ -20572,6 +20572,49 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
     assert redis.jobs["job:stale-job"]["status"] == "orphaned"
 
 
+def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypatch):
+    scan_id = uuid.UUID("56565656-5656-4656-8656-565656565656")
+
+    class Conn:
+        def __init__(self):
+            self.updated = []
+
+        async def fetch(self, query, cutoff):
+            assert "created_at < $1" in query
+            assert cutoff < api_module.utc_now()
+            return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None}]
+
+        async def fetchrow(self, query, row_id):
+            assert "queue_handoff_lost" in query
+            self.updated.append(row_id)
+            return {"id": row_id, "parent_scan_id": None}
+
+    class Redis:
+        def __init__(self):
+            self.jobs = {}
+
+        def hgetall(self, _key):
+            return {}
+
+        def hset(self, key, mapping):
+            self.jobs[key] = dict(mapping)
+
+        def expire(self, *_args):
+            return True
+
+    conn = Conn()
+    redis = Redis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module, "queue_payloads", lambda *_args, **_kwargs: [])
+
+    repaired = asyncio.run(api_module.cleanup_orphaned_scan_queue_handoffs(_FakePool(conn)))
+
+    assert repaired == 1
+    assert conn.updated == [scan_id]
+    assert redis.jobs["job:lost-job"]["status"] == "failed"
+    assert redis.jobs["job:lost-job"]["current_phase"] == "queue_handoff_lost"
+
+
 def test_model_intake_report_summary_preserves_only_safe_file_identity():
     manifest = api_module._model_intake_repository_manifest_summary({
         "complete": True,
