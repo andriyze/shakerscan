@@ -3,24 +3,26 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Braces, ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react'
 import {
-  createRequestCollection,
   getDevices,
-  getRequestCollection,
   getTargets,
+  type DeviceTarget,
+  type Target,
+} from '@/lib/api'
+import {
+  createRequestCollection,
+  getRequestCollection,
   listRequestCollectionInventory,
   listRequestCollections,
   upsertRequestCollectionBinding,
   upsertRequestCollectionEnvironment,
   upsertRequestCollectionSelection,
-  type DeviceTarget,
   type RequestCollectionDetail,
   type RequestCollectionInventoryItem,
   type RequestCollectionImportFormat,
   type RequestCollectionReplayPolicy,
   type RequestCollectionTargetKind,
   type SharedRequestCollection,
-  type Target,
-} from '@/lib/api'
+} from '@/lib/requestCollectionApi'
 import {
   Button,
   Card,

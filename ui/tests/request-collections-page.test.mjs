@@ -9,6 +9,7 @@ const picker = fs.readFileSync(path.join(root, 'src/components/RequestCollection
 const scan = fs.readFileSync(path.join(root, 'src/app/scan/new/page.tsx'), 'utf8')
 const hunt = fs.readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+const collectionApi = fs.readFileSync(path.join(root, 'src/lib/requestCollectionApi.ts'), 'utf8')
 const sidebar = fs.readFileSync(path.join(root, 'src/components/Sidebar.tsx'), 'utf8')
 
 test('shared collection UI supports upload, environment, binding, inventory, and selection', () => {
@@ -28,8 +29,9 @@ test('shared collection UI supports upload, environment, binding, inventory, and
 })
 
 test('collection presentation stays metadata-only after upload', () => {
-  assert.match(api, /secret_values_visible: false/)
-  assert.match(api, /storage_encrypted: true/)
+  assert.match(collectionApi, /secret_values_visible: false/)
+  assert.match(collectionApi, /storage_encrypted: true/)
+  assert.doesNotMatch(api, /export async function listRequestCollections/)
   assert.doesNotMatch(page, /detail\.collection\.(encrypted_payload|document|environment)/)
   assert.doesNotMatch(picker, /encrypted_payload/)
   assert.match(page, /never reads secret-bearing content back/)

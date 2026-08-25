@@ -8,7 +8,7 @@ import {
   type RequestCollectionDetail,
   type RequestCollectionReplayPolicy,
   type RequestCollectionTargetKind,
-} from '@/lib/api'
+} from '@/lib/requestCollectionApi'
 
 export type RequestCollectionSelectionMetadata = Record<string, {
   replayPolicy: RequestCollectionReplayPolicy
