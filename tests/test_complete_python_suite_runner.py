@@ -49,7 +49,9 @@ def test_partition_environment_preserves_the_launch_interpreters_packages(packag
     assert str(root) in paths
     assert str(root / "api") in paths
     assert str(root / "scanner") in paths
-    assert any(path.endswith("site-packages") for path in paths)
+    assert any(
+        path.endswith(("site-packages", "dist-packages")) for path in paths
+    )
 
 
 def test_junit_reports_are_combined_without_losing_suite_totals(tmp_path):
