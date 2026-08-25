@@ -397,28 +397,41 @@ function ScanFindingContextCard({
 }) {
   if (!scan?.target_id) return null
   const rawCurrent = Array.isArray(scan?.result?.findings) ? scan.result.findings : []
-  const persistedCurrent = targetFindings.filter((finding) => finding.scan_id === scan.id)
-  const currentKeys = new Set(rawCurrent.map((finding: any) => [
+  const scanPersistedCurrent = Array.isArray(scan?.findings) ? scan.findings : []
+  const historyPersistedCurrent = targetFindings.filter((finding) => finding.scan_id === scan.id)
+  const persistedCurrent = [
+    ...scanPersistedCurrent,
+    ...historyPersistedCurrent.filter((finding) => (
+      !scanPersistedCurrent.some((current: Finding) => current.id === finding.id)
+    )),
+  ]
+  const findingKey = (finding: any) => [
     String(finding?.title || ''),
     String(finding?.url || ''),
     String(finding?.cwe || ''),
-  ].join('|')))
-  const additionalPersistedCurrent = persistedCurrent.filter((finding) => !currentKeys.has([
-    String(finding.title || ''),
-    String(finding.url || ''),
-    String(finding.cwe || ''),
-  ].join('|')))
+  ].join('|')
+  const persistedByKey = new Map(
+    persistedCurrent.map((finding: Finding) => [findingKey(finding), finding]),
+  )
+  const currentKeys = new Set(rawCurrent.map(findingKey))
+  const additionalPersistedCurrent = persistedCurrent.filter(
+    (finding: Finding) => !currentKeys.has(findingKey(finding)),
+  )
   const current = [
-    ...rawCurrent.map((finding: any, index: number) => ({
-      ...finding,
-      _rowKey: `raw-${finding.id || finding.fingerprint || index}`,
-      _origin: 'this scan' as const,
-      _persisted: false,
-    })),
+    ...rawCurrent.map((finding: any, index: number) => {
+      const persisted = persistedByKey.get(findingKey(finding))
+      return {
+        ...finding,
+        ...persisted,
+        _rowKey: `raw-${persisted?.id || finding.id || finding.fingerprint || index}`,
+        _origin: 'observed in this scan' as const,
+        _persisted: Boolean(persisted?.id || finding.id),
+      }
+    }),
     ...additionalPersistedCurrent.map((finding) => ({
       ...finding,
       _rowKey: `persisted-${finding.id}`,
-      _origin: 'this scan' as const,
+      _origin: 'observed in this scan' as const,
       _persisted: true,
     })),
   ]
@@ -428,9 +441,9 @@ function ScanFindingContextCard({
     <Card className="mb-6 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-gray-200">Findings from this scan</h2>
+          <h2 className="text-sm font-semibold text-gray-200">Findings observed in this scan</h2>
           <p className="mt-1 text-xs text-gray-500">
-            This run's signals are kept separate from findings already tracked on the target.
+            This run's observations are kept separate from findings that were not observed in this run.
           </p>
         </div>
         <Link href={`/findings?target_id=${scan.target_id}`} className="text-xs text-blue-300 hover:text-blue-200">
@@ -438,8 +451,8 @@ function ScanFindingContextCard({
         </Link>
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
-        <span className="rounded bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} from this scan</span>
-        <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} earlier on target</span>
+        <span className="rounded bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} observed in this scan</span>
+        <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} not observed in this scan</span>
       </div>
       {loading ? (
         <p className="mt-3 text-sm text-gray-500">Loading target finding history…</p>
@@ -456,7 +469,7 @@ function ScanFindingContextCard({
               <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
                 {String(finding.severity || 'info')}
               </span>
-              <span className={`rounded px-1.5 py-0.5 text-xs ${finding._origin === 'this scan' ? 'bg-blue-500/10 text-blue-200' : 'bg-gray-800 text-gray-300'}`}>
+              <span className={`rounded px-1.5 py-0.5 text-xs ${finding._origin === 'observed in this scan' ? 'bg-blue-500/10 text-blue-200' : 'bg-gray-800 text-gray-300'}`}>
                 {finding._origin}
               </span>
               {finding.id && finding._persisted ? (

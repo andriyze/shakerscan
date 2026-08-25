@@ -13,10 +13,16 @@ test('scan result fetches durable finding history for its exact target', () => {
   assert.match(detail, /limit: 100/)
 })
 
-test('scan result separates current signals from earlier target findings', () => {
-  assert.match(detail, /Findings from this scan/)
-  assert.match(detail, /from this scan/)
-  assert.match(detail, /earlier on target/)
+test('scan result reconciles report evidence with durable IDs from the scan payload', () => {
+  assert.match(detail, /const scanPersistedCurrent = Array\.isArray\(scan\?\.findings\)/)
+  assert.match(detail, /const persistedByKey = new Map/)
+  assert.match(detail, /_persisted: Boolean\(persisted\?\.id \|\| finding\.id\)/)
+})
+
+test('scan result separates observations from findings not observed by this run', () => {
+  assert.match(detail, /Findings observed in this scan/)
+  assert.match(detail, /observed in this scan/)
+  assert.match(detail, /not observed in this scan/)
   assert.match(detail, /Open all target findings/)
   assert.match(detail, /const rawCurrent = Array\.isArray\(scan\?\.result\?\.findings\)/)
 })
