@@ -70754,7 +70754,7 @@ async def scale_workers(request: WorkerScaleRequest):
     try:
         count = request.count
         _max_allowed = _compute_max_allowed_workers()
-        if count < 1 or count > _max_allowed:
+        if count < 1:
             raise HTTPException(400, f"Workers must be between 1 and {_max_allowed}")
 
         # Get current workers via socket API
@@ -70785,6 +70785,14 @@ async def scale_workers(request: WorkerScaleRequest):
                 "target_count": current_count,
                 "message": f"Already at {count} worker(s)"
             }
+
+        # An older configuration may have launched more workers than the current
+        # memory-derived ceiling. Always permit a request that moves that fleet
+        # downward; applying the ceiling before discovering the current count made
+        # the dashboard's one-step decrease control impossible to use. The ceiling
+        # still rejects every request that would grow an at/over-limit fleet.
+        if count > _max_allowed and count > current_count:
+            raise HTTPException(400, f"Workers must be between 1 and {_max_allowed}")
 
         if count > current_count:
             # Remove non-running worker containers (stopped, crash-looping, or left

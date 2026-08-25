@@ -114,6 +114,53 @@ def test_worker_capacity_defaults_to_five_below_sixteen_gb(monkeypatch):
     assert api_module._compute_max_allowed_workers() == 5
 
 
+def test_worker_scaler_allows_oversized_fleet_to_move_down(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_MAX_WORKERS", "5")
+    containers = [
+        {"Id": f"worker-{index}", "State": "running"}
+        for index in range(11)
+    ]
+    removed = []
+
+    def docker_request(method, path, body=None):
+        if method == "GET" and path.startswith("/containers/json"):
+            return 200, containers
+        if method == "DELETE":
+            removed.append(path)
+            return 204, {}
+        raise AssertionError((method, path, body))
+
+    monkeypatch.setattr(api_module, "docker_socket_request", docker_request)
+    monkeypatch.setattr(api_module, "_local_compose_project_best_effort", lambda: "shakerscan")
+    monkeypatch.setattr(api_module, "_is_local_scan_worker_container", lambda *_args, **_kwargs: True)
+
+    result = asyncio.run(api_module.scale_workers(api_module.WorkerScaleRequest(count=10)))
+
+    assert result["target_count"] == 10
+    assert len(removed) == 1
+
+
+def test_worker_scaler_rejects_growth_beyond_safety_limit(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_MAX_WORKERS", "5")
+    containers = [
+        {"Id": f"worker-{index}", "State": "running"}
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        api_module,
+        "docker_socket_request",
+        lambda method, path, body=None: (200, containers),
+    )
+    monkeypatch.setattr(api_module, "_local_compose_project_best_effort", lambda: "shakerscan")
+    monkeypatch.setattr(api_module, "_is_local_scan_worker_container", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(api_module.scale_workers(api_module.WorkerScaleRequest(count=6)))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Workers must be between 1 and 5"
+
+
 def test_stale_scan_cleanup_normalizes_raw_redis_job_replies():
     scan_id = "11111111-1111-4111-8111-111111111111"
     decoded = api_module._decode_redis_hash({

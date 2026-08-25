@@ -6907,7 +6907,7 @@ export async function scaleWorkers(count: number): Promise<{ status: string; tar
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ count })
   })
-  if (!res.ok) throw new Error('Failed to scale workers')
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to scale workers'))
   return res.json()
 }
 

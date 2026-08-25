@@ -316,6 +316,11 @@ export default function Dashboard() {
                 {staleCount} stale
               </span>
             )}
+            {!fleetEnabled && workersKnown && (
+              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`Worker safety limit: ${maxWorkers}`}>
+                {workerCount} running · max {maxWorkers}
+              </span>
+            )}
             <span className="h-5 w-px bg-gray-800" aria-hidden="true" />
             <button
               type="button"
@@ -332,7 +337,9 @@ export default function Dashboard() {
               onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
               disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
               aria-label={fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
-              title={fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
+              title={(workerCount || 0) >= maxWorkers
+                ? `Worker safety limit reached (${maxWorkers})`
+                : fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
               className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />
