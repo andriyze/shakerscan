@@ -197,7 +197,7 @@ def test_native_device_policy_is_typed_paced_and_fail_closed():
 def test_native_device_hunts_never_seed_legacy_agent_state():
     source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
     start = source.index("async def _start_hunt_v2(")
-    end = source.index("\n\nasync def _parse_hunt_start_body", start)
+    end = source.index("\n\n_hunt_run_service =", start)
     native_start = source[start:end]
     assert "device_agent.seed_state" not in native_start
     assert '"device_state"' not in native_start

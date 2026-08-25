@@ -118,12 +118,19 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
     assert cancelled_after_finish["status"] == "completed"
 
 
-def test_hunt_run_router_owns_only_read_and_terminal_lifecycle_routes():
+def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
     paths = {
         (frozenset(route.methods or ()), route.path, route.name)
         for route in run_router.router.routes
     }
     assert paths == {
+        (frozenset({"POST"}), "/hunts", "start_hunt"),
+        (frozenset({"GET"}), "/hunts/contract", "get_hunt_contract"),
+        (
+            frozenset({"GET"}),
+            "/hunts/lifecycle-metrics",
+            "get_hunt_lifecycle_metrics",
+        ),
         (frozenset({"GET"}), "/hunts/{hunt_id}", "get_hunt"),
         (frozenset({"GET"}), "/hunts", "list_hunts"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/finish", "finish_hunt"),

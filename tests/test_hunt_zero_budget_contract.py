@@ -49,14 +49,14 @@ def test_api_ui_contract_generation_and_migration_defaults_stay_in_sync():
     )
     assert completed.returncode == 0, completed.stderr
 
-    api = (ROOT / "api" / "api.py").read_text()
+    router = (ROOT / "api" / "hunt" / "run_router.py").read_text()
     migration = (ROOT / "api" / "retest_contract.py").read_text()
     initial_schema = (ROOT / "db" / "init.sql").read_text()
     hunt_table = initial_schema[initial_schema.index("CREATE TABLE hunt_runs ("):]
     hunt_table = hunt_table[:hunt_table.index("CREATE INDEX idx_hunt_runs_web")]
-    assert '@app.get("/hunts/contract", tags=["Hunt"])' in api
-    assert "allow_oob_interactions: bool = False" in api
-    assert "hunt_start_public_contract()" in api
+    assert '@router.get("/hunts/contract", tags=["Hunt"])' in router
+    assert "allow_oob_interactions: bool = False" in router
+    assert "hunt_start_public_contract()" in router
     assert "'{allow_oob_interactions}'" in migration
     assert "'false'::jsonb" in migration
     assert "policy_json JSONB NOT NULL DEFAULT " \

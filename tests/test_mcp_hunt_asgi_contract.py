@@ -69,7 +69,23 @@ def hunt_asgi(monkeypatch):
             "context_pack": {},
         }
 
-    monkeypatch.setattr(api_module, "_start_hunt_v2", fake_start)
+    # The product router receives its handler once during application startup.
+    # Patch the exact registered endpoint module because the complete-suite
+    # runner deliberately exercises both supported import layouts.
+    registered_routes = (
+        nested
+        for route in api_module.app.routes
+        for nested in getattr(
+            getattr(route, "original_router", None), "routes", (route,)
+        )
+    )
+    start_route = next(
+        route
+        for route in registered_routes
+        if getattr(route, "path", None) == "/hunts"
+        and "POST" in (getattr(route, "methods", None) or ())
+    )
+    monkeypatch.setitem(start_route.endpoint.__globals__, "_start_handler", fake_start)
     http = TestClient(api_module.app)
     return MCPAgainstASGI(http), http, captured
 
@@ -198,4 +214,3 @@ def test_real_capability_request_model_requires_retry_identity():
 
     with pytest.raises(ValidationError):
         api_module.HuntCapabilityRequest.model_validate({"input": {}})
-
