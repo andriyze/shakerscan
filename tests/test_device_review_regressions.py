@@ -289,6 +289,7 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
 
 def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     api = (ROOT / "api" / "api.py").read_text()
+    collection_api = (ROOT / "api" / "request_collection_api.py").read_text()
     worker = (ROOT / "api" / "worker.py").read_text()
     agent = (ROOT / "api" / "device_agent.py").read_text()
     schema = (ROOT / "db" / "init.sql").read_text()
@@ -322,7 +323,7 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert "Use real imported API requests" in ui
     assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt
     assert "CREATE TABLE request_collections" in schema
-    assert '@app.post("/request-collections")' in api
+    assert '@router.post("/request-collections")' in collection_api
     assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()
     assert "allow_untrusted_tls_credentials" in api
     assert "untrusted_tls_credentials_not_confirmed" in web

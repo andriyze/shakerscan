@@ -138,15 +138,18 @@ def test_generic_storage_and_scan_hunt_api_contracts_are_wired():
     root = Path(__file__).resolve().parents[1]
     schema = (root / "db" / "init.sql").read_text()
     api = (root / "api" / "api.py").read_text()
+    router = (root / "api" / "request_collection_api.py").read_text()
 
     assert "CREATE TABLE request_collections" in schema
     assert "CREATE TABLE request_collection_requests" in schema
-    assert 'app.post("/request-collections")' in api
-    assert 'app.get("/request-collections/{collection_id}/requests")' in api
-    assert 'app.post("/request-collections/{collection_id}/select")' in api
-    assert 'app.post("/request-collections/{collection_id}/environments")' in api
-    assert 'app.post("/request-collections/{collection_id}/bindings")' in api
-    assert 'app.post("/request-collections/{collection_id}/selections")' in api
+    assert "app.include_router(request_collection_router)" in api
+    assert '@router.post("/request-collections")' in router
+    assert '@router.get("/request-collections/{collection_id}/requests")' in router
+    assert '@router.post("/request-collections/{collection_id}/select")' in router
+    assert '@router.post("/request-collections/{collection_id}/environments")' in router
+    assert '@router.post("/request-collections/{collection_id}/bindings")' in router
+    assert '@router.post("/request-collections/{collection_id}/selections")' in router
+    assert "import api" not in router
     assert "collection_manifest_requests," in api
     assert ") = await _generic_collection_refs" in api
     assert "secret_values_visible" in api
