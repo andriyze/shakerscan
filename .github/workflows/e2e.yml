@@ -77,7 +77,19 @@ jobs:
           docker compose exec -T worker python3 -c 'import urllib.request; response = urllib.request.urlopen("http://juice-shop:3000/rest/products/search?q=apple", timeout=10); assert response.status == 200'
 
       - name: Run full E2E release gate
-        run: python3 tests/e2e/run_e2e.py --area all
+        run: |
+          mkdir -p artifacts
+          python3 tests/e2e/run_e2e.py --area all \
+            --scorecard artifacts/e2e-scorecard.json
+
+      - name: Upload exact-SHA E2E scorecard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-e2e-${{ inputs.candidate_sha }}
+          path: artifacts/e2e-scorecard.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Dump stack logs on failure
         if: failure()

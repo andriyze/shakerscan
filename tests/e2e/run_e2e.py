@@ -492,6 +492,7 @@ def run_platform() -> H.Scorecard:
     target_id = ""
     schedule_id = ""
     finding_id = ""
+    credential_id = ""
     target_url = f"https://platform-{_RUN_NONCE}.invalid"
     try:
         target_status, target = H.post("/targets", {
@@ -569,9 +570,112 @@ def run_platform() -> H.Scorecard:
             and isinstance(evidence.get("evidence_objects"), list),
             f"listed={finding_id in listed_ids} evidence_count={len(evidence.get('evidence_objects') or [])}",
         )
+
+        credential_status, credential = H.post("/credential-profiles", {
+            "target_kind": "web",
+            "target_id": target_id,
+            "name": f"Disposable platform credential {_RUN_NONCE}",
+            "auth_kind": "authorization_header",
+            "principal_slot": "primary",
+            "principal_label": "e2e-primary",
+            "secret": f"Bearer disposable-{_RUN_NONCE}",
+            "allowed_capabilities": ["http.request"],
+            "created_by": "platform-e2e",
+        })
+        credential_profile = credential.get("profile") or {}
+        credential_id = str(credential_profile.get("id") or "")
+        if credential_status != 201 or not credential_id:
+            raise RuntimeError(
+                f"credential creation failed: status={credential_status} body={credential}"
+            )
+        public_before = json.dumps(credential_profile, sort_keys=True)
+        rotate_status, rotated = H.post(
+            f"/credential-profiles/{credential_id}/rotate",
+            {
+                "expected_record_version": credential_profile.get("record_version"),
+                "secret": f"Bearer rotated-{_RUN_NONCE}",
+                "created_by": "platform-e2e",
+            },
+        )
+        rotated_profile = rotated.get("profile") or {}
+        public_after = json.dumps(rotated_profile, sort_keys=True)
+        sc.check(
+            "P-9 encrypted credential create and rotation stay metadata-only",
+            rotate_status == 200
+            and rotated_profile.get("record_version") == 2
+            and rotated_profile.get("storage_encrypted") is True
+            and rotated_profile.get("execution_compatible") is True
+            and "disposable-" not in public_before
+            and "rotated-" not in public_after
+            and rotated_profile.get("secret_values_visible") is False,
+            (
+                f"create_status={credential_status} rotate_status={rotate_status} "
+                f"version={rotated_profile.get('record_version')}"
+            ),
+        )
+
+        collection_status, collection = H.post("/request-collections", {
+            "target_id": target_id,
+            "name": f"Disposable platform collection {_RUN_NONCE}",
+            "format": "postman_collection",
+            "document": {
+                "info": {
+                    "name": "Platform E2E",
+                    "schema": (
+                        "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+                    ),
+                },
+                "item": [{
+                    "name": "Safe health request",
+                    "request": {"method": "GET", "url": f"{target_url}/health"},
+                }],
+            },
+        })
+        collection_id = str(collection.get("id") or "")
+        binding_id = str((collection.get("binding") or {}).get("id") or "")
+        if collection_status != 200 or not collection_id or not binding_id:
+            raise RuntimeError(
+                f"collection creation failed: status={collection_status} body={collection}"
+            )
+        select_status, selected = H.post(
+            f"/request-collections/{collection_id}/select",
+            {"methods": ["GET"], "safe_methods_only": True, "limit": 10},
+        )
+        selected_blob = json.dumps(selected, sort_keys=True)
+        sc.check(
+            "P-10 request collection import, binding, and redacted selection work",
+            select_status == 200
+            and selected.get("count") == 1
+            and selected.get("secret_values_visible") is False
+            and "Bearer disposable-" not in selected_blob,
+            (
+                f"collection_status={collection_status} select_status={select_status} "
+                f"count={selected.get('count')}"
+            ),
+        )
+
+        manifest = H.get(
+            f"/evidence/export-manifest?finding_id={finding_id}&limit=10"
+        )
+        bundle = H.get(
+            f"/evidence/export-bundle?finding_id={finding_id}&limit=10&format=json"
+        )
+        sc.check(
+            "P-11 evidence manifest and bundle exports remain content-free",
+            manifest.get("content_included") is False
+            and bundle.get("content_included") is False
+            and isinstance(manifest.get("manifest_hash"), str)
+            and isinstance(bundle.get("bundle_hash"), str),
+            (
+                f"manifest_schema={manifest.get('schema_version')} "
+                f"bundle_schema={bundle.get('schema_version')}"
+            ),
+        )
     except Exception as exc:
-        sc.error("P-6/P-7/P-8 disposable persistence lifecycle", exc)
+        sc.error("P-6 through P-11 disposable persistence lifecycle", exc)
     finally:
+        if credential_id:
+            H.delete(f"/credential-profiles/{credential_id}")
         if finding_id:
             H.delete(f"/findings/{finding_id}")
         if schedule_id:

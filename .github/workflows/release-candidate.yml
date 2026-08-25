@@ -149,6 +149,18 @@ jobs:
           verify_run "$CODEQL_RUN_ID" "CodeQL"
           verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
 
+      - name: Download exact-SHA E2E scorecard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          E2E_RUN_ID: ${{ inputs.e2e_run_id }}
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        run: |
+          mkdir -p artifacts/external-e2e
+          gh run download "$E2E_RUN_ID" \
+            --name "full-e2e-${CANDIDATE_SHA}" \
+            --dir artifacts/external-e2e
+          test "$(jq -r '.gate' artifacts/external-e2e/e2e-scorecard.json)" = pass
+
       - name: Smoke-test frozen-source installer
         run: make installer-smoke
 
@@ -223,11 +235,14 @@ jobs:
 
       - name: Unit, contract, documentation, and release gates
         run: |
+          mkdir -p artifacts
           docker run --rm --entrypoint python \
             -e PYTHONPATH=/src/api:/src/scanner:/src \
             -v "$PWD:/src:ro" -w /src \
+            -v "$PWD/artifacts:/artifacts" \
             shakerscan-scanner:release-candidate \
-            -m pytest -q -p no:cacheprovider tests
+            scripts/run_complete_python_suite.py \
+            --artifacts-dir /artifacts
           docker run --rm --entrypoint python \
             -e PYTHONPATH=/src/api:/src/scanner:/src \
             -v "$PWD:/src:ro" -w /src \
@@ -262,6 +277,36 @@ jobs:
           docker tag shakerscan-ui:release-candidate "shakerscan-ui:$VERSION"
           docker tag shakerscan-model-intake-signer:release-candidate "shakerscan-model-intake-signer:$VERSION"
           make installed-stack-smoke
+
+      - name: Certify Model Intake and mature subsystem preservation
+        env:
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        run: |
+          scanner_id="$(docker image inspect --format '{{.Id}}' shakerscan-scanner:release-candidate)"
+          api_id="$(docker image inspect --format '{{.Id}}' shakerscan-api:release-candidate)"
+          ui_id="$(docker image inspect --format '{{.Id}}' shakerscan-ui:release-candidate)"
+          signer_id="$(docker image inspect --format '{{.Id}}' shakerscan-model-intake-signer:release-candidate)"
+          python3 scripts/release_preservation.py \
+            --matrix tests/release_preservation_matrix.json \
+            --junit artifacts/v2-full-python.xml \
+            --e2e-scorecard artifacts/external-e2e/e2e-scorecard.json \
+            --source-sha "$CANDIDATE_SHA" \
+            --image "scanner=$scanner_id" \
+            --image "api=$api_id" \
+            --image "ui=$ui_id" \
+            --image "signer=$signer_id" \
+            --output artifacts/release-preservation.json
+          test "$(jq -r '.status' artifacts/release-preservation.json)" = pass
+          test "$(jq -r '.source_sha' artifacts/release-preservation.json)" = "$CANDIDATE_SHA"
+
+      - name: Upload candidate preservation receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-preservation-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/release-preservation.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Audit locked Python dependencies
         run: |

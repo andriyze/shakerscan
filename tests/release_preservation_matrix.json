@@ -1,0 +1,91 @@
+{
+  "schema_version": "release-preservation-matrix/v1",
+  "programs": {
+    "model_intake": {
+      "label": "Model Intake",
+      "controls": [
+        {"id":"fixture","label":"Deterministic fixture submission","e2e":{"area":"model_intake","row":"MI-2 correct digest verifies"}},
+        {"id":"identity","label":"Artifact and repository snapshot identity","pytest_selector":"tests/test_model_intake.py::test_huggingface_repository_snapshot_acquires_every_manifest_file"},
+        {"id":"static","label":"Static analysis evidence","pytest_selector":"tests/test_model_intake_scanners.py::test_required_warning_needs_resolution_and_cannot_satisfy_static_gate"},
+        {"id":"conversion","label":"Conversion equivalence","pytest_selector":"tests/test_model_intake_runner_receipts.py::test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence"},
+        {"id":"runtime","label":"Runtime execution evidence","pytest_selector":"tests/test_model_intake_runner_receipts.py::test_runtime_pass_requires_real_generated_isolation_and_load_observations"},
+        {"id":"embedding","label":"Embedding evaluation","pytest_selector":"tests/test_model_intake_loader_runner.py::test_guest_embedding_equivalence_uses_deterministic_cpu_execution"},
+        {"id":"data_plane","label":"Data-plane evaluation","pytest_selector":"tests/test_model_intake_runner_receipts.py::test_evaluation_and_data_plane_pass_claims_are_semantically_checked"},
+        {"id":"freeze","label":"Evidence freeze","pytest_selector":"tests/test_model_intake_workflow_contracts.py::test_conversion_evidence_freeze_binds_target_identity_not_source_loader"},
+        {"id":"approvals","label":"Independent approvals","pytest_selector":"tests/test_model_intake_control_plane.py::test_policy_requires_generated_evidence_and_separated_approvals"},
+        {"id":"policy","label":"Policy decision","pytest_selector":"tests/test_model_intake_reporting.py::test_complete_exact_subject_report_allows_only_with_matching_active_admission"},
+        {"id":"admission","label":"Signed admission","pytest_selector":"tests/test_model_intake_admission.py::test_signed_admission_verifies_exact_subjects"},
+        {"id":"revocation","label":"Revoked and expired approval rejection","pytest_selector":"tests/test_model_intake_admission.py::test_admission_rejects_tampering_drift_and_expiry"},
+        {"id":"report","label":"Deterministic report rebuild","pytest_selector":"tests/test_model_intake_reporting.py::test_report_digest_is_content_stable_across_render_times"},
+        {"id":"upgrade","label":"Upgrade with existing submissions","pytest_selector":"tests/test_model_intake_workflow_contracts.py::test_fresh_and_upgrade_schemas_share_deployment_binding_admission_fk"},
+        {"id":"restart","label":"Restart idempotency","pytest_selector":"tests/test_model_intake_runner_service.py::test_runner_restart_fails_interrupted_jobs_without_reexecution"},
+        {"id":"safetensors","label":"SafeTensors format","pytest_selector":"tests/test_model_intake.py::test_model_intake_accepts_signed_safetensors_with_provenance"},
+        {"id":"onnx","label":"ONNX format","pytest_selector":"tests/test_model_intake_loader_runner.py::test_onnx_profile_uses_hash_locked_cpu_runtime_for_hugging_face_families"},
+        {"id":"pytorch","label":"PyTorch conversion boundary","pytest_selector":"tests/test_model_intake_loader_runner.py::test_conversion_profile_is_narrow_digest_bound_and_model_agnostic"},
+        {"id":"legacy_transformers","label":"Legacy Transformers initialization","pytest_selector":"tests/test_model_intake_loader_runner.py::test_guest_installs_bounded_transformers_compatibility_defaults"},
+        {"id":"archive","label":"Local archive format","pytest_selector":"tests/test_model_intake_archives.py::test_complete_archive_path_detects_risky_model_configuration"},
+        {"id":"provider_acquisition","label":"URL and Hugging Face acquisition","pytest_selector":"tests/test_model_intake.py::test_model_intake_fetches_huggingface_resolve_url"}
+      ]
+    },
+    "ai_gate": {
+      "label": "AI Gate API, RAG, trace, MCP, and widget",
+      "controls": [
+        {"id":"api","label":"API target real-stack smoke","e2e":{"area":"ai_gate","row":"AI-1 smoke scan completed"}},
+        {"id":"rag","label":"RAG cross-principal real-stack control","e2e":{"area":"ai_gate","row":"AI-3 control: same probe IS generated in staging (non-vacuous)"}},
+        {"id":"trace","label":"Trace evidence isolation","pytest_selector":"tests/test_ai_gate_judging.py::test_rag_safe_source_id_suffix_is_not_cross_tenant_trace_context"},
+        {"id":"mcp","label":"MCP authorization checks","pytest_selector":"tests/test_ai_gate_judging.py::test_mcp_oauth_audience_confusion_is_detected"},
+        {"id":"widget","label":"Widget request budgets","pytest_selector":"tests/test_ai_gate_judging.py::test_widget_target_blocks_request_when_budget_is_exhausted"}
+      ]
+    },
+    "asm": {
+      "label": "Continuous ASM",
+      "controls": [
+        {"id":"registry","label":"ASM family registry","e2e":{"area":"platform","row":"P-2 ASM registry remains available"}},
+        {"id":"inventory","label":"ASM inventory and campaign ledger","pytest_selector":"tests/test_asm_inventory.py::test_claim_test_batch_writes_campaign_family_lease_attempt"}
+      ]
+    },
+    "device": {
+      "label": "Connected device review and SSH",
+      "controls": [
+        {"id":"readiness","label":"Device readiness is explicit","e2e":{"area":"platform","row":"P-3 Connected Devices inventory and readiness remain explicit"}},
+        {"id":"review","label":"Device review remains target-bound","pytest_selector":"tests/test_device_review_regressions.py::test_unified_hunt_history_is_durable_and_target_bound"},
+        {"id":"ssh","label":"SSH plans remain immutable and user-confirmed","pytest_selector":"tests/test_device_review_regressions.py::test_device_agent_shell_is_immutable_user_confirmed_and_remote_only"}
+      ]
+    },
+    "credentials": {
+      "label": "Credentials",
+      "controls": [
+        {"id":"live_lifecycle","label":"Real-stack encrypted lifecycle","e2e":{"area":"platform","row":"P-9 encrypted credential create and rotation stay metadata-only"}},
+        {"id":"contract","label":"Metadata-only CRUD and rotation","pytest_selector":"tests/test_credential_api.py::test_metadata_only_crud_and_rotation_never_return_secret_material"}
+      ]
+    },
+    "collections": {
+      "label": "Request collections",
+      "controls": [
+        {"id":"live_lifecycle","label":"Real-stack import, binding, and selection","e2e":{"area":"platform","row":"P-10 request collection import, binding, and redacted selection work"}},
+        {"id":"replay_boundary","label":"Safe selection remains bounded","pytest_selector":"tests/test_request_collections_v2.py::test_selector_defaults_to_safe_reads_and_never_returns_more_than_replay_limit"}
+      ]
+    },
+    "retest": {
+      "label": "Finding retest and verification",
+      "controls": [
+        {"id":"contract","label":"Canonical retest subject and proof paths","pytest_selector":"tests/test_retest_contract_aliases.py::test_retest_queue_contract_accepts_exactly_one_subject_kind"}
+      ]
+    },
+    "fleet": {
+      "label": "Fleet enrollment and cancellation",
+      "controls": [
+        {"id":"enrollment","label":"Single-use secret-free enrollment","pytest_selector":"tests/test_fleet.py::test_join_token_is_single_use_and_raw_secrets_are_never_stored"},
+        {"id":"cancellation","label":"Revocation blocks unused enrollment capacity","pytest_selector":"tests/test_fleet.py::test_join_token_revocation_blocks_remaining_uses_without_raw_secret"}
+      ]
+    },
+    "report_evidence": {
+      "label": "Report and evidence",
+      "controls": [
+        {"id":"live_export","label":"Real-stack content-free export","e2e":{"area":"platform","row":"P-11 evidence manifest and bundle exports remain content-free"}},
+        {"id":"report_rebuild","label":"Offline report rebuild","pytest_selector":"tests/test_scan_report_rebuild.py::test_offline_bundle_rebuilds_the_byte_stable_report"},
+        {"id":"evidence_integrity","label":"Hashed, redacted evidence objects","pytest_selector":"tests/test_evidence_objects.py::test_evidence_object_is_hashed_redaction_profiled_and_retention_classed"}
+      ]
+    }
+  }
+}
