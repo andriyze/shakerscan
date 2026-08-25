@@ -19,6 +19,14 @@ test('shared Credentials UI binds profiles to an exact supported target kind', (
   assert.match(credentialApi, /target_id: params\.target_id/)
 })
 
+test('changing credential target kind cannot query with the previous kind target ID', () => {
+  const changeKind = page.match(/function changeTargetKind[\s\S]*?\n  }/)?.[0] || ''
+  assert.match(changeKind, /setTargetId\(''\)/)
+  assert.match(changeKind, /setProfiles\(\[\]\)/)
+  assert.match(changeKind, /setTargetKind\(kind\)/)
+  assert.match(page, /onChange=\{\(event\) => changeTargetKind\(event\.target\.value as CredentialTargetKind\)\}/)
+})
+
 test('shared Credentials UI supports every canonical credential kind and lifecycle action', () => {
   for (const kind of [
     'authorization_header',

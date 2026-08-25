@@ -287,6 +287,17 @@ export default function CredentialsPage() {
     setEditorError(null)
   }
 
+  function changeTargetKind(kind: CredentialTargetKind) {
+    if (kind === targetKind) return
+    // A target ID is meaningful only inside its kind. Clear it in the same
+    // event before the profile-loading effect can combine a new kind with the
+    // previous kind's ID and surface a misleading 404.
+    setTargetId('')
+    setProfiles([])
+    setError(null)
+    setTargetKind(kind)
+  }
+
   async function saveProfile() {
     if (!targetId) return
     const validationErrors = validateDraft(draft, Boolean(rotating))
@@ -361,7 +372,7 @@ export default function CredentialsPage() {
       <Card className="mb-5 p-5">
         <div className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)_auto] md:items-end">
           <Field label="Target type">
-            <Select value={targetKind} onChange={(event) => setTargetKind(event.target.value as CredentialTargetKind)}>
+            <Select value={targetKind} onChange={(event) => changeTargetKind(event.target.value as CredentialTargetKind)}>
               <option value="web">Web</option>
               <option value="api">API</option>
               <option value="network">Network / SSH</option>
