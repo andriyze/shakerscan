@@ -2790,9 +2790,10 @@ def finding_proof_fields(finding: dict[str, Any]) -> dict[str, Any]:
 
     A High/Critical lead shown at full severity is the trust problem (docs §7):
     `is_verified` is the ONE boolean (deterministic proof == verdict 'exploited');
-    `is_suspected` marks an unproven High/Critical that must render as "suspected"
-    with a visible badge in the findings LIST, not only the detail page; and not
-    count as a proven High/Critical in the headline grade.
+    `is_suspected` marks explicit candidate evidence at every severity, plus any
+    unproven High/Critical that must render as "suspected" with a visible badge
+    in the findings LIST, not only the detail page. Neither case counts as
+    deterministic proof in the headline grade.
     """
     fields = _scan_time_verification_fields(finding) or {}
     verdict = str(
@@ -2805,7 +2806,24 @@ def finding_proof_fields(finding: dict[str, Any]) -> dict[str, Any]:
     is_verified = verdict == "exploited"
     severity = str(finding.get("severity") or "").lower()
     is_high_crit = severity in ("high", "critical")
-    is_suspected = is_high_crit and not is_verified
+    evidence = _json_object(finding.get("evidence"))
+    triage = _json_object(evidence.get("triage"))
+    evidence_proof_state = str(
+        finding.get("proof_state")
+        or evidence.get("proof_state")
+        or triage.get("proof_state")
+        or ""
+    ).strip().lower()
+    explicit_candidate = (
+        finding.get("suspected") is True
+        or finding.get("needs_verification") is True
+        or triage.get("suspected") is True
+        or triage.get("needs_verification") is True
+        or evidence_proof_state in {
+            "candidate", "suspected", "likely_vulnerable", "needs_review",
+        }
+    )
+    is_suspected = not is_verified and (is_high_crit or explicit_candidate)
     return {
         "is_verified": is_verified,
         "is_suspected": is_suspected,

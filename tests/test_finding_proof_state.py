@@ -106,10 +106,39 @@ def test_unproven_critical_is_suspected():
 
 
 def test_unproven_medium_is_not_suspected():
-    # Only High/Critical leads are the trust problem; medium/low are not "suspected".
+    # Severity alone does not invent a candidate state for medium/low rows.
     r = pf({"severity": "medium"})
     assert r["is_suspected"] is False
     assert r["proof_state"] == "unverified"
+
+
+def test_explicit_medium_template_candidate_remains_suspected():
+    r = pf({
+        "severity": "medium",
+        "evidence": {
+            "proof_state": "candidate",
+            "triage": {
+                "suspected": True,
+                "needs_verification": True,
+            },
+        },
+    })
+    assert r["is_verified"] is False
+    assert r["is_suspected"] is True
+    assert r["proof_state"] == "suspected"
+
+
+def test_json_encoded_persisted_candidate_evidence_is_not_downgraded():
+    r = pf({
+        "severity": "info",
+        "evidence": (
+            '{"proof_state":"candidate","triage":'
+            '{"suspected":true,"needs_verification":false}}'
+        ),
+    })
+    assert r["is_verified"] is False
+    assert r["is_suspected"] is True
+    assert r["proof_state"] == "suspected"
 
 
 def test_blocked_verdict_high_is_suspected_not_verified():
