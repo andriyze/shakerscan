@@ -41,3 +41,27 @@ test('tool-specific identity wins when legacy records share a title and endpoint
   const index = buildFindingLinkageIndex([nuclei, custom])
   assert.equal(linkedPersistedFinding({ title: custom.title, tool: custom.tool, url: custom.url }, index), custom)
 })
+
+test('probe-local AI finding IDs resolve only inside the current scan index', () => {
+  const sourceId = 'smoke.prompt-leakage:pii'
+  const honeyFinding = {
+    id: 'honey-finding-uuid',
+    source_finding_id: sourceId,
+    title: 'Honey prompt leakage',
+  }
+  const fixtureFinding = {
+    id: 'fixture-finding-uuid',
+    source_finding_id: sourceId,
+    title: 'Fixture prompt leakage',
+  }
+
+  const rawFinding = { id: sourceId }
+  assert.equal(
+    linkedPersistedFinding(rawFinding, buildFindingLinkageIndex([honeyFinding])),
+    honeyFinding,
+  )
+  assert.equal(
+    linkedPersistedFinding(rawFinding, buildFindingLinkageIndex([fixtureFinding])),
+    fixtureFinding,
+  )
+})

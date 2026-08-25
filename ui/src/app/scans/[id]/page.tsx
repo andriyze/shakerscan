@@ -11,6 +11,7 @@ import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGa
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
+import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -206,10 +207,12 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
 
 function DeploymentDecisionCard({
   decision,
+  persistedFindings,
   loading,
   onRefresh,
 }: {
   decision: DeploymentDecision | null
+  persistedFindings: Array<Record<string, unknown>>
   loading: boolean
   onRefresh: () => void
 }) {
@@ -226,6 +229,7 @@ function DeploymentDecisionCard({
   const exceptionCount = appliedExceptions.length
   const exceptionSummary = decision?.exception_summary
   const requiredEvidenceMissing = Array.isArray(decision?.required_evidence_missing) ? decision.required_evidence_missing : []
+  const persistedFindingIndex = buildFindingLinkageIndex(persistedFindings)
   const verdictClass =
     verdict === 'block'
       ? 'bg-red-900/50 text-red-200'
@@ -327,13 +331,16 @@ function DeploymentDecisionCard({
             </p>
           )}
           <ul className="space-y-1">
-            {blockingFindings.slice(0, 8).map((f, i) => (
-              <li key={f.id || i} className="flex items-center gap-2 text-xs">
+            {blockingFindings.slice(0, 8).map((f, i) => {
+              const persistedFinding = linkedPersistedFinding(f as Record<string, unknown>, persistedFindingIndex)
+              const persistedFindingId = typeof persistedFinding?.id === 'string' ? persistedFinding.id : null
+              return (
+              <li key={`${f.id || 'finding'}-${i}`} className="flex items-center gap-2 text-xs">
                 <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${deploySeverityClass(f.severity)}`}>
                   {String(f.severity || 'finding')}
                 </span>
-                {f.id ? (
-                  <Link href={`/findings/${f.id}`} className="text-gray-300 hover:text-white break-all">
+                {persistedFindingId ? (
+                  <Link href={`/findings/${persistedFindingId}`} className="text-gray-300 hover:text-white break-all">
                     {f.title || 'Untitled finding'}
                   </Link>
                 ) : (
@@ -348,7 +355,8 @@ function DeploymentDecisionCard({
                   </span>
                 )}
               </li>
-            ))}
+              )
+            })}
           </ul>
           {blockingCount > 8 && (
             <p className="mt-1 text-xs text-gray-500">+{blockingCount - 8} more</p>
@@ -515,6 +523,9 @@ function deltaClass(value: number | undefined, invert: boolean = false): string 
 
 function AiGateCampaignReviewCard({ scan }: { scan: any }) {
   const review: AiGateCampaignReview = buildAiGateCampaignReview(scan?.result)
+  const persistedFindingIndex = buildFindingLinkageIndex(
+    Array.isArray(scan?.findings) ? scan.findings : [],
+  )
   const [replayLoading, setReplayLoading] = useState<string | null>(null)
   const [replayError, setReplayError] = useState<string | null>(null)
   const [replayQueued, setReplayQueued] = useState<{ scan_id: string; ui_url?: string; label: string } | null>(null)
@@ -872,7 +883,10 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
         <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Replay / Rerun Findings</div>
           <div className="grid gap-2 lg:grid-cols-2">
-            {review.findings.map((finding) => (
+            {review.findings.map((finding) => {
+              const persistedFinding = linkedPersistedFinding(finding as unknown as Record<string, unknown>, persistedFindingIndex)
+              const persistedFindingId = typeof persistedFinding?.id === 'string' ? persistedFinding.id : null
+              return (
               <div key={finding.id || `${finding.title}-${finding.probe_id}`} className="rounded border border-gray-800 bg-gray-900/60 p-2">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${deploySeverityClass(finding.severity)}`}>
@@ -883,13 +897,14 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                 <div className="mt-1 text-[11px] text-gray-500">
                   {finding.probe_id || 'probe unknown'}{finding.probe_family ? ` · ${formatAiGateLabel(finding.probe_family)}` : ''}
                 </div>
-                {finding.id && (
-                  <Link href={`/findings/${finding.id}`} className="mt-2 inline-block rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                {persistedFindingId && (
+                  <Link href={`/findings/${persistedFindingId}`} className="mt-2 inline-block rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                     Review / replay
                   </Link>
                 )}
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
@@ -1725,6 +1740,7 @@ function ScanDetailContent() {
           <AiGateCampaignReviewCard scan={scan} />
           <DeploymentDecisionCard
             decision={deploymentDecision}
+            persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
             loading={deploymentDecisionLoading}
             onRefresh={refreshDeploymentDecision}
           />
@@ -1770,6 +1786,7 @@ function ScanDetailContent() {
             <div className="px-4 pb-4">
               <DeploymentDecisionCard
                 decision={deploymentDecision}
+                persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
                 loading={deploymentDecisionLoading}
                 onRefresh={refreshDeploymentDecision}
               />
@@ -1799,6 +1816,7 @@ function ScanDetailContent() {
       <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}
+        persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
         loading={deploymentDecisionLoading}
         onRefresh={refreshDeploymentDecision}
       />
