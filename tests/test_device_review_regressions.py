@@ -12,9 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_device_result_uses_the_shared_nul_sanitizer_before_returning():
-    source = (ROOT / "api" / "worker_handlers" / "non_dast.py").read_text()
-    branch = source[source.index("async def _run_device_posture("):]
-    branch = branch[:branch.index("async def _run_model_intake(")]
+    source = (ROOT / "api" / "worker_handlers" / "device.py").read_text()
+    branch = source[source.index("async def run_posture("):]
     assert "self.services.strip_null_bytes(result)" in branch
 
 
@@ -205,7 +204,8 @@ def test_unified_hunt_client_and_device_redirect_are_wired():
     assert "export async function startHuntV2Native" in hunt_client
     assert "startAgentHuntSession" not in api_client
     assert "startDeviceAgentSession" not in api_client
-    assert "export async function getHuntV2" in api_client
+    assert "export async function getHuntV2" in hunt_client
+    assert "export async function getHuntV2" not in api_client
     assert "new URLSearchParams({ target: id })" in hunt_ui
     assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
     assert "startHuntV2Native" in generic_hunt
@@ -214,13 +214,15 @@ def test_unified_hunt_client_and_device_redirect_are_wired():
 
 def test_unified_hunt_history_is_durable_and_target_bound():
     api = (ROOT / "api" / "api.py").read_text()
-    api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
+    hunt_router = (ROOT / "api" / "hunt" / "run_router.py").read_text()
+    hunt_client = (ROOT / "ui" / "src" / "lib" / "huntV2.ts").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     assert "CREATE TABLE IF NOT EXISTS hunt_runs" in (ROOT / "api" / "retest_contract.py").read_text()
-    assert '@app.get("/hunts")' in api
-    assert '@app.get("/hunts/{hunt_id}")' in api
-    assert "target_id" in api_client
+    assert '@router.get("/hunts")' in hunt_router
+    assert '@router.get("/hunts/{hunt_id}")' in hunt_router
+    assert "app.include_router(hunt_run_router)" in api
+    assert "target_id" in hunt_client
     assert "new URLSearchParams({ target: id })" in hunt_ui
     assert "query.set('legacy_run', run)" in hunt_ui
     assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
@@ -259,10 +261,9 @@ def test_device_children_have_redis_identity_and_dedicated_heartbeats():
 
 
 def test_device_worker_rechecks_feature_flag_and_injects_cancel_guard():
-    source = (ROOT / "api" / "worker_handlers" / "non_dast.py").read_text()
-    branch = source[source.index("async def _run_device_posture("):]
-    branch = branch[:branch.index("async def _run_model_intake(")]
-    assert "self._device_enabled()" in branch
+    source = (ROOT / "api" / "worker_handlers" / "device.py").read_text()
+    branch = source[source.index("async def run_posture("):]
+    assert "self.enabled()" in branch
     assert "DEVICE_POSTURE_ENABLED" in source
     assert 'device_options["_cancel_check"]' in branch
 

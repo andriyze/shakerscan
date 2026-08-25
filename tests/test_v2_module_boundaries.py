@@ -239,7 +239,14 @@ def test_product_services_are_concrete_and_independent_of_api_monolith():
 
 
 def test_worker_product_handlers_own_behavior_without_worker_wrappers():
-    _reject_monolith_imports("api/worker_handlers/non_dast.py")
+    for relative in (
+        "api/worker_handlers/non_dast.py",
+        "api/worker_handlers/device.py",
+        "api/worker_handlers/model_intake.py",
+        "api/worker_handlers/ai_gate.py",
+        "api/worker_handlers/services.py",
+    ):
+        _reject_monolith_imports(relative)
     handler_run = _class_method(
         "api/worker_handlers/non_dast.py", "NonDastWorkerHandler", "run",
     )
@@ -247,16 +254,16 @@ def test_worker_product_handlers_own_behavior_without_worker_wrappers():
     handler_attributes = {
         node.attr for node in ast.walk(handler_run) if isinstance(node, ast.Attribute)
     }
-    assert {"_run_device_posture", "_run_model_intake", "_run_ai_gate"}.issubset(
+    assert {"device", "model_intake", "ai_gate"}.issubset(
         handler_attributes
     )
-    for method, executor in (
-        ("_run_device_posture", "run_device_posture_scan"),
-        ("_run_model_intake", "run_model_intake_scan"),
-        ("_run_ai_gate", "run_ai_target_scan"),
+    for relative, class_name, method, executor in (
+        ("api/worker_handlers/device.py", "DeviceWorkerHandler", "run_posture", "run_device_posture_scan"),
+        ("api/worker_handlers/model_intake.py", "ModelIntakeWorkerHandler", "run", "run_model_intake_scan"),
+        ("api/worker_handlers/ai_gate.py", "AIGateWorkerHandler", "run", "run_ai_target_scan"),
     ):
         method_node = _class_method(
-            "api/worker_handlers/non_dast.py", "NonDastWorkerHandler", method,
+            relative, class_name, method,
         )
         assert method_node is not None
         assert executor in {

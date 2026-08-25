@@ -61,10 +61,14 @@ def test_worker_handlers_are_not_monolith_wrappers():
     non_dast = sources["non_dast.py"]
 
     assert "class NonDastWorkerHandler" in non_dast
-    assert "run_device_service_probe" in non_dast
-    assert "run_device_posture_scan" in non_dast
-    assert "run_model_intake_scan" in non_dast
-    assert "run_ai_target_scan" in non_dast
+    assert "DeviceWorkerHandler" in non_dast
+    assert "ModelIntakeWorkerHandler" in non_dast
+    assert "AIGateWorkerHandler" in non_dast
+    combined = "\n".join(sources.values())
+    assert "run_device_service_probe" in combined
+    assert "run_device_posture_scan" in combined
+    assert "run_model_intake_scan" in combined
+    assert "run_ai_target_scan" in combined
     for source in sources.values():
         assert "from worker import" not in source
         assert "import worker" not in source
