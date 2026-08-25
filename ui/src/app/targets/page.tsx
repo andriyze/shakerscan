@@ -553,7 +553,7 @@ function TargetsContent() {
             const domainInfo = (
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-white">{domain.root_domain}</span>
+                  <span className="block max-w-full truncate font-medium text-white">{domain.root_domain}</span>
                   {domain.subdomain_count > 0 && (
                     <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
                       +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
@@ -605,7 +605,7 @@ function TargetsContent() {
                         onClick={(e) => e.stopPropagation()}
                         className="hover:text-blue-400 transition-colors"
                       >
-                        {domain.root_target.total_scans} scans
+                        {domain.root_target.total_scans} completed scans
                       </Link>
                       {domain.root_target.active_findings_count > 0 && (
                         <Link
@@ -824,14 +824,14 @@ function TargetsContent() {
                           href={`/scans?domain=${domain.root_domain}`}
                           className="hover:text-blue-400 transition-colors"
                         >
-                          {subdomain.total_scans} scans
+                          {subdomain.total_scans} completed scans
                         </Link>
                         {subdomain.active_findings_count > 0 && (
                           <Link
                             href={`/findings?target_id=${subdomain.id}&status=active`}
                             className="text-yellow-500 hover:text-yellow-400 transition-colors"
                           >
-                            {subdomain.active_findings_count}
+                            {subdomain.active_findings_count} findings
                           </Link>
                         )}
                         {(subdomain.investigator_verified_count || 0) > 0 && (
