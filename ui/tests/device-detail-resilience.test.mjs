@@ -11,5 +11,6 @@ test('device collection summaries tolerate list responses without request previe
   assert.match(api, /requests: Array\.isArray\(collection\.summary\?\.requests\) \? collection\.summary\.requests : \[\]/)
   assert.match(api, /methods: collection\.summary\?\.methods \|\| \{\}/)
   assert.match(api, /port_hints: Array\.isArray/)
-  assert.match(page, /collection\.summary\.requests\.map/)
+  assert.match(page, /onToggle=\{\(event\) => \{ if \(event\.currentTarget\.open\) void loadRequestPreview\(collection\.id\) \}\}/)
+  assert.match(page, /requestPreviews\[collection\.id\]\.requests\.map/)
 })
