@@ -259,12 +259,18 @@ def test_mcp_server_protocol_and_notifications():
         "params": {"protocolVersion": "2024-11-05"},
     })
     notification = server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    cancelled = server.handle({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": 99, "reason": "client no longer needs the result"},
+    })
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
 
     assert initialized["result"]["protocolVersion"] == "2024-11-05"
     assert initialized["result"]["capabilities"] == {"tools": {"listChanged": False}}
     assert initialized["result"]["serverInfo"]["version"] == (ROOT / "VERSION").read_text().strip()
     assert notification is None
+    assert cancelled is None
     assert len(tools["result"]["tools"]) == 7 + len(mcp.HUNT_TOOLS)
 
 
