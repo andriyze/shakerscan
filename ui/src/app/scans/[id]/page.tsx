@@ -1156,6 +1156,15 @@ function ShardCard({ shard }: { shard: any }) {
     : selected || worklistTotal
       ? `${selected}${worklistTotal ? ` / ${worklistTotal}` : ''}`
       : null
+  const shardStatus = String(shard.status || '').trim().toLowerCase()
+  const rawPhase = String(shard.current_phase || '').trim()
+  const staleTerminalPhases = new Set(['pending', 'queued', 'running'])
+  const terminal = ['completed', 'failed', 'cancelled'].includes(shardStatus)
+  const phaseLabel = terminal && (!rawPhase || staleTerminalPhases.has(rawPhase.toLowerCase()))
+    ? shardStatus
+    : rawPhase || (shard.executing_node_id
+      ? `node ${String(shard.executing_node_id).slice(0, 8)}`
+      : shardStatus || 'queued')
 
   return (
     <Link
@@ -1173,13 +1182,7 @@ function ShardCard({ shard }: { shard: any }) {
         />
       </div>
       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-        <span>
-          {shard.current_phase && shard.current_phase !== shard.status
-            ? shard.current_phase
-            : shard.executing_node_id
-              ? `node ${String(shard.executing_node_id).slice(0, 8)}`
-              : 'queued'}
-        </span>
+        <span>{phaseLabel}</span>
         <span>{shard.findings_count || 0} findings</span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs">

@@ -30,3 +30,9 @@ test('direct shard pages identify the parent as the authoritative Scan', () => {
   assert.match(detail, /isShard \? 'Shard failed' : 'Scan failed'/)
   assert.match(detail, /Review parent Scan/)
 })
+
+test('terminal shard rollups never render stale queued or running phases', () => {
+  assert.match(detail, /const terminal = \['completed', 'failed', 'cancelled'\]\.includes\(shardStatus\)/)
+  assert.match(detail, /const staleTerminalPhases = new Set\(\['pending', 'queued', 'running'\]\)/)
+  assert.match(detail, /<span>\{phaseLabel\}<\/span>/)
+})
