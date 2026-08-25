@@ -35,6 +35,61 @@ def _reject_monolith_imports(relative: str) -> None:
     assert not violations, f"{relative} imports a monolith: {violations}"
 
 
+def _product_module_files() -> tuple[Path, ...]:
+    files: list[Path] = []
+    for package in ("scan", "hunt", "runtime", "capabilities", "worker_handlers"):
+        files.extend((ROOT / "api" / package).rglob("*.py"))
+    files.extend(
+        ROOT / "api" / name
+        for name in (
+            "app_lifecycle.py",
+            "credential_api.py",
+            "request_collection_api.py",
+            "fleet.py",
+            "model_intake_control_plane.py",
+        )
+    )
+    return tuple(sorted(path for path in files if path.is_file()))
+
+
+def _module_name(path: Path) -> str:
+    return ".".join(path.relative_to(ROOT).with_suffix("").parts)
+
+
+def _local_import_graph() -> dict[str, set[str]]:
+    files = _product_module_files()
+    modules = {_module_name(path): path for path in files}
+    for name, path in tuple(modules.items()):
+        if name.endswith(".__init__"):
+            modules.setdefault(name.removesuffix(".__init__"), path)
+    graph = {name: set() for name in modules}
+    for name, path in modules.items():
+        if name.endswith(".__init__"):
+            continue
+        package = name.rsplit(".", 1)[0]
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            candidates: list[str] = []
+            if isinstance(node, ast.Import):
+                candidates.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    parts = package.split(".")
+                    prefix = ".".join(parts[: len(parts) - node.level + 1])
+                    imported = ".".join(
+                        part for part in (prefix, node.module or "") if part
+                    )
+                else:
+                    imported = str(node.module or "")
+                candidates.append(imported)
+                candidates.extend(
+                    f"{imported}.{alias.name}" for alias in node.names if imported
+                )
+            graph[name].update(
+                candidate for candidate in candidates if candidate in modules
+            )
+    return graph
+
+
 def _top_level_definition(relative: str, name: str) -> ast.AST | None:
     return next(
         (
@@ -200,6 +255,32 @@ def test_worker_product_handlers_own_behavior_without_worker_wrappers():
         and _attribute_path(node.value) == ("_NON_DAST_WORKER_HANDLER", "run")
         for node in ast.walk(worker_tree)
     )
+
+
+def test_extracted_product_modules_are_acyclic_and_never_import_composition_roots():
+    files = _product_module_files()
+    assert len(files) >= 90
+    for path in files:
+        _reject_monolith_imports(str(path.relative_to(ROOT)))
+
+    graph = _local_import_graph()
+    visited: set[str] = set()
+    active: list[str] = []
+
+    def visit(module: str) -> None:
+        if module in active:
+            cycle = [*active[active.index(module):], module]
+            raise AssertionError("product import cycle: " + " -> ".join(cycle))
+        if module in visited:
+            return
+        active.append(module)
+        for dependency in sorted(graph[module]):
+            visit(dependency)
+        active.pop()
+        visited.add(module)
+
+    for module in sorted(graph):
+        visit(module)
 
 
 def test_parallel_parent_uses_canonical_compiler_service():

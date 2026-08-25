@@ -59,6 +59,11 @@ from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 try:
+    from app_lifecycle import ApiLifecycleDependencies, create_api_lifespan
+except ModuleNotFoundError:
+    from api.app_lifecycle import ApiLifecycleDependencies, create_api_lifespan
+
+try:
     from scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
 except ModuleNotFoundError:
     from scanner.scanner_tools.build_fingerprint import hash_source_files, runtime_file_map, source_file_map
@@ -4657,68 +4662,37 @@ def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
     return count_sql, params[:-2]
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage database connection pool lifecycle and background tasks."""
+def _set_database_pool(pool: Any) -> None:
+    """Publish the one live pool to legacy helpers during router extraction."""
     global db_pool
-    # Larger pool defaults: with up to ~20 workers persisting findings, two
-    # always-running background tasks (stale_scan_checker, schedule_runner),
-    # and concurrent UI requests, min=2/max=10 starves under load. Tune via
-    # DB_POOL_MIN_SIZE / DB_POOL_MAX_SIZE / DB_STATEMENT_TIMEOUT_MS env vars.
-    db_pool_min = _int_env("DB_POOL_MIN_SIZE", 5)
-    db_pool_max = _int_env("DB_POOL_MAX_SIZE", 25)
-    db_statement_timeout_ms = _int_env("DB_STATEMENT_TIMEOUT_MS", 30000)
+    db_pool = pool
 
-    async def _init_conn(conn):
-        # Server-side cap so a runaway query (e.g. ILIKE without a usable
-        # index) can't pin a pool slot indefinitely. 0 disables.
-        if db_statement_timeout_ms > 0:
-            await conn.execute(f"SET statement_timeout = {db_statement_timeout_ms}")
 
-    db_pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=db_pool_min,
-        max_size=db_pool_max,
-        init=_init_conn,
-    )
-    app.state.db_pool = db_pool
-    await ensure_verification_schema(db_pool)
-
-    fleet_edge_mode = os.environ.get("FLEET_EDGE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
-
-    # Publish the active-scan concurrency cap up front so a fresh/headless
-    # deployment doesn't run on the worker fallback until /workers is first hit.
-    try:
-        _publish_max_active_scans()
-        _publish_scanner_version()
-    except Exception:
-        pass
-
-    # The optional overlay TLS edge serves the same app against its own pool, but
-    # must not duplicate schedulers or maintenance controllers.
-    background_tasks: list[asyncio.Task] = []
-    if not fleet_edge_mode:
-        background_tasks = [
-            asyncio.create_task(stale_scan_checker(db_pool)),
-            asyncio.create_task(schedule_runner(db_pool)),
-            asyncio.create_task(asm_dispatcher(db_pool)),
-            asyncio.create_task(research_autopilot_runner(db_pool)),
-            asyncio.create_task(scan_artifact_retention_runner(db_pool)),
-            asyncio.create_task(model_intake_automatic_review_runner(db_pool)),
-        ]
-
-    yield
-
-    # Stop background tasks
-    for task in background_tasks:
-        task.cancel()
-    for task in background_tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    await db_pool.close()
+lifespan = create_api_lifespan(ApiLifecycleDependencies(
+    database_url=DATABASE_URL,
+    create_pool=lambda *args, **kwargs: asyncpg.create_pool(*args, **kwargs),
+    int_env=lambda name, default: _int_env(name, default),
+    set_pool=_set_database_pool,
+    ensure_schema=lambda pool: ensure_verification_schema(pool),
+    publish_max_active_scans=lambda: _publish_max_active_scans(),
+    publish_scanner_version=lambda: _publish_scanner_version(),
+    fleet_edge_mode=lambda: os.environ.get("FLEET_EDGE_MODE", "").strip().lower()
+    in {"1", "true", "yes", "on"},
+    background_controllers=(
+        ("stale_scan_checker", lambda pool: stale_scan_checker(pool)),
+        ("schedule_runner", lambda pool: schedule_runner(pool)),
+        ("asm_dispatcher", lambda pool: asm_dispatcher(pool)),
+        ("research_autopilot_runner", lambda pool: research_autopilot_runner(pool)),
+        (
+            "scan_artifact_retention_runner",
+            lambda pool: scan_artifact_retention_runner(pool),
+        ),
+        (
+            "model_intake_automatic_review_runner",
+            lambda pool: model_intake_automatic_review_runner(pool),
+        ),
+    ),
+))
 
 
 app = FastAPI(
