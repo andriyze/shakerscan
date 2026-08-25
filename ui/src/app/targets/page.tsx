@@ -8,7 +8,7 @@ import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
-import { boundedTargetDisplay } from '@/lib/targetChoices'
+import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -562,7 +562,7 @@ function TargetsContent() {
             const domainInfo = (
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="block max-w-full truncate font-medium text-white">{domain.root_domain}</span>
+                  <span className="block max-w-full truncate font-medium text-white">{boundedDisplayText(domain.root_domain, 96)}</span>
                   {domain.subdomain_count > 0 && (
                     <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
                       +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
