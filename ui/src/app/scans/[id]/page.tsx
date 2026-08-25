@@ -8,6 +8,7 @@ import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/li
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
+import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 
 function formatScanTypeLabel(scan: any): string {
@@ -94,8 +95,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
     .map((severity) => [severity, severityCounts[severity]] as const)
     .filter(([, count]) => count > 0)
   const totalCounted = severityEntries.reduce((sum, [, count]) => sum + count, 0)
-  const hasGrade = Boolean(scan.grade)
-  const hasScore = typeof scan.score === 'number'
+  const scorePresentation = deviceScorePresentation(scan)
+  const hasGrade = Boolean(scorePresentation.grade)
+  const hasScore = typeof scorePresentation.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
   const duration = scan.duration_seconds ? formatDuration(scan.duration_seconds) : null
   const scanVersion: string | null = scan?.result?.scanner_version || null
@@ -112,15 +114,29 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
   return (
     <Card className="p-6 mb-6">
       <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
-        {(hasGrade || hasScore) && (
-          <div className="flex items-baseline gap-3">
-            {hasGrade && (
-              <span className={`text-5xl font-bold ${gradeTextColor(scan.grade)}`}>
-                {scan.grade}
-              </span>
+        {(hasGrade || hasScore || scorePresentation.status === 'unavailable') && (
+          <div>
+            {scorePresentation.status === 'provisional' && (
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-300">
+                Provisional posture
+              </p>
             )}
-            {hasScore && (
-              <span className="text-lg text-gray-400">{scan.score}/100</span>
+            {scorePresentation.status === 'unavailable' ? (
+              <p className="text-sm font-medium text-amber-200">Posture score unavailable</p>
+            ) : (
+              <div className="flex items-baseline gap-3">
+                {hasGrade && (
+                  <span className={`text-5xl font-bold ${gradeTextColor(scorePresentation.grade)}`}>
+                    {scorePresentation.grade}
+                  </span>
+                )}
+                {hasScore && (
+                  <span className="text-lg text-gray-400">{scorePresentation.score}/100</span>
+                )}
+              </div>
+            )}
+            {scorePresentation.note && (
+              <p className="mt-1 max-w-md text-xs text-amber-200/80">{scorePresentation.note}</p>
             )}
           </div>
         )}

@@ -18,6 +18,7 @@ import { gradeTextColor } from '@/components/ui'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
+import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -782,6 +783,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const isAIScan = scan.scan_type === 'ai_gate' || String(scan.run_kind || '').startsWith('ai_') || Boolean(ai_gate)
   const isModelIntakeScan = scan.scan_type === 'model_intake' || scan.run_kind === 'model_intake' || Boolean(model_intake)
   const isDeviceScan = scan.scan_type === 'device_posture' || scan.run_kind === 'device_posture' || Boolean(devicePosture)
+  const scorePresentation = deviceScorePresentation(scan)
   // Continuous ASM recon is a DISCOVERY pass (active testing off by design) that
   // refreshes the endpoint inventory; active vuln testing runs as separate ASM
   // test batches. Don't frame its intentionally-off active modules as a
@@ -1033,13 +1035,27 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 </button>
               )}
             </div>
-            {(scan.grade || result.grade) && (
-              <div className={`text-5xl font-bold ${gradeTextColor(scan.grade || result.grade)}`}>
-                {scan.grade || result.grade}
+            {scorePresentation.status === 'provisional' && (
+              <div className="text-xs font-semibold uppercase tracking-wide text-amber-300">
+                Provisional posture
               </div>
             )}
-            {(scan.score != null || result.score != null) && (
-              <div className="text-xl text-gray-400">Score: {scan.score ?? result.score}/100</div>
+            {scorePresentation.status === 'unavailable' ? (
+              <div className="text-sm font-medium text-amber-200">Posture score unavailable</div>
+            ) : (
+              <>
+                {scorePresentation.grade && (
+                  <div className={`text-5xl font-bold ${gradeTextColor(scorePresentation.grade)}`}>
+                    {scorePresentation.grade}
+                  </div>
+                )}
+                {scorePresentation.score != null && (
+                  <div className="text-xl text-gray-400">Score: {scorePresentation.score}/100</div>
+                )}
+              </>
+            )}
+            {scorePresentation.note && (
+              <div className="max-w-sm text-xs text-amber-200/80">{scorePresentation.note}</div>
             )}
           </div>
         </div>

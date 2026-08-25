@@ -6,6 +6,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
+import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -285,6 +286,16 @@ function DeviceDetailContent() {
   const selectedPosture = selectedScan?.result && typeof selectedScan.result.device_posture === 'object' && selectedScan.result.device_posture !== null
     ? selectedScan.result.device_posture as Record<string, unknown>
     : null
+  const selectedScorePresentation = selectedScan ? deviceScorePresentation(selectedScan) : null
+  const selectedPostureLabel = selectedScorePresentation?.status === 'provisional'
+    ? `Provisional ${selectedScorePresentation.grade || 'score'}${selectedScorePresentation.score != null ? ` · ${selectedScorePresentation.score}` : ''}`
+    : selectedScorePresentation?.status === 'unavailable'
+      ? 'No reliable score'
+      : selectedScorePresentation?.grade
+        ? `${selectedScorePresentation.grade} · ${selectedScorePresentation.score ?? '—'}`
+        : selectedScanLoading
+          ? 'Loading scan…'
+          : 'No score'
   const selectedReachability = selectedPosture?.reachability && typeof selectedPosture.reachability === 'object'
     ? selectedPosture.reachability as unknown as typeof data.reachability
     : null
@@ -408,7 +419,7 @@ function DeviceDetailContent() {
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
           ['Class', device.device_class], ['Manufacturer', device.manufacturer || 'Unknown'], ['Model', device.model || 'Unknown'],
-          ['Policy', device.policy_name || 'Default'], ['Posture', device.last_grade ? `${device.last_grade} · ${device.last_score ?? '—'}` : 'Not scanned'],
+          ['Policy', device.policy_name || 'Default'], ['Posture', selectedScanId ? selectedPostureLabel : device.last_grade ? `${device.last_grade} · ${device.last_score ?? '—'}` : 'Not scanned'],
         ].map(([label, value]) => <Card key={label} className="p-3"><p className="text-xs text-gray-500">{label}</p><p className="mt-1 truncate font-medium text-white">{value}</p></Card>)}
       </div>
 
