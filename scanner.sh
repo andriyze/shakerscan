@@ -1870,6 +1870,7 @@ print_help() {
     echo "  logs [service]     View logs (api, worker, ui, postgres, redis)"
     echo "                       worker aggregates all shakerscan-worker* containers"
     echo "  scan <target>      Submit the deterministic DAST Scan"
+    echo "  hunt <cmd>         Start or drive one canonical Hunt"
     echo "  report-rebuild <bundle>  Rebuild a deterministic report fully offline"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
@@ -2282,6 +2283,17 @@ run_v2_scan_cli() {
         return 1
     fi
     python3 "$SCRIPT_DIR/scripts/scan_cli.py" "${cli_args[@]}" "$@"
+}
+
+run_v2_product_cli() {
+    local product="$1"
+    shift || true
+    if [ ! -f "$SCRIPT_DIR/scripts/v2_cli.py" ]; then
+        echo -e "${RED}Error: the V2 product CLI is missing from this runtime.${NC}" >&2
+        return 1
+    fi
+    python3 "$SCRIPT_DIR/scripts/v2_cli.py" \
+        --api-url "$(api_base_url)" "$product" "$@"
 }
 
 
@@ -3503,7 +3515,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|scan-full|scan-smart|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|scan-full|scan-smart|hunt|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -3572,6 +3584,9 @@ case $COMMAND in
         ;;
     scan-smart)
         run_v2_scan_cli "smart" "${ARGS[@]}"
+        ;;
+    hunt)
+        run_v2_product_cli "hunt" "${ARGS[@]}"
         ;;
     report-rebuild)
         if [ ! -f "$SCRIPT_DIR/scripts/rebuild_scan_report.py" ]; then

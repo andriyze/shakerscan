@@ -310,6 +310,7 @@ download "$REPO_RAW_BASE/scripts/local_planner_adapter.py" "$INSTALL_DIR/scripts
 download "$REPO_RAW_BASE/scripts/planner_evals.py" "$INSTALL_DIR/scripts/planner_evals.py"
 download "$REPO_RAW_BASE/scripts/fleet_cli.py" "$INSTALL_DIR/scripts/fleet_cli.py"
 download "$REPO_RAW_BASE/scripts/fleet_acceptance.py" "$INSTALL_DIR/scripts/fleet_acceptance.py"
+download "$REPO_RAW_BASE/scripts/v2_cli.py" "$INSTALL_DIR/scripts/v2_cli.py"
 download "$REPO_RAW_BASE/scripts/model_intake_runner_cli.py" "$INSTALL_DIR/scripts/model_intake_runner_cli.py"
 download "$REPO_RAW_BASE/scripts/build-model-intake-guest-rootfs.sh" "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"
 download "$REPO_RAW_BASE/scripts/provision-model-intake-firecracker.sh" "$INSTALL_DIR/scripts/provision-model-intake-firecracker.sh"
