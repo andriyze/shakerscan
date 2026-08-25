@@ -681,7 +681,9 @@ def test_linux_host_without_nested_virtualization_reports_unsupported_host(tmp_p
     result = firecracker_readiness({"SHAKERSCAN_HOST_PLATFORM": "linux"}, cpuinfo_path=guest)
     assert result["status"] == "UNSUPPORTED_HOST"
     assert result["supported_host"] is False
-    assert result["checks"]["kvm"] is False
+    # /dev/kvm is an ambient host observation and newer hosted CI runners may
+    # expose it. The pinned CPU fixture remains authoritative for this verdict.
+    assert isinstance(result["checks"]["kvm"], bool)
     assert result["unsupported_reason"] == "no_hardware_virtualization"
     # The remedy is off-host but real, so the reason must point at it rather
     # than claiming the machine can never run a microVM.
