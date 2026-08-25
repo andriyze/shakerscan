@@ -5,6 +5,15 @@
       "label": "Model Intake",
       "controls": [
         {"id":"fixture","label":"Deterministic fixture submission","e2e":{"area":"model_intake","row":"MI-2 correct digest verifies"}},
+        {"id":"bounded_partial","label":"Bounded partial acquisition stays incomplete, never false-mismatched","e2e":{"area":"model_intake","row":"MI-1 206 partial download flagged truncated (not mismatch)"},"pytest_selector":"tests/test_model_intake.py::test_model_intake_validates_truncated_safetensors_against_declared_artifact_size"},
+        {"id":"checksum_scope","label":"Partial artifact checksum scope is explicit","e2e":{"area":"model_intake","row":"MI-1 sha256 scope is inspected_bytes"},"pytest_selector":"tests/test_model_intake.py::test_model_intake_does_not_compare_full_hash_to_truncated_sample"},
+        {"id":"tamper","label":"Tampered artifacts fail closed","e2e":{"area":"model_intake","row":"MI-3 tampered artifact -> critical sha256_mismatch"},"pytest_selector":"tests/test_model_intake.py::test_model_intake_checksum_mismatch_is_critical_and_blocks"},
+        {"id":"unsafe_serialization","label":"Unsafe serialization is detected and blocked","e2e":{"area":"model_intake","row":"MI-4 dangerous pickle flagged"}},
+        {"id":"untrusted_signer","label":"Self-signed material cannot establish deployment trust","e2e":{"area":"model_intake","row":"MI-5 valid self-signed -> untrusted_root (not verified)"}},
+        {"id":"caller_authority","label":"Caller input cannot grant trust or admission authority","e2e":{"area":"model_intake","row":"MI-6 caller cannot supply its own trust anchor"},"pytest_selector":"tests/test_model_intake.py::test_metadata_url_cannot_reintroduce_deployment_approval_authority"},
+        {"id":"trust_expiry","label":"Expired and wrong durable anchors do not verify","e2e":{"area":"model_intake","row":"MI-6A expired and wrong durable anchors do not verify"}},
+        {"id":"trust_activation","label":"Active durable trust anchors verify exact signatures","e2e":{"area":"model_intake","row":"MI-6B operator-created durable anchor verifies exact signature"}},
+        {"id":"trust_deactivation","label":"Deactivated trust anchors immediately stop verification","e2e":{"area":"model_intake","row":"MI-6C deactivated durable anchor stops verification"}},
         {"id":"identity","label":"Artifact and repository snapshot identity","pytest_selector":"tests/test_model_intake.py::test_huggingface_repository_snapshot_acquires_every_manifest_file"},
         {"id":"static","label":"Static analysis evidence","pytest_selector":"tests/test_model_intake_scanners.py::test_required_warning_needs_resolution_and_cannot_satisfy_static_gate"},
         {"id":"conversion","label":"Conversion equivalence","pytest_selector":"tests/test_model_intake_runner_receipts.py::test_conversion_receipt_requires_tensor_numeric_and_embedding_equivalence"},
@@ -24,32 +33,58 @@
         {"id":"pytorch","label":"PyTorch conversion boundary","pytest_selector":"tests/test_model_intake_loader_runner.py::test_conversion_profile_is_narrow_digest_bound_and_model_agnostic"},
         {"id":"legacy_transformers","label":"Legacy Transformers initialization","pytest_selector":"tests/test_model_intake_loader_runner.py::test_guest_installs_bounded_transformers_compatibility_defaults"},
         {"id":"archive","label":"Local archive format","pytest_selector":"tests/test_model_intake_archives.py::test_complete_archive_path_detects_risky_model_configuration"},
-        {"id":"provider_acquisition","label":"URL and Hugging Face acquisition","pytest_selector":"tests/test_model_intake.py::test_model_intake_fetches_huggingface_resolve_url"}
+        {"id":"provider_acquisition","label":"URL and Hugging Face acquisition","pytest_selector":"tests/test_model_intake.py::test_model_intake_fetches_huggingface_resolve_url"},
+        {"id":"signing_boundary","label":"Workers have no admission signing authority","pytest_selector":"tests/test_model_intake_runtime_layout.py::test_worker_compose_and_scanner_have_no_admission_signing_authority"},
+        {"id":"browser","label":"Model Intake production page renders","playwright":{"title":"/model-intake renders without an application exception"}}
       ]
     },
     "ai_gate": {
       "label": "AI Gate API, RAG, trace, MCP, and widget",
       "controls": [
         {"id":"api","label":"API target real-stack smoke","e2e":{"area":"ai_gate","row":"AI-1 smoke scan completed"}},
+        {"id":"production_confirmation","label":"Production scans require explicit confirmation","e2e":{"area":"ai_gate","row":"AI-4 prod scan refused without confirm"}},
         {"id":"rag","label":"RAG cross-principal real-stack control","e2e":{"area":"ai_gate","row":"AI-3 control: same probe IS generated in staging (non-vacuous)"}},
+        {"id":"rag_production","label":"Production RAG blocks unsafe principal probes","e2e":{"area":"ai_gate","row":"AI-3 admin-impersonation probe blocked in production"}},
+        {"id":"prompt_injection","label":"Indirect prompt-injection harnesses remain available","pytest_selector":"tests/test_ai_gate_judging.py::test_probe_catalog_includes_indirect_injection_harnesses"},
         {"id":"trace","label":"Trace evidence isolation","pytest_selector":"tests/test_ai_gate_judging.py::test_rag_safe_source_id_suffix_is_not_cross_tenant_trace_context"},
         {"id":"mcp","label":"MCP authorization checks","pytest_selector":"tests/test_ai_gate_judging.py::test_mcp_oauth_audience_confusion_is_detected"},
-        {"id":"widget","label":"Widget request budgets","pytest_selector":"tests/test_ai_gate_judging.py::test_widget_target_blocks_request_when_budget_is_exhausted"}
+        {"id":"widget","label":"Widget request budgets","pytest_selector":"tests/test_ai_gate_judging.py::test_widget_target_blocks_request_when_budget_is_exhausted"},
+        {"id":"provider_failure","label":"Provider failures retain bounded attempt provenance","pytest_selector":"tests/test_ai_classifier_resilience.py::test_provider_failure_sink_is_populated_on_definitive_auth_error"},
+        {"id":"transcript_redaction","label":"Live transcripts redact planted secrets","e2e":{"area":"ai_gate","row":"AI-2 no planted secret survives transcript"},"pytest_selector":"tests/test_ai_gate_judging.py::test_judge_redactor_strips_credential_assignments_and_dsn"},
+        {"id":"finding_truth","label":"Deterministic AI Gate findings retain true-positive analysis","pytest_selector":"tests/test_ai_gate_judging.py::test_deterministic_ai_gate_finding_populates_true_positive_analysis"},
+        {"id":"browser","label":"AI Gate production page renders","playwright":{"title":"/ai-gate renders without an application exception"}}
       ]
     },
     "asm": {
       "label": "Continuous ASM",
       "controls": [
         {"id":"registry","label":"ASM family registry","e2e":{"area":"platform","row":"P-2 ASM registry remains available"}},
-        {"id":"inventory","label":"ASM inventory and campaign ledger","pytest_selector":"tests/test_asm_inventory.py::test_claim_test_batch_writes_campaign_family_lease_attempt"}
+        {"id":"toggle","label":"ASM policy enable and disable lifecycle","e2e":{"area":"platform","row":"P-12 ASM policy enable and disable round-trip"}},
+        {"id":"inventory","label":"ASM inventory and campaign ledger","pytest_selector":"tests/test_asm_inventory.py::test_claim_test_batch_writes_campaign_family_lease_attempt"},
+        {"id":"dynamic_batch","label":"Dynamic endpoint work is deduplicated and bounded","pytest_selector":"tests/test_asm_inventory.py::test_normalize_worklist_dedupes_by_fingerprint"},
+        {"id":"schedule_execution","label":"Successful schedules advance only after enqueue","pytest_selector":"tests/test_api_helpers.py::test_run_due_schedules_advances_schedule_after_successful_enqueue"},
+        {"id":"cancellation","label":"Campaign cancellation propagates to correlated scans","pytest_selector":"tests/test_api_helpers.py::test_campaign_cancel_propagates_to_preflight_scan"},
+        {"id":"freshness","label":"Freshness decisions reconcile due and skipped work","pytest_selector":"tests/test_asm_inventory.py::test_decide_action_skips"},
+        {"id":"merge","label":"Repeated endpoint evidence merges idempotently","pytest_selector":"tests/test_asm_inventory.py::test_record_endpoint_attempts_can_replace_existing_for_idempotent_merge"},
+        {"id":"browser","label":"ASM production page renders","playwright":{"title":"/asm renders without an application exception"}}
       ]
     },
     "device": {
       "label": "Connected device review and SSH",
       "controls": [
         {"id":"readiness","label":"Device readiness is explicit","e2e":{"area":"platform","row":"P-3 Connected Devices inventory and readiness remain explicit"}},
+        {"id":"reachability","label":"Reachability requires corroborated positive evidence","pytest_selector":"tests/test_device_reachability.py::test_scan_responses_corroborate_online_and_service_accessibility"},
+        {"id":"service_identity","label":"Service transport and TLS identity are retained","pytest_selector":"tests/test_device_posture_scanner.py::test_parse_nmap_services_preserves_transport_and_tls_identity"},
+        {"id":"web_evidence","label":"Web evidence binds the exact device service","pytest_selector":"tests/test_device_evidence.py::test_evidence_graph_is_stable_and_links_web_to_the_exact_service"},
+        {"id":"fragility","label":"Health degradation stops subsequent device actions","pytest_selector":"tests/test_device_safety.py::test_health_degradation_halts_future_actions_after_a_healthy_checkpoint"},
+        {"id":"credentials","label":"Saved device credentials decrypt only in worker memory","pytest_selector":"tests/test_device_review_regressions.py::test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memory"},
+        {"id":"collections","label":"Saved device collections stay encrypted and pinned","pytest_selector":"tests/test_device_review_regressions.py::test_device_request_collections_are_encrypted_pinned_and_agent_bounded"},
         {"id":"review","label":"Device review remains target-bound","pytest_selector":"tests/test_device_review_regressions.py::test_unified_hunt_history_is_durable_and_target_bound"},
-        {"id":"ssh","label":"SSH plans remain immutable and user-confirmed","pytest_selector":"tests/test_device_review_regressions.py::test_device_agent_shell_is_immutable_user_confirmed_and_remote_only"}
+        {"id":"ssh","label":"SSH plans remain immutable and user-confirmed","pytest_selector":"tests/test_device_review_regressions.py::test_device_agent_shell_is_immutable_user_confirmed_and_remote_only"},
+        {"id":"ssh_proposal","label":"SSH proposals are confirmation-gated and plan-bound","pytest_selector":"tests/test_hunt_device_ssh_proposal_reservations.py::test_ssh_proposal_receipt_is_confirmation_gated_and_plan_bound"},
+        {"id":"ssh_confirmation","label":"SSH confirmation binds user consent and downstream scan","pytest_selector":"tests/test_hunt_device_ssh_confirmation_reservations.py::test_confirmation_receipt_binds_user_consent_plan_and_downstream_scan"},
+        {"id":"history_upgrade","label":"Device identity and scan history survive locator changes","pytest_selector":"tests/test_device_review_regressions.py::test_device_locator_changes_preserve_identity_and_history"},
+        {"id":"browser","label":"Connected Devices production page renders","playwright":{"title":"/devices renders without an application exception"}}
       ]
     },
     "credentials": {
@@ -69,7 +104,21 @@
     "retest": {
       "label": "Finding retest and verification",
       "controls": [
-        {"id":"contract","label":"Canonical retest subject and proof paths","pytest_selector":"tests/test_retest_contract_aliases.py::test_retest_queue_contract_accepts_exactly_one_subject_kind"}
+        {"id":"contract","label":"Canonical retest subject and proof paths","pytest_selector":"tests/test_retest_contract_aliases.py::test_retest_queue_contract_accepts_exactly_one_subject_kind"},
+        {"id":"deterministic_proof","label":"Deterministic proof can promote only fresh verified findings","pytest_selector":"tests/test_worker_ai_merge.py::test_scan_time_verification_fields_promote_fresh_verified_finding"},
+        {"id":"ai_private_scope","label":"AI retest inherits only matching authorized private scope","pytest_selector":"tests/test_worker_ai_merge.py::test_private_retest_with_authorized_source_scan_can_be_classified"},
+        {"id":"weak_signal","label":"Meaningful unproven signals remain partial evidence","pytest_selector":"tests/test_worker_ai_merge.py::test_meaningful_nonproven_signal_is_partial_evidence"}
+      ]
+    },
+    "findings": {
+      "label": "Finding identity, truth, and attack-chain honesty",
+      "controls": [
+        {"id":"dedupe","label":"Equivalent endpoint findings collapse without merging distinct routes","pytest_selector":"tests/test_finding_identity_collapse.py::test_sqli_same_param_different_payloads_collapse"},
+        {"id":"suspected_candidate","label":"AI candidates remain suspected pseudo-findings","pytest_selector":"tests/test_findings_candidate_merge.py::test_candidate_maps_to_a_suspected_pseudo_finding"},
+        {"id":"candidate_visibility","label":"Candidates stay opt-in on the Hunt surface","pytest_selector":"tests/test_findings_candidate_merge.py::test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_surface"},
+        {"id":"proof_gate","label":"Generic validation flags cannot satisfy proof contracts","pytest_selector":"tests/test_report_verification_gating.py::test_finding_has_verification_evidence_rejects_generic_nested_validation_flags"},
+        {"id":"attack_chain","label":"Unverified findings cannot complete an attack chain","pytest_selector":"tests/test_attack_chain_precision.py::test_complete_chain_requires_reference_backed_observation_for_every_step"},
+        {"id":"browser","label":"Findings production page renders","playwright":{"title":"/findings renders without an application exception"}}
       ]
     },
     "fleet": {
@@ -84,7 +133,9 @@
       "controls": [
         {"id":"live_export","label":"Real-stack content-free export","e2e":{"area":"platform","row":"P-11 evidence manifest and bundle exports remain content-free"}},
         {"id":"report_rebuild","label":"Offline report rebuild","pytest_selector":"tests/test_scan_report_rebuild.py::test_offline_bundle_rebuilds_the_byte_stable_report"},
-        {"id":"evidence_integrity","label":"Hashed, redacted evidence objects","pytest_selector":"tests/test_evidence_objects.py::test_evidence_object_is_hashed_redaction_profiled_and_retention_classed"}
+        {"id":"evidence_integrity","label":"Hashed, redacted evidence objects","pytest_selector":"tests/test_evidence_objects.py::test_evidence_object_is_hashed_redaction_profiled_and_retention_classed"},
+        {"id":"manual_projection","label":"Manual finding evidence projects through the real stack","e2e":{"area":"platform","row":"P-8 manual finding and evidence projection round-trip"}},
+        {"id":"browser","label":"Evidence production page renders","playwright":{"title":"/evidence renders without an application exception"}}
       ]
     },
     "hunt": {
@@ -117,6 +168,8 @@
     "ui": {
       "label": "Production browser UI",
       "controls": [
+        {"id":"navigation","label":"Every static release route renders without an application exception","playwright":{"title":"sidebar links are internal, unique, and navigable"}},
+        {"id":"scan_start","label":"Production UI submits the canonical Scan contract","playwright":{"title":"production scan UI submits canonical V2 Scan contract"}},
         {"id":"hunt_start","label":"Production UI submits canonical passive Hunt","playwright":{"title":"production Hunt UI submits canonical passive V2 authority"},"pytest_selector":"tests/test_hunt_skill_contract.py::test_every_hunt_skill_json_example_satisfies_hunt_start_v2"}
       ]
     }

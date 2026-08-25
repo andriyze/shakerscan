@@ -47,16 +47,22 @@ def _write_evidence(tmp_path: Path, *, fail_row: str | None = None):
         ],
     }))
     playwright = tmp_path / "playwright.json"
+    playwright_titles = {
+        control["playwright"]["title"]
+        for program in MATRIX["programs"].values()
+        for control in program["controls"]
+        if control.get("playwright")
+    }
     playwright.write_text(json.dumps({
         "suites": [{
             "title": "browser",
             "specs": [{
-                "title": "production Hunt UI submits canonical passive V2 authority",
+                "title": title,
                 "tests": [{
                     "expectedStatus": "passed",
                     "results": [{"status": "passed"}],
                 }],
-            }],
+            } for title in sorted(playwright_titles)],
         }],
     }))
     return junit, scorecard, playwright
@@ -96,6 +102,32 @@ def test_every_matrix_pytest_selector_names_a_real_test():
         file_name, test_name = selector.split("::", 1)
         source = (ROOT / file_name).read_text(encoding="utf-8")
         assert f"def {test_name}(" in source, selector
+
+
+def test_every_matrix_live_evidence_names_a_real_acceptance_check():
+    e2e_source = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(
+        encoding="utf-8"
+    )
+    browser_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "ui" / "tests" / "browser").glob("*.spec.ts"))
+    )
+    for program in MATRIX["programs"].values():
+        for control in program["controls"]:
+            if control.get("e2e"):
+                row = control["e2e"]["row"]
+                assert json.dumps(row) in e2e_source, row
+            if control.get("playwright"):
+                title = control["playwright"]["title"]
+                if title.startswith("/") and title.endswith(
+                    " renders without an application exception"
+                ):
+                    route = title.removesuffix(
+                        " renders without an application exception"
+                    )
+                    assert f"'{route}'" in browser_source, title
+                else:
+                    assert title in browser_source, title
 
 
 def test_receipt_fails_closed_on_missing_test_or_failed_e2e(tmp_path):
@@ -146,7 +178,11 @@ def test_receipt_requires_passing_production_browser_evidence(tmp_path):
         )
 
     report = json.loads(playwright.read_text())
-    report["suites"][0]["specs"][0]["tests"][0]["results"][0]["status"] = "failed"
+    hunt_spec = next(
+        item for item in report["suites"][0]["specs"]
+        if item["title"] == "production Hunt UI submits canonical passive V2 authority"
+    )
+    hunt_spec["tests"][0]["results"][0]["status"] = "failed"
     playwright.write_text(json.dumps(report))
     receipt = build_receipt(
         matrix=MATRIX,

@@ -525,6 +525,26 @@ def run_platform() -> H.Scorecard:
             ),
         )
 
+        enable_status, enabled_policy = H.put(
+            f"/targets/{target_id}/asm/policy",
+            {"enabled": True, "config": {"recon_interval_hours": 24}},
+        )
+        disable_status, disabled_policy = H.put(
+            f"/targets/{target_id}/asm/policy",
+            {"enabled": False, "config": {}},
+        )
+        sc.check(
+            "P-12 ASM policy enable and disable round-trip",
+            enable_status == 200
+            and enabled_policy.get("enabled") is True
+            and disable_status == 200
+            and disabled_policy.get("enabled") is False,
+            (
+                f"enable_status={enable_status} enabled={enabled_policy.get('enabled')} "
+                f"disable_status={disable_status} disabled={disabled_policy.get('enabled')}"
+            ),
+        )
+
         future = datetime.now(timezone.utc) + timedelta(hours=6)
         schedule_status, schedule = H.post("/schedules", {
             "target_id": target_id,
@@ -676,7 +696,7 @@ def run_platform() -> H.Scorecard:
             ),
         )
     except Exception as exc:
-        sc.error("P-6 through P-11 disposable persistence lifecycle", exc)
+        sc.error("P-6 through P-12 disposable persistence lifecycle", exc)
     finally:
         if credential_id:
             H.delete(f"/credential-profiles/{credential_id}")
