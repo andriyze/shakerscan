@@ -9,6 +9,30 @@ import type { StartHuntHuntsPostRequest } from './publicApi.generated'
 
 export type { HuntBudgetProfile, HuntTargetKind } from './huntContract.generated'
 
+export interface HuntActionV2 {
+  action_id: string
+  capability_name: string
+  status: 'reserved' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'failed' | 'partial'
+  input_digest?: string | null
+  idempotency_key_sha256?: string | null
+  receipt_id?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  result: {
+    ok: boolean
+    partial: boolean
+    timed_out: boolean
+    observation_count: number
+    budget_consumed: Record<string, number>
+    reference_ids: {
+      scan_ids: string[]
+      finding_ids: string[]
+      candidate_ids: string[]
+      evidence_ids: string[]
+    }
+  }
+}
+
 export interface HuntV2 {
   hunt_id: string
   target_kind: 'web' | 'api' | 'device' | 'network'
@@ -27,6 +51,7 @@ export interface HuntV2 {
     input_schema: Record<string, unknown>
     budget_cost: Record<string, number>
   }>
+  actions?: HuntActionV2[]
   final_debrief?: { summary?: string; next_actions?: string[] }
   stop_reason?: string | null
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }

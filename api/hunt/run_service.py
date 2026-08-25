@@ -25,6 +25,21 @@ HUNT_RUN_STATUSES = frozenset({
     "budget_exhausted",
 })
 
+_ACTION_REFERENCE_FIELDS = {
+    "scan_id": "scan_ids",
+    "scan_ids": "scan_ids",
+    "queued_scan_id": "scan_ids",
+    "finding_id": "finding_ids",
+    "finding_ids": "finding_ids",
+    "candidate_id": "candidate_ids",
+    "candidate_ids": "candidate_ids",
+    "evidence_id": "evidence_ids",
+    "evidence_ids": "evidence_ids",
+    "evidence_ref": "evidence_ids",
+    "evidence_instance_id": "evidence_ids",
+    "evidence_instance_ids": "evidence_ids",
+}
+
 
 def _uuid_or_400(value: str, label: str) -> uuid.UUID:
     try:
@@ -51,6 +66,81 @@ def _row_dict(row: Any) -> dict[str, Any]:
         elif isinstance(value, datetime):
             item[key] = value.isoformat()
     return item
+
+
+def _uuid_reference(value: Any) -> str | None:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _action_reference_ids(value: Any) -> dict[str, list[str]]:
+    """Extract only typed UUID references from a redacted action result."""
+
+    references: dict[str, list[str]] = {
+        "scan_ids": [],
+        "finding_ids": [],
+        "candidate_ids": [],
+        "evidence_ids": [],
+    }
+
+    def visit(node: Any, *, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(node, Mapping):
+            for raw_key, raw_value in node.items():
+                key = str(raw_key)
+                reference_kind = _ACTION_REFERENCE_FIELDS.get(key)
+                if reference_kind:
+                    values = raw_value if isinstance(raw_value, (list, tuple)) else [raw_value]
+                    for candidate in values:
+                        reference = _uuid_reference(candidate)
+                        if reference and reference not in references[reference_kind]:
+                            references[reference_kind].append(reference)
+                if isinstance(raw_value, (Mapping, list, tuple)):
+                    visit(raw_value, depth=depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                visit(child, depth=depth + 1)
+
+    visit(value)
+    return references
+
+
+def public_hunt_action(row: Any) -> dict[str, Any]:
+    """Return a content-safe projection of one canonical capability action."""
+
+    item = _row_dict(row)
+    input_summary = _decode_json(item.get("input_summary"), {})
+    result_summary = _decode_json(item.get("result_summary"), {})
+    budget_consumed = result_summary.get("budget_consumed")
+    if not isinstance(budget_consumed, Mapping):
+        budget_consumed = {}
+    observations = result_summary.get("observations")
+    observation_count = len(observations) if isinstance(observations, list) else 0
+    return {
+        "action_id": str(item.get("id")) if item.get("id") else None,
+        "capability_name": item.get("capability_name"),
+        "status": item.get("status"),
+        "input_digest": input_summary.get("input_digest"),
+        "idempotency_key_sha256": input_summary.get("idempotency_key_sha256"),
+        "receipt_id": str(item.get("receipt_id")) if item.get("receipt_id") else None,
+        "started_at": item.get("started_at"),
+        "completed_at": item.get("completed_at"),
+        "result": {
+            "ok": result_summary.get("ok") is True,
+            "partial": result_summary.get("partial") is True,
+            "timed_out": result_summary.get("timed_out") is True,
+            "observation_count": observation_count,
+            "budget_consumed": {
+                str(key): amount
+                for key, amount in budget_consumed.items()
+                if isinstance(amount, (int, float)) and not isinstance(amount, bool)
+            },
+            "reference_ids": _action_reference_ids(result_summary),
+        },
+    }
 
 
 def public_hunt_run(
@@ -134,7 +224,16 @@ class HuntRunService:
     async def get(self, hunt_id: str) -> dict[str, Any]:
         async with self._pool().acquire() as connection:
             row = await hunt_run_or_404(connection, hunt_id)
-        return public_hunt_run(row)
+            actions = await connection.fetch(
+                """SELECT id, capability_name, status, input_summary,
+                          result_summary, receipt_id, started_at, completed_at
+                   FROM hunt_actions WHERE hunt_run_id=$1
+                   ORDER BY started_at ASC, id ASC""",
+                _uuid_or_400(hunt_id, "hunt id"),
+            )
+        result = public_hunt_run(row)
+        result["actions"] = [public_hunt_action(action) for action in actions]
+        return result
 
     async def list(
         self,
@@ -228,5 +327,6 @@ __all__ = [
     "HUNT_RUN_STATUSES",
     "HuntRunService",
     "hunt_run_or_404",
+    "public_hunt_action",
     "public_hunt_run",
 ]

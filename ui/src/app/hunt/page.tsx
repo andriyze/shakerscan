@@ -68,6 +68,14 @@ function huntStatusLabel(status: HuntV2['status']): string {
   return status.replaceAll('_', ' ')
 }
 
+function huntActionStatusClass(status: string): string {
+  if (status === 'completed') return 'bg-emerald-500/10 text-emerald-300'
+  if (status === 'partial') return 'bg-amber-500/10 text-amber-300'
+  if (status === 'blocked' || status === 'cancelled') return 'bg-gray-700 text-gray-300'
+  if (status === 'failed') return 'bg-red-500/10 text-red-300'
+  return 'bg-blue-500/10 text-blue-300'
+}
+
 function LegacyDeviceRun({ run }: { run: DeviceAgentSession }) {
   return (
     <div className="grid gap-5 lg:grid-cols-[0.9fr_1.5fr]">
@@ -912,23 +920,89 @@ function HuntContent() {
             )}
           </div>
 
-          <Card className="p-5">
-            <h2 className="font-medium text-white">Available capabilities</h2>
-            <p className="mt-1 text-xs text-gray-500">
-              Your coding agent can query context and call only this persisted allowlist.
-            </p>
-            <div className="mt-4 space-y-2">
-              {(hunt.capabilities || []).map((capability) => (
-                <div key={capability.name} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <code className="text-sm text-blue-300">{capability.name}</code>
-                    <span className="text-xs text-gray-500">{capability.risk_tier}</span>
-                  </div>
-                  <p className="mt-1 text-xs text-gray-400">{capability.description}</p>
+          <div className="space-y-5">
+            <Card className="p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-medium text-white">Capability action ledger</h2>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Canonical receipts and content-safe outcomes for every capability call in this run.
+                  </p>
                 </div>
-              ))}
-            </div>
-          </Card>
+                <span className="text-xs text-gray-500">{(hunt.actions || []).length} recorded</span>
+              </div>
+              {(hunt.actions || []).length === 0 ? (
+                <p className="mt-4 text-sm text-gray-500">No capability actions were recorded.</p>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {(hunt.actions || []).map((action) => {
+                    const references = action.result.reference_ids
+                    const budget = Object.entries(action.result.budget_consumed)
+                    return (
+                      <div key={action.action_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <code className="text-sm text-blue-300">{action.capability_name}</code>
+                          <span className={`rounded px-2 py-1 text-xs ${huntActionStatusClass(action.status)}`}>
+                            {action.status.replaceAll('_', ' ')}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
+                          <span>{action.result.observation_count} observations</span>
+                          {action.started_at && <span>Started {new Date(action.started_at).toLocaleString()}</span>}
+                          {action.completed_at && <span>Finished {new Date(action.completed_at).toLocaleString()}</span>}
+                        </div>
+                        {budget.length > 0 && (
+                          <p className="mt-2 text-xs text-gray-500">
+                            Used {budget.map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`).join(' · ')}
+                          </p>
+                        )}
+                        {(references.scan_ids.length > 0 || references.finding_ids.length > 0) && (
+                          <div className="mt-3 flex flex-wrap gap-3">
+                            {references.scan_ids.map((scanId) => (
+                              <Link key={scanId} href={`/scans/${scanId}`} className="text-xs text-blue-300 hover:text-blue-200">
+                                Open scan {scanId.slice(0, 8)}
+                              </Link>
+                            ))}
+                            {references.finding_ids.map((findingId) => (
+                              <Link key={findingId} href={`/findings/${findingId}`} className="text-xs text-blue-300 hover:text-blue-200">
+                                Open finding {findingId.slice(0, 8)}
+                              </Link>
+                            ))}
+                          </div>
+                        )}
+                        <details className="mt-3 text-xs text-gray-500">
+                          <summary className="cursor-pointer text-gray-400 hover:text-gray-300">Audit identifiers</summary>
+                          <dl className="mt-2 space-y-1">
+                            <div><dt className="inline">Action: </dt><dd className="inline break-all font-mono">{action.action_id}</dd></div>
+                            <div><dt className="inline">Receipt: </dt><dd className="inline break-all font-mono">{action.receipt_id || 'not recorded'}</dd></div>
+                            <div><dt className="inline">Input digest: </dt><dd className="inline break-all font-mono">{action.input_digest || 'not recorded'}</dd></div>
+                          </dl>
+                        </details>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </Card>
+
+            <Card className="p-5">
+              <h2 className="font-medium text-white">Available capabilities</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                Your coding agent can query context and call only this persisted allowlist.
+              </p>
+              <div className="mt-4 space-y-2">
+                {(hunt.capabilities || []).map((capability) => (
+                  <div key={capability.name} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <code className="text-sm text-blue-300">{capability.name}</code>
+                      <span className="text-xs text-gray-500">{capability.risk_tier}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-gray-400">{capability.description}</p>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </div>
         </div>
       )}
     </div>

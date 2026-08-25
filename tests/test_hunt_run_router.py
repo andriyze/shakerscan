@@ -8,7 +8,7 @@ import uuid
 import pytest
 
 from api.hunt import run_router
-from api.hunt.run_service import HuntRunService, public_hunt_run
+from api.hunt.run_service import HuntRunService, public_hunt_action, public_hunt_run
 
 
 def _row(**overrides):
@@ -65,6 +65,73 @@ def test_public_hunt_projection_is_metadata_only_and_legacy_fail_closed():
 
     legacy = public_hunt_run(_row(policy_json={}))
     assert legacy["capabilities"] == []
+
+
+def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content():
+    scan_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    action = public_hunt_action({
+        "id": uuid.uuid4(),
+        "capability_name": "device.inspect",
+        "status": "completed",
+        "input_summary": {
+            "input": {"password": "must-not-leak"},
+            "input_digest": "input-digest",
+            "idempotency_key_sha256": "idempotency-digest",
+        },
+        "result_summary": {
+            "ok": True,
+            "partial": False,
+            "timed_out": False,
+            "secret": "must-not-leak",
+            "observations": [{"message": "must-not-leak"}],
+            "budget_consumed": {"agent_actions": 1, "invalid": "hidden"},
+            "data": {
+                "scan_id": str(scan_id),
+                "finding_ids": [str(finding_id), "not-a-uuid"],
+            },
+        },
+        "receipt_id": uuid.uuid4(),
+        "started_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+        "completed_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+    })
+
+    serialized = json.dumps(action)
+    assert "must-not-leak" not in serialized
+    assert action["input_digest"] == "input-digest"
+    assert action["result"]["observation_count"] == 1
+    assert action["result"]["budget_consumed"] == {"agent_actions": 1}
+    assert action["result"]["reference_ids"]["scan_ids"] == [str(scan_id)]
+    assert action["result"]["reference_ids"]["finding_ids"] == [str(finding_id)]
+
+
+def test_hunt_run_service_get_includes_canonical_action_ledger():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            assert query.startswith("SELECT * FROM hunt_runs")
+            return _row(id=uuid.UUID(hunt_id))
+
+        async def fetch(self, query, *args):
+            assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
+            assert args == (uuid.UUID(hunt_id),)
+            return [{
+                "id": uuid.uuid4(),
+                "capability_name": "collections.inspect",
+                "status": "completed",
+                "input_summary": {},
+                "result_summary": {},
+                "receipt_id": uuid.uuid4(),
+                "started_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+                "completed_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+            }]
+
+    service = HuntRunService(lambda: _Pool(Connection()))
+    result = asyncio.run(service.get(hunt_id))
+
+    assert len(result["actions"]) == 1
+    assert result["actions"][0]["capability_name"] == "collections.inspect"
 
 
 def test_hunt_run_service_lists_without_context_or_capability_expansion():

@@ -31,6 +31,12 @@ test('canonical Hunt history has durable exact-run links and audit details', () 
   assert.match(hunt, /&run=\$\{encodeURIComponent\(run\.hunt_id\)\}/)
   assert.match(hunt, /Run ID/)
   assert.match(hunt, /Back to launcher and history/)
+  assert.match(hunt, /Capability action ledger/)
+  assert.match(hunt, /Canonical receipts and content-safe outcomes/)
+  assert.match(hunt, /action\.result\.reference_ids/)
+  assert.match(hunt, /href=\{`\/scans\/\$\{scanId\}`\}/)
+  assert.match(hunt, /href=\{`\/findings\/\$\{findingId\}`\}/)
+  assert.match(hunt, /Audit identifiers/)
 })
 
 test('open Hunt sessions do not imply background network execution', () => {
