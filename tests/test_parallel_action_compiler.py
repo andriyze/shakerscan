@@ -8,6 +8,7 @@ from api.runtime.models import TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.contracts import resolve_scan_contract
+from api.scan.continuation import ScanContinuationAllocation
 from api.scan.jobs import derive_scan_shard_budget
 from api.scan.parallel_compiler import (
     ParallelActionPlanCompiler,
@@ -257,6 +258,143 @@ def test_parallel_partition_record_rejects_unplanned_child_plan():
             parent_scan_id=PARENT_ID,
             child_plan_digests={**digests, CHILD_IDS[2]: "f" * 64},
         )
+
+
+def test_parallel_partition_validator_preserves_v1_upgrade_records():
+    execution, parent = _authority()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=_children(),
+        strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    assignments = _assignments(_children())
+    current = partition.record(
+        plans,
+        child_work_assignments=assignments,
+        parent_work_assignment=_parent_assignment(assignments),
+    )
+    legacy = {
+        key: value for key, value in current.items()
+        if key not in {
+            "record_digest", "allowed_parent_action_ids",
+            "allowed_parent_capabilities", "continuation_allocation_digest",
+            "allowed_continuation_capabilities",
+            "required_continuation_capabilities",
+        }
+    }
+    legacy["schema_version"] = "parallel-action-partition-record/v1"
+    legacy["record_digest"] = hashlib.sha256(json.dumps(
+        legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+
+    validate_parallel_partition_record(
+        legacy,
+        parent_scan_id=PARENT_ID,
+        child_plan_digests={
+            scan_id: str(plan.plan_digest) for scan_id, plan in plans.items()
+        },
+        child_action_plans=plans,
+    )
+
+
+def test_parallel_partition_accepts_only_preallocated_continuation_actions():
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={
+            "active_testing": True,
+            "include_families": ["xss"],
+            "exclude_families": ["nuclei", "sqli", "bola"],
+        },
+        approval_receipt_id="approval-1",
+    )
+    admitted = allocate_scan_action_plan(
+        ScanActionPlanCompiler().compile(
+            scan_id=PARENT_ID,
+            execution_plan=contract.execution_plan,
+            target_binding=_target(),
+            defer_manifest_actions=True,
+            include_finalizer=False,
+        ),
+        contract.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+    )
+    parent = admitted.plan
+    continuation = ScanContinuationAllocation(
+        scan_id=PARENT_ID,
+        parent_plan_digest=parent.plan_digest,
+        execution_plan_digest=parent.execution_plan_digest,
+        target_binding_digest=parent.target_binding_digest,
+        parent_action_ids=tuple(action.action_id for action in parent.actions),
+        budget_ceiling=admitted.residual_scan_execute_budget,
+        max_endpoint_entries=contract.budget.max_endpoints,
+        max_candidate_entries=contract.budget.max_http_requests,
+        required_capabilities=("xss.verify",),
+        allowed_capabilities=("xss.verify",),
+    )
+    children = _children()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=contract.execution_plan,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=children,
+        continuation_allocation=continuation,
+        strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    endpoint_id = CHILD_IDS[1]
+    seed = parent.actions[0]
+    continuation_action = replace(
+        seed,
+        action_id="verify.xss",
+        capability_name="xss.verify",
+        ordinal=len(plans[endpoint_id].actions),
+        dependencies=(),
+        required=True,
+        action_digest=None,
+    )
+    plans[endpoint_id] = replace(
+        plans[endpoint_id],
+        actions=(*plans[endpoint_id].actions, continuation_action),
+        plan_digest=None,
+    )
+    assignments = _assignments(children)
+
+    record = partition.record(
+        plans,
+        child_work_assignments=assignments,
+        parent_work_assignment=_parent_assignment(assignments),
+    )
+    validate_parallel_partition_record(
+        record,
+        parent_scan_id=PARENT_ID,
+        child_plan_digests={
+            scan_id: str(plan.plan_digest) for scan_id, plan in plans.items()
+        },
+        child_action_plans=plans,
+    )
+    assert record["continuation_allocation_digest"] == (
+        continuation.allocation_digest
+    )
+
+    rogue = replace(
+        continuation_action,
+        capability_name="rogue.execute",
+        action_digest=None,
+    )
+    rogue_plans = {
+        **plans,
+        endpoint_id: replace(
+            plans[endpoint_id],
+            actions=(*plans[endpoint_id].actions[:-1], rogue),
+            plan_digest=None,
+        ),
+    }
+    with pytest.raises(ParallelActionPlanError, match="outside parent authority"):
+        partition.record(rogue_plans)
 
 
 def test_parallel_partition_rejects_a_cloned_full_parent_plan_on_every_child():

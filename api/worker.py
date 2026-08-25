@@ -15222,7 +15222,9 @@ async def process_scan_plan_job(job_data: dict):
         authority_row = await conn.fetchrow(
             """
             SELECT budget_used_json, scan_action_plan_json,
-                   scan_action_plan_digest
+                   scan_action_plan_digest,
+                   scan_continuation_allocation_json,
+                   scan_continuation_allocation_digest
             FROM scans WHERE id=$1
             """,
             uuid.UUID(parent_id),
@@ -15247,6 +15249,35 @@ async def process_scan_plan_job(job_data: dict):
     ):
         raise ExecutionScopeError(
             "canonical parallel parent action-plan identity is inconsistent"
+        )
+    continuation_allocation: ScanContinuationAllocation | None = None
+    raw_continuation = authority_row.get(
+        "scan_continuation_allocation_json"
+    )
+    if raw_continuation is not None:
+        try:
+            continuation_allocation = ScanContinuationAllocation.from_dict(
+                _as_report_dict(raw_continuation)
+            )
+        except (ScanContinuationError, TypeError, ValueError) as exc:
+            raise ExecutionScopeError(
+                "canonical parallel parent has an invalid continuation allocation"
+            ) from exc
+        if str(authority_row.get(
+            "scan_continuation_allocation_digest"
+        ) or "") != continuation_allocation.allocation_digest:
+            raise ExecutionScopeError(
+                "canonical parallel continuation allocation identity is inconsistent"
+            )
+    elif (
+        canonical_parent_job.execution_plan.policy.active_testing
+        and not any(
+            action.action_id == "finalize.report"
+            for action in parent_action_plan.actions
+        )
+    ):
+        raise ExecutionScopeError(
+            "canonical active parallel parent has no continuation allocation"
         )
 
     # Count the plan/discovery stage as a running job. This stage runs the discover-once
@@ -15776,6 +15807,7 @@ async def process_scan_plan_job(job_data: dict):
                 consumed_budget=_as_report_dict(
                     parent_authority_row.get("budget_used_json")
                 ),
+                continuation_allocation=continuation_allocation,
                 strategy=plan.strategy,
                 available_worker_count=int(
                     job_data.get('parallel_worker_count') or 0
@@ -15842,9 +15874,21 @@ async def process_scan_plan_job(job_data: dict):
                     "parallel parent request manifest is unavailable"
                 )
             manifests_by_selection[str(raw_digest).lower()] = manifest
+        endpoint_children = tuple(
+            (child_id, shard_index)
+            for shard, (child_id, _job_id, shard_index) in zip(
+                plan.shards, child_identities, strict=True,
+            )
+            if not shard.options.get("parallel_backbone")
+        )
+        if not endpoint_children:
+            raise ParallelScanInputError(
+                "parallel request work has no endpoint child"
+            )
         authenticated_shards = tuple(
             shard.index for shard in plan.shards
-            if str(shard.options.get("auth_state") or "").lower()
+            if not shard.options.get("parallel_backbone")
+            and str(shard.options.get("auth_state") or "").lower()
             not in {"", "anonymous"}
         )
         eligible_lanes = (
@@ -15853,10 +15897,7 @@ async def process_scan_plan_job(job_data: dict):
         )
         partitions = partition_request_manifests(
             manifests_by_selection,
-            children=tuple(
-                (child_id, shard_index)
-                for child_id, _job_id, shard_index in child_identities
-            ),
+            children=endpoint_children,
             eligible_shards_by_lane=eligible_lanes,
         )
         request_partitions = {
@@ -15873,7 +15914,10 @@ async def process_scan_plan_job(job_data: dict):
     ] = []
     child_work_assignments: dict[str, dict[str, Any]] = {}
     parent_allowed_family_scope = parallel_capability_family_scope(
-        parallel_action_partition.allowed_parent_capabilities
+        (
+            *parallel_action_partition.allowed_parent_capabilities,
+            *parallel_action_partition.allowed_continuation_capabilities,
+        )
     )
     parent_endpoint_assignments: list[Any] = []
     for shard, (child_id, child_job_id, identity_shard_index) in zip(

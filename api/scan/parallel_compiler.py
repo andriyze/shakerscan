@@ -13,12 +13,16 @@ except ModuleNotFoundError:
     from ..runtime.models import ScanBudget, TargetBinding
 
 from .action_plan import ScanActionPlan
+from .continuation import ScanContinuationAllocation
 from .execution import ScanExecutionPlan
 from .jobs import ScanShardBudget
 
 
-PARALLEL_ACTION_PARTITION_SCHEMA = "parallel-action-partition/v1"
-PARALLEL_ACTION_PARTITION_RECORD_SCHEMA = "parallel-action-partition-record/v1"
+PARALLEL_ACTION_PARTITION_SCHEMA = "parallel-action-partition/v2"
+PARALLEL_ACTION_PARTITION_RECORD_SCHEMA = "parallel-action-partition-record/v2"
+_LEGACY_PARALLEL_ACTION_PARTITION_RECORD_SCHEMA = (
+    "parallel-action-partition-record/v1"
+)
 _VALID_STRATEGIES = frozenset({
     "auto", "scope", "family", "coverage", "coverage_family", "auth_split",
 })
@@ -298,6 +302,9 @@ class ParallelActionPartition:
     assigned_parent_action_ids: tuple[str, ...]
     required_parent_action_ids: tuple[str, ...]
     allowed_parent_capabilities: tuple[str, ...]
+    continuation_allocation_digest: str | None
+    allowed_continuation_capabilities: tuple[str, ...]
+    required_continuation_capabilities: tuple[str, ...]
     schema_version: str = PARALLEL_ACTION_PARTITION_SCHEMA
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -315,6 +322,13 @@ class ParallelActionPartition:
             "assigned_parent_action_ids": list(self.assigned_parent_action_ids),
             "required_parent_action_ids": list(self.required_parent_action_ids),
             "allowed_parent_capabilities": list(self.allowed_parent_capabilities),
+            "continuation_allocation_digest": self.continuation_allocation_digest,
+            "allowed_continuation_capabilities": list(
+                self.allowed_continuation_capabilities
+            ),
+            "required_continuation_capabilities": list(
+                self.required_continuation_capabilities
+            ),
         }
 
     @property
@@ -343,12 +357,19 @@ class ParallelActionPartition:
         parent_projection_ids = set(self.assigned_parent_action_ids)
         required_parent_ids = set(self.required_parent_action_ids)
         parent_capabilities = set(self.allowed_parent_capabilities)
+        continuation_capabilities = set(
+            self.allowed_continuation_capabilities
+        )
+        required_continuation = set(
+            self.required_continuation_capabilities
+        )
         global_action_ids = set(self.globally_assigned_action_ids)
         parent_owned_ids = set(self.parent_owned_action_ids)
         child_records = []
         endpoint_owners: dict[str, str] = {}
         request_owners: dict[str, str] = {}
         assigned_projection_ids: set[str] = set()
+        assigned_continuation_capabilities: set[str] = set()
         global_occurrences: dict[str, int] = {
             action_id: 0 for action_id in global_action_ids
         }
@@ -365,12 +386,21 @@ class ParallelActionPartition:
             action_projection_ids = {
                 _projection_id(action.action_id) for action in plan.actions
             }
-            if not action_projection_ids <= parent_projection_ids:
+            unauthorized_projection = {
+                _projection_id(action.action_id)
+                for action in plan.actions
+                if (
+                    _projection_id(action.action_id) not in parent_projection_ids
+                    and action.capability_name not in continuation_capabilities
+                )
+            }
+            if unauthorized_projection:
                 raise ParallelActionPlanError(
                     "parallel child introduced an action outside parent authority"
                 )
             if any(
                 action.capability_name not in parent_capabilities
+                and action.capability_name not in continuation_capabilities
                 for action in plan.actions
             ):
                 raise ParallelActionPlanError(
@@ -392,6 +422,11 @@ class ParallelActionPartition:
             for action_id in child_global:
                 global_occurrences[action_id] += 1
             assigned_projection_ids.update(action_projection_ids)
+            assigned_continuation_capabilities.update(
+                action.capability_name
+                for action in plan.actions
+                if action.capability_name in continuation_capabilities
+            )
 
             if supplied_assignments:
                 assignment = _canonical_work_assignment(
@@ -458,6 +493,10 @@ class ParallelActionPartition:
             raise ParallelActionPlanError(
                 "parallel children left required parent work unassigned"
             )
+        if not required_continuation <= assigned_continuation_capabilities:
+            raise ParallelActionPlanError(
+                "parallel children left required continuation work unassigned"
+            )
         observed_parent_work = build_parallel_work_assignment(
             endpoints=(),
             request_entries=(),
@@ -495,7 +534,16 @@ class ParallelActionPartition:
             "parent_scan_id": self.parent_scan_id,
             "parent_action_plan_digest": self.parent_action_plan_digest,
             "parent_owned_action_ids": list(self.parent_owned_action_ids),
+            "allowed_parent_action_ids": list(self.assigned_parent_action_ids),
+            "allowed_parent_capabilities": list(self.allowed_parent_capabilities),
             "required_parent_action_ids": list(self.required_parent_action_ids),
+            "continuation_allocation_digest": self.continuation_allocation_digest,
+            "allowed_continuation_capabilities": list(
+                self.allowed_continuation_capabilities
+            ),
+            "required_continuation_capabilities": list(
+                self.required_continuation_capabilities
+            ),
             "expected_global_action_ids": list(self.globally_assigned_action_ids),
             "parent_endpoint_work_ids": expected_parent_work["endpoint_work_ids"],
             "parent_request_work_ids": expected_parent_work["request_work_ids"],
@@ -531,6 +579,7 @@ class ParallelActionPlanCompiler:
         target_binding: TargetBinding,
         child_specs: Sequence[Mapping[str, Any]],
         consumed_budget: Mapping[str, Any] | None = None,
+        continuation_allocation: ScanContinuationAllocation | None = None,
         strategy: str,
         available_worker_count: int = 0,
     ) -> ParallelActionPartition:
@@ -550,6 +599,20 @@ class ParallelActionPlanCompiler:
         scan_ids = [str(item.get("scan_id") or "") for item in child_specs]
         if any(not item for item in scan_ids) or len(set(scan_ids)) != len(scan_ids):
             raise ParallelActionPlanError("parallel child Scan identities must be unique")
+        if continuation_allocation is not None and (
+            continuation_allocation.scan_id != parent_action_plan.scan_id
+            or continuation_allocation.parent_plan_digest
+            != parent_action_plan.plan_digest
+            or continuation_allocation.execution_plan_digest
+            != parent_execution_plan.digest
+            or continuation_allocation.target_binding_digest
+            != target_binding.digest
+            or continuation_allocation.parent_action_ids
+            != tuple(action.action_id for action in parent_action_plan.actions)
+        ):
+            raise ParallelActionPlanError(
+                "parallel continuation allocation differs from parent authority"
+            )
 
         backbone = [
             index for index, item in enumerate(child_specs)
@@ -648,6 +711,18 @@ class ParallelActionPlanCompiler:
                 action.capability_name for action in parent_action_plan.actions
                 if action.action_id not in parent_owned
             })),
+            continuation_allocation_digest=(
+                continuation_allocation.allocation_digest
+                if continuation_allocation is not None else None
+            ),
+            allowed_continuation_capabilities=(
+                continuation_allocation.allowed_capabilities
+                if continuation_allocation is not None else ()
+            ),
+            required_continuation_capabilities=(
+                continuation_allocation.required_capabilities
+                if continuation_allocation is not None else ()
+            ),
         )
 
 
@@ -661,7 +736,10 @@ def validate_parallel_partition_record(
     raw = dict(record)
     supplied_record_digest = str(raw.pop("record_digest", ""))
     if (
-        raw.get("schema_version") != PARALLEL_ACTION_PARTITION_RECORD_SCHEMA
+        raw.get("schema_version") not in {
+            PARALLEL_ACTION_PARTITION_RECORD_SCHEMA,
+            _LEGACY_PARALLEL_ACTION_PARTITION_RECORD_SCHEMA,
+        }
         or raw.get("parent_scan_id") != parent_scan_id
         or supplied_record_digest != _digest(raw)
     ):
@@ -677,11 +755,30 @@ def validate_parallel_partition_record(
         raise ParallelActionPlanError(
             "persisted child action plans differ from the parent partition"
         )
+    semantic_authority_v2 = (
+        raw.get("schema_version") == PARALLEL_ACTION_PARTITION_RECORD_SCHEMA
+    )
     parent_owned = set(raw.get("parent_owned_action_ids") or ())
+    allowed_parent_actions = set(raw.get("allowed_parent_action_ids") or ())
+    allowed_parent_capabilities = set(
+        raw.get("allowed_parent_capabilities") or ()
+    )
     required_parent = set(raw.get("required_parent_action_ids") or ())
+    allowed_continuation = set(
+        raw.get("allowed_continuation_capabilities") or ()
+    )
+    required_continuation = set(
+        raw.get("required_continuation_capabilities") or ()
+    )
     expected_global = set(raw.get("expected_global_action_ids") or ())
     parent_endpoints = list(raw.get("parent_endpoint_work_ids") or ())
     parent_requests = list(raw.get("parent_request_work_ids") or ())
+    authority_lists = (
+        raw.get("allowed_parent_action_ids"),
+        raw.get("allowed_parent_capabilities"),
+        raw.get("allowed_continuation_capabilities"),
+        raw.get("required_continuation_capabilities"),
+    ) if semantic_authority_v2 else ()
     if any(
         not isinstance(value, list)
         for value in (
@@ -690,6 +787,7 @@ def validate_parallel_partition_record(
             raw.get("expected_global_action_ids"),
             raw.get("parent_endpoint_work_ids"),
             raw.get("parent_request_work_ids"),
+            *authority_lists,
         )
     ):
         raise ParallelActionPlanError("parallel action partition authority is invalid")
@@ -697,6 +795,7 @@ def validate_parallel_partition_record(
     observed_endpoints: list[str] = []
     observed_requests: list[str] = []
     observed_projection_ids: set[str] = set()
+    observed_continuation_capabilities: set[str] = set()
     plans = dict(child_action_plans or {})
     if plans and set(plans) != set(expected):
         raise ParallelActionPlanError(
@@ -774,6 +873,25 @@ def validate_parallel_partition_record(
                 raise ParallelActionPlanError(
                     "persisted child action authority differs from the semantic partition"
                 )
+            for action in plan.actions:
+                projection = _projection_id(action.action_id)
+                capability = action.capability_name
+                if semantic_authority_v2 and (
+                    projection not in allowed_parent_actions
+                    and capability not in allowed_continuation
+                ):
+                    raise ParallelActionPlanError(
+                        "persisted child action exceeds parent authority"
+                    )
+                if semantic_authority_v2 and (
+                    capability not in allowed_parent_capabilities
+                    and capability not in allowed_continuation
+                ):
+                    raise ParallelActionPlanError(
+                        "persisted child capability exceeds parent authority"
+                    )
+                if capability in allowed_continuation:
+                    observed_continuation_capabilities.add(capability)
     if any(count != 1 for count in global_occurrences.values()):
         raise ParallelActionPlanError(
             "global actions do not occur exactly once in the partition"
@@ -788,3 +906,11 @@ def validate_parallel_partition_record(
         raise ParallelActionPlanError("parallel request work is incomplete")
     if not required_parent <= observed_projection_ids:
         raise ParallelActionPlanError("required parent action work is unassigned")
+    if (
+        semantic_authority_v2
+        and plans
+        and not required_continuation <= observed_continuation_capabilities
+    ):
+        raise ParallelActionPlanError(
+            "required continuation capability work is unassigned"
+        )

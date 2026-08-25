@@ -2107,7 +2107,10 @@ def test_worker_waits_for_fast_queue_handoff_confirmation(monkeypatch):
 
 
 class _FakePlanConn:
-    def __init__(self, parent_id, target_id, campaign_id, parent_action_plan=None):
+    def __init__(
+        self, parent_id, target_id, campaign_id, parent_action_plan=None,
+        continuation_allocation=None,
+    ):
         self.parent_id = parent_id
         self.target_id = target_id
         self.campaign_id = campaign_id
@@ -2116,6 +2119,7 @@ class _FakePlanConn:
         self.persisted_action_scan_ids = set()
         self.persisted_manifest_rows = []
         self.parent_action_plan = parent_action_plan
+        self.continuation_allocation = continuation_allocation
 
     async def fetchrow(self, query, *args):
         if "SELECT target_id, target_url, status FROM scans" in query:
@@ -2131,6 +2135,14 @@ class _FakePlanConn:
                 "budget_used_json": {},
                 "scan_action_plan_json": self.parent_action_plan.canonical_dict(),
                 "scan_action_plan_digest": self.parent_action_plan.plan_digest,
+                "scan_continuation_allocation_json": (
+                    self.continuation_allocation.canonical_dict()
+                    if self.continuation_allocation is not None else None
+                ),
+                "scan_continuation_allocation_digest": (
+                    self.continuation_allocation.allocation_digest
+                    if self.continuation_allocation is not None else None
+                ),
             }
         if "SET scan_action_plan_json=" in query:
             self.persisted_action_scan_ids.add(str(args[0]))
@@ -2301,6 +2313,93 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
     assert any(
         worker.parallel_scan.PARALLEL_DISCOVERY_ROLE in args
         for query, args in conn.executions if "INSERT INTO scans" in query
+    )
+
+
+def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatch):
+    from scan.action_plan import ScanActionPlanCompiler
+    from scan.budget_allocator import allocate_scan_action_plan
+    from scan.continuation import ScanContinuationAllocation
+
+    parent_id = "51515151-5151-4515-8515-515151515152"
+    target_id = uuid.UUID("31313131-3131-4313-8313-313131313132")
+    endpoints = (
+        "GET /rest/products/search?q=juice",
+        "GET /api/Quantitys/",
+        "GET /rest/admin/application-version",
+        "GET /rest/products/1/reviews",
+    )
+    parent_job, _full_plan, options, queue_payload = (
+        _canonical_parallel_fixture(
+            parent_id,
+            target_id,
+            policy={
+                "active_testing": True,
+                "include_families": ["xss"],
+            },
+            strategy="scope",
+            custom_endpoints=endpoints,
+        )
+    )
+    admitted = allocate_scan_action_plan(
+        ScanActionPlanCompiler().compile(
+            scan_id=parent_id,
+            execution_plan=parent_job.execution_plan,
+            target_binding=parent_job.target,
+            defer_manifest_actions=True,
+            include_finalizer=False,
+        ),
+        parent_job.execution_plan.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+    )
+    parent_plan = admitted.plan
+    allocation = ScanContinuationAllocation(
+        scan_id=parent_id,
+        parent_plan_digest=parent_plan.plan_digest,
+        execution_plan_digest=parent_plan.execution_plan_digest,
+        target_binding_digest=parent_plan.target_binding_digest,
+        parent_action_ids=tuple(
+            action.action_id for action in parent_plan.actions
+        ),
+        budget_ceiling=admitted.residual_scan_execute_budget,
+        max_endpoint_entries=parent_job.execution_plan.budget.max_endpoints,
+        max_candidate_entries=parent_job.execution_plan.budget.max_http_requests,
+        required_capabilities=("xss.verify",),
+        allowed_capabilities=("xss.verify",),
+    )
+    conn = _FakePlanConn(
+        parent_id, target_id, uuid.uuid4(), parent_plan, allocation,
+    )
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": parent_job.job_id,
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "options": options,
+        "parallel_worker_count": 3,
+        "_canonical_queue_payload": queue_payload,
+    }))
+
+    queued = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(queued) >= 2
+    parent_update = next(
+        json.loads(args[2])
+        for query, args in conn.executions
+        if "UPDATE scans SET current_phase" in query
+        and "sharded:" in str(args)
+    )
+    record = parent_update["parallel_action_partition_record"]
+    assert record["continuation_allocation_digest"] == (
+        allocation.allocation_digest
+    )
+    assert record["allowed_continuation_capabilities"] == ["xss.verify"]
+    assert any(
+        "verify.xss" in child["expected_action_ids"]
+        for child in record["children"]
     )
 
 
