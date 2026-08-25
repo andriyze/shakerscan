@@ -7,6 +7,7 @@ import pytest
 
 from scripts.run_complete_python_suite import (
     CompleteSuiteError,
+    _environment,
     _package_import_styles,
     merge_junit_reports,
     partition_test_files,
@@ -37,6 +38,18 @@ def test_partition_rejects_a_test_that_imports_both_api_layouts(tmp_path):
 
     with pytest.raises(CompleteSuiteError, match="mixes package and compatibility"):
         partition_test_files(tmp_path)
+
+
+@pytest.mark.parametrize("package_native", [True, False])
+def test_partition_environment_preserves_the_launch_interpreters_packages(package_native):
+    root = Path(__file__).resolve().parents[1]
+    env = _environment(root, package_native=package_native)
+    paths = env["PYTHONPATH"].split(":")
+
+    assert str(root) in paths
+    assert str(root / "api") in paths
+    assert str(root / "scanner") in paths
+    assert any(path.endswith("site-packages") for path in paths)
 
 
 def test_junit_reports_are_combined_without_losing_suite_totals(tmp_path):

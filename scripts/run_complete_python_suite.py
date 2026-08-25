@@ -16,6 +16,7 @@ import argparse
 import ast
 import os
 from pathlib import Path
+import site
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -169,8 +170,24 @@ def _environment(repo_root: Path, *, package_native: bool) -> dict[str, str]:
         if package_native
         else (api_root, scanner_root, repo_root)
     )
+    # A source checkout intentionally puts ``scanner/`` on PYTHONPATH so its
+    # security ``sitecustomize`` can install frozen DNS for canonical worker
+    # subprocesses. On Homebrew Python that also changes the automatically
+    # selected prefix site-packages directory from ``/opt/homebrew/lib`` to the
+    # Cellar path, which can hide the pytest/coverage installation used to
+    # launch this runner. Preserve only the current interpreter's package roots
+    # after the deliberate repository import order.
+    package_roots = [
+        Path(value).resolve()
+        for value in [*site.getsitepackages(), site.getusersitepackages()]
+        if value and Path(value).is_dir()
+    ]
+    paths = list(ordered)
+    for path in package_roots:
+        if path not in paths:
+            paths.append(path)
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(str(path) for path in ordered)
+    env["PYTHONPATH"] = os.pathsep.join(str(path) for path in paths)
     return env
 
 
