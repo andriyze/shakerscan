@@ -158,7 +158,7 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
         preflight_only=False,
         target="https://lab.example.test",
         authorized=True,
-        scan_type="quick",
+        budget_profile="fast",
         request_budget_mode="default",
         fault_node_ssh=None,
         fault_node_id=None,
@@ -170,7 +170,9 @@ def test_full_acceptance_routes_scan_to_shared_remote_transport(monkeypatch):
     fleet_acceptance.run(args)
 
     assert submitted[0]["options"]["placement"] == {"node_scope": "remote"}
-    assert submitted[0]["options"]["scan_type"] == "quick"
+    assert submitted[0]["budget_profile"] == "fast"
+    assert "scan_type" not in submitted[0]
+    assert "scan_type" not in submitted[0]["options"]
     assert submitted[0]["options"]["request_budget_mode"] == "default"
     assert submitted[0]["options"]["custom_budget"] == {"request_max": 600}
 

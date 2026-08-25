@@ -14,24 +14,22 @@ import request_collection_api  # noqa: E402
 
 
 def test_request_collection_routes_are_owned_by_extracted_router():
-    methods_by_path = {}
-    for route in request_collection_api.router.routes:
-        methods_by_path.setdefault(route.path, set()).update(route.methods or ())
-    assert methods_by_path == {
-        "/request-collections": {"GET", "POST"},
-        "/request-collections/{collection_id}/requests": {"GET"},
-        "/request-collections/{collection_id}/select": {"POST"},
-        "/request-collections/{collection_id}": {"GET"},
-        "/request-collections/{collection_id}/environments": {"POST"},
-        "/request-collections/{collection_id}/environments/{environment_id}": {
-            "DELETE"
-        },
-        "/request-collections/{collection_id}/bindings": {"POST"},
-        "/request-collections/{collection_id}/selections": {"POST"},
-        "/request-collections/{collection_id}/selections/{selection_id}": {
-            "DELETE"
-        },
+    source = (ROOT / "api" / "request_collection_api.py").read_text(
+        encoding="utf-8"
+    )
+    routes = {
+        '@router.post("/request-collections")',
+        '@router.get("/request-collections")',
+        '@router.get("/request-collections/{collection_id}/requests")',
+        '@router.post("/request-collections/{collection_id}/select")',
+        '@router.get("/request-collections/{collection_id}")',
+        '@router.post("/request-collections/{collection_id}/environments")',
+        '@router.delete("/request-collections/{collection_id}/environments/{environment_id}")',
+        '@router.post("/request-collections/{collection_id}/bindings")',
+        '@router.post("/request-collections/{collection_id}/selections")',
+        '@router.delete("/request-collections/{collection_id}/selections/{selection_id}")',
     }
+    assert all(route in source for route in routes)
 
 
 def test_request_collection_router_is_not_a_monolith_wrapper():

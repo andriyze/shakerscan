@@ -2224,7 +2224,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DEVICE_INTEL_DB_PATH` | `api/api.py`, `api/device_agent.py`, `api/worker.py` |
 | `DEVICE_INTEL_DB_SHA256` | `api/api.py`, `api/device_agent.py`, `api/worker.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
-| `DEVICE_POSTURE_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `DEVICE_POSTURE_ENABLED` | `api/api.py`, `api/worker_handlers/non_dast.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_SCAN_WORKER_ENABLED` | `api/worker.py` |
 | `DEVICE_SSH_AUTH_COOLDOWN_SECONDS` | `api/worker.py` |
