@@ -1,10 +1,10 @@
 'use client'
 
 import Link from 'next/link'
-import { Suspense, useCallback, useEffect, useState } from 'react'
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
-import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
+import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
@@ -74,6 +74,8 @@ function DeviceDetailContent() {
   const [renameOpen, setRenameOpen] = useState(false)
   const [credentials, setCredentials] = useState<DeviceCredentialProfile[]>([])
   const [requestCollections, setRequestCollections] = useState<DeviceRequestCollection[]>([])
+  const [requestPreviews, setRequestPreviews] = useState<Record<string, { loading: boolean; error: string | null; requests: DeviceRequestCollectionRequest[]; total: number }>>({})
+  const requestPreviewInFlight = useRef(new Set<string>())
   const [deviceHunts, setDeviceHunts] = useState<DeviceAgentRunSummary[]>([])
   const [requestImportSaving, setRequestImportSaving] = useState(false)
   const [requestImport, setRequestImport] = useState<{ name: string; format: 'auto' | 'postman_collection' | 'har' | 'openapi'; document: Record<string, unknown> | null; documentFile: string; environment: Record<string, unknown> | null; environmentFile: string; baseUrl: string }>({ name: '', format: 'auto', document: null, documentFile: '', environment: null, environmentFile: '', baseUrl: '' })
@@ -96,6 +98,44 @@ function DeviceDetailContent() {
       const [device, credentialData, collectionData, huntData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 })])
       setData(device); setCredentials(credentialData.profiles || []); setRequestCollections(collectionData.collections || []); setDeviceHunts(huntData.runs || []); setFailed(false)
     } catch { setFailed(true) } finally { setLoading(false) }
+  }, [deviceId])
+
+  const loadRequestPreview = useCallback(async (collectionId: string) => {
+    if (requestPreviewInFlight.current.has(collectionId)) return
+    requestPreviewInFlight.current.add(collectionId)
+    setRequestPreviews((current) => ({
+      ...current,
+      [collectionId]: {
+        loading: true,
+        error: null,
+        requests: current[collectionId]?.requests || [],
+        total: current[collectionId]?.total || 0,
+      },
+    }))
+    try {
+      const collection = await getDeviceRequestCollection(deviceId, collectionId)
+      setRequestPreviews((current) => ({
+        ...current,
+        [collectionId]: {
+          loading: false,
+          error: null,
+          requests: collection.summary.requests || [],
+          total: collection.summary.requests_total ?? collection.summary.request_count ?? 0,
+        },
+      }))
+    } catch (error) {
+      setRequestPreviews((current) => ({
+        ...current,
+        [collectionId]: {
+          loading: false,
+          error: error instanceof Error ? error.message : 'Could not load the redacted request preview',
+          requests: [],
+          total: 0,
+        },
+      }))
+    } finally {
+      requestPreviewInFlight.current.delete(collectionId)
+    }
   }, [deviceId])
 
   useEffect(() => { load(); const timer = setInterval(load, 10_000); return () => clearInterval(timer) }, [load])
@@ -468,7 +508,7 @@ function DeviceDetailContent() {
 
       <section className="mb-6">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-white">API request collections</h2><p className="text-sm text-gray-500">Import Postman, HAR, OpenAPI, or Swagger JSON so scans test real device endpoints—not just ports.</p></div><Button size="sm" variant="secondary" onClick={() => setRequestImportOpen(true)}><Upload className="h-4 w-4" /> Import API requests</Button></div>
-        <Card className="p-4">{requestCollections.length ? <div className="space-y-4">{requestCollections.map((collection) => <div key={collection.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 gap-3"><FileJson className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium text-white">{collection.name}</p><span className="rounded bg-orange-500/10 px-2 py-0.5 text-[10px] uppercase text-orange-300">{collection.format === 'postman_collection' ? 'Postman' : collection.format === 'har' ? 'HAR 1.2' : collection.summary.spec_version?.startsWith('2.') ? 'Swagger 2.0' : 'OpenAPI'}</span></div><p className="mt-1 text-xs text-gray-500">{collection.summary.request_count} requests · {collection.summary.safe_request_count} safe methods · {collection.summary.state_changing_request_count} state-changing · encrypted</p><div className="mt-2 flex flex-wrap gap-1.5">{Object.entries(collection.summary.methods).map(([method, count]) => <span key={method} className="rounded bg-gray-800 px-2 py-0.5 font-mono text-[10px] text-gray-300">{method} {count}</span>)}{collection.summary.port_hints.map((port) => <span key={port} className="rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">port {port}</span>)}</div></div></div><Button size="sm" variant="ghost" onClick={async () => { try { await deactivateDeviceRequestCollection(deviceId, collection.id); toast.success('Request collection removed'); await load() } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to remove collection') } }}><Trash2 className="h-4 w-4" /> Remove</Button></div><details className="mt-3 border-t border-gray-800 pt-3"><summary className="cursor-pointer text-xs font-medium text-gray-400">Preview redacted request inventory</summary><div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{collection.summary.requests.map((request) => <div key={request.id} className="flex flex-wrap items-center gap-2 rounded bg-gray-900/70 px-3 py-2 text-xs"><span className={`rounded px-1.5 py-0.5 font-mono ${request.safe_method ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'}`}>{request.method}</span><span className="min-w-0 flex-1 truncate font-mono text-gray-300">{request.url}</span><span className="text-gray-600">{request.auth_type}</span></div>)}</div>{collection.summary.scripts_ignored > 0 && <p className="mt-3 text-xs text-amber-300">{collection.summary.scripts_ignored} Postman script{collection.summary.scripts_ignored === 1 ? ' was' : 's were'} ignored and will never execute.</p>}{Boolean(collection.summary.external_refs_ignored) && <p className="mt-3 text-xs text-amber-300">{collection.summary.external_refs_ignored} external reference{collection.summary.external_refs_ignored === 1 ? ' was' : 's were'} ignored; ShakerScan never fetches imported references.</p>}</details></div>)}</div> : <div className="flex items-center gap-3"><FileJson className="h-5 w-5 text-gray-600" /><div><p className="text-sm text-gray-400">No request collections imported</p><p className="text-xs text-gray-600">Port discovery can find a web server, but imported traffic or API specifications tell ShakerScan how the device API is actually used.</p></div></div>}</Card>
+        <Card className="p-4">{requestCollections.length ? <div className="space-y-4">{requestCollections.map((collection) => <div key={collection.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 gap-3"><FileJson className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium text-white">{collection.name}</p><span className="rounded bg-orange-500/10 px-2 py-0.5 text-[10px] uppercase text-orange-300">{collection.format === 'postman_collection' ? 'Postman' : collection.format === 'har' ? 'HAR 1.2' : collection.summary.spec_version?.startsWith('2.') ? 'Swagger 2.0' : 'OpenAPI'}</span></div><p className="mt-1 text-xs text-gray-500">{collection.summary.request_count} requests · {collection.summary.safe_request_count} safe methods · {collection.summary.state_changing_request_count} state-changing · encrypted</p><div className="mt-2 flex flex-wrap gap-1.5">{Object.entries(collection.summary.methods).map(([method, count]) => <span key={method} className="rounded bg-gray-800 px-2 py-0.5 font-mono text-[10px] text-gray-300">{method} {count}</span>)}{collection.summary.port_hints.map((port) => <span key={port} className="rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">port {port}</span>)}</div></div></div><Button size="sm" variant="ghost" onClick={async () => { try { await deactivateDeviceRequestCollection(deviceId, collection.id); toast.success('Request collection removed'); await load() } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to remove collection') } }}><Trash2 className="h-4 w-4" /> Remove</Button></div><details className="mt-3 border-t border-gray-800 pt-3" onToggle={(event) => { if (event.currentTarget.open) void loadRequestPreview(collection.id) }}><summary className="cursor-pointer text-xs font-medium text-gray-400">Preview redacted request inventory</summary>{requestPreviews[collection.id]?.loading && <p className="mt-3 text-xs text-gray-500">Loading redacted requests…</p>}{requestPreviews[collection.id]?.error && <p className="mt-3 text-xs text-red-300" role="alert">{requestPreviews[collection.id].error}</p>}{!requestPreviews[collection.id]?.loading && !requestPreviews[collection.id]?.error && requestPreviews[collection.id] && requestPreviews[collection.id].requests.length === 0 && <p className="mt-3 text-xs text-gray-500">No redacted request rows are available.</p>}{(requestPreviews[collection.id]?.requests.length || 0) > 0 && <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{requestPreviews[collection.id].requests.map((request) => <div key={request.id} className="flex flex-wrap items-center gap-2 rounded bg-gray-900/70 px-3 py-2 text-xs"><span className={`rounded px-1.5 py-0.5 font-mono ${request.safe_method ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'}`}>{request.method}</span><span className="min-w-0 flex-1 truncate font-mono text-gray-300">{request.url}</span><span className="text-gray-600">{request.auth_type}</span></div>)}</div>}{requestPreviews[collection.id] && requestPreviews[collection.id].total > requestPreviews[collection.id].requests.length && <p className="mt-3 text-xs text-gray-500">Showing {requestPreviews[collection.id].requests.length} of {requestPreviews[collection.id].total} redacted requests.</p>}{collection.summary.scripts_ignored > 0 && <p className="mt-3 text-xs text-amber-300">{collection.summary.scripts_ignored} Postman script{collection.summary.scripts_ignored === 1 ? ' was' : 's were'} ignored and will never execute.</p>}{Boolean(collection.summary.external_refs_ignored) && <p className="mt-3 text-xs text-amber-300">{collection.summary.external_refs_ignored} external reference{collection.summary.external_refs_ignored === 1 ? ' was' : 's were'} ignored; ShakerScan never fetches imported references.</p>}</details></div>)}</div> : <div className="flex items-center gap-3"><FileJson className="h-5 w-5 text-gray-600" /><div><p className="text-sm text-gray-400">No request collections imported</p><p className="text-xs text-gray-600">Port discovery can find a web server, but imported traffic or API specifications tell ShakerScan how the device API is actually used.</p></div></div>}</Card>
       </section>
 
       <section className="mb-6">

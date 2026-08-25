@@ -1467,6 +1467,8 @@ export interface DeviceRequestCollection {
     environment_variable_names: string[]
     collection_variable_names: string[]
     requests: DeviceRequestCollectionRequest[]
+    requests_preview?: DeviceRequestCollectionRequest[]
+    requests_total?: number
     secrets_redacted: true
   }
 }
@@ -5446,6 +5448,27 @@ export async function getDeviceRequestCollections(deviceId: string): Promise<{ c
     },
   }))
   return { collections, count: payload.count ?? collections.length }
+}
+
+export async function getDeviceRequestCollection(deviceId: string, collectionId: string): Promise<DeviceRequestCollection> {
+  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/request-collections/${encodeURIComponent(collectionId)}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load imported request preview'))
+  const payload = await res.json() as { collection: DeviceRequestCollection }
+  const collection = payload.collection
+  const summary = collection?.summary || {} as DeviceRequestCollection['summary']
+  return {
+    ...collection,
+    summary: {
+      ...summary,
+      methods: summary.methods || {},
+      port_hints: Array.isArray(summary.port_hints) ? summary.port_hints : [],
+      environment_variable_names: Array.isArray(summary.environment_variable_names) ? summary.environment_variable_names : [],
+      collection_variable_names: Array.isArray(summary.collection_variable_names) ? summary.collection_variable_names : [],
+      requests: Array.isArray(summary.requests_preview)
+        ? summary.requests_preview
+        : Array.isArray(summary.requests) ? summary.requests : [],
+    },
+  }
 }
 
 export async function createDeviceRequestCollection(deviceId: string, payload: {
