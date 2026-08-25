@@ -15,6 +15,7 @@ test('New Scan labels target entry and exposes selected budget state', () => {
 })
 
 test('New Scan exposes disclosure and validation state to assistive technology', () => {
+  assert.match(page, /<form\s+noValidate\s+onSubmit=\{handleSubmit\}/)
   assert.match(page, /aria-expanded=\{showAdvanced\}/)
   assert.match(page, /aria-controls="advanced-scan-options"/)
   assert.match(page, /id="advanced-scan-options"/)

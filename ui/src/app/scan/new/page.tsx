@@ -352,6 +352,7 @@ export default function NewScanPage() {
       </div>
 
       <form
+        noValidate
         onSubmit={handleSubmit}
         onChange={() => { if (error) setError(null) }}
         className="space-y-6"
