@@ -3679,6 +3679,23 @@ def test_public_scan_schema_exposes_independent_host_and_mutation_ceilings():
         )
 
 
+def test_public_scan_omitted_parallel_compiles_to_worker_default():
+    request = api_module.ScanRequest(
+        target="https://example.test",
+        options={
+            "parallel": None,
+            "custom_endpoints": ["GET /health"],
+            "require_current_workers": True,
+        },
+    )
+
+    execution_options = api_module._scan_execution_options(request.options)
+
+    assert execution_options.parallel is False
+    assert execution_options.custom_endpoints == ["GET /health"]
+    assert execution_options.require_current_workers is True
+
+
 def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):
     schedule = _due_schedule()
     schedule["schedule_kind"] = "evidence_retention_sweep"

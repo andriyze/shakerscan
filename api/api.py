@@ -30097,6 +30097,21 @@ async def submit_scan(request: ScanRequest):
     return await _submit_scan(request)
 
 
+def _scan_execution_options(
+    options: Union[ScanOptions, ScanPublicCompatibilityOptions],
+) -> ScanOptions:
+    """Compile public compatibility controls into worker execution options.
+
+    Public controls use ``None`` to distinguish an omitted parallel choice from
+    an explicit boolean.  The historical worker model uses concrete boolean
+    defaults, so omitted public values must be removed before validation rather
+    than forwarded as ``parallel=None``.
+    """
+    if isinstance(options, ScanOptions):
+        return options.model_copy(deep=True)
+    return ScanOptions(**options.model_dump(mode="python", exclude_none=True))
+
+
 def _scan_requires_durable_approval(
     scan_contract: ResolvedScanContract,
     *,
@@ -30115,11 +30130,7 @@ async def _submit_scan(
     request: _ScanRequestBase,
 ):
     """Canonical V2 admission; legacy identities and inline secrets are rejected."""
-    execution_options = (
-        request.options.model_copy(deep=True)
-        if isinstance(request.options, ScanOptions)
-        else ScanOptions(**request.options.model_dump(mode="python"))
-    )
+    execution_options = _scan_execution_options(request.options)
     scheme_inferred = "://" not in (request.target or "")
     try:
         normalized_target, target_note = normalize_target_url(request.target)
