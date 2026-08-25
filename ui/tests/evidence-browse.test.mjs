@@ -18,3 +18,13 @@ test('evidence labels both nested family proofs and root proof contracts', () =>
   assert.match(page, /const nested = asObject\(po\.family_proof\)/)
   assert.match(page, /Object\.keys\(nested\)\.length \? nested : po/)
 })
+
+test('evidence detail treats canonical deterministic proof contracts as usable proof', () => {
+  assert.match(page, /schema_version\) === 'proof-contract\/v2'/)
+  assert.match(page, /predicate\.satisfied === true/)
+  assert.match(page, /reexecution\.performed === true/)
+  assert.match(page, /Boolean\(text\(reexecution\.verifier_build\)\)/)
+  assert.match(page, /hasValidProofContract \|\| hasRequestComparisonProof/)
+  assert.match(page, /hasValidProofContract \? 'Deterministic proof'/)
+  assert.match(page, /!isProofContract \? \(/)
+})

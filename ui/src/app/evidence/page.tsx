@@ -395,13 +395,25 @@ function EvidenceContent() {
 function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onViewObject?: () => void }) {
   const po = proofObs(inst)
   const fp = familyProof(inst)
+  const predicate = asObject(fp.predicate)
+  const reexecution = asObject(fp.reexecution)
   const objective = text(po.objective)
   const expected = text(po.expected_signal)
   const falsifier = text(po.falsifier)
   const verdict = text(fp.verdict)
   const comparisons = Array.isArray(po.comparisons) ? po.comparisons : []
   const hasDecisionRule = Boolean(objective && expected && falsifier)
-  const isUsableProof = inst.proof_state === 'verified' && hasDecisionRule && comparisons.length > 0
+  const isProofContract = text(fp.schema_version) === 'proof-contract/v2'
+  const hasValidProofContract = isProofContract
+    && inst.proof_state === 'verified'
+    && verdict === 'verified'
+    && fp.promotable === true
+    && predicate.satisfied === true
+    && reexecution.performed === true
+    && Boolean(text(reexecution.verifier_build))
+  const hasRequestComparisonProof = inst.proof_state === 'verified' && hasDecisionRule && comparisons.length > 0
+  const isUsableProof = hasValidProofContract || hasRequestComparisonProof
+  const proofHeading = hasValidProofContract ? 'Deterministic proof' : hasRequestComparisonProof ? 'Reproducible proof' : 'Incomplete evidence'
 
   return (
     <div className="grid gap-4 text-sm md:grid-cols-2">
@@ -412,20 +424,29 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
             : 'border-amber-500/25 bg-amber-500/[0.06] text-amber-100'
         }`}>
           <div className="text-xs font-semibold uppercase tracking-wide">
-            {isUsableProof ? 'Reproducible proof' : 'Incomplete evidence'}
+            {proofHeading}
           </div>
           <p className="mt-1 text-xs opacity-80">
-            {isUsableProof
+            {hasValidProofContract
+              ? 'A canonical proof contract, live re-execution, and verifier build are recorded.'
+              : hasRequestComparisonProof
               ? 'The decision rule and request comparison are recorded.'
-              : 'Do not treat this record as proof until its decision rule and request comparison are complete.'}
+              : isProofContract
+                ? 'Do not treat this record as proof until its proof contract and live re-execution are complete.'
+                : 'Do not treat this record as proof until its decision rule and request comparison are complete.'}
           </p>
         </div>
         {objective && <div><div className="text-xs font-medium text-gray-500">Objective</div><p className="text-gray-300">{objective}</p></div>}
         {expected && <div><div className="text-xs font-medium text-emerald-400">Signal that supports it</div><p className="text-gray-300">{expected}</p></div>}
         {falsifier && <div><div className="text-xs font-medium text-gray-500">What would disprove it</div><p className="text-gray-400">{falsifier}</p></div>}
-        {!hasDecisionRule && (
+        {!isProofContract && !hasDecisionRule && (
           <p className="text-xs text-amber-300">
             Missing decision rule. Re-run verification with an expected signal and a condition that would disprove the claim.
+          </p>
+        )}
+        {isProofContract && !hasValidProofContract && (
+          <p className="text-xs text-amber-300">
+            The proof contract is missing a verified predicate, promotion decision, or live verifier-build receipt.
           </p>
         )}
         <div className="flex flex-wrap gap-3 text-xs">
@@ -443,6 +464,8 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
           )}
           {fp.reproduction_count === 2 && <Badge className="bg-emerald-500/10 text-emerald-300">reproduced twice</Badge>}
           {fp.restoration_verified === true && <Badge className="bg-blue-500/10 text-blue-300">state restored</Badge>}
+          {isProofContract && text(fp.contract_id) && <Badge className="bg-blue-500/10 text-blue-300">{text(fp.contract_id)}</Badge>}
+          {isProofContract && text(fp.proof_basis) && <Badge className="bg-gray-800 text-gray-300">{text(fp.proof_basis).replace(/_/g, ' ')}</Badge>}
           {typeof inst.tool_receipt_id === 'string' && <span className="text-xs text-gray-600">receipt {inst.tool_receipt_id.slice(0, 8)}…</span>}
         </div>
         {comparisons.length > 0 ? (
@@ -458,9 +481,9 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
               ))}
             </div>
           </details>
-        ) : (
+        ) : !isProofContract ? (
           <p className="text-xs text-amber-300">No request/response comparison was captured.</p>
-        )}
+        ) : null}
         {onViewObject && (
           <button type="button" onClick={onViewObject} className="text-xs text-blue-400 hover:text-blue-300">View raw object</button>
         )}
