@@ -103,7 +103,13 @@ def test_allocator_rejects_legacy_residual_assignment_for_pure_finalizer():
 def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
     budget = ScanBudget(300, 100, 50, 10, 10, 30, 1, 0, 10)
     execution = ScanExecutionPlan(
-        policy=ScanPolicy(active_testing=False),
+        # This fixture exercises residual accounting for a pure-finalizer
+        # endpoint shard. Keep Nuclei out of scope explicitly so the compiler
+        # does not (correctly) require the canonical immutable template pack.
+        policy=ScanPolicy(
+            active_testing=False,
+            exclude_families=("nuclei",),
+        ),
         budget_profile="fast",
         budget=budget,
     )
