@@ -734,6 +734,21 @@ try:
         normalize_hunt_start_payload,
     )
     from hunt.legacy import LegacyHuntIsolationMiddleware
+    from hunt.run_router import (
+        HuntFinishRequest,
+        cancel_hunt,
+        configure_hunt_run_router,
+        finish_hunt,
+        get_hunt,
+        list_hunts,
+        resume_hunt,
+        router as hunt_run_router,
+    )
+    from hunt.run_service import (
+        HuntRunService,
+        hunt_run_or_404 as _hunt_run_or_404,
+        public_hunt_run as _hunt_public,
+    )
 except ModuleNotFoundError:
     from api.hunt.action_dispatcher import (
         HUNT_ACTION_DISPATCHER,
@@ -777,6 +792,21 @@ except ModuleNotFoundError:
         normalize_hunt_start_payload,
     )
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
+    from api.hunt.run_router import (
+        HuntFinishRequest,
+        cancel_hunt,
+        configure_hunt_run_router,
+        finish_hunt,
+        get_hunt,
+        list_hunts,
+        resume_hunt,
+        router as hunt_run_router,
+    )
+    from api.hunt.run_service import (
+        HuntRunService,
+        hunt_run_or_404 as _hunt_run_or_404,
+        public_hunt_run as _hunt_public,
+    )
 try:
     from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -39032,12 +39062,6 @@ class HuntCandidateRequest(BaseModel):
     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
 
 
-class HuntFinishRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    summary: str = Field(min_length=1, max_length=20_000)
-    next_actions: list[str] = Field(default_factory=list, max_length=100)
-
-
 def _hunt_json(value: Any, default: Any) -> Any:
     decoded = _decode_json_value(value)
     return decoded if isinstance(decoded, type(default)) else default
@@ -39421,10 +39445,6 @@ def _hunt_nonexecuting_actual(
     return actual
 
 
-def _hunt_capability_public(spec: Any) -> dict[str, Any]:
-    return spec.planner_contract()
-
-
 def _resolve_hunt_allowed_capabilities(
     contract: HuntStartContract,
     *,
@@ -39434,63 +39454,6 @@ def _resolve_hunt_allowed_capabilities(
         contract,
         credentials_available=credential_access,
     )
-
-
-def _hunt_public(
-    row: Any,
-    *,
-    include_context: bool = True,
-    include_capabilities: bool = True,
-) -> dict[str, Any]:
-    item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
-    policy = _hunt_json(item.get("policy_json"), {})
-    allowed = policy.get("allowed_capabilities")
-    if isinstance(allowed, list):
-        capabilities: list[dict[str, Any]] = []
-        for raw_name in allowed:
-            try:
-                capabilities.append(
-                    _hunt_capability_public(
-                        agent_tools.CAPABILITY_REGISTRY.require(str(raw_name))
-                    )
-                )
-            except KeyError:
-                continue
-    else:
-        # Pre-V2 rows do not carry a persisted semantic allowlist. Never infer executable
-        # authority from stale booleans; legacy history remains readable but non-executable.
-        capabilities = []
-    result = {
-        "hunt_id": str(item.get("id")) if item.get("id") else None,
-        "target_kind": item.get("target_kind"),
-        "target_id": str(item.get("target_id") or item.get("device_target_id") or "") or None,
-        "objective": item.get("objective"),
-        "status": item.get("status"),
-        "budget_profile": item.get("budget_profile"),
-        "policy": policy,
-        "budget": _hunt_json(item.get("budget_json"), {}),
-        "budget_used": _hunt_json(item.get("budget_used_json"), {}),
-        "stop_reason": item.get("stop_reason"),
-        "final_debrief": _hunt_json(item.get("final_debrief"), {}),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-        "next_action": f"POST /hunts/{item.get('id')}/query" if item.get("status") in {"active", "awaiting_planner"} else None,
-    }
-    if include_capabilities:
-        result["capabilities"] = capabilities
-    if include_context:
-        result["context_pack"] = _hunt_json(item.get("context_pack"), {})
-    return _json_safe_row(result)
-
-
-async def _hunt_run_or_404(conn: Any, hunt_id: str, *, for_update: bool = False) -> Any:
-    query = "SELECT * FROM hunt_runs WHERE id=$1"
-    if for_update:
-        query += " FOR UPDATE"
-    row = await conn.fetchrow(query, _uuid_or_400(hunt_id, "hunt id"))
-    if not row:
-        raise HTTPException(status_code=404, detail="Hunt not found")
-    return row
 
 
 def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> RequestSelector:
@@ -40088,42 +40051,9 @@ async def get_hunt_lifecycle_metrics():
     return HUNT_ACTION_SERVICE.metrics.snapshot()
 
 
-@app.get("/hunts/{hunt_id}")
-async def get_hunt(hunt_id: str):
-    async with db_pool.acquire() as conn:
-        row = await _hunt_run_or_404(conn, hunt_id)
-    return _hunt_public(row)
-
-
-@app.get("/hunts")
-async def list_hunts(
-    target_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-):
-    clauses: list[str] = []
-    params: list[Any] = []
-    if target_id:
-        params.append(_uuid_or_400(target_id, "target id"))
-        clauses.append(f"(target_id=${len(params)} OR device_target_id=${len(params)})")
-    if status:
-        if status not in {"created", "active", "awaiting_planner", "completed", "cancelled", "failed", "budget_exhausted"}:
-            raise HTTPException(status_code=400, detail="invalid Hunt status")
-        params.append(status)
-        clauses.append(f"status=${len(params)}")
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    params.append(limit)
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"SELECT * FROM hunt_runs{where} ORDER BY created_at DESC LIMIT ${len(params)}", *params,
-        )
-    return {
-        "hunts": [
-            _hunt_public(row, include_context=False, include_capabilities=False)
-            for row in rows
-        ],
-        "count": len(rows),
-    }
+_hunt_run_service = HuntRunService(lambda: db_pool)
+configure_hunt_run_router(lambda: _hunt_run_service)
+app.include_router(hunt_run_router)
 
 
 @app.post("/hunts/{hunt_id}/query")
@@ -42588,51 +42518,6 @@ async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
             candidate_uuid, policy["approval_receipt_id"], created_by=f"hunt_v2:{hunt_id}",
         )
     return {"hunt_id": hunt_id, "candidate_id": candidate_id, "verification": result}
-
-
-@app.post("/hunts/{hunt_id}/finish")
-async def finish_hunt(hunt_id: str, request: HuntFinishRequest):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """UPDATE hunt_runs SET status='completed', stop_reason='completed', final_debrief=$2,
-                      completed_at=NOW(), updated_at=NOW()
-               WHERE id=$1 AND status IN ('active','awaiting_planner') RETURNING *""",
-            _uuid_or_400(hunt_id, "hunt id"),
-            json.dumps({"summary": request.summary, "next_actions": request.next_actions}),
-        )
-        if not row:
-            row = await _hunt_run_or_404(conn, hunt_id)
-            if row["status"] != "completed":
-                raise HTTPException(status_code=409, detail=f"Hunt is {row['status']}")
-    return _hunt_public(row)
-
-
-@app.post("/hunts/{hunt_id}/cancel")
-async def cancel_hunt(hunt_id: str):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled', completed_at=NOW(), updated_at=NOW()
-               WHERE id=$1 AND status IN ('created','active','awaiting_planner') RETURNING *""",
-            _uuid_or_400(hunt_id, "hunt id"),
-        )
-        if not row:
-            row = await _hunt_run_or_404(conn, hunt_id)
-    return _hunt_public(row)
-
-
-@app.post("/hunts/{hunt_id}/resume")
-async def resume_hunt(hunt_id: str):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """UPDATE hunt_runs SET status='active', stop_reason=NULL, updated_at=NOW()
-               WHERE id=$1 AND status='awaiting_planner' RETURNING *""",
-            _uuid_or_400(hunt_id, "hunt id"),
-        )
-        if not row:
-            row = await _hunt_run_or_404(conn, hunt_id)
-            if row["status"] != "active":
-                raise HTTPException(status_code=409, detail=f"Hunt is {row['status']} and cannot resume")
-    return _hunt_public(row)
 
 
 class AgentHuntRequest(BaseModel):

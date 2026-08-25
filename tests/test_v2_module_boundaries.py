@@ -176,6 +176,7 @@ def test_api_routers_own_real_endpoint_behavior_without_monolith_imports():
         "api/credential_api.py",
         "api/request_collection_api.py",
         "api/scan/read_router.py",
+        "api/hunt/run_router.py",
     ):
         _reject_monolith_imports(relative)
 
@@ -184,6 +185,7 @@ def test_api_routers_own_real_endpoint_behavior_without_monolith_imports():
     assert "PostgresScanActionStore" in _name_references("api/scan/read_router.py")
     assert {
         "credential_router", "request_collection_router", "scan_read_router",
+        "hunt_run_router",
     }.issubset(_included_routers("api/api.py"))
     assert ("post", "/request-collections") in _decorated_routes(
         "api/request_collection_api.py", "router",
@@ -193,6 +195,17 @@ def test_api_routers_own_real_endpoint_behavior_without_monolith_imports():
     )
     assert ("post", "/request-collections") not in _decorated_routes("api/api.py", "app")
     assert ("get", "/scans/{scan_id}/actions") not in _decorated_routes("api/api.py", "app")
+    for method, path in (
+        ("get", "/hunts/{hunt_id}"),
+        ("get", "/hunts"),
+        ("post", "/hunts/{hunt_id}/finish"),
+        ("post", "/hunts/{hunt_id}/cancel"),
+        ("post", "/hunts/{hunt_id}/resume"),
+    ):
+        assert (method, path) in _decorated_routes(
+            "api/hunt/run_router.py", "router"
+        )
+        assert (method, path) not in _decorated_routes("api/api.py", "app")
 
 
 def test_product_services_are_concrete_and_independent_of_api_monolith():
