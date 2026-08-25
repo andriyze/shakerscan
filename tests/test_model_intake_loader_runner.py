@@ -692,6 +692,29 @@ def test_linux_host_without_nested_virtualization_reports_unsupported_host(tmp_p
     assert result["fallback_execution"] is False
 
 
+def test_known_missing_cpu_virtualization_overrides_ambient_kvm_device(
+    tmp_path, monkeypatch,
+):
+    """A mounted /dev/kvm cannot override authoritative CPU capability data."""
+    from model_intake_runner_controller import firecracker_readiness
+
+    guest = _cpuinfo(tmp_path, "fpu vme de pse hypervisor lahf_lm smep")
+    original_exists = Path.exists
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda self: True if str(self) == "/dev/kvm" else original_exists(self),
+    )
+    result = firecracker_readiness(
+        {"SHAKERSCAN_HOST_PLATFORM": "linux"}, cpuinfo_path=guest,
+    )
+
+    assert result["checks"]["kvm"] is True
+    assert result["status"] == "UNSUPPORTED_HOST"
+    assert result["supported_host"] is False
+    assert result["unsupported_reason"] == "no_hardware_virtualization"
+
+
 def test_unreadable_cpuinfo_leaves_a_linux_host_eligible(tmp_path):
     # Without a positive "this CPU cannot virtualize" signal, stay in the
     # repairable NOT_READY state rather than declaring the host hopeless.

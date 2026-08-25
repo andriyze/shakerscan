@@ -251,7 +251,8 @@ def firecracker_readiness(
     # The remedy is real but lives outside the host: most clouds now expose
     # nested virtualization as a per-instance setting, so the reason must not
     # tell the operator the machine is hopeless.
-    if supported_host and not checks["kvm"] and cpu_exposes_virtualization(cpuinfo_path) is False:
+    cpu_virtualization = cpu_exposes_virtualization(cpuinfo_path)
+    if supported_host and cpu_virtualization is False:
         supported_host = False
         reason_code = "no_hardware_virtualization"
         reason = (
