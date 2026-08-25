@@ -18220,7 +18220,12 @@ async def _revalidate_job_execution_scope(job_data: dict[str, Any]) -> bool:
     return True
 
 
-async def _fail_execution_scope(job_data: dict[str, Any], message: str) -> None:
+async def _fail_execution_scope(
+    job_data: dict[str, Any],
+    message: str,
+    *,
+    phase: str = "scope_revalidation_failed",
+) -> None:
     raw_scan_id = str(job_data.get("scan_id") or "").strip()
     job_id = str(job_data.get("job_id") or "").strip()
     try:
@@ -18232,13 +18237,14 @@ async def _fail_execution_scope(job_data: dict[str, Any], message: str) -> None:
             failed_row = await conn.fetchrow(
                 """
                 UPDATE scans
-                SET status='failed', progress=100, current_phase='scope_revalidation_failed',
+                SET status='failed', progress=100, current_phase=$3,
                     error_message=$2, completed_at=NOW()
                 WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
                 RETURNING parent_scan_id
                 """,
                 scan_id,
                 message[:500],
+                phase[:100],
             )
             parent_id = failed_row.get("parent_scan_id") if failed_row else None
             if parent_id:
@@ -18258,7 +18264,7 @@ async def _fail_execution_scope(job_data: dict[str, Any], message: str) -> None:
         try:
             get_redis().hset(
                 f"job:{job_id}",
-                mapping={"status": "failed", "current_phase": "scope_revalidation_failed", "error": message[:500]},
+                mapping={"status": "failed", "current_phase": phase[:100], "error": message[:500]},
             )
         except Exception:
             pass
@@ -22513,32 +22519,44 @@ async def process_job(job_data: dict):
         return
     job_type = job_data.get('type', 'scan')
 
-    if job_type == 'discovery':
-        await process_discovery_job(job_data)
-    elif job_type == 'agent_scanner_tool':
-        await process_agent_scanner_tool_job(job_data)
-    elif job_type == 'canonical_scanner_capability':
-        await process_canonical_scanner_capability_job(job_data)
-    elif job_type == 'request_collection_replay':
-        await process_request_collection_replay_job(job_data)
-    elif job_type == 'canonical_browser_capability':
-        await process_canonical_browser_capability_job(job_data)
-    elif job_type == 'canonical_http_capability':
-        await process_canonical_http_capability_job(job_data)
-    elif job_type == 'canonical_network_capability':
-        await process_canonical_network_capability_job(job_data)
-    elif job_type == 'finding_retest':
-        await process_finding_retest_job(job_data)
-    elif job_type == parallel_scan.PLAN_JOB_TYPE:
-        await process_scan_plan_job(job_data)
-    elif job_type == parallel_scan.SHARD_JOB_TYPE:
-        await process_scan_shard_job(job_data)
-    elif job_type == parallel_scan.MERGE_JOB_TYPE:
-        await process_scan_merge_job(job_data)
-    elif job_type == asm_inventory.EXPLOIT_BATCH_JOB_TYPE:
-        await process_exploit_batch_job(job_data)
-    else:
-        await process_scan_job(job_data)
+    try:
+        if job_type == 'discovery':
+            await process_discovery_job(job_data)
+        elif job_type == 'agent_scanner_tool':
+            await process_agent_scanner_tool_job(job_data)
+        elif job_type == 'canonical_scanner_capability':
+            await process_canonical_scanner_capability_job(job_data)
+        elif job_type == 'request_collection_replay':
+            await process_request_collection_replay_job(job_data)
+        elif job_type == 'canonical_browser_capability':
+            await process_canonical_browser_capability_job(job_data)
+        elif job_type == 'canonical_http_capability':
+            await process_canonical_http_capability_job(job_data)
+        elif job_type == 'canonical_network_capability':
+            await process_canonical_network_capability_job(job_data)
+        elif job_type == 'finding_retest':
+            await process_finding_retest_job(job_data)
+        elif job_type == parallel_scan.PLAN_JOB_TYPE:
+            await process_scan_plan_job(job_data)
+        elif job_type == parallel_scan.SHARD_JOB_TYPE:
+            await process_scan_shard_job(job_data)
+        elif job_type == parallel_scan.MERGE_JOB_TYPE:
+            await process_scan_merge_job(job_data)
+        elif job_type == asm_inventory.EXPLOIT_BATCH_JOB_TYPE:
+            await process_exploit_batch_job(job_data)
+        else:
+            await process_scan_job(job_data)
+    except ExecutionScopeError as exc:
+        # Deterministic authority/compiler failures cannot succeed on another
+        # delivery. Terminalize them once with the actionable reason instead of
+        # retrying the same immutable job until the queue hides the root cause.
+        await _fail_execution_scope(
+            job_data,
+            str(exc),
+            phase="execution_contract_failed",
+        )
+        print(f"[execution-contract] refused queued work: {exc}", flush=True)
+        return
     await _finish_broker_result_ingest(job_data)
 
 
@@ -22578,6 +22596,14 @@ def _mark_worker_processing_lease(
 async def _fail_exhausted_queue_delivery(job_data: dict[str, Any], attempts: int) -> None:
     job_id = str(job_data.get("job_id") or "unknown")
     message = f"Queue delivery exhausted after {attempts} attempts"
+    try:
+        last_error = _redis_scalar_text(
+            get_redis().hget(f"job:{job_id}", "last_delivery_error")
+        ).strip()
+    except Exception:
+        last_error = ""
+    if last_error:
+        message = f"{message}. Last error: {last_error[:500]}"
     scan_id = str(job_data.get("scan_id") or "").strip()
     verification_id = str(job_data.get("verification_id") or "").strip()
     async with db_pool.acquire() as conn:
@@ -22693,6 +22719,20 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
             )
             if not acknowledged:
                 raise RuntimeError(f"completed queue message {lease.message_id} was not acknowledged")
+        except Exception as exc:
+            try:
+                detail = " ".join(str(exc).split())[:500]
+                redis_client.hset(
+                    f"job:{str(job_data.get('job_id') or 'unknown')}",
+                    mapping={
+                        "last_delivery_error": detail,
+                        "last_delivery_error_type": type(exc).__name__,
+                        "last_delivery_attempt": str(lease.delivery_attempts),
+                    },
+                )
+            except Exception:
+                pass
+            raise
         finally:
             guard_task.cancel()
             await asyncio.gather(guard_task, return_exceptions=True)

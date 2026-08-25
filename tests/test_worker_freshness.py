@@ -428,6 +428,38 @@ def test_canonical_asm_batch_materializes_inner_authority_before_dispatch(monkey
     assert admitted["_canonical_queue_payload"] == outer["scan_job"]
 
 
+def test_execution_contract_refusal_terminalizes_without_queue_retry(monkeypatch):
+    terminal = []
+
+    async def reject(_job):
+        raise worker.ExecutionScopeError(
+            "canonical parallel action partition rejected: unauthorized action"
+        )
+
+    async def fail(job, message, *, phase="scope_revalidation_failed"):
+        terminal.append((job["scan_id"], message, phase))
+
+    monkeypatch.delenv("SHAKERSCAN_NODE_ID", raising=False)
+    monkeypatch.setattr(worker, "_fleet_node_accepts_work", lambda: _async_value(True))
+    monkeypatch.setattr(worker, "_refuse_stale_job_if_needed", lambda _job: _async_value(False))
+    monkeypatch.setattr(worker, "_attribute_job_execution", lambda _job: _async_value(None))
+    monkeypatch.setattr(worker, "process_scan_plan_job", reject)
+    monkeypatch.setattr(worker, "_fail_execution_scope", fail)
+
+    scan_id = str(uuid.uuid4())
+    _run(worker.process_job({
+        "type": worker.parallel_scan.PLAN_JOB_TYPE,
+        "job_id": "plan-contract-refusal",
+        "scan_id": scan_id,
+    }))
+
+    assert terminal == [(
+        scan_id,
+        "canonical parallel action partition rejected: unauthorized action",
+        "execution_contract_failed",
+    )]
+
+
 async def _async_value(value):
     return value
 
@@ -475,6 +507,43 @@ def test_failed_dispatch_remains_pending_for_reclaim(monkeypatch):
         _run(worker._run_job_under_lease(object(), lease, {"job_id": "job-2"}))
 
     assert acknowledged == []
+
+
+def test_failed_dispatch_preserves_the_actionable_delivery_error(monkeypatch):
+    class Redis:
+        def __init__(self):
+            self.values = {}
+
+        def hset(self, key, mapping):
+            self.values[key] = dict(mapping)
+
+    async def fail(_job):
+        raise RuntimeError(
+            "parallel child introduced an action outside parent authority"
+        )
+
+    redis_client = Redis()
+    monkeypatch.setattr(worker, "process_job", fail)
+    lease = worker.QueueLease(
+        queue_name=worker.QUEUE_NAME,
+        payload='{"job_id":"job-detail"}',
+        stream_key="scan_jobs:leased",
+        message_id="2-1",
+        delivery_attempts=3,
+    )
+
+    with pytest.raises(RuntimeError, match="outside parent authority"):
+        _run(worker._run_job_under_lease(
+            redis_client, lease, {"job_id": "job-detail"},
+        ))
+
+    assert redis_client.values["job:job-detail"] == {
+        "last_delivery_error": (
+            "parallel child introduced an action outside parent authority"
+        ),
+        "last_delivery_error_type": "RuntimeError",
+        "last_delivery_attempt": "3",
+    }
 
 
 def test_lost_stream_lease_cancels_stale_execution(monkeypatch):
