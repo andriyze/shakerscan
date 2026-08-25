@@ -178,7 +178,8 @@ def test_device_hunt_compatibility_routes_to_unified_hunt():
     skill = (ROOT / "skills" / "device-hunt" / "SKILL.md").read_text()
     skill_index = (ROOT / "skills" / "README.md").read_text()
     assert "href={`/devices/${device.id}/agent`}" in detail_ui
-    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
+    assert "new URLSearchParams({ target: id })" in hunt_ui
+    assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
     assert "name: device-hunt" in skill and "compatibility" in skill.lower()
     assert "[`device-hunt`](device-hunt/SKILL.md)" in skill_index
     assert "../hunt/SKILL.md" in skill
@@ -194,7 +195,8 @@ def test_unified_hunt_client_and_device_redirect_are_wired():
     assert "startAgentHuntSession" not in api_client
     assert "startDeviceAgentSession" not in api_client
     assert "export async function getHuntV2" in api_client
-    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
+    assert "new URLSearchParams({ target: id })" in hunt_ui
+    assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
     assert "startHuntV2Native" in generic_hunt
     assert "target_id" in generic_hunt
 
@@ -208,7 +210,9 @@ def test_unified_hunt_history_is_durable_and_target_bound():
     assert '@app.get("/hunts")' in api
     assert '@app.get("/hunts/{hunt_id}")' in api
     assert "target_id" in api_client
-    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt_ui
+    assert "new URLSearchParams({ target: id })" in hunt_ui
+    assert "query.set('legacy_run', run)" in hunt_ui
+    assert "redirect(`/hunt?${query.toString()}`)" in hunt_ui
     assert "href={`/devices/${device.id}/agent`}" in detail_ui
 
 
@@ -321,7 +325,8 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert '"request_collection_secrets_visible_to_planner": False' in api
     assert "Import API requests" in ui
     assert "Use real imported API requests" in ui
-    assert "redirect(`/hunt?target=${encodeURIComponent(id)}`)" in hunt
+    assert "new URLSearchParams({ target: id })" in hunt
+    assert "redirect(`/hunt?${query.toString()}`)" in hunt
     assert "CREATE TABLE request_collections" in schema
     assert '@router.post("/request-collections")' in collection_api
     assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()
