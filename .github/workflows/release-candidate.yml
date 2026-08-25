@@ -15,6 +15,9 @@ on:
       codeql_run_id:
         description: "Successful CodeQL workflow run ID for this exact SHA"
         required: true
+      parity_run_id:
+        description: "Successful real-fleet Scan parity workflow run ID for this exact SHA"
+        required: true
 
 # Serialize candidate construction. This workflow never publishes a version,
 # `latest`, an installer channel, a Git tag, or a GitHub Release.
@@ -133,6 +136,7 @@ jobs:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
           E2E_RUN_ID: ${{ inputs.e2e_run_id }}
           CODEQL_RUN_ID: ${{ inputs.codeql_run_id }}
+          PARITY_RUN_ID: ${{ inputs.parity_run_id }}
         shell: bash
         run: |
           verify_run() {
@@ -143,6 +147,7 @@ jobs:
           }
           verify_run "$E2E_RUN_ID" "E2E (full release gate)"
           verify_run "$CODEQL_RUN_ID" "CodeQL"
+          verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
 
       - name: Smoke-test frozen-source installer
         run: make installer-smoke

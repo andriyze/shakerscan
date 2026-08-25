@@ -18,8 +18,10 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert "shakerscan-release-candidate/v1" in text
     assert "e2e_run_id:" in text
     assert "codeql_run_id:" in text
+    assert "parity_run_id:" in text
     assert 'verify_run "$E2E_RUN_ID" "E2E (full release gate)"' in text
     assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
+    assert 'verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"' in text
     assert "Verify signed candidate provenance" in text
     assert "final-multiarch-image-digests" in text
 

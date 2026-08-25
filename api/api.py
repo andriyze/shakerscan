@@ -45,9 +45,11 @@ import asyncpg
 import redis
 try:
     from release_identity import build_fingerprint as release_build_fingerprint
+    from release_identity import load_release_identity
     from release_identity import published_scanner_version
 except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
+    from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -13575,10 +13577,8 @@ def expected_build_fingerprint() -> Optional[str]:
     return release_build_fingerprint(hash_source_files(runtime_file_map(), require_all=True))
 
 
-def _git_head_short(repo: str = "/workspace") -> Optional[str]:
-    """Resolve the real short commit of the mounted checkout (the API bind-mounts
-    the repo at /workspace). Pure-file resolution so it works without a git binary;
-    handles symbolic HEAD, packed-refs, and detached HEAD."""
+def _git_head(repo: str = "/workspace") -> Optional[str]:
+    """Resolve the complete commit of a mounted checkout without a git binary."""
     try:
         git_dir = os.path.join(repo, ".git")
         head = open(os.path.join(git_dir, "HEAD")).read().strip()
@@ -13586,17 +13586,30 @@ def _git_head_short(repo: str = "/workspace") -> Optional[str]:
             ref = head.split(" ", 1)[1].strip()
             loose = os.path.join(git_dir, ref)
             if os.path.exists(loose):
-                return open(loose).read().strip()[:7]
+                return open(loose).read().strip()
             packed = os.path.join(git_dir, "packed-refs")
             if os.path.exists(packed):
                 for line in open(packed):
                     line = line.strip()
                     if line and not line.startswith(("#", "^")) and line.endswith(ref):
-                        return line.split()[0][:7]
+                        return line.split()[0]
             return None
-        return head[:7] if len(head) >= 7 else None
+        return head if len(head) >= 7 else None
     except Exception:
         return None
+
+
+def _git_head_short(repo: str = "/workspace") -> Optional[str]:
+    head = _git_head(repo)
+    return head[:7] if head else None
+
+
+def current_source_revision() -> str:
+    """Return the immutable full source revision represented by this runtime."""
+    identity = load_release_identity()
+    if identity.image_built:
+        return identity.source_revision
+    return str(os.environ.get("GIT_COMMIT") or _git_head() or identity.source_revision or "unknown")
 
 
 def current_scanner_version() -> str:
@@ -13939,6 +13952,7 @@ async def health():
         # differs whenever the runtime code differs — so the UI can flag a scan or
         # worker on a stale image even when scanner_version is "dev" on both.
         "scanner_version": expected_version,
+        "source_revision": current_source_revision(),
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
         "scan_action_budget_reconciliation": action_budget_reconciliation,

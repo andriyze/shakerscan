@@ -1,0 +1,72 @@
+name: V2 Scan parity (real fleet)
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact deployed V2 commit SHA"
+        required: true
+      api_url:
+        description: "API URL of the candidate-bound parity environment"
+        required: true
+      target_url:
+        description: "Authorized public URL serving the deterministic parity fixture contract"
+        required: true
+      broker_node_id:
+        description: "Ready outbound-only broker node enrolled in that environment"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-scan-parity-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  parity:
+    name: Real local, broker, and parallel parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    environment: v2-parity
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - name: Validate candidate identity
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+
+      - name: Run non-skippable real Scan parity
+        shell: bash
+        env:
+          SHAKERSCAN_API: ${{ inputs.api_url }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TARGET_URL: ${{ inputs.target_url }}
+          BROKER_NODE_ID: ${{ inputs.broker_node_id }}
+        run: |
+          mkdir -p artifacts
+          python3 tests/e2e/run_scan_parity.py \
+            --expected-source-sha "$CANDIDATE_SHA" \
+            --target-url "$TARGET_URL" \
+            --broker-node-id "$BROKER_NODE_ID" \
+            --json > artifacts/v2-scan-parity.json
+          test "$(jq -r '.consistent' artifacts/v2-scan-parity.json)" = true
+          test "$(jq -r '.all_artifacts_truthful' artifacts/v2-scan-parity.json)" = true
+          test "$(jq -r '.source_revision' artifacts/v2-scan-parity.json)" = "$CANDIDATE_SHA"
+          test "$(jq -r '.scan_ids | keys | sort | join(",")' artifacts/v2-scan-parity.json)" = "broker,local,parallel"
+
+      - name: Upload candidate-bound parity receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-scan-parity-${{ inputs.candidate_sha }}
+          path: artifacts/v2-scan-parity.json
+          if-no-files-found: error
+          retention-days: 30

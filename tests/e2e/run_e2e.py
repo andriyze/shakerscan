@@ -714,9 +714,12 @@ def run_ai_gate() -> H.Scorecard:
 JUICE_SHOP = os.environ.get("SHAKERSCAN_E2E_DAST_TARGET", f"http://{HONEY_HOST}:3001")
 
 
-def _dast_fixture_authority() -> tuple[str, str, dict[str, dict[str, str]]]:
+def _dast_fixture_authority(
+    fixture_target: str = FIXTURES_BASE,
+    *,
+    allowed_host: str = HONEY_HOST,
+) -> tuple[str, str, dict[str, dict[str, str]]]:
     """Create target-bound approval plus exact saved-request selections."""
-    fixture_target = FIXTURES_BASE
     _, target = H.post("/targets", {
         "url": fixture_target,
         "name": f"E2E request mutation fixture {_RUN_NONCE}",
@@ -727,7 +730,7 @@ def _dast_fixture_authority() -> tuple[str, str, dict[str, dict[str, str]]]:
     _, scope_response = H.post("/arsenal/scope/preview", {
         "url": fixture_target,
         "target_id": target_id,
-        "allowed_hosts": [HONEY_HOST],
+        "allowed_hosts": [allowed_host],
         "environment": "lab",
     })
     scope = scope_response.get("scope_receipt") or {}

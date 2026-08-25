@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,14 +111,42 @@ def _artifact(scan_id: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--broker-node-id", default=os.environ.get("SHAKERSCAN_E2E_BROKER_NODE_ID"))
+    parser.add_argument("--target-url", default=os.environ.get("SHAKERSCAN_E2E_PARITY_TARGET"))
+    parser.add_argument("--expected-source-sha", default=os.environ.get("SHAKERSCAN_E2E_SOURCE_SHA"))
     parser.add_argument("--json", action="store_true", dest="json_output")
     args = parser.parse_args(argv)
 
     H.preflight()
+    health = H.get("/health")
+    expected_source_sha = str(args.expected_source_sha or "").strip().lower()
+    if expected_source_sha:
+        actual_source_sha = str(health.get("source_revision") or "").strip().lower()
+        if (
+            len(expected_source_sha) != 40
+            or any(char not in "0123456789abcdef" for char in expected_source_sha)
+        ):
+            raise RuntimeError("expected source SHA must be a complete 40-character commit")
+        if actual_source_sha != expected_source_sha:
+            raise RuntimeError(
+                "parity deployment source mismatch: "
+                f"expected={expected_source_sha} actual={actual_source_sha or 'missing'}"
+            )
     broker_node = _broker_node_id(args.broker_node_id)
-    server = FX.start(E2E.FIXTURES_PORT)
+    target_url = str(args.target_url or "").strip().rstrip("/")
+    parsed_target = urlsplit(target_url) if target_url else None
+    if parsed_target and (
+        parsed_target.scheme not in {"http", "https"}
+        or not parsed_target.hostname
+        or parsed_target.username
+        or parsed_target.password
+    ):
+        raise RuntimeError("parity target must be an HTTP(S) origin without credentials")
+    server = None if target_url else FX.start(E2E.FIXTURES_PORT)
     try:
-        target, approval_id, selections = E2E._dast_fixture_authority()
+        target, approval_id, selections = E2E._dast_fixture_authority(
+            target_url or E2E.FIXTURES_BASE,
+            allowed_host=(parsed_target.hostname if parsed_target else E2E.HONEY_HOST),
+        )
         scan_ids = {
             "local": _submit(
                 target=target,
@@ -150,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             "scan_ids": scan_ids,
             "broker_node_id": broker_node,
             "all_artifacts_truthful": True,
+            "source_revision": str(health.get("source_revision") or "unknown"),
+            "build_fingerprint": str(health.get("build_fingerprint") or "unknown"),
         }
         if args.json_output:
             print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
@@ -167,8 +198,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
         return 0 if comparison["consistent"] else 1
     finally:
-        server.shutdown()
-        server.server_close()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

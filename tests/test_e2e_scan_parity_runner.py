@@ -66,3 +66,16 @@ def test_parity_runner_rejects_silent_parallel_downgrade(monkeypatch):
             placement={"node_scope": "remote"},
             parallel=True,
         )
+
+
+def test_real_parity_workflow_is_candidate_bound_and_non_skippable():
+    workflow = (
+        run_scan_parity.ROOT / ".github" / "workflows" / "v2-scan-parity.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "--expected-source-sha \"$CANDIDATE_SHA\"" in workflow
+    assert "--target-url \"$TARGET_URL\"" in workflow
+    assert "--broker-node-id \"$BROKER_NODE_ID\"" in workflow
+    assert "continue-on-error" not in workflow
+    assert "if-no-files-found: error" in workflow
+    assert "v2-scan-parity-${{ inputs.candidate_sha }}" in workflow
