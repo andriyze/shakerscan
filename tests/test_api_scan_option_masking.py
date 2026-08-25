@@ -1182,6 +1182,18 @@ class _AsmActionConn:
         self.executes = []
         self.campaign_id = uuid.uuid4()
 
+    def transaction(self):
+        conn = self
+
+        class _Transaction:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        return _Transaction()
+
     async def fetchrow(self, query, *args):
         if "INSERT INTO command_results" in query:
             return {
@@ -1245,6 +1257,25 @@ class _AsmActionConn:
         return "OK"
 
 
+async def _noop_persist_asm_scan_authority(*_args, **_kwargs):
+    return None
+
+
+def _asm_claim_rows(count):
+    return [
+        {
+            "id": uuid.uuid4(),
+            "method": "GET",
+            "path": f"/api/resources/{index}",
+            "param_shape": {},
+            "param_location": "query",
+            "replay_spec": None,
+            "auth_state": "public",
+        }
+        for index in range(count)
+    ]
+
+
 def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
     target_id = str(uuid.uuid4())
     conn = _AsmActionConn()
@@ -1261,21 +1292,28 @@ def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
+    monkeypatch.setattr(
+        api_module,
+        "_resolve_runtime_target_addresses",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=["192.0.2.10"]),
+    )
     result = asyncio.run(api_module.asm_improve(target_id, api_module.AsmImproveRequest()))
 
     assert result["action"] == "recon"
     assert result["status"] == "queued"
     assert result["campaign_id"] == str(conn.campaign_id)
     queued = json.loads(redis_client.rpush_calls[0][1])
-    assert queued["asm_recon"] is True
-    assert queued["triggered_by"] == "improve"
-    assert queued["campaign_id"] == str(conn.campaign_id)
-    assert "custom_budget" in queued["options"]
-    assert queued["options"]["discovery_manifest_only"] is True
-    assert queued["options"]["active"] is False
-    assert queued["options"]["xss"] is False
-    assert queued["options"]["sqli"] is False
-    assert any("INSERT INTO scans" in query for query, _args in conn.executes)
+    scan_insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    persisted_options = json.loads(scan_insert[1][4])
+    assert queued["schema_version"] == "scan-job/v2"
+    assert queued["scan_id"] == result["scan_id"]
+    assert "options" not in queued
+    assert "run_kind" not in queued
+    assert "custom_budget" in persisted_options
+    assert persisted_options["active"] is False
+    assert queued["execution_plan"]["policy"]["active_testing"] is False
+    assert queued["execution_plan"]["policy"]["include_families"] == ["recon"]
     assert any("asm_last_recon_at" in query for query, _args in conn.executes)
 
 
@@ -1300,6 +1338,12 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
+    monkeypatch.setattr(
+        api_module.asm_inventory,
+        "claim_test_batch",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=_asm_claim_rows(8)),
+    )
     monkeypatch.setattr(
         api_module,
         "_resolve_runtime_target_addresses",
@@ -1322,10 +1366,15 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     assert queued["exploit_depth"] is True
     assert queued["check_family"] == "sqli"
     assert queued["campaign_id"] == str(conn.campaign_id)
-    assert queued["options"]["auth_header"] == "Bearer token"
-    assert queued["options"]["sqli"] is True
-    assert queued["options"]["xss"] is False
-    assert queued["options"]["asm_check_family"] == "sqli"
+    assert len(queued["claimed_endpoint_ids"]) == 8
+    assert queued["scan_job"]["schema_version"] == "scan-job/v2"
+    assert "options" not in queued
+    scan_insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    persisted_options = json.loads(scan_insert[1][4])
+    assert persisted_options["auth_header"] == "Bearer token"
+    assert persisted_options["sqli"] is True
+    assert persisted_options["xss"] is False
+    assert persisted_options["asm_check_family"] == "sqli"
     assert any("asm_last_test_at" in query for query, _args in conn.executes)
 
 
@@ -1350,6 +1399,12 @@ def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
+    monkeypatch.setattr(
+        api_module.asm_inventory,
+        "claim_test_batch",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=_asm_claim_rows(12)),
+    )
     monkeypatch.setattr(
         api_module,
         "_resolve_runtime_target_addresses",
@@ -1366,7 +1421,11 @@ def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
     assert result["endpoint_filter"] == "api"
     queued = json.loads(redis_client.rpush_calls[0][1])
     assert queued["endpoint_filter"] == "api"
-    assert queued["options"]["asm_endpoint_filter"] == "api"
+    assert len(queued["claimed_endpoint_ids"]) == 12
+    assert "options" not in queued
+    scan_insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
+    persisted_options = json.loads(scan_insert[1][4])
+    assert persisted_options["asm_endpoint_filter"] == "api"
 
 
 def test_asm_improve_endpoint_filter_does_not_queue_when_no_matching_work(monkeypatch):

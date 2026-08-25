@@ -48,7 +48,7 @@ def test_extracted_handler_rejects_deterministic_scan_and_unknown_run_kind():
         asyncio.run(handler.run("https://example.test", {}))
     with pytest.raises(ValueError, match="unsupported non-DAST"):
         asyncio.run(handler.run(
-            "https://example.test", {"run_kind": "asm_batch"},
+            "https://example.test", {"run_kind": "device_web_dast"},
         ))
 
 
