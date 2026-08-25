@@ -1202,6 +1202,37 @@ function ShardCard({ shard }: { shard: any }) {
   )
 }
 
+function ShardContextBanner({ scan }: { scan: any }) {
+  if (scan?.scan_role !== 'shard' || !scan?.parent_scan_id) return null
+
+  const shardNumber = Number(scan?.shard_index ?? 0) + 1
+  const shardCount = Number(scan?.shard_count || 0)
+  const terminal = ['completed', 'failed', 'cancelled'].includes(String(scan?.status || ''))
+  return (
+    <div className="mb-6 rounded-lg border border-blue-500/30 bg-blue-500/10 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-blue-200">
+            Parallel work unit · shard {shardNumber}{shardCount ? ` of ${shardCount}` : ''}
+          </p>
+          <p className="mt-1 max-w-3xl text-sm text-blue-100/75">
+            This page is one child execution, not the final Scan verdict.
+            {terminal
+              ? ' Its terminal state must be interpreted through the parent’s complete shard rollup.'
+              : ' The parent Scan remains the authoritative progress and result view.'}
+          </p>
+        </div>
+        <Link
+          href={`/scans/${scan.parent_scan_id}`}
+          className="inline-flex rounded-lg border border-blue-400/30 bg-blue-400/10 px-3 py-1.5 text-sm font-medium text-blue-100 hover:bg-blue-400/20"
+        >
+          Open parent Scan
+        </Link>
+      </div>
+    </div>
+  )
+}
+
 // Plain-language explanation for a failed scan: which phase it died in, whether
 // any partial baseline/discovery data was recovered, that there is no final
 // score/grade, and what to do next. Rendered above any results.
@@ -1220,6 +1251,7 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
     'No specific error was reported.'
   const targetUrl = String(scan?.target_url || scan?.target || '').trim()
   const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(String(failureMessage))
+  const isShard = scan?.scan_role === 'shard' && Boolean(scan?.parent_scan_id)
 
   return (
     <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-5 mb-6">
@@ -1228,11 +1260,11 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
         <div className="min-w-0">
-          <h2 className="text-red-300 font-semibold">Scan failed</h2>
+          <h2 className="text-red-300 font-semibold">{isShard ? 'Shard failed' : 'Scan failed'}</h2>
           <p className="text-red-200/90 text-sm mt-1">
             {failurePhase
-              ? <>This scan stopped during the <span className="font-medium">{failurePhase}</span> phase and did not finish.</>
-              : 'This scan stopped before it finished.'}
+              ? <>This {isShard ? 'shard' : 'scan'} stopped during the <span className="font-medium">{failurePhase}</span> phase and did not finish.</>
+              : `This ${isShard ? 'shard' : 'scan'} stopped before it finished.`}
           </p>
           <p className="text-red-200/70 text-sm mt-1">{failureMessage}</p>
           <ul className="mt-3 space-y-1 text-sm text-red-200/80 list-disc list-inside">
@@ -1241,16 +1273,25 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
             ) : (
               <li>No baseline or discovery data could be recovered from this run.</li>
             )}
-            <li>No final score or grade was produced, so this scan should not be used as a pass/fail verdict.</li>
+            <li>No final score or grade was produced, so this {isShard ? 'work unit' : 'scan'} should not be used as a pass/fail verdict.</li>
           </ul>
           <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
             <p className="text-sm font-medium text-amber-200">Recommended next step</p>
             <p className="mt-1 text-sm text-amber-100/80">
-              {looksLikeReachabilityFailure
-                ? 'Confirm the target address is correct and reachable from the scanner, then try again.'
-                : 'Review the failure above, then retry this target when the underlying problem is resolved.'}
+              {isShard
+                ? 'Open the parent Scan to review sibling status and the authoritative final result.'
+                : looksLikeReachabilityFailure
+                  ? 'Confirm the target address is correct and reachable from the scanner, then try again.'
+                  : 'Review the failure above, then retry this target when the underlying problem is resolved.'}
             </p>
-            {targetUrl && (
+            {isShard ? (
+              <Link
+                href={`/scans/${scan.parent_scan_id}`}
+                className="mt-3 inline-flex rounded-lg bg-amber-500/15 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/25"
+              >
+                Review parent Scan
+              </Link>
+            ) : targetUrl && (
               <Link
                 href={`/scan/new?target=${encodeURIComponent(targetUrl)}`}
                 className="mt-3 inline-flex rounded-lg bg-amber-500/15 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/25"
@@ -1662,6 +1703,7 @@ function ScanDetailContent() {
             The scan is in progress. This page will automatically update when complete.
           </p>
         </div>
+        <ShardContextBanner scan={scan} />
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
         <ExecutionPlanCard scan={scan} />
@@ -1684,6 +1726,7 @@ function ScanDetailContent() {
       return (
         <div>
           <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
+          <ShardContextBanner scan={scan} />
           <FailedScanPanel scan={scan} hasPartialResults={true} />
           <ParallelShardRollup scan={scan} />
           <ParentCoverageRollup scan={scan} />
@@ -1709,6 +1752,7 @@ function ScanDetailContent() {
     return (
       <div className="space-y-6">
         <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
+        <ShardContextBanner scan={scan} />
         <FailedScanPanel scan={scan} hasPartialResults={false} />
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
@@ -1756,6 +1800,7 @@ function ScanDetailContent() {
   return (
     <div>
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
+      <ShardContextBanner scan={scan} />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
       <ParallelShardRollup scan={scan} />
       <ParentCoverageRollup scan={scan} />

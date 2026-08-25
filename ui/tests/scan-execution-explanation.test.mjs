@@ -21,3 +21,12 @@ test('execution explanation remains visible while running and after terminal out
   assert.equal((detail.match(/<ExecutionPlanCard scan=\{scan\} \/>/g) || []).length, 4)
   assert.match(detail, /complete_with_gaps/)
 })
+
+test('direct shard pages identify the parent as the authoritative Scan', () => {
+  assert.match(detail, /function ShardContextBanner/)
+  assert.match(detail, /Parallel work unit · shard/)
+  assert.match(detail, /This page is one child execution, not the final Scan verdict/)
+  assert.match(detail, /Open parent Scan/)
+  assert.match(detail, /isShard \? 'Shard failed' : 'Scan failed'/)
+  assert.match(detail, /Review parent Scan/)
+})
