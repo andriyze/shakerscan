@@ -1508,9 +1508,57 @@ def _sanitize_scan_options(value: Any) -> Any:
     return redact_sensitive(options)
 
 
+_SCAN_LIST_OPTION_KEYS = {
+    "auth_header", "auth_cookies", "auth_headers_json", "auth_scenario_json",
+    "login_username", "login_password", "user2_header", "user2_cookies",
+    "budget_profile", "scan_generation", "legacy_scan_type", "parallel_strategy",
+    "complete_artifact_download", "complete_repository_snapshot", "expected_sha256",
+}
+_SCAN_DETAIL_ONLY_FIELDS = {
+    "result", "result_partial", "delta", "execution_context", "policy_json",
+    "budget_json", "budget_used_json", "coverage_json", "scan_job_payload",
+    "scan_job_digest", "scan_action_plan_json", "scan_action_plan_digest",
+    "scan_action_plan_schema", "scan_continuation_allocation_json",
+    "scan_continuation_allocation_digest", "scan_continuation_applied_at",
+}
+
+
+def _scan_list_options(value: Any) -> dict[str, Any]:
+    """Return only option facts used by scan/model-intake list surfaces.
+
+    Full redacted options remain available from ``GET /scans/{id}``. Keeping
+    job manifests and provider metadata out of list rows prevents a 50-row
+    refresh from repeatedly transferring megabytes of detail-only data.
+    """
+    options = _sanitize_scan_options(value)
+    if not isinstance(options, dict):
+        return {}
+    summary = {
+        key: options[key]
+        for key in _SCAN_LIST_OPTION_KEYS
+        if key in options
+    }
+    metadata = options.get("metadata_json")
+    if isinstance(metadata, dict):
+        provider = metadata.get("provider_resolution")
+        if isinstance(provider, dict):
+            summary["metadata_json"] = {
+                "provider_resolution": {
+                    key: provider[key]
+                    for key in ("provider", "source_kind")
+                    if key in provider
+                }
+            }
+    return summary
+
+
 def _public_target_row(row: Any) -> dict[str, Any]:
     """Serialize a target without exposing credentials stored in scan options."""
     target = row_to_dict(row)
+    for key, limit in (("url", 2049), ("name", 512), ("root_domain", 253)):
+        value = target.get(key)
+        if isinstance(value, str) and len(value) > limit:
+            target[key] = value[:limit]
     if "scan_options" in target:
         target["scan_options"] = _sanitize_scan_options(target.get("scan_options"))
     if str(target.get("discovery_source") or "").lower() != "model-intake":
@@ -5830,13 +5878,13 @@ class AIDemoRunRequest(BaseModel):
 
 
 class TargetCreate(BaseModel):
-    url: str
-    name: Optional[str] = None
+    url: str = Field(min_length=1, max_length=2048)
+    name: Optional[str] = Field(default=None, max_length=512)
     scan_options: Optional[dict] = None
 
 
 class TargetUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=512)
     is_active: Optional[bool] = None
     scan_options: Optional[dict] = None
     # Merged into the existing metadata (JSONB ||), so partial ownership
@@ -30494,7 +30542,8 @@ async def list_scans(
     include_model_intake: bool = False,
     include_devices: bool = False,
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    include_details: bool = False,
 ):
     """List scans with optional filtering.
 
@@ -30504,8 +30553,16 @@ async def list_scans(
     use include_model_intake for administrative or evidence-selection views.
     """
     async with db_pool.acquire() as conn:
-        query = """
-            SELECT s.*,
+        scan_columns = "s.*" if include_details else """
+                   s.id, s.target_id, s.target_url, s.status, s.progress,
+                   s.current_phase, s.options, s.scan_type, s.score, s.grade,
+                   s.findings_count, s.created_at, s.started_at, s.completed_at,
+                   s.duration_seconds, s.error_message, s.run_kind, s.ai_target_id,
+                   s.device_target_id, s.parent_scan_id, s.scan_role,
+                   s.shard_index, s.shard_count
+        """
+        query = f"""
+            SELECT {scan_columns},
                    COALESCE(t.name, ait.name) as target_name,
                    t.root_domain,
                    ait.target_type as ai_target_type
@@ -30594,14 +30651,22 @@ async def list_scans(
     for row in rows:
         scan = dict(row)
         if scan.get("options") is not None:
-            scan["options"] = _sanitize_scan_options(scan["options"])
-        scan["execution_context"] = _json_object(scan.get("execution_context"))
+            scan["options"] = (
+                _sanitize_scan_options(scan["options"])
+                if include_details
+                else _scan_list_options(scan["options"])
+            )
+        if include_details:
+            scan["execution_context"] = _json_object(scan.get("execution_context"))
         # Drop the heavy full report from list rows. The Scans page only needs
         # summary columns (status/grade/score/findings_count); returning the full
         # result for every row made this response ~9 MB for 50 scans (slow load +
         # intermittent timeouts). The detail endpoint still returns the full result.
         scan.pop("result", None)
         scan.pop("result_partial", None)
+        if not include_details:
+            for key in _SCAN_DETAIL_ONLY_FIELDS:
+                scan.pop(key, None)
         scans.append(scan)
 
     return {
@@ -31875,17 +31940,24 @@ async def list_targets(
     """List all targets."""
     async with db_pool.acquire() as conn:
         query = """
-            SELECT t.*, fs.total_active as active_findings,
+            SELECT t.id,
+                   LEFT(t.url, 2049) AS url,
+                   LEFT(t.name, 512) AS name,
+                   LEFT(t.root_domain, 253) AS root_domain,
+                   t.is_root, t.discovery_source, t.is_active,
+                   t.last_scanned_at, t.last_score, t.last_grade,
+                   t.total_scans, t.active_findings_count, t.created_at,
+                   fs.total_active as active_findings,
                    COALESCE(origins.items, '[]'::jsonb) AS origins
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
             LEFT JOIN LATERAL (
                 SELECT jsonb_agg(item.target_url ORDER BY item.last_seen DESC) AS items
                 FROM (
-                    SELECT s.target_url, MAX(s.created_at) AS last_seen
+                    SELECT LEFT(s.target_url, 2049) AS target_url, MAX(s.created_at) AS last_seen
                     FROM scans s
                     WHERE s.target_id=t.id AND s.run_kind='web_dast'
-                    GROUP BY s.target_url
+                    GROUP BY LEFT(s.target_url, 2049)
                     ORDER BY MAX(s.created_at) DESC
                     LIMIT 32
                 ) item
@@ -39177,7 +39249,12 @@ def _resolve_hunt_allowed_capabilities(
     )
 
 
-def _hunt_public(row: Any, *, include_context: bool = True) -> dict[str, Any]:
+def _hunt_public(
+    row: Any,
+    *,
+    include_context: bool = True,
+    include_capabilities: bool = True,
+) -> dict[str, Any]:
     item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
     policy = _hunt_json(item.get("policy_json"), {})
     allowed = policy.get("allowed_capabilities")
@@ -39206,13 +39283,14 @@ def _hunt_public(row: Any, *, include_context: bool = True) -> dict[str, Any]:
         "policy": policy,
         "budget": _hunt_json(item.get("budget_json"), {}),
         "budget_used": _hunt_json(item.get("budget_used_json"), {}),
-        "capabilities": capabilities,
         "stop_reason": item.get("stop_reason"),
         "final_debrief": _hunt_json(item.get("final_debrief"), {}),
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
         "next_action": f"POST /hunts/{item.get('id')}/query" if item.get("status") in {"active", "awaiting_planner"} else None,
     }
+    if include_capabilities:
+        result["capabilities"] = capabilities
     if include_context:
         result["context_pack"] = _hunt_json(item.get("context_pack"), {})
     return _json_safe_row(result)
@@ -39830,7 +39908,13 @@ async def list_hunts(
         rows = await conn.fetch(
             f"SELECT * FROM hunt_runs{where} ORDER BY created_at DESC LIMIT ${len(params)}", *params,
         )
-    return {"hunts": [_hunt_public(row, include_context=False) for row in rows], "count": len(rows)}
+    return {
+        "hunts": [
+            _hunt_public(row, include_context=False, include_capabilities=False)
+            for row in rows
+        ],
+        "count": len(rows),
+    }
 
 
 @app.post("/hunts/{hunt_id}/query")

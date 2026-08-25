@@ -3914,7 +3914,7 @@ export interface HuntV2 {
   budget: Record<string, number>
   budget_used: Record<string, number>
   context_pack?: Record<string, unknown>
-  capabilities: Array<{
+  capabilities?: Array<{
     name: string
     description: string
     risk_tier: string

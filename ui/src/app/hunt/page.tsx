@@ -906,7 +906,7 @@ function HuntContent() {
               Your coding agent can query context and call only this persisted allowlist.
             </p>
             <div className="mt-4 space-y-2">
-              {hunt.capabilities.map((capability) => (
+              {(hunt.capabilities || []).map((capability) => (
                 <div key={capability.name} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
                   <div className="flex items-center justify-between gap-3">
                     <code className="text-sm text-blue-300">{capability.name}</code>
