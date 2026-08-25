@@ -105,6 +105,42 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
     assert action["result"]["reference_ids"]["finding_ids"] == [str(finding_id)]
 
 
+def test_public_hunt_action_projects_content_safe_worker_record_count():
+    action = public_hunt_action({
+        "id": uuid.uuid4(),
+        "capability_name": "web.crawl",
+        "status": "completed",
+        "input_summary": {},
+        "result_summary": {
+            "status": "success",
+            "record_count": 45,
+        },
+    })
+
+    assert action["result"]["observation_count"] == 45
+
+
+def test_public_hunt_action_prefers_canonical_worker_observation_count():
+    action = public_hunt_action({
+        "id": uuid.uuid4(),
+        "capability_name": "web.probe",
+        "status": "completed",
+        "input_summary": {},
+        "result_summary": {
+            "status": "success",
+            "observation_count": 1,
+            "record_count": 999,
+            "budget_consumed": {"http_requests": 1, "agent_actions": 1},
+        },
+    })
+
+    assert action["result"]["observation_count"] == 1
+    assert action["result"]["budget_consumed"] == {
+        "http_requests": 1,
+        "agent_actions": 1,
+    }
+
+
 def test_hunt_run_service_get_includes_canonical_action_ledger():
     hunt_id = str(uuid.uuid4())
 

@@ -118,7 +118,24 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     if not isinstance(budget_consumed, Mapping):
         budget_consumed = {}
     observations = result_summary.get("observations")
-    observation_count = len(observations) if isinstance(observations, list) else 0
+    if isinstance(observations, list):
+        observation_count = len(observations)
+    else:
+        # Worker-owned network/scanner actions intentionally persist only a
+        # content-safe count, not their complete observation bodies. Older
+        # rows used ``record_count`` while current rows use the canonical
+        # ``observation_count`` name. Preserve both so the UI does not turn a
+        # successful probe or crawl into a misleading "0 observations" card.
+        raw_observation_count = result_summary.get(
+            "observation_count", result_summary.get("record_count", 0)
+        )
+        observation_count = (
+            int(raw_observation_count)
+            if isinstance(raw_observation_count, int)
+            and not isinstance(raw_observation_count, bool)
+            and raw_observation_count >= 0
+            else 0
+        )
     return {
         "action_id": str(item.get("id")) if item.get("id") else None,
         "capability_name": item.get("capability_name"),

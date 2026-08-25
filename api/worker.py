@@ -20749,9 +20749,14 @@ async def process_canonical_scanner_capability_job(
                 )
                 action_result = {
                     "status": status,
+                    "ok": status == "success",
+                    "partial": is_partial,
+                    "timed_out": execution.timed_out,
+                    "observation_count": len(observations),
                     "error": error,
                     "record_count": len(observations),
                     "parser_errors": parser_errors,
+                    "budget_consumed": dict(terminal.actual),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
