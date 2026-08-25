@@ -2369,9 +2369,13 @@ def command_join(paths: RuntimePaths, args: argparse.Namespace) -> None:
     capabilities = [str(item).strip().lower() for item in (getattr(args, "capability", None) or []) if str(item).strip()]
     if capabilities:
         labels["tools"] = sorted(set(capabilities))
-    scan_tiers = [str(item).strip().lower() for item in (getattr(args, "scan_tier", None) or []) if str(item).strip()]
-    if scan_tiers:
-        labels["scan_tiers"] = sorted(set(scan_tiers))
+    budget_profiles = [
+        str(item).strip().lower()
+        for item in (getattr(args, "budget_profile", None) or [])
+        if str(item).strip()
+    ]
+    if budget_profiles:
+        labels["budget_profiles"] = sorted(set(budget_profiles))
     for raw_label in getattr(args, "label", None) or []:
         key, separator, value = str(raw_label).partition("=")
         key = key.strip().lower()
@@ -2661,9 +2665,9 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--data-residency")
     join.add_argument("--capability", action="append", default=[])
     join.add_argument(
-        "--scan-tier",
+        "--budget-profile",
+        choices=("fast", "balanced", "thorough"),
         action="append",
-        choices=["quick", "standard", "deep", "full", "aggressive", "smart"],
         default=[],
     )
     join.add_argument("--label", action="append", default=[])

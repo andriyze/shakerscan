@@ -15,10 +15,10 @@ def test_device_children_are_hidden_from_the_default_scan_list():
     assert api_module.DEVICE_WEB_ORIGIN_ROLE not in api_module._hidden_scan_roles_for_list(include_internal=True)
 
 
-def test_device_run_kind_is_not_a_web_dast_scan_type():
-    assert "device_posture" not in api_module.HISTORICAL_DAST_SCAN_TYPES
-    assert api_module.HISTORICAL_DAST_SCAN_TYPES == {
-        "quick", "standard", "deep", "full", "aggressive", "smart",
+def test_device_run_kind_is_not_a_scan_budget_profile():
+    assert "device_posture" not in api_module.SCAN_BUDGET_PROFILES
+    assert api_module.SCAN_BUDGET_PROFILES == {
+        "fast", "balanced", "thorough",
     }
 
 

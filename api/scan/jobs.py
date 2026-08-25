@@ -85,7 +85,7 @@ _QUEUE_TRANSPORT_KEYS = frozenset({
     "parallel_worker_count", "plan_stage", "discovery_scan_id",
 })
 _PLACEMENT_SCALAR_KEYS = frozenset({
-    "region", "egress_group", "network", "scan_tier", "tier",
+    "region", "egress_group", "network", "budget_profile",
     "data_residency", "node_id", "node_scope",
 })
 _BUDGET_CEILINGS: Mapping[str, int] = {

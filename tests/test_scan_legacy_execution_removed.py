@@ -65,3 +65,25 @@ def test_normal_scheduler_has_no_digestless_queue_fallback():
     assert "canonical_job.queue_payload(" in scheduler
     assert "'scheduled': True" not in scheduler
     assert '"v2" if canonical_schedule else "legacy"' not in scheduler
+
+
+def test_scan_placement_uses_budget_profiles_not_legacy_scan_tiers():
+    sources = {
+        path: (ROOT / path).read_text(encoding="utf-8")
+        for path in (
+            "api/api.py",
+            "api/job_queue.py",
+            "api/scan/jobs.py",
+            "api/worker.py",
+            "scripts/fleet_cli.py",
+        )
+    }
+    combined = "\n".join(sources.values())
+
+    assert "budget_profiles" in combined
+    assert "budget_profile" in combined
+    assert "scan_tiers" not in combined
+    assert "scan_tier" not in combined
+    assert "--scan-tier" not in combined
+    assert "HISTORICAL_DAST_SCAN_TYPES" not in combined
+    assert "LEGACY_DAST_SCAN_TYPE_LABELS" not in combined

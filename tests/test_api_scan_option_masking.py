@@ -2065,12 +2065,12 @@ def test_scan_options_normalize_oob_callback_url_strips_whitespace():
 def test_scan_options_normalize_fleet_placement():
     options = api_module.ScanOptions(placement={
         "region": " EU-WEST ",
-        "scan_tier": "SMART",
+        "budget_profile": "THOROUGH",
         "requires": ["Playwright", "nuclei", "playwright"],
     })
     assert options.placement == {
         "region": "eu-west",
-        "scan_tier": "smart",
+        "budget_profile": "thorough",
         "requires": ["nuclei", "playwright"],
     }
 

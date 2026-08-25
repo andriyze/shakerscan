@@ -408,7 +408,7 @@ TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
 DEVICE_SSH_AUTH_COOLDOWN_SECONDS = max(60, int(os.environ.get("DEVICE_SSH_AUTH_COOLDOWN_SECONDS", "1800")))
 DEVICE_SSH_AUTH_DAILY_FAILURE_CAP = max(1, int(os.environ.get("DEVICE_SSH_AUTH_DAILY_FAILURE_CAP", "3")))
 
-LEGACY_DAST_SCAN_TYPE_LABELS = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",
@@ -22748,11 +22748,15 @@ def _worker_placement_labels() -> dict[str, Any]:
         detected_tools
         | {str(item).strip().lower() for item in configured_tools if str(item).strip()}
     )
-    configured_tiers = labels.get("scan_tiers") or list(LEGACY_DAST_SCAN_TYPE_LABELS)
-    if isinstance(configured_tiers, str):
-        configured_tiers = [configured_tiers]
-    labels["scan_tiers"] = sorted(
-        {str(item).strip().lower() for item in configured_tiers if str(item).strip()}
+    configured_profiles = labels.get("budget_profiles") or list(SCAN_BUDGET_PROFILES)
+    if isinstance(configured_profiles, str):
+        configured_profiles = [configured_profiles]
+    labels["budget_profiles"] = sorted(
+        {
+            str(item).strip().lower()
+            for item in configured_profiles
+            if str(item).strip()
+        }
     )
     return labels
 

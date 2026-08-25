@@ -25,8 +25,7 @@ PLACEMENT_SCALAR_KEYS = {
     "region",
     "egress_group",
     "network",
-    "scan_tier",
-    "tier",
+    "budget_profile",
     "data_residency",
     "node_id",
     "node_scope",
@@ -206,7 +205,7 @@ def worker_matches_placement(worker: dict[str, Any], placement: dict[str, Any]) 
         required = placement.get(key)
         if not required:
             continue
-        worker_key = "scan_tiers" if key in {"scan_tier", "tier"} else key
+        worker_key = "budget_profiles" if key == "budget_profile" else key
         actual = labels.get(worker_key)
         if isinstance(actual, (list, tuple, set)):
             if str(required).lower() not in {str(item).lower() for item in actual}:

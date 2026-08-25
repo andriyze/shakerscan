@@ -1480,7 +1480,11 @@ def test_local_placement_is_reachable_without_an_enrolled_node(monkeypatch):
     monkeypatch.setattr(api_module, "_current_scan_worker_count_best_effort", lambda: 2)
     asyncio.run(api_module._require_reachable_fleet_placement(
         Conn(),
-        {"node_id": "local", "scan_tier": "smart", "requires": ["nuclei"]},
+        {
+            "node_id": "local",
+            "budget_profile": "thorough",
+            "requires": ["nuclei"],
+        },
     ))
 
 
@@ -1614,12 +1618,12 @@ def test_fleet_join_rate_limit_ignores_invalid_trusted_forwarding_metadata(monke
     assert keys[0] == keys[1]
 
 
-def test_default_fleet_scan_tiers_are_all_supported_but_tools_are_bounded():
+def test_default_fleet_budget_profiles_are_supported_but_tools_are_bounded():
     labels = api_module._fleet_node_placement_labels(
         {"id": uuid.uuid4(), "region": "us-east", "labels": {}},
         {"requires": ["invented-tool"]},
     )
-    assert set(labels["scan_tiers"]) == api_module.HISTORICAL_DAST_SCAN_TYPES
+    assert set(labels["budget_profiles"]) == api_module.SCAN_BUDGET_PROFILES
     assert "nuclei" in labels["tools"]
     assert "invented-tool" not in labels["tools"]
 

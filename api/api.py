@@ -333,7 +333,7 @@ try:
 except ModuleNotFoundError:
     from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
-HISTORICAL_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 DEVICE_FINDING_SOURCE = "device"
 DEVICE_WEB_ORIGIN_ROLE = "device_web_origin"
@@ -4741,7 +4741,7 @@ class ScanOptions(BaseModel):
         if not isinstance(value, dict):
             raise ValueError("placement must be an object")
         unknown = set(value) - {
-            "region", "egress_group", "network", "scan_tier", "tier",
+            "region", "egress_group", "network", "budget_profile",
             "data_residency", "node_id", "node_scope", "requires",
         }
         if unknown:
@@ -10534,8 +10534,8 @@ def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:
         labels["region"] = str(node.get("region"))
     if "tools" not in labels and "capabilities" not in labels:
         labels["tools"] = sorted(DEFAULT_WORKER_TOOL_COMMANDS)
-    if "scan_tiers" not in labels:
-        labels["scan_tiers"] = sorted(HISTORICAL_DAST_SCAN_TYPES)
+    if "budget_profiles" not in labels:
+        labels["budget_profiles"] = sorted(SCAN_BUDGET_PROFILES)
     return labels
 
 
@@ -28907,8 +28907,8 @@ def _fleet_node_placement_labels(row: Any, _placement: dict[str, Any]) -> dict[s
     # additional capabilities explicitly so admission never invents a requested tool.
     if "tools" not in labels and "capabilities" not in labels:
         labels["tools"] = sorted(DEFAULT_WORKER_TOOL_COMMANDS)
-    if "scan_tiers" not in labels:
-        labels["scan_tiers"] = sorted(HISTORICAL_DAST_SCAN_TYPES)
+    if "budget_profiles" not in labels:
+        labels["budget_profiles"] = sorted(SCAN_BUDGET_PROFILES)
     return labels
 
 
@@ -28919,7 +28919,7 @@ def _local_worker_placement_labels() -> dict[str, Any]:
         "node_scope": "local",
         "transport": "local",
         "tools": sorted(DEFAULT_WORKER_TOOL_COMMANDS),
-        "scan_tiers": sorted(HISTORICAL_DAST_SCAN_TYPES),
+        "budget_profiles": sorted(SCAN_BUDGET_PROFILES),
     }
 
 

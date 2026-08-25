@@ -428,7 +428,7 @@ def test_broker_join_installs_no_database_or_redis_credentials(tmp_path, monkeyp
             network_label="customer-vpc",
             data_residency=None,
             capability=["nuclei"],
-            scan_tier=["smart"],
+            budget_profile=["thorough"],
             label=[],
         ),
     )
@@ -492,7 +492,7 @@ def test_broker_join_local_build_skips_registry_runtime_and_persists_override(tm
             network_label=None,
             data_residency=None,
             capability=[],
-            scan_tier=[],
+            budget_profile=[],
             label=[],
         ),
     )
@@ -965,7 +965,7 @@ def test_broker_join_can_pin_a_private_enrollment_ca(tmp_path, monkeypatch):
             network_label=None,
             data_residency=None,
             capability=[],
-            scan_tier=[],
+            budget_profile=[],
             label=[],
         ),
     )
