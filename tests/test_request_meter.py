@@ -1,6 +1,10 @@
 import asyncio
+from contextlib import contextmanager
+import http.server
 import os
 import sys
+import threading
+import urllib.request
 
 import httpx
 import pytest
@@ -20,6 +24,42 @@ from scanner_tools.request_meter import (
 
 def teardown_function():
     configure_request_meter(limit=None, target_host=None, mode="off")
+
+
+@contextmanager
+def _redirect_server():
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            hits.append(self.path)
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", "/final")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return None
+
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    except PermissionError:
+        pytest.skip("test sandbox does not permit a loopback listener")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", hits
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_request_meter_tracks_attempt_completion_retry_and_rejection():
@@ -242,6 +282,109 @@ def test_httpx_hook_rejects_passive_post_before_transport():
     asyncio.run(run_request())
     assert calls == 0
     assert meter.snapshot()["method_rejected_requests"] == 1
+
+
+def test_all_python_target_clients_share_real_wire_budget_and_redirect_guard():
+    import aiohttp
+    import requests
+
+    install_async_client_metering()
+    with _redirect_server() as (origin, hits):
+        for client_name in ("httpx", "aiohttp", "requests", "urllib"):
+            hits.clear()
+            meter = configure_request_meter(
+                limit=1,
+                target_host="127.0.0.1",
+                mode="enforce",
+                planned=1,
+                reserved=1,
+                allowed_methods={"GET"},
+                allowed_origins={origin},
+                allowed_addresses={"127.0.0.1"},
+                require_destination_scope=True,
+            )
+            url = origin + "/start"
+            if client_name == "httpx":
+                async def httpx_request():
+                    async with httpx.AsyncClient(trust_env=False) as client:
+                        response = await client.get(url, follow_redirects=True)
+                        assert response.status_code == 302
+
+                asyncio.run(httpx_request())
+            elif client_name == "aiohttp":
+                async def aiohttp_request():
+                    async with aiohttp.ClientSession(trust_env=False) as client:
+                        async with client.get(url, allow_redirects=True) as response:
+                            assert response.status == 302
+
+                asyncio.run(aiohttp_request())
+            elif client_name == "requests":
+                response = requests.get(url, allow_redirects=True, timeout=2)
+                assert response.status_code == 302
+            else:
+                with pytest.raises(RequestBudgetExceeded):
+                    urllib.request.urlopen(url, timeout=2)
+
+            snapshot = meter.snapshot()
+            assert hits == ["/start"], client_name
+            assert snapshot["attempted_requests"] == 1
+            assert snapshot["attempted_requests"] <= snapshot["reserved_requests"]
+            assert snapshot["limit_exceeded"] is False
+
+
+def test_ambient_proxy_is_rejected_or_bypassed_before_target_wire(monkeypatch):
+    import aiohttp
+    import requests
+
+    install_async_client_metering()
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with _redirect_server() as (origin, hits):
+        url = origin + "/final"
+
+        for client_name in ("httpx", "aiohttp"):
+            meter = configure_request_meter(
+                limit=1, target_host="127.0.0.1", mode="enforce",
+                planned=1, reserved=1,
+                allowed_origins={origin}, allowed_addresses={"127.0.0.1"},
+                require_destination_scope=True,
+            )
+            if client_name == "httpx":
+                async def httpx_request():
+                    async with httpx.AsyncClient(trust_env=True) as client:
+                        await client.get(url)
+
+                operation = httpx_request()
+            else:
+                async def aiohttp_request():
+                    async with aiohttp.ClientSession(trust_env=True) as client:
+                        await client.get(url)
+
+                operation = aiohttp_request()
+            with pytest.raises(
+                RequestDestinationRejected, match="environment_proxy_forbidden",
+            ):
+                asyncio.run(operation)
+            assert meter.snapshot()["attempted_requests"] == 0
+
+        for client_name in ("requests", "urllib"):
+            hits.clear()
+            meter = configure_request_meter(
+                limit=1, target_host="127.0.0.1", mode="enforce",
+                planned=1, reserved=1,
+                allowed_origins={origin}, allowed_addresses={"127.0.0.1"},
+                require_destination_scope=True,
+            )
+            if client_name == "requests":
+                response = requests.get(url, timeout=2)
+                assert response.status_code == 200
+            else:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    assert response.status == 200
+            assert hits == ["/final"], client_name
+            assert meter.snapshot()["attempted_requests"] == 1
 
 
 def test_curl_method_inference_covers_implicit_and_explicit_mutations():

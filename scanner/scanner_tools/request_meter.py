@@ -287,6 +287,26 @@ class RequestMeter:
                 )
             self._event("observed_unmetered_tool", phase=tool, url=target_url)
 
+    def reject_environment_proxy(self, *, phase: str, url: Any) -> None:
+        """Fail before target traffic when a client would honor an ambient proxy."""
+
+        with self._lock:
+            self.rejected += 1
+            self.destination_rejected += 1
+            self._increment_adapter(phase, "rejected")
+            self._event(
+                "rejected_destination",
+                phase=phase,
+                url=url,
+                method="",
+                reason="environment_proxy_forbidden",
+                resolved_addresses=[],
+            )
+        raise RequestDestinationRejected(
+            "request destination is outside the frozen target binding "
+            "(environment_proxy_forbidden)"
+        )
+
     def _increment_adapter(self, phase: Any, field: str) -> None:
         name = str(phase or "unknown").strip()[:100] or "unknown"
         counters = self.adapter_usage.setdefault(name, {
@@ -366,6 +386,23 @@ def get_request_meter() -> RequestMeter:
     return _request_meter_context.get() or _default_request_meter
 
 
+def _environment_proxy_applies(url: Any) -> bool:
+    """Return whether stdlib proxy discovery would proxy this exact URL."""
+
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        host = str(parsed.hostname or "")
+        proxies = urllib.request.getproxies()
+        return bool(
+            host
+            and proxies.get(parsed.scheme.lower())
+            and not urllib.request.proxy_bypass(host)
+        )
+    except (OSError, TypeError, ValueError):
+        # Ambiguous proxy state is unsafe for a frozen target action.
+        return True
+
+
 def install_async_client_metering() -> dict[str, bool]:
     """Install process-wide hooks once; wrappers read the current meter per call."""
     installed = {
@@ -382,6 +419,13 @@ def install_async_client_metering() -> dict[str, bool]:
         if not getattr(original, "_shakerscan_request_meter", False):
             async def metered_httpx_request(self, method, url, *args, **kwargs):
                 meter = get_request_meter()
+                if (
+                    meter.enforcing
+                    and meter.applies_to(url)
+                    and bool(getattr(self, "_trust_env", False))
+                    and _environment_proxy_applies(url)
+                ):
+                    meter.reject_environment_proxy(phase="httpx", url=url)
                 metered = meter.before_request(
                     phase="httpx",
                     url=url,
@@ -415,6 +459,15 @@ def install_async_client_metering() -> dict[str, bool]:
         if not getattr(original_aiohttp, "_shakerscan_request_meter", False):
             async def metered_aiohttp_request(self, method, str_or_url, *args, **kwargs):
                 meter = get_request_meter()
+                if (
+                    meter.enforcing
+                    and meter.applies_to(str_or_url)
+                    and bool(getattr(self, "trust_env", False))
+                    and _environment_proxy_applies(str_or_url)
+                ):
+                    meter.reject_environment_proxy(
+                        phase="aiohttp", url=str_or_url,
+                    )
                 metered = meter.before_request(
                     phase="aiohttp", url=str_or_url, method=method,
                 )
@@ -450,6 +503,11 @@ def install_async_client_metering() -> dict[str, bool]:
                 )
                 if metered and meter.enforcing:
                     kwargs["allow_redirects"] = False
+                    # Empty proxy values explicitly defeat requests' environment
+                    # merge without mutating a potentially shared Session.
+                    proxies = dict(kwargs.get("proxies") or {})
+                    proxies.update({"http": "", "https": "", "all": ""})
+                    kwargs["proxies"] = proxies
                 response = None
                 try:
                     response = original_requests(self, method, url, *args, **kwargs)
@@ -475,7 +533,18 @@ def install_async_client_metering() -> dict[str, bool]:
                 metered = meter.before_request(phase="urllib", url=url, method=method)
                 response = None
                 try:
-                    response = original_urlopen(self, fullurl, *args, **kwargs)
+                    if metered and meter.enforcing:
+                        # Use a per-request opener with no ProxyHandler state.
+                        # Redirects re-enter this metered method and consume their
+                        # own reserved unit before any second wire request.
+                        proxyless = urllib.request.build_opener(
+                            urllib.request.ProxyHandler({}),
+                        )
+                        response = original_urlopen(
+                            proxyless, fullurl, *args, **kwargs,
+                        )
+                    else:
+                        response = original_urlopen(self, fullurl, *args, **kwargs)
                     return response
                 finally:
                     if metered:

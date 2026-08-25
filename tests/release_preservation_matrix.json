@@ -174,6 +174,27 @@
         {"id":"worker_loss","label":"Accepted device work survives response loss","pytest_selector":"tests/test_hunt_device_queue_reservations.py::test_device_queue_recovers_a_job_accepted_before_response_failure"}
       ]
     },
+    "target_transport": {
+      "label": "Target-bound transport",
+      "controls": [
+        {"id":"python_clients","label":"Python clients share one real-wire reservation and redirect guard","pytest_selector":"tests/test_request_meter.py::test_all_python_target_clients_share_real_wire_budget_and_redirect_guard"},
+        {"id":"proxy_bypass","label":"Ambient proxies are rejected or bypassed before target wire","pytest_selector":"tests/test_request_meter.py::test_ambient_proxy_is_rejected_or_bypassed_before_target_wire"},
+        {"id":"ipv4_ipv6_dual","label":"IPv4, IPv6, and dual-stack ordering is explicit and stable","pytest_selector":"tests/test_scan_dns_rebinding.py::test_frozen_address_order_is_stable_and_explicitly_family_preferred"},
+        {"id":"address_failover","label":"First-address failure stays inside the frozen set","pytest_selector":"tests/test_scan_dns_rebinding.py::test_socket_factory_fails_over_without_dns"},
+        {"id":"aiohttp_replay","label":"Exact replay uses a pinned aiohttp wire path","pytest_selector":"tests/test_v2_worker_replay.py::test_pinned_transport_preserves_exact_headers_and_body_without_dns"},
+        {"id":"replay_failover","label":"Exact replay reports stable fallback and the real peer","pytest_selector":"tests/test_v2_worker_replay.py::test_pinned_replay_fails_over_in_stable_order_and_reports_the_real_peer"},
+        {"id":"same_origin_redirect","label":"Same-origin redirects are bounded and observable","pytest_selector":"tests/test_hunt_redirects.py::test_executor_follows_same_origin_chain_and_returns_final_response"},
+        {"id":"cross_origin_redirect","label":"Cross-origin redirects stop before the next hop","pytest_selector":"tests/test_hunt_redirects.py::test_executor_stops_and_records_terminal_status_on_cross_origin_hop"},
+        {"id":"dns_rebinding","label":"Runtime DNS drift is rejected before target traffic","pytest_selector":"tests/test_request_meter.py::test_frozen_target_binding_rejects_origin_and_dns_drift_before_request"},
+        {"id":"tls","label":"TLS preserves hostname identity over a frozen address","pytest_selector":"tests/test_canonical_tls_runtime.py::test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes"},
+        {"id":"browser","label":"Browser navigation blocks cross-origin traffic and writes","pytest_selector":"tests/test_hunt_browser_capability.py::test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence"},
+        {"id":"external_adapters","label":"External adapter plans cannot exceed durable holds","pytest_selector":"tests/test_external_process_budget.py::test_enforcement_receipt_cannot_authorize_more_than_the_hold"},
+        {"id":"device_http","label":"Device HTTP preserves the registered host and TLS identity over a pinned address","pytest_selector":"tests/test_device_web.py::test_device_web_connects_to_pinned_address_with_registered_host_and_sni"},
+        {"id":"websocket_upgrade","label":"LG secure WebSocket support is limited to the pinned upgrade handshake","pytest_selector":"tests/test_device_application.py::test_lg_secure_websocket_transport_uses_upgrade_handshake"},
+        {"id":"egress_separation","label":"Provider and control-plane egress remain separate from target authority","pytest_selector":"tests/test_scan_target_transport_gate.py::test_non_target_egress_is_explicitly_separate_from_target_authority"},
+        {"id":"source_gate","label":"Canonical Scan modules reject unreviewed network bypasses","pytest_selector":"tests/test_scan_target_transport_gate.py::test_canonical_scan_modules_have_no_unreviewed_network_bypass"}
+      ]
+    },
     "mcp": {
       "label": "MCP Hunt client",
       "controls": [
