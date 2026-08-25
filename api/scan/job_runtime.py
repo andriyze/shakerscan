@@ -110,7 +110,16 @@ def materialize_canonical_scan_job(
     policy = _json_object(_row_value(persisted_row, "policy_json"), name="policy_json")
     budget = _json_object(_row_value(persisted_row, "budget_json"), name="budget_json")
     canonical_plan = job.execution_plan.canonical_dict()
-    if policy != canonical_plan["policy"] or budget != canonical_plan["budget"]:
+    # A shard inherits the immutable parent execution policy, but its durable
+    # row is intentionally budgeted to the exact sub-allocation frozen in the
+    # queue authority. Comparing a child row to the parent ceiling rejects
+    # every correctly partitioned shard before it can start.
+    expected_budget = (
+        job.shard.sub_budget.payload()
+        if job.shard is not None
+        else canonical_plan["budget"]
+    )
+    if policy != canonical_plan["policy"] or budget != expected_budget:
         raise CanonicalScanJobMaterializationError(
             "persisted Scan policy or budget does not match scan-job/v2"
         )

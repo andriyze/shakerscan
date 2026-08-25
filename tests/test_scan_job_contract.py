@@ -185,6 +185,7 @@ def _shard_job_and_row(*, discovery=False):
     row.update({
         "job_id": child.job_id,
         "options": options,
+        "budget_json": authority.sub_budget.payload(),
         "scan_job_payload": child.payload(),
         "scan_job_digest": child.payload_digest,
         "parent_scan_id": parent.scan_id,
@@ -484,6 +485,23 @@ def test_worker_materializes_only_after_persisted_authority_and_dns_match():
     assert materialized["_canonical_queue_payload"] == job.payload()
     assert materialized["_canonical_scan_job_digest"] == job.payload_digest
     assert materialized["options"]["_canonical_target_binding"] == job.target.canonical_dict()
+
+
+def test_worker_materializes_shard_against_exact_sub_budget_not_parent_ceiling():
+    child, child_row, queued = _shard_job_and_row()
+
+    materialized = materialize_canonical_scan_job(
+        queued, child_row, resolved_addresses=("192.0.2.10",),
+    )
+
+    assert materialized["parent_scan_id"] == child.shard.parent_scan_id
+    assert child_row["budget_json"] == child.shard.sub_budget.payload()
+
+    child_row["budget_json"] = child.execution_plan.canonical_dict()["budget"]
+    with pytest.raises(CanonicalScanJobMaterializationError, match="policy or budget"):
+        materialize_canonical_scan_job(
+            queued, child_row, resolved_addresses=("192.0.2.10",),
+        )
 
 
 def test_worker_preserves_only_validated_queue_placement_after_materialization():
