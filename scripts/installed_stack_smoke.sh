@@ -9,6 +9,7 @@ RUNTIME="$SMOKE_HOME/.shakerscan"
 BIN_DIR="$SMOKE_HOME/.local/bin"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 PROJECT="shakerscan-installed-smoke-$$"
+JUICE_CONTAINER="${PROJECT}-juice-shop"
 API_PORT=$((38000 + ($$ % 500)))
 UI_PORT=$((39000 + ($$ % 500)))
 POSTGRES_PORT=$((42000 + ($$ % 500)))
@@ -23,6 +24,7 @@ check_equal() {
 }
 
 cleanup() {
+    docker rm -f "$JUICE_CONTAINER" >/dev/null 2>&1 || true
     if [ -x "$BIN_DIR/shakerscan" ]; then
         HOME="$SMOKE_HOME" COMPOSE_PROJECT_NAME="$PROJECT" \
             SCANNER_IMAGE_TAG="$VERSION" SCANNER_IMAGE_REPO=shakerscan-scanner \
@@ -72,5 +74,38 @@ case "$(jq -r '.command' <<<"$plan")" in
     "cd $RUNTIME && sudo ./scanner.sh model-intake-runner install"*) ;;
     *) echo "installed-stack smoke: Firecracker command does not enter $RUNTIME" >&2; exit 1 ;;
 esac
+
+if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
+    scorecard_path="${INSTALLED_STACK_SMOKE_E2E_SCORECARD:?INSTALLED_STACK_SMOKE_E2E_SCORECARD is required}"
+    network_name="${PROJECT}_default"
+    docker run --detach --name "$JUICE_CONTAINER" \
+        --network "$network_name" --network-alias juice-shop \
+    bkimminich/juice-shop@sha256:e68144772ebaaca0ec117b38d44903af92416793230288ef7c5437fc4f26850a \
+        >/dev/null
+    for _attempt in $(seq 1 60); do
+        if docker run --rm --network "$network_name" --entrypoint python3 \
+            "shakerscan-scanner:$VERSION" -c \
+            'import urllib.request; assert urllib.request.urlopen("http://juice-shop:3000/", timeout=3).status == 200' \
+            >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+    done
+    docker run --rm --network "$network_name" --entrypoint python3 \
+        "shakerscan-scanner:$VERSION" -c \
+        'import urllib.request; assert urllib.request.urlopen("http://juice-shop:3000/", timeout=5).status == 200' \
+        >/dev/null
+    fixture_host="host.docker.internal"
+    if [ "$(uname -s)" = "Linux" ]; then
+        fixture_host="$(docker network inspect "$network_name" \
+            --format '{{(index .IPAM.Config 0).Gateway}}')"
+    fi
+    SHAKERSCAN_API="http://127.0.0.1:$API_PORT" \
+        SHAKERSCAN_E2E_HONEY_HOST="$fixture_host" \
+        SHAKERSCAN_E2E_DAST_TARGET="http://juice-shop:3000" \
+        SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN="$token" \
+        python3 "$ROOT_DIR/tests/e2e/run_e2e.py" --area all --scorecard "$scorecard_path"
+    check_equal "exact-image E2E gate" "$(jq -r '.gate' "$scorecard_path")" "pass"
+fi
 
 echo "installed-stack smoke passed: release identity, local Model Intake session, and Firecracker guidance"

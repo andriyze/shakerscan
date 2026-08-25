@@ -198,8 +198,14 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert "dropdb -U scanner scanner_dirty" in script
     assert "pg_restore" in script
     assert "run_scenario scanner_dirty rollback" in script
+    assert "BASELINE_REF:-v0.8.17" in script
+    assert "shakerscan/shakerscan-scanner:0.8.17" in script
+    assert "run_baseline_migrations scanner_dirty" in script
+    assert 'docker restart "$SMOKE_CONTAINER"' in script
+    assert "run_scenario scanner_dirty verify_dirty" in script
+    assert "upgrade_acceptance_receipt.py" in script
     assert "_assert_rollback" in verifier
-    assert 'choices=("clean", "dirty", "rollback")' in verifier
+    assert 'choices=("clean", "dirty", "verify_dirty", "rollback")' in verifier
 
 
 def test_minimal_installed_research_adapter_has_all_imports(tmp_path):

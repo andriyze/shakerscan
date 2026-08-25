@@ -653,10 +653,141 @@ jobs:
             release-candidate-receipt.json > "$receipt_tmp"
           mv "$receipt_tmp" release-candidate-receipt.json
 
-      - name: Upload candidate receipt
+      - name: Upload uncertified manifest receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
+          path: release-candidate-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # Certification deliberately happens after the multi-architecture manifests
+  # exist. These are the exact immutable digests the promotion workflow re-tags;
+  # pre-manifest build images cannot stand in for them.
+  certify:
+    name: Certify final manifest digests
+    needs: [meta, merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Download immutable manifest receipt
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/uncertified
+
+      - name: Pull and identify exact final manifests
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          receipt=artifacts/uncertified/release-candidate-receipt.json
+          test "$(jq -r '.candidate_sha' "$receipt")" = "$CANDIDATE_SHA"
+          for binding in \
+            "scanner:${SCANNER_IMAGE}:shakerscan-scanner" \
+            "api:${API_IMAGE}:shakerscan-api" \
+            "ui:${UI_IMAGE}:shakerscan-ui" \
+            "signer:${SIGNER_IMAGE}:shakerscan-model-intake-signer"; do
+            IFS=: read -r key repository local_repository <<<"$binding"
+            digest="$(jq -r ".images.${key}" "$receipt")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker pull "${repository}@${digest}"
+            docker tag "${repository}@${digest}" "${local_repository}:${VERSION}"
+          done
+          scanner_digest="$(jq -r '.images.scanner' "$receipt")"
+          api_digest="$(jq -r '.images.api' "$receipt")"
+          for image in "${SCANNER_IMAGE}@${scanner_digest}" "${API_IMAGE}@${api_digest}"; do
+            docker run --rm \
+              -e SCANNER_EXPECTED_VERSION="$VERSION" \
+              -e SCANNER_EXPECTED_REVISION="$CANDIDATE_SHA" \
+              --entrypoint python3 "$image" /app/release_identity.py --verify
+          done
+
+      - name: Run complete contracts in final scanner runtime
+        env:
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/certification
+          scanner_digest="$(jq -r '.images.scanner' artifacts/uncertified/release-candidate-receipt.json)"
+          docker run --rm --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            -v "$PWD/artifacts/certification:/artifacts" \
+            "${SCANNER_IMAGE}@${scanner_digest}" \
+            scripts/run_complete_python_suite.py --artifacts-dir /artifacts
+
+      - name: Prove previous-stable upgrade, restart, and rollback
+        env:
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          scanner_digest="$(jq -r '.images.scanner' artifacts/uncertified/release-candidate-receipt.json)"
+          SCANNER_IMAGE="${SCANNER_IMAGE}@${scanner_digest}" \
+            CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
+            UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt.json" \
+            scripts/upgrade_smoke.sh
+
+      - name: Run full user-visible E2E on exact final manifests
+        env:
+          INSTALLED_STACK_SMOKE_E2E: "1"
+          INSTALLED_STACK_SMOKE_E2E_SCORECARD: ${{ github.workspace }}/artifacts/certification/e2e-scorecard.json
+        run: make installed-stack-smoke
+
+      - name: Build exact-digest preservation receipt
+        env:
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          receipt=artifacts/uncertified/release-candidate-receipt.json
+          python3 scripts/release_preservation.py \
+            --matrix tests/release_preservation_matrix.json \
+            --junit artifacts/certification/v2-full-python.xml \
+            --e2e-scorecard artifacts/certification/e2e-scorecard.json \
+            --source-sha "$CANDIDATE_SHA" \
+            --image "scanner=$(jq -r '.images.scanner' "$receipt")" \
+            --image "api=$(jq -r '.images.api' "$receipt")" \
+            --image "ui=$(jq -r '.images.ui' "$receipt")" \
+            --image "signer=$(jq -r '.images.signer' "$receipt")" \
+            --output artifacts/certification/preservation-receipt.json
+
+      - name: Seal promotion-ready candidate receipt
+        env:
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        run: |
+          python3 scripts/certify_release_receipt.py \
+            --candidate artifacts/uncertified/release-candidate-receipt.json \
+            --upgrade artifacts/certification/upgrade-receipt.json \
+            --preservation artifacts/certification/preservation-receipt.json \
+            --e2e-scorecard artifacts/certification/e2e-scorecard.json \
+            --source-sha "$CANDIDATE_SHA" \
+            --output release-candidate-receipt.json
+          test "$(jq -r '.schema_version' release-candidate-receipt.json)" = shakerscan-release-candidate/v2
+          test "$(jq -r '.certification.status' release-candidate-receipt.json)" = pass
+
+      - name: Upload promotion-ready receipt
         uses: actions/upload-artifact@v7
         with:
           name: release-candidate-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: release-candidate-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload exact-digest certification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-certification-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/certification
           if-no-files-found: error
           retention-days: 30

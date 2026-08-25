@@ -13,10 +13,22 @@ import asyncpg
 from retest_contract import run_schema_migrations
 
 
-SURVIVOR_ID = "11111111-1111-4111-8111-111111111111"
-SURVIVOR_CANONICAL_KEY = "web:upgrade.example.test"
-SCAN_ID = "33333333-3333-4333-8333-333333333333"
+TARGET_ID = "11111111-1111-4111-8111-111111111111"
+TARGET_CANONICAL_KEY = "web:upgrade.example.test"
+COMPLETED_SCAN_ID = "33333333-3333-4333-8333-333333333333"
+PENDING_SCAN_ID = "55555555-5555-4555-8555-555555555555"
 FINDING_ID = "44444444-4444-4444-8444-444444444444"
+AI_TARGET_ID = "66666666-6666-4666-8666-666666666666"
+MODEL_INTAKE_ID = "77777777-7777-4777-8777-777777777777"
+EVIDENCE_ID = "88888888-8888-4888-8888-888888888888"
+FLEET_NODE_ID = "99999999-9999-4999-8999-999999999999"
+FLEET_CREDENTIAL_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+LEGACY_CREDENTIAL_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+LEGACY_HUNT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+
+async def _table_exists(conn, table: str) -> bool:
+    return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}"))
 
 
 async def _assert_common(conn) -> None:
@@ -25,29 +37,31 @@ async def _assert_common(conn) -> None:
         raise RuntimeError("idx_targets_canonical_key is missing after migration")
     trigger_count = await conn.fetchval(
         """
-        SELECT COUNT(*)
-        FROM pg_trigger
+        SELECT COUNT(*) FROM pg_trigger
         WHERE tgname = 'trg_targets_canonical_key' AND NOT tgisinternal
         """
     )
     if trigger_count != 1:
         raise RuntimeError("canonical target trigger is missing or duplicated")
-    if not await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
-        raise RuntimeError("app_schema_migrations is missing after migration")
-    if not await conn.fetchval("SELECT to_regclass('public.budget_reservations') IS NOT NULL"):
-        raise RuntimeError("budget_reservations is missing after migration")
+    for table in (
+        "app_schema_migrations",
+        "budget_reservations",
+        "credential_profiles",
+        "request_collections",
+        "hunt_runs",
+        "model_intake_submission_events",
+    ):
+        if not await _table_exists(conn, table):
+            raise RuntimeError(f"{table} is missing after migration")
     if not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM app_schema_migrations "
         "WHERE name='v2_budget_reservations_v2')"
     ):
         raise RuntimeError("V2 budget reservation migration marker is missing")
-    if not await conn.fetchval("SELECT to_regclass('public.model_intake_submission_events') IS NOT NULL"):
-        raise RuntimeError("model_intake_submission_events is missing after migration")
 
     submission_state_constraint = await conn.fetchval(
         """
-        SELECT pg_get_constraintdef(oid)
-        FROM pg_constraint
+        SELECT pg_get_constraintdef(oid) FROM pg_constraint
         WHERE conname = 'model_intake_submission_state_check'
           AND conrelid = 'model_intake_submissions'::regclass
         """
@@ -57,8 +71,7 @@ async def _assert_common(conn) -> None:
 
     deployment_binding_fk = await conn.fetchval(
         """
-        SELECT pg_get_constraintdef(oid)
-        FROM pg_constraint
+        SELECT pg_get_constraintdef(oid) FROM pg_constraint
         WHERE conname = 'model_intake_deployment_bindings_admission_id_fkey'
           AND conrelid = 'model_intake_deployment_bindings'::regclass
         """
@@ -70,8 +83,7 @@ async def _assert_common(conn) -> None:
         row["column_name"]
         for row in await conn.fetch(
             """
-            SELECT column_name
-            FROM information_schema.columns
+            SELECT column_name FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = 'node_join_tokens'
             """
         )
@@ -86,12 +98,9 @@ async def _assert_common(conn) -> None:
     desired_state_changed_at = await conn.fetchval(
         """
         SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'nodes'
-              AND column_name = 'desired_state_changed_at'
-              AND is_nullable = 'NO'
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'nodes'
+              AND column_name = 'desired_state_changed_at' AND is_nullable = 'NO'
         )
         """
     )
@@ -99,97 +108,201 @@ async def _assert_common(conn) -> None:
         raise RuntimeError("fleet desired-state timestamp migration is missing")
 
 
-async def _assert_dirty_merge(conn) -> None:
-    rows = await conn.fetch(
-        "SELECT id::text, canonical_key FROM targets WHERE canonical_key = $1",
-        SURVIVOR_CANONICAL_KEY,
+async def _assert_stable_fixture(conn, *, upgraded: bool) -> None:
+    target = await conn.fetchrow(
+        "SELECT id::text, url, total_scans, active_findings_count, canonical_key "
+        "FROM targets WHERE id=$1::uuid",
+        TARGET_ID,
     )
-    if [dict(row) for row in rows] != [
-        {"id": SURVIVOR_ID, "canonical_key": SURVIVOR_CANONICAL_KEY}
+    if not target or dict(target) != {
+        "id": TARGET_ID,
+        "url": "https://upgrade.example.test",
+        "total_scans": 3,
+        "active_findings_count": 3,
+        "canonical_key": TARGET_CANONICAL_KEY,
+    }:
+        raise RuntimeError(f"previous-stable target was not preserved: {target!r}")
+
+    scans = await conn.fetch(
+        "SELECT id::text, target_id::text, status, scan_type FROM scans "
+        "WHERE id=ANY($1::uuid[]) ORDER BY id",
+        [COMPLETED_SCAN_ID, PENDING_SCAN_ID],
+    )
+    if [dict(row) for row in scans] != [
+        {
+            "id": COMPLETED_SCAN_ID,
+            "target_id": TARGET_ID,
+            "status": "completed",
+            "scan_type": "quick",
+        },
+        {
+            "id": PENDING_SCAN_ID,
+            "target_id": TARGET_ID,
+            "status": "pending",
+            "scan_type": "smart",
+        },
     ]:
-        raise RuntimeError(f"canonical duplicate merge produced unexpected targets: {rows!r}")
+        raise RuntimeError(f"completed or pending Scan state was not preserved: {scans!r}")
 
-    scan_target = await conn.fetchval("SELECT target_id::text FROM scans WHERE id = $1::uuid", SCAN_ID)
-    finding_target = await conn.fetchval(
-        "SELECT target_id::text FROM findings WHERE id = $1::uuid", FINDING_ID
+    finding = await conn.fetchrow(
+        "SELECT id::text, scan_id::text, target_id::text, fingerprint, severity "
+        "FROM findings WHERE id=$1::uuid",
+        FINDING_ID,
     )
-    if scan_target != SURVIVOR_ID or finding_target != SURVIVOR_ID:
-        raise RuntimeError(
-            "duplicate merge did not preserve scan/finding ownership: "
-            f"scan={scan_target}, finding={finding_target}"
+    if not finding or dict(finding) != {
+        "id": FINDING_ID,
+        "scan_id": COMPLETED_SCAN_ID,
+        "target_id": TARGET_ID,
+        "fingerprint": "upgrade-smoke-finding",
+        "severity": "medium",
+    }:
+        raise RuntimeError(f"previous-stable finding was not preserved: {finding!r}")
+
+    evidence = await conn.fetchrow(
+        "SELECT id::text, scan_id::text, finding_id::text, content_sha256, retention_class "
+        "FROM evidence_objects WHERE id=$1::uuid",
+        EVIDENCE_ID,
+    )
+    if not evidence or dict(evidence) != {
+        "id": EVIDENCE_ID,
+        "scan_id": COMPLETED_SCAN_ID,
+        "finding_id": FINDING_ID,
+        "content_sha256": "e" * 64,
+        "retention_class": "audit",
+    }:
+        raise RuntimeError(f"previous-stable evidence was not preserved: {evidence!r}")
+
+    ai_target = await conn.fetchrow(
+        "SELECT id::text, name, endpoint_url, is_active FROM ai_targets WHERE id=$1::uuid",
+        AI_TARGET_ID,
+    )
+    if not ai_target or dict(ai_target) != {
+        "id": AI_TARGET_ID,
+        "name": "Previous stable AI target",
+        "endpoint_url": "https://upgrade-ai.example.test/query",
+        "is_active": True,
+    }:
+        raise RuntimeError(f"previous-stable AI Gate target was not preserved: {ai_target!r}")
+
+    submission = await conn.fetchrow(
+        "SELECT id::text, scan_id::text, state, source_kind, source_reference_hash "
+        "FROM model_intake_submissions WHERE id=$1::uuid",
+        MODEL_INTAKE_ID,
+    )
+    if not submission or dict(submission) != {
+        "id": MODEL_INTAKE_ID,
+        "scan_id": COMPLETED_SCAN_ID,
+        "state": "submitted",
+        "source_kind": "https",
+        "source_reference_hash": "a" * 64,
+    }:
+        raise RuntimeError(f"previous-stable Model Intake submission was not preserved: {submission!r}")
+
+    legacy_credential = await conn.fetchrow(
+        "SELECT id::text, target_id::text, name, auth_kind, secret_value, is_active "
+        "FROM target_credential_profiles WHERE id=$1::uuid",
+        LEGACY_CREDENTIAL_ID,
+    )
+    if (
+        not legacy_credential
+        or legacy_credential["target_id"] != TARGET_ID
+        or legacy_credential["name"] != "previous-stable-primary"
+        or legacy_credential["auth_kind"] != "authorization_header"
+        or not str(legacy_credential["secret_value"] or "").startswith("enc:fernet:")
+        or not legacy_credential["is_active"]
+    ):
+        raise RuntimeError(f"previous-stable credential was not preserved: {legacy_credential!r}")
+
+    hunt = await conn.fetchrow(
+        "SELECT id::text, target_id::text, objective, status, execution_mode "
+        "FROM research_episodes WHERE id=$1::uuid",
+        LEGACY_HUNT_ID,
+    )
+    if not hunt or dict(hunt) != {
+        "id": LEGACY_HUNT_ID,
+        "target_id": TARGET_ID,
+        "objective": "Previous stable legacy Hunt awaiting its planner",
+        "status": "awaiting_planner",
+        "execution_mode": "gated",
+    }:
+        raise RuntimeError(f"previous-stable Hunt was not preserved: {hunt!r}")
+
+    node = await conn.fetchrow(
+        "SELECT id::text, name, status, desired_worker_count FROM nodes WHERE id=$1::uuid",
+        FLEET_NODE_ID,
+    )
+    if not node or dict(node) != {
+        "id": FLEET_NODE_ID,
+        "name": "previous-stable-worker",
+        "status": "draining",
+        "desired_worker_count": 1,
+    }:
+        raise RuntimeError(f"previous-stable fleet node was not preserved: {node!r}")
+    node_credential = await conn.fetchrow(
+        "SELECT id::text, node_id::text, credential_hash, credential_version, revoked_at "
+        "FROM node_credentials WHERE id=$1::uuid",
+        FLEET_CREDENTIAL_ID,
+    )
+    if (
+        not node_credential
+        or node_credential["node_id"] != FLEET_NODE_ID
+        or node_credential["credential_hash"] != "c" * 64
+        or node_credential["credential_version"] != 1
+        or node_credential["revoked_at"] is not None
+    ):
+        raise RuntimeError(f"previous-stable fleet credential was not preserved: {node_credential!r}")
+
+    token = await conn.fetchrow(
+        """
+        SELECT token_id::text, transport, max_uses, use_count,
+               consumed_at IS NOT NULL AS consumed, revoked_at
+        FROM node_join_tokens WHERE token_hash='upgrade-consumed-token'
+        """
+    )
+    if (
+        not token
+        or not token["token_id"]
+        or token["transport"] != "broker"
+        or token["max_uses"] != 1
+        or token["use_count"] != 1
+        or not token["consumed"]
+        or token["revoked_at"] is not None
+    ):
+        raise RuntimeError(f"consumed fleet join token was not preserved: {token!r}")
+
+    if upgraded:
+        generic = await conn.fetchrow(
+            "SELECT id::text, target_kind, target_id::text, name, auth_kind, "
+            "principal_slot, is_active FROM credential_profiles WHERE id=$1::uuid",
+            LEGACY_CREDENTIAL_ID,
         )
-
-    legacy_token = await conn.fetchrow(
-        """
-        SELECT token_id::text, transport, max_uses, use_count, consumed_at IS NOT NULL AS consumed
-        FROM node_join_tokens
-        WHERE token_hash = 'upgrade-consumed-token'
-        """
-    )
-    if not legacy_token or not legacy_token["token_id"] or legacy_token["transport"] is not None:
-        raise RuntimeError(f"legacy fleet join token was not upgraded safely: {legacy_token!r}")
-    if legacy_token["max_uses"] != 1 or legacy_token["use_count"] != 1 or not legacy_token["consumed"]:
-        raise RuntimeError(f"consumed legacy fleet token was reactivated: {legacy_token!r}")
+        if (
+            not generic
+            or generic["target_kind"] != "web"
+            or generic["target_id"] != TARGET_ID
+            or generic["name"] != "previous-stable-primary"
+            or generic["auth_kind"] != "authorization_header"
+            or generic["principal_slot"] != "primary"
+            or not generic["is_active"]
+        ):
+            raise RuntimeError(f"legacy credential was not mirrored into V2: {generic!r}")
 
 
 async def _assert_rollback(conn) -> None:
+    for candidate_only_table in (
+        "budget_reservations",
+        "credential_profiles",
+        "request_collections",
+        "hunt_runs",
+    ):
+        if await _table_exists(conn, candidate_only_table):
+            raise RuntimeError(f"rollback retained candidate-only table {candidate_only_table}")
     if await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-        "WHERE table_schema='public' AND table_name='targets' "
-        "AND column_name='canonical_key')"
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations "
+        "WHERE name='v2_budget_reservations_v2')"
     ):
-        raise RuntimeError("rollback retained an upgraded targets schema")
-    if await conn.fetchval("SELECT to_regclass('public.app_schema_migrations') IS NOT NULL"):
-        raise RuntimeError("rollback retained current migration bookkeeping")
-
-    targets = await conn.fetch(
-        "SELECT id::text, url, total_scans, active_findings_count "
-        "FROM targets WHERE id = ANY($1::uuid[]) ORDER BY id",
-        [SURVIVOR_ID, "22222222-2222-4222-8222-222222222222"],
-    )
-    if [dict(row) for row in targets] != [
-        {
-            "id": SURVIVOR_ID,
-            "url": "http://upgrade.example.test",
-            "total_scans": 3,
-            "active_findings_count": 3,
-        },
-        {
-            "id": "22222222-2222-4222-8222-222222222222",
-            "url": "https://upgrade.example.test/",
-            "total_scans": 0,
-            "active_findings_count": 0,
-        },
-    ]:
-        raise RuntimeError(f"rollback did not restore historical targets: {targets!r}")
-
-    scan_target = await conn.fetchval(
-        "SELECT target_id::text FROM scans WHERE id = $1::uuid", SCAN_ID,
-    )
-    finding_target = await conn.fetchval(
-        "SELECT target_id::text FROM findings WHERE id = $1::uuid", FINDING_ID,
-    )
-    duplicate_id = "22222222-2222-4222-8222-222222222222"
-    if scan_target != duplicate_id or finding_target != duplicate_id:
-        raise RuntimeError(
-            "rollback did not restore legacy ownership: "
-            f"scan={scan_target}, finding={finding_target}"
-        )
-
-    token_columns = {
-        row["column_name"]
-        for row in await conn.fetch(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema='public' AND table_name='node_join_tokens'"
-        )
-    }
-    if "token_id" in token_columns or "use_count" in token_columns:
-        raise RuntimeError("rollback retained upgraded fleet join-token columns")
-    if not await conn.fetchval(
-        "SELECT consumed_at IS NOT NULL FROM node_join_tokens "
-        "WHERE token_hash='upgrade-consumed-token'"
-    ):
-        raise RuntimeError("rollback lost the consumed legacy fleet token")
+        raise RuntimeError("rollback retained a candidate V2 migration marker")
+    await _assert_stable_fixture(conn, upgraded=False)
 
 
 async def _run(database_url: str, scenario: str) -> None:
@@ -198,14 +311,15 @@ async def _run(database_url: str, scenario: str) -> None:
         if scenario == "rollback":
             async with pool.acquire() as conn:
                 await _assert_rollback(conn)
-        else:
+            return
+        if scenario != "verify_dirty":
             await run_schema_migrations(pool)
             # Both API and workers run migrations. A second pass must be harmless.
             await run_schema_migrations(pool)
-            async with pool.acquire() as conn:
-                await _assert_common(conn)
-                if scenario == "dirty":
-                    await _assert_dirty_merge(conn)
+        async with pool.acquire() as conn:
+            await _assert_common(conn)
+            if scenario in {"dirty", "verify_dirty"}:
+                await _assert_stable_fixture(conn, upgraded=True)
     finally:
         await pool.close()
 
@@ -214,7 +328,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
-        "--scenario", choices=("clean", "dirty", "rollback"), required=True,
+        "--scenario", choices=("clean", "dirty", "verify_dirty", "rollback"), required=True,
     )
     args = parser.parse_args()
     if not args.database_url:

@@ -16,6 +16,7 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert 'imagetools create -t "${SCANNER_IMAGE}:${VERSION}"' not in text
     assert 'imagetools create -t "${SCANNER_IMAGE}:latest"' not in text
     assert "shakerscan-release-candidate/v1" in text
+    assert "shakerscan-release-candidate/v2" in text
     assert "e2e_run_id:" in text
     assert "codeql_run_id:" in text
     assert "parity_run_id:" in text
@@ -24,6 +25,11 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert 'verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"' in text
     assert "Verify signed candidate provenance" in text
     assert "final-multiarch-image-digests" in text
+    assert "release-candidate-uncertified-" in text
+    assert "Certify final manifest digests" in text
+    assert "scripts/certify_release_receipt.py" in text
+    assert "INSTALLED_STACK_SMOKE_E2E" in text
+    assert "CANDIDATE_IMAGE_DIGEST" in text
 
 
 def test_release_promotion_reuses_candidate_digests_without_physical_gate():
@@ -41,6 +47,8 @@ def test_release_promotion_reuses_candidate_digests_without_physical_gate():
     assert "docker build " not in text
     assert ":latest" not in text
     assert "Reverify signed candidate provenance" in text
+    assert 'shakerscan-release-candidate/v2' in text
+    assert '.certification.status == "pass"' in text
 
 
 def test_stable_channel_is_separate_last_step():
