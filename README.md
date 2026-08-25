@@ -78,6 +78,7 @@ shakerscan scan https://app.example.test --budget-profile thorough --active-test
 shakerscan hunt start --target-id "$TARGET_ID" --target-kind web
 shakerscan credentials test "$PROFILE_ID"
 shakerscan collections select "$COLLECTION_ID" --method GET
+shakerscan evidence export --scan-id "$SCAN_ID" --format manifest
 shakerscan status
 ```
 
@@ -487,6 +488,7 @@ scan <target> [options]       Submit the deterministic DAST Scan
 hunt start|call               Start a Hunt or call one returned capability
 credentials create|rotate|test  Manage encrypted exact-target profiles
 collections upload|bind|select  Manage encrypted request collections
+evidence export                Export content-free evidence manifests or bundles
 scan-full <target>            Deprecated: thorough + active compatibility translation
 scan-smart <target>           Deprecated: thorough + active compatibility translation
 doctor | install-deps         Diagnose or install local prerequisites

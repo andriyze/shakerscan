@@ -1873,6 +1873,7 @@ print_help() {
     echo "  hunt <cmd>         Start or drive one canonical Hunt"
     echo "  credentials <cmd>  Create, rotate, or admission-test encrypted profiles"
     echo "  collections <cmd>  Upload, bind, or select request collections"
+    echo "  evidence export    Export content-free evidence manifests or bundles"
     echo "  report-rebuild <bundle>  Rebuild a deterministic report fully offline"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
@@ -3517,7 +3518,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|scan-full|scan-smart|hunt|credentials|collections|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|scan-full|scan-smart|hunt|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -3595,6 +3596,9 @@ case $COMMAND in
         ;;
     collections)
         run_v2_product_cli "collections" "${ARGS[@]}"
+        ;;
+    evidence)
+        run_v2_product_cli "evidence" "${ARGS[@]}"
         ;;
     report-rebuild)
         if [ ! -f "$SCRIPT_DIR/scripts/rebuild_scan_report.py" ]; then

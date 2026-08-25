@@ -125,3 +125,29 @@ def test_collection_upload_document_accepts_json_or_openapi_yaml(tmp_path):
     yaml_path.write_text("openapi: 3.0.0\npaths: {}\n")
     assert v2_cli._read_document(str(json_path)) == {"info": {"name": "fixture"}}
     assert v2_cli._read_document(str(yaml_path)).startswith("openapi:")
+
+
+def test_evidence_export_is_first_class_and_requires_output_for_zip():
+    args = v2_cli.build_parser().parse_args([
+        "--api-url", "http://localhost:8080", "evidence", "export",
+        "--scan-id", "scan-1", "--format", "zip",
+    ])
+
+    class FakeClient:
+        def download(self, path):
+            assert "scan_id=scan-1" in path
+            assert "format=zip" in path
+            return b"PKfixture", "application/zip"
+
+    with pytest.raises(v2_cli.CliError, match="requires --output"):
+        v2_cli._run_evidence(args, FakeClient())
+
+
+def test_evidence_export_writes_atomically_without_implicit_overwrite(tmp_path):
+    output = tmp_path / "manifest.json"
+    assert v2_cli._write_export(str(output), b"{}", force=False) == output.resolve()
+    assert output.read_bytes() == b"{}"
+    with pytest.raises(v2_cli.CliError, match="already exists"):
+        v2_cli._write_export(str(output), b"changed", force=False)
+    v2_cli._write_export(str(output), b"changed", force=True)
+    assert output.read_bytes() == b"changed"

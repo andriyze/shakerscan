@@ -72,6 +72,25 @@ class ApiClient:
     def post(self, path: str, payload: Mapping[str, Any]) -> Any:
         return self.request("POST", path, payload=payload)
 
+    def download(self, path: str, *, max_bytes: int = MAX_REQUEST_BYTES) -> tuple[bytes, str]:
+        request = urllib.request.Request(
+            f"{self.base_url}{path}", headers={"Accept": "application/json, application/zip"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read(max_bytes + 1)
+                content_type = str(response.headers.get("Content-Type") or "")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read(MAX_JSON_BYTES + 1)
+            detail = _safe_api_error(raw, fallback=f"API returned HTTP {exc.code}")
+            raise CliError(detail) from exc
+        except urllib.error.URLError as exc:
+            raise CliError(f"cannot reach ShakerScan API: {exc.reason}") from exc
+        if len(raw) > max_bytes:
+            raise CliError("evidence export exceeds the 52 MiB CLI limit")
+        return raw, content_type
+
 
 def _safe_api_error(raw: bytes, *, fallback: str) -> str:
     try:
@@ -387,6 +406,54 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
     raise CliError("unknown collections command")
 
 
+def _write_export(path: str, value: bytes, *, force: bool) -> Path:
+    output = Path(path).expanduser()
+    if output.exists() and not force:
+        raise CliError("evidence export output already exists; use --force to replace it")
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_bytes(value)
+        temporary.replace(output)
+    except OSError as exc:
+        raise CliError(f"cannot write evidence export: {exc}") from exc
+    return output.resolve()
+
+
+def _run_evidence(args: argparse.Namespace, client: ApiClient) -> Any:
+    if args.evidence_command != "export":
+        raise CliError("unknown evidence command")
+    query: dict[str, str] = {"limit": str(args.limit)}
+    for name in ("scan_id", "finding_id", "retention_class"):
+        value = getattr(args, name)
+        if value:
+            query[name] = str(value)
+    if args.format == "manifest":
+        path = f"/evidence/export-manifest?{urllib.parse.urlencode(query)}"
+    else:
+        query["format"] = args.format
+        query["record_event"] = "true" if args.record_event else "false"
+        path = f"/evidence/export-bundle?{urllib.parse.urlencode(query)}"
+    raw, content_type = client.download(path)
+    if args.format == "zip" and "zip" not in content_type.lower():
+        raise CliError("running server did not return the requested evidence zip")
+    if args.output:
+        output = _write_export(args.output, raw, force=args.force)
+        return {
+            "schema_version": "evidence-cli-export/v1",
+            "format": args.format,
+            "output": str(output),
+            "bytes": len(raw),
+            "content_type": content_type,
+        }
+    if args.format == "zip":
+        raise CliError("zip evidence export requires --output")
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CliError("running server returned invalid evidence JSON") from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="shakerscan",
@@ -481,6 +548,22 @@ def build_parser() -> argparse.ArgumentParser:
     collection_select.add_argument("--tag", action="append", default=[])
     collection_select.add_argument("--include-mutating", action="store_true")
     collection_select.add_argument("--limit", type=int, default=500)
+
+    evidence = products.add_parser(
+        "evidence", help="Export content-free evidence manifests or bundles",
+    )
+    evidence_commands = evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_export = evidence_commands.add_parser(
+        "export", help="Export a filtered manifest, JSON bundle, or metadata zip",
+    )
+    evidence_export.add_argument("--scan-id")
+    evidence_export.add_argument("--finding-id")
+    evidence_export.add_argument("--retention-class")
+    evidence_export.add_argument("--limit", type=int, default=200)
+    evidence_export.add_argument("--format", choices=("manifest", "json", "zip"), default="manifest")
+    evidence_export.add_argument("--record-event", action="store_true")
+    evidence_export.add_argument("--output")
+    evidence_export.add_argument("--force", action="store_true")
     return parser
 
 
@@ -495,6 +578,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _run_credentials(args, client)
         elif args.product == "collections":
             result = _run_collections(args, client)
+        elif args.product == "evidence":
+            result = _run_evidence(args, client)
         else:
             raise CliError("unknown command")
         print(json.dumps(result, indent=2, sort_keys=True))
