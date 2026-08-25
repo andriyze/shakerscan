@@ -183,6 +183,10 @@ jobs:
           ui=false
           while IFS= read -r changed; do
             case "$changed" in
+              api/public_api_contract.py|scripts/generate_public_api_contract.py|tests/test_public_api_contract_generation.py|docs/generated/public-openapi-manifest.json|ui/src/lib/publicApi.generated.ts)
+                backend=true
+                ui=true
+                ;;
               ui/*|scripts/generate_scan_contract.py|scripts/generate_hunt_contract.py|tests/test_ui_*|tests/test_scan_contract_generation.py)
                 ui=true
                 ;;
@@ -223,6 +227,13 @@ jobs:
           python scripts/check_scan_target_transport.py
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_target_transport_gate.py
+
+      - name: Reject public OpenAPI and generated-client drift
+        run: |
+          PYTHONPATH=. python -m pytest -q -p no:cacheprovider \
+            tests/test_public_api_contract_generation.py \
+            tests/test_scan_openapi_contract.py \
+            tests/test_scan_contract_generation.py
 
       - name: Validate package-native Scan contracts
         run: |

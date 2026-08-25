@@ -22,12 +22,11 @@ def _enum_values(schema):
 def test_scan_openapi_budget_enums_match_public_contract_and_cli():
     expected = set(public_scan_contract()["budget_profiles"])
     openapi = api_module.app.openapi()
-    schemas = openapi["components"]["schemas"]
 
-    for model_name in ("ScanRequest", "BatchRequest"):
-        profile = schemas[model_name]["properties"]["budget_profile"]
+    for path in ("/scans", "/scans/batch"):
+        schema = openapi["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        profile = schema["properties"]["budget_profile"]
         assert _enum_values(profile) == expected
 
-    options_profile = schemas["ScanOptions"]["properties"]["budget_profile"]
-    assert _enum_values(options_profile) == expected
+    assert "ScanOptions" not in openapi["components"]["schemas"]
     assert "exhaustive" not in str(openapi)

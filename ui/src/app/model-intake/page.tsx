@@ -826,8 +826,8 @@ function ModelIntakeSettingsContent() {
     setSignaturePublicKeyUrl(payload.signature_public_key_url || '')
     setSignaturePublicKey(payload.signature_public_key || '')
     setSignatureValue(payload.signature_value || '')
-    setSignatureTrustedKeys(listFieldText(payload.signature_trusted_keys))
-    setSignatureTrustedKeySha256(listFieldText(payload.signature_trusted_key_sha256))
+    setSignatureTrustedKeys(listFieldText(payload.signature_trusted_keys ?? undefined))
+    setSignatureTrustedKeySha256(listFieldText(payload.signature_trusted_key_sha256 ?? undefined))
     setSignatureRsaPadding(payload.signature_rsa_padding || 'pss')
     setSignatureHash(payload.signature_hash || 'sha256')
     setSignaturePayload(payload.signature_payload || 'artifact')
@@ -856,14 +856,14 @@ function ModelIntakeSettingsContent() {
     setTimeoutSeconds(String(payload.timeout_seconds || 20))
     if (payload.policy_profile) setPolicyProfile(payload.policy_profile)
     setTrustMode(inferModelIntakeTrustMode({
-      expectedSha256: payload.expected_sha256,
-      signatureUrl: payload.signature_url,
-      signaturePublicKeyUrl: payload.signature_public_key_url,
-      signaturePublicKey: payload.signature_public_key,
-      signatureValue: payload.signature_value,
-      signatureTrustedKeys: listFieldText(payload.signature_trusted_keys),
-      signatureTrustedKeySha256: listFieldText(payload.signature_trusted_key_sha256),
-      metadata: payload.metadata_json,
+      expectedSha256: payload.expected_sha256 ?? undefined,
+      signatureUrl: payload.signature_url ?? undefined,
+      signaturePublicKeyUrl: payload.signature_public_key_url ?? undefined,
+      signaturePublicKey: payload.signature_public_key ?? undefined,
+      signatureValue: payload.signature_value ?? undefined,
+      signatureTrustedKeys: listFieldText(payload.signature_trusted_keys ?? undefined),
+      signatureTrustedKeySha256: listFieldText(payload.signature_trusted_key_sha256 ?? undefined),
+      metadata: payload.metadata_json ?? undefined,
     }))
   }
 

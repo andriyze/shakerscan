@@ -1003,7 +1003,7 @@ def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):
     assert captured["target"] == "https://example.test"
     assert captured["options"]["parallel"] is True
     assert captured["options"]["shard_strategy"] == "coverage"
-    assert captured["options"]["exploit_depth"] is False
+    assert "exploit_depth" not in captured["options"]
     assert result["executed"]["scan_id"] == "scan-1"
     assert result["executed"]["ui_link"] == "/scans/scan-1"
 
@@ -1036,7 +1036,7 @@ def test_ai_ops_router_executes_exact_dast_type_when_confirmed(monkeypatch):
     assert result["dry_run"] is False
     assert captured["budget_profile"] == "thorough"
     assert captured["policy"]["active_testing"] is False
-    assert captured["options"]["scan_type"] is None
+    assert "scan_type" not in captured["options"]
     assert result["executed"]["scan_id"] == "scan-deep"
 
 
@@ -1972,10 +1972,10 @@ def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatc
     ("asm_check_family", "xss"),
 ])
 def test_canonical_scan_request_rejects_every_legacy_authority_field(field, value):
-    with pytest.raises(ValidationError, match="rejects legacy option authority"):
+    with pytest.raises(ValidationError, match="extra_forbidden"):
         api_module.ScanRequest(
             target="https://example.test",
-            options=api_module.ScanOptions(**{field: value}),
+            options={field: value},
         )
 
 
@@ -1991,10 +1991,10 @@ def test_canonical_scan_request_accepts_only_credential_profile_references():
             target="https://api.example.test",
             authentication={"auth_header": "Bearer never-echo-this"},
         )
-    with pytest.raises(ValidationError, match="canonical Scan rejects inline authentication"):
+    with pytest.raises(ValidationError, match="extra_forbidden"):
         api_module.ScanRequest(
             target="https://api.example.test",
-            options=api_module.ScanOptions(auth_header="Bearer never-echo-this"),
+            options={"auth_header": "Bearer never-echo-this"},
         )
 
 
@@ -2005,10 +2005,10 @@ def test_legacy_scan_request_models_are_removed():
 
 
 def test_canonical_batch_rejects_inline_authentication():
-    with pytest.raises(ValidationError, match="canonical Scan batch rejects inline authentication"):
+    with pytest.raises(ValidationError, match="extra_forbidden"):
         api_module.BatchRequest(
             targets=["https://api.example.test"],
-            options=api_module.ScanOptions(auth_cookies="session=never-echo-this"),
+            options={"auth_cookies": "session=never-echo-this"},
         )
 
 
@@ -2581,10 +2581,10 @@ def test_broker_budget_deferral_exposes_waiting_phase():
 
 
 def test_canonical_batch_rejects_explicit_false_legacy_authority():
-    with pytest.raises(ValidationError, match="rejects legacy option authority"):
+    with pytest.raises(ValidationError, match="extra_forbidden"):
         api_module.BatchRequest(
             targets=["https://example.test"],
-            options=api_module.ScanOptions(active=False),
+            options={"active": False},
         )
 
 

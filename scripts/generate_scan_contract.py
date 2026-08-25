@@ -38,30 +38,7 @@ export type ScanCredentialAuthKind = {auth_kinds}
 export type ScanReplayPolicy = {replay_policies}
 export type ScanTargetKind = 'web' | 'api'
 
-export interface ScanStartRequest {{
-  target: string
-  name?: string
-  target_kind?: ScanTargetKind
-  budget_profile?: ScanBudgetProfile
-  policy?: {{
-    active_testing?: boolean
-    allow_state_changing_http?: boolean
-    subdomain_discovery?: boolean
-    network_discovery?: boolean
-    include_families?: string[]
-    exclude_families?: string[]
-    approval_receipt_id?: string
-  }}
-  request_collections?: Array<{{
-    id: string
-    replay_policy?: ScanReplayPolicy
-    [key: string]: unknown
-  }}>
-  credential_profile_ids?: string[]
-  advanced?: Record<string, number | boolean | string[] | undefined>
-  approval_receipt_id?: string
-  options?: Record<string, unknown>
-}}
+export type {{ SubmitScanScansPostRequest as ScanStartRequest }} from './publicApi.generated'
 
 export interface ScanPublicContract {{
   schema_version: 'scan-public-contract/v1'

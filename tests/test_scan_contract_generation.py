@@ -31,13 +31,14 @@ def test_generated_scan_types_match_the_server_contract():
     contract = public_scan_contract()
 
     assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
-    assert "export interface ScanStartRequest" in generated
+    assert "SubmitScanScansPostRequest as ScanStartRequest" in generated
     assert "export interface ScanPublicContract" in generated
     assert "legacy_capability" not in generated
     assert "exhaustive" not in generated
     assert "interface ScanV2Request" not in api_source
     assert "interface ScanPublicContract" not in api_source
     assert "from './scanContract.generated'" in api_source
+    assert "from './publicApi.generated'" in api_source
 
 
 def test_scan_cli_budget_values_match_the_public_contract():

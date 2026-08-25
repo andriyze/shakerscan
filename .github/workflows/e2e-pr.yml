@@ -37,6 +37,10 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}" \
             -- api scanner db tests/e2e docker-compose.yml Makefile \
+               scripts/generate_public_api_contract.py \
+               docs/generated/public-openapi-manifest.json \
+               ui/src/lib/publicApi.generated.ts \
+               tests/test_public_api_contract_generation.py \
                .github/workflows/e2e-pr.yml .github/workflows/e2e.yml; then
             echo "backend=false" >> "$GITHUB_OUTPUT"
           else
@@ -46,7 +50,10 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}" \
             -- ui api/api.py api/scan/contracts.py \
+               api/public_api_contract.py \
                scripts/generate_scan_contract.py scripts/generate_hunt_contract.py \
+               scripts/generate_public_api_contract.py \
+               docs/generated/public-openapi-manifest.json \
                .github/workflows/e2e-pr.yml .github/workflows/v2-contracts.yml; then
             echo "ui=false" >> "$GITHUB_OUTPUT"
           else

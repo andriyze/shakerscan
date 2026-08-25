@@ -4,6 +4,7 @@ import {
   type HuntBudgetProfile,
   type HuntTargetKind,
 } from './huntContract.generated'
+import type { StartHuntHuntsPostRequest } from './publicApi.generated'
 
 export type { HuntBudgetProfile, HuntTargetKind } from './huntContract.generated'
 
@@ -43,29 +44,30 @@ async function apiError(response: Response): Promise<string> {
 }
 
 export async function startHuntV2Native(request: HuntStartV2Request): Promise<HuntV2> {
+  const payload: StartHuntHuntsPostRequest = {
+    schema_version: HUNT_START_CONTRACT.schema_version,
+    target_id: request.targetId,
+    target_kind: request.targetKind,
+    goal: request.goal,
+    budget_profile: request.budgetProfile,
+    budgets: request.budgets || {},
+    policy: {
+      active_testing: request.policy.activeTesting,
+      allow_state_changing_http: request.policy.allowStateChangingHttp,
+      network_discovery: request.policy.networkDiscovery,
+      allow_oob_interactions: request.policy.allowOobInteractions,
+      authorization_confirmed: request.policy.authorizationConfirmed,
+      approval_receipt_id: request.policy.approvalReceiptId || undefined,
+      scope_receipt_id: request.policy.scopeReceiptId || undefined,
+    },
+    credential_refs: request.credentialRefs || {},
+    capabilities: request.capabilities || [],
+    request_collection_ids: request.requestCollectionIds || [],
+  }
   const response = await fetch(`${API_URL}/hunts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      schema_version: HUNT_START_CONTRACT.schema_version,
-      target_id: request.targetId,
-      target_kind: request.targetKind,
-      goal: request.goal,
-      budget_profile: request.budgetProfile,
-      budgets: request.budgets || {},
-      policy: {
-        active_testing: request.policy.activeTesting,
-        allow_state_changing_http: request.policy.allowStateChangingHttp,
-        network_discovery: request.policy.networkDiscovery,
-        allow_oob_interactions: request.policy.allowOobInteractions,
-        authorization_confirmed: request.policy.authorizationConfirmed,
-        approval_receipt_id: request.policy.approvalReceiptId || undefined,
-        scope_receipt_id: request.policy.scopeReceiptId || undefined,
-      },
-      credential_refs: request.credentialRefs || {},
-      capabilities: request.capabilities || [],
-      request_collection_ids: request.requestCollectionIds || [],
-    }),
+    body: JSON.stringify(payload),
   })
   if (!response.ok) throw new Error(await apiError(response))
   const contract = response.headers.get('x-shakerscan-hunt-contract')

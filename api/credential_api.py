@@ -61,13 +61,30 @@ def public_credential_validation_errors(errors: list[dict[str, Any]]) -> list[di
     ]
 
 
+CredentialAuthKind = Literal[
+    "authorization_header",
+    "bearer_token",
+    "api_key_header",
+    "cookie",
+    "basic_auth",
+    "form_login",
+    "oauth_client_credentials",
+    "oauth_password",
+    "custom_headers",
+    "query_parameter",
+    "ssh_password",
+    "ssh_private_key",
+    "ssh_private_key_with_passphrase",
+]
+
+
 class CredentialProfileCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_kind: Literal["web", "api", "network", "device"]
     target_id: uuid.UUID
     name: str = Field(min_length=1, max_length=120)
-    auth_kind: str
+    auth_kind: CredentialAuthKind
     principal_label: str | None = Field(default=None, max_length=120)
     principal_slot: Literal["primary", "secondary", "service", "ssh"] = "primary"
     secret: SecretStr | None = None

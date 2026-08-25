@@ -15,6 +15,7 @@ import {
   type DeviceTarget,
   type RequestCollectionDetail,
   type RequestCollectionInventoryItem,
+  type RequestCollectionImportFormat,
   type RequestCollectionReplayPolicy,
   type RequestCollectionTargetKind,
   type SharedRequestCollection,
@@ -91,7 +92,7 @@ export default function RequestCollectionsPage() {
   const [uploaderOpen, setUploaderOpen] = useState(false)
 
   const [uploadName, setUploadName] = useState('')
-  const [uploadFormat, setUploadFormat] = useState('auto')
+  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')
   const [documentText, setDocumentText] = useState('')
   const [environmentText, setEnvironmentText] = useState('')
   const [environmentName, setEnvironmentName] = useState('')
@@ -535,7 +536,7 @@ export default function RequestCollectionsPage() {
           )}
           <div className="grid gap-3 md:grid-cols-2">
             <Field label="Collection name"><Input value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder="Production API" /></Field>
-            <Field label="Format"><Select value={uploadFormat} onChange={(event) => setUploadFormat(event.target.value)}><option value="auto">Detect automatically</option><option value="postman">Postman</option><option value="har">HAR 1.2</option><option value="openapi">OpenAPI / Swagger</option></Select></Field>
+            <Field label="Format"><Select value={uploadFormat} onChange={(event) => setUploadFormat(event.target.value as RequestCollectionImportFormat)}><option value="auto">Detect automatically</option><option value="postman_collection">Postman</option><option value="har">HAR 1.2</option><option value="openapi">OpenAPI / Swagger</option></Select></Field>
           </div>
           <Field label="Collection JSON file">
             <input type="file" accept=".json,.har,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) { setDocumentText(value); setUploadErrors({}) } }).catch((cause) => setUploadErrors({ document: cause instanceof Error ? cause.message : 'Failed to read file', form: 'The collection file could not be read.' }))} className="block w-full text-sm text-gray-400" />

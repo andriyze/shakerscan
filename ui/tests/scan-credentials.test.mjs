@@ -8,13 +8,15 @@ const scan = fs.readFileSync(path.join(root, 'src/app/scan/new/page.tsx'), 'utf8
 const credentials = fs.readFileSync(path.join(root, 'src/app/credentials/page.tsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
 const scanContract = fs.readFileSync(path.join(root, 'src/lib/scanContract.generated.ts'), 'utf8')
+const publicApiContract = fs.readFileSync(path.join(root, 'src/lib/publicApi.generated.ts'), 'utf8')
 
 test('canonical Scan UI submits only opaque exact-target credential profile IDs', () => {
   assert.match(scan, /listCredentialProfiles/)
   assert.match(scan, /credential_profile_ids: selectedCredentialIds/)
   assert.match(scan, /Only opaque IDs enter the Scan request and queue/)
   assert.match(api, /ScanStartRequest/)
-  assert.match(scanContract, /credential_profile_ids\?: string\[\]/)
+  assert.match(scanContract, /SubmitScanScansPostRequest as ScanStartRequest/)
+  assert.match(publicApiContract, /credential_profile_ids\?: Array<string>/)
   assert.doesNotMatch(scan, /authHeader|authCookies|user2Header|user2Cookies/)
   assert.doesNotMatch(scan, /Bearer …|session=…/)
 })

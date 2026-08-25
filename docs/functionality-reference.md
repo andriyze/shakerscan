@@ -154,6 +154,11 @@ multi-dimensional hold before execution and reconciles consumed, released, or un
 afterward; unused profile capacity remains visibly unallocated.
 
 The server-generated `GET /scan/contracts` manifest is the public vocabulary for the UI and CLI.
+The complete REST shape is frozen in `docs/generated/public-openapi-manifest.json`: every OpenAPI
+operation ID, request/response schema digest, and component-schema digest is checked on API changes.
+`scripts/generate_public_api_contract.py` also generates the six release-critical UI client surfaces
+(Scan, Hunt, credentials, request collections, evidence, and Model Intake) from that same live
+OpenAPI document. `GET /hunts/contract` remains the runtime Hunt policy/budget discovery endpoint.
 The canonical action compiler currently implements `recon`, `nuclei`, `xss`, `sqli`, and `bola`.
 An unsupported registry family is rejected rather than accepted as a successful no-op. Explicit
 XSS, SQLi, or BOLA inclusion requires active permission; BOLA additionally requires two distinct
@@ -1419,8 +1424,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 395 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 332 | `api/**/*.py` |
+| Public REST operations | 397 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 334 | `api/**/*.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1428,7 +1433,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
 | Canonical scanner wrapper commands | 31 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
-| Make targets | 17 | `Makefile` |
+| Make targets | 18 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 353 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
@@ -1491,6 +1496,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/api/v1/findings` | `list_cli_v1_findings` |
 | `GET` | `/api/v1/scan` | `get_cli_v1_scan` |
 | `POST` | `/arsenal/approvals` | `arsenal_create_approval` |
+| `POST` | `/arsenal/approvals/{approval_receipt_id}/revoke` | `arsenal_revoke_approval` |
 | `GET` | `/arsenal/campaign-actions` | `arsenal_campaign_actions` |
 | `POST` | `/arsenal/campaign-actions/{campaign_action_id}/authz-promote` | `arsenal_promote_authz_replay` |
 | `POST` | `/arsenal/campaign-actions/{campaign_action_id}/authz-replay` | `arsenal_execute_authz_replay` |
@@ -1644,6 +1650,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/hunts` | `list_hunts` |
 | `POST` | `/hunts` | `start_hunt` |
 | `GET` | `/hunts/contract` | `get_hunt_contract` |
+| `GET` | `/hunts/lifecycle-metrics` | `get_hunt_lifecycle_metrics` |
 | `GET` | `/hunts/{hunt_id}` | `get_hunt` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
@@ -1754,8 +1761,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/retests/{retest_id}` | `get_retest` |
 | `GET` | `/scan/contracts` | `get_scan_public_contract` |
 | `GET` | `/scans` | `list_scans` |
-| `POST` | `/scans` | `submit_scan` |
-| `POST` | `/scans/batch` | `submit_batch` |
+| `POST` | `/scans` | `submit_scan_endpoint` |
+| `POST` | `/scans/batch` | `submit_batch_endpoint` |
 | `GET` | `/scans/{scan_id}` | `get_scan` |
 | `GET` | `/scans/{scan_id}/actions` | `get_scan_actions` |
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
@@ -2133,7 +2140,7 @@ opaque profile, and collection-reference fields.
 | Surface | Names |
 |---|---|
 | Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `collections`, `credentials`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory

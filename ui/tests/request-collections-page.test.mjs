@@ -19,7 +19,7 @@ test('shared collection UI supports upload, environment, binding, inventory, and
   assert.match(page, /upsertRequestCollectionSelection/)
   assert.match(page, /Redacted request inventory/)
   assert.match(page, /\.slice\(0, 240\)/)
-  for (const format of ['postman', 'har', 'openapi']) {
+  for (const format of ['postman_collection', 'har', 'openapi']) {
     assert.match(page, new RegExp(`<option value="${format}">`))
   }
   for (const policy of ['discovery_only', 'safe_reads', 'confirmed_active']) {

@@ -75,7 +75,7 @@ class RequestCollectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_id: str
     name: Optional[str] = Field(default=None, max_length=300)
-    format: str = Field(default="auto", max_length=40)
+    format: Literal["auto", "postman_collection", "har", "openapi"] = "auto"
     document: Any
     environment: Any = None
     environment_name: Optional[str] = Field(default=None, max_length=160)

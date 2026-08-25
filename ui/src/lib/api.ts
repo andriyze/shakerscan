@@ -8,6 +8,15 @@ import type {
   ScanPublicContract,
   ScanStartRequest,
 } from './scanContract.generated'
+import type {
+  CredentialProfileCreate as GeneratedCredentialProfileCreate,
+  CredentialProfileRotate as GeneratedCredentialProfileRotate,
+  ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
+  RequestCollectionBindingUpsert as GeneratedRequestCollectionBindingUpsert,
+  RequestCollectionCreate as GeneratedRequestCollectionCreate,
+  RequestCollectionEnvironmentCreate as GeneratedRequestCollectionEnvironmentCreate,
+  RequestCollectionSelectionUpsert as GeneratedRequestCollectionSelectionUpsert,
+} from './publicApi.generated'
 
 export type {
   ScanBudgetProfile,
@@ -1553,64 +1562,7 @@ export interface DeviceCapabilitiesResponse {
   summary: Record<string, number>
 }
 
-export interface ModelIntakeScanRequest {
-  artifact_url: string
-  name?: string
-  intake_mode?: 'admission' | 'preflight'
-  metadata_url?: string
-  metadata_json?: Record<string, unknown>
-  expected_sha256?: string
-  signature_url?: string
-  signature_public_key?: string
-  signature_public_key_url?: string
-  signature_value?: string
-  signature_rsa_padding?: string
-  signature_hash?: string
-  signature_payload?: string
-  signature_trusted_keys?: string | string[]
-  signature_trusted_key_sha256?: string | string[]
-  attestation_bundle_json?: Record<string, unknown>
-  attestation_trusted_keys?: string | string[]
-  attestation_trusted_key_sha256?: string | string[]
-  allowed_attestation_predicate_types?: string[]
-  required_attestation_builder_ids?: string[]
-  require_attestation_verification?: boolean
-  require_transparency_log?: boolean
-  trust_anchor_ids?: string[]
-  model_card_url?: string
-  deployment_approved?: boolean
-  require_deployment_approval?: boolean
-  require_signature?: boolean
-  require_signature_verification?: boolean
-  require_cryptographic_signature_verification?: boolean
-  require_hash?: boolean
-  require_model_governance?: boolean
-  policy_profile?: string
-  max_download_bytes?: number
-  complete_artifact_download?: boolean
-  max_artifact_bytes?: number
-  complete_repository_snapshot?: boolean
-  max_repository_bytes?: number
-  max_repository_files?: number
-  run_generated_scanners?: boolean
-  generated_scanner_names?: string[]
-  run_dynamic_sandbox?: boolean
-  require_dynamic_sandbox?: boolean
-  sandbox_timeout_seconds?: number
-  evaluation_spec_json?: Record<string, unknown>
-  run_generated_evaluation?: boolean
-  require_generated_evaluation?: boolean
-  require_signed_admission?: boolean
-  admission_expires_days?: number
-  admission_reassessment_days?: number
-  allow_insecure_http?: boolean
-  allow_private_networks?: boolean
-  allowed_acquisition_hosts?: string[]
-  allowed_acquisition_ports?: number[]
-  max_acquisition_redirects?: number
-  timeout_seconds?: number
-  approval_receipt_id?: string
-}
+export type ModelIntakeScanRequest = GeneratedModelIntakeScanRequest
 
 export interface ModelIntakeScannerAdapterReadiness {
   name: string
@@ -5766,11 +5718,14 @@ export async function createTarget(url: string, name?: string) {
   return res.json()
 }
 
-export async function scanTarget(targetId: string, options: Record<string, unknown> = {}) {
+export async function scanTarget(
+  targetId: string,
+  request: Omit<ScanStartRequest, 'target' | 'name' | 'target_kind' | 'request_collections' | 'credential_profile_ids'> = {},
+) {
   const res = await fetch(`${API_URL}/targets/${targetId}/scan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(options)
+    body: JSON.stringify(request)
   })
   if (!res.ok) throw new Error('Failed to start scan')
   return res.json()
@@ -7663,22 +7618,9 @@ export async function endInteractiveSession(sessionId: string): Promise<{ status
   return res.json()
 }
 
-export type CredentialTargetKind = 'web' | 'api' | 'network' | 'device'
-export type CredentialPrincipalSlot = 'primary' | 'secondary' | 'service' | 'ssh'
-export type CredentialAuthKind =
-  | 'authorization_header'
-  | 'bearer_token'
-  | 'api_key_header'
-  | 'cookie'
-  | 'basic_auth'
-  | 'form_login'
-  | 'oauth_client_credentials'
-  | 'oauth_password'
-  | 'custom_headers'
-  | 'query_parameter'
-  | 'ssh_password'
-  | 'ssh_private_key'
-  | 'ssh_private_key_with_passphrase'
+export type CredentialTargetKind = GeneratedCredentialProfileCreate['target_kind']
+export type CredentialPrincipalSlot = NonNullable<GeneratedCredentialProfileCreate['principal_slot']>
+export type CredentialAuthKind = GeneratedCredentialProfileCreate['auth_kind']
 
 export interface CredentialProfile {
   id: string
@@ -7719,30 +7661,12 @@ export interface CredentialProfile {
   encryption_available: boolean
 }
 
-export interface CredentialSecretPayload {
-  secret?: string
-  username?: string
-  secondary_secret?: string
-  header_name?: string
-  endpoint_url?: string
-  client_id?: string
-  scopes?: string[]
-  custom_headers?: Record<string, string>
-  parameter_name?: string
-  expires_at?: string
-  clear_expiry?: boolean
-}
+export type CredentialSecretPayload = Omit<
+  GeneratedCredentialProfileRotate,
+  'expected_record_version' | 'created_by'
+>
 
-export interface CredentialProfileCreatePayload extends CredentialSecretPayload {
-  target_kind: CredentialTargetKind
-  target_id: string
-  name: string
-  auth_kind: CredentialAuthKind
-  principal_label?: string
-  principal_slot: CredentialPrincipalSlot
-  allowed_capabilities?: string[]
-  created_by?: string
-}
+export type CredentialProfileCreatePayload = GeneratedCredentialProfileCreate
 
 export async function listCredentialProfiles(params: {
   target_kind: CredentialTargetKind
@@ -7796,6 +7720,7 @@ export async function deactivateCredentialProfile(
 
 export type RequestCollectionTargetKind = 'web' | 'api' | 'device'
 export type RequestCollectionReplayPolicy = 'discovery_only' | 'safe_reads' | 'confirmed_active'
+export type RequestCollectionImportFormat = NonNullable<GeneratedRequestCollectionCreate['format']>
 
 export interface SharedRequestCollection {
   id: string
@@ -7930,13 +7855,8 @@ export async function listRequestCollectionInventory(
 
 export async function createRequestCollection(payload: {
   target_id: string
-  name?: string
-  format?: string
   document: unknown
-  environment?: unknown
-  environment_name?: string
-  base_url?: string
-}): Promise<SharedRequestCollection & {
+} & Omit<GeneratedRequestCollectionCreate, 'target_id' | 'document'>): Promise<SharedRequestCollection & {
   environment?: RequestCollectionEnvironment | null
   binding?: RequestCollectionBinding | null
 }> {
@@ -7951,7 +7871,7 @@ export async function createRequestCollection(payload: {
 
 export async function upsertRequestCollectionEnvironment(
   collectionId: string,
-  payload: { name: string; document: Record<string, unknown> },
+  payload: GeneratedRequestCollectionEnvironmentCreate,
 ): Promise<{ environment: RequestCollectionEnvironment }> {
   const res = await fetch(
     `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/environments`,
@@ -7967,12 +7887,7 @@ export async function upsertRequestCollectionEnvironment(
 
 export async function upsertRequestCollectionBinding(
   collectionId: string,
-  payload: {
-    target_kind: RequestCollectionTargetKind
-    target_id: string
-    allowed_origins: string[]
-    environment_id?: string
-  },
+  payload: GeneratedRequestCollectionBindingUpsert,
 ): Promise<{ binding: RequestCollectionBinding }> {
   const res = await fetch(
     `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/bindings`,
@@ -7988,18 +7903,7 @@ export async function upsertRequestCollectionBinding(
 
 export async function upsertRequestCollectionSelection(
   collectionId: string,
-  payload: {
-    name: string
-    binding_id: string
-    replay_policy: RequestCollectionReplayPolicy
-    request_ids?: string[]
-    folders?: string[]
-    methods?: string[]
-    path_regex?: string
-    tags?: string[]
-    safe_methods_only?: boolean
-    max_requests?: number
-  },
+  payload: GeneratedRequestCollectionSelectionUpsert,
 ): Promise<{
   selection: RequestCollectionSelection
   preview: {

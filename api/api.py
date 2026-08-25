@@ -38,7 +38,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional, Sequence, Union
+from typing import Annotated, Any, Literal, Mapping, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -4735,6 +4735,17 @@ except ModuleNotFoundError:
     from api.credential_api import router as credential_router
     from api.credential_api import public_credential_validation_errors
 
+try:
+    from public_api_contract import (
+        PublicV2BodyLimitMiddleware,
+        public_v2_surface,
+    )
+except ModuleNotFoundError:
+    from api.public_api_contract import (
+        PublicV2BodyLimitMiddleware,
+        public_v2_surface,
+    )
+
 app.include_router(credential_router)
 configure_scan_read_router(lambda: db_pool)
 app.include_router(scan_read_router)
@@ -4853,6 +4864,7 @@ app.add_middleware(
 
 
 app.add_middleware(LegacyHuntIsolationMiddleware)
+app.add_middleware(PublicV2BodyLimitMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -4862,11 +4874,7 @@ async def _request_validation_error_handler(
     # FastAPI's default 422 body includes rejected input. That is useful for ordinary
     # forms but unsafe for credential creation, where the rejected value may be a key,
     # token, password, or private key. Preserve the standard handler everywhere else.
-    if (
-        request.url.path.startswith("/credential-profiles")
-        or request.url.path.startswith("/scans")
-        or request.url.path == "/api/v1/scan"
-    ):
+    if public_v2_surface(request.url.path) is not None or request.url.path == "/api/v1/scan":
         return JSONResponse(
             status_code=422,
             content={"detail": public_credential_validation_errors(exc.errors())},
@@ -5153,6 +5161,56 @@ class ScanAdvancedLimits(BaseModel):
     force_single_worker: bool = False
 
 
+class ScanPublicPlacement(BaseModel):
+    """Typed placement constraints accepted by public Scan clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    region: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    egress_group: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    network: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    data_residency: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    node_id: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    node_scope: Optional[Literal["local", "remote"]] = None
+    requires: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ScanPublicCompatibilityOptions(BaseModel):
+    """Narrow, secret-free compatibility controls published for ``/scans``.
+
+    The worker's historical ``ScanOptions`` model remains available for stored
+    rows and internal migrations. It is deliberately not the public schema:
+    aliases, output-only fields, raw authentication, and removed Smart Scan
+    tuning knobs cannot become new V2 client authority.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    custom_endpoints: list[str] = Field(default_factory=list, max_length=2_000)
+    require_current_workers: bool = False
+    placement: Optional[ScanPublicPlacement] = None
+    parallel: Optional[bool] = None
+    shards: Optional[
+        Union[Annotated[int, Field(ge=2, le=20)], Literal["auto"]]
+    ] = None
+    shard_strategy: Optional[Literal["auto", "scope", "family", "coverage", "coverage_family"]] = None
+    auth_state_shards: bool = False
+
+    @model_validator(mode="after")
+    def validate_parallel_controls(self):
+        has_parallel_detail = bool(
+            self.shards is not None
+            or self.shard_strategy is not None
+            or self.auth_state_shards
+        )
+        if has_parallel_detail and self.parallel is not True:
+            raise ValueError(
+                "shards, shard_strategy, and auth_state_shards require parallel=true"
+            )
+        return self
+
+
 def _scan_authentication_value_present(value: Any) -> bool:
     """Return whether an auth field carries executable private material."""
     if isinstance(value, bool):
@@ -5183,30 +5241,40 @@ class _ScanRequestBase(BaseModel):
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
-    options: ScanOptions = Field(default_factory=ScanOptions)
+    options: ScanPublicCompatibilityOptions = Field(
+        default_factory=ScanPublicCompatibilityOptions,
+        description=(
+            "Deprecated secret-free compatibility controls. New permission and "
+            "budget authority belongs in policy, budget_profile, and advanced."
+        ),
+    )
 
 
 class ScanRequest(_ScanRequestBase):
     """Canonical secret-free Scan submission using only durable references."""
 
-    @model_validator(mode="after")
-    def reject_inline_authentication(self):
-        legacy_fields = _new_legacy_scan_fields(self.options)
-        if legacy_fields:
-            raise ValueError(
-                "canonical Scan rejects legacy option authority: "
-                + ", ".join(legacy_fields)
-                + "; use budget_profile, policy, and advanced family controls"
-            )
-        if any(
-            _scan_authentication_value_present(getattr(self.options, key, None))
-            for key in SCAN_AUTHENTICATION_KEYS
-        ):
-            raise ValueError(
-                "canonical Scan rejects inline authentication; create an encrypted "
-                "credential profile and pass credential_profile_ids"
-            )
-        return self
+
+class ScanInternalCompatibilityRequest(_ScanRequestBase):
+    """Server-authored Scan request for historical rows and bounded adapters.
+
+    This model is never attached to a public route or OpenAPI operation.
+    """
+
+    options: ScanOptions = Field(default_factory=ScanOptions)
+
+
+class TargetScanRequest(BaseModel):
+    """Canonical controls for starting a Scan from an existing target."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    policy: Optional[dict[str, Any]] = None
+    advanced: Optional[ScanAdvancedLimits] = None
+    approval_receipt_id: Optional[str] = None
+    options: ScanPublicCompatibilityOptions = Field(
+        default_factory=ScanPublicCompatibilityOptions,
+    )
 
 
 class DeviceTargetCreate(BaseModel):
@@ -5427,33 +5495,18 @@ class _BatchRequestBase(BaseModel):
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
-    options: ScanOptions = Field(default_factory=ScanOptions)
+    options: ScanPublicCompatibilityOptions = Field(
+        default_factory=ScanPublicCompatibilityOptions,
+    )
 
 
 class BatchRequest(_BatchRequestBase):
     """Canonical secret-free batch submission."""
 
-    @model_validator(mode="after")
-    def reject_inline_authentication(self):
-        legacy_fields = _new_legacy_scan_fields(self.options)
-        if legacy_fields:
-            raise ValueError(
-                "canonical Scan batch rejects legacy option authority: "
-                + ", ".join(legacy_fields)
-                + "; use budget_profile, policy, and advanced family controls"
-            )
-        if any(
-            _scan_authentication_value_present(getattr(self.options, key, None))
-            for key in SCAN_AUTHENTICATION_KEYS
-        ):
-            raise ValueError(
-                "canonical Scan batch rejects inline authentication; use "
-                "credential_profile_ids"
-            )
-        return self
-
 
 class ModelIntakeScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     artifact_url: str
     name: Optional[str] = None
     intake_mode: Literal["admission", "preflight"] = Field(
@@ -5594,6 +5647,8 @@ class ModelIntakeScanRequest(BaseModel):
 
 
 class ModelIntakeResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     platform: str = Field(default="auto", pattern="^(auto|huggingface|http|s3|gcs|azure|oci|mlflow)$")
     ref: str
     revision: Optional[str] = None
@@ -5621,6 +5676,8 @@ class ModelIntakeAutomaticReviewRequest(BaseModel):
 
 
 class ModelIntakeAdmissionVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     admission_package: dict[str, Any]
     expected_artifact_sha256: str = Field(pattern="^[0-9a-fA-F]{64}$")
     expected_repository_snapshot_sha256: Optional[str] = Field(default=None, pattern="^[0-9a-fA-F]{64}$")
@@ -5628,11 +5685,15 @@ class ModelIntakeAdmissionVerifyRequest(BaseModel):
 
 
 class ModelIntakeAdmissionRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     actor: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=3, max_length=2000)
 
 
 class ModelIntakeReassessmentEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     trigger_type: str
     requested_action: str = Field(default="reassess", pattern="^(reassess|revoke)$")
     actor: str = Field(min_length=1, max_length=200)
@@ -6458,6 +6519,8 @@ class ToolReceiptRequest(BaseModel):
 
 
 class EvidenceInstanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     finding_id: Optional[str] = None
     evidence_object_id: Optional[str] = None
     scan_id: Optional[str] = None
@@ -29952,7 +30015,59 @@ async def get_cli_v1_scan(
     return result
 
 
-@app.post("/scans")
+async def _parse_public_json_model(
+    request: Request,
+    model: type[BaseModel],
+    *,
+    product: str,
+) -> BaseModel:
+    """Decode one already body-bounded public request without echoing input."""
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_json",
+                "message": f"{product} request body must be valid JSON.",
+            },
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_request_shape",
+                "message": f"{product} request body must be an object.",
+            },
+        )
+    try:
+        return model.model_validate(payload)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+@app.post(
+    "/scans",
+    operation_id="submit_scan_scans_post",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": ScanRequest.model_json_schema(),
+                },
+            },
+        },
+    },
+)
+async def submit_scan_endpoint(request: Request):
+    parsed = await _parse_public_json_model(
+        request, ScanRequest, product="Scan",
+    )
+    return await submit_scan(parsed)
+
+
 async def submit_scan(request: ScanRequest):
     """Submit one canonical secret-free Scan job."""
     return await _submit_scan(request)
@@ -29976,6 +30091,11 @@ async def _submit_scan(
     request: _ScanRequestBase,
 ):
     """Canonical V2 admission; legacy identities and inline secrets are rejected."""
+    execution_options = (
+        request.options.model_copy(deep=True)
+        if isinstance(request.options, ScanOptions)
+        else ScanOptions(**request.options.model_dump(mode="python"))
+    )
     scheme_inferred = "://" not in (request.target or "")
     try:
         normalized_target, target_note = normalize_target_url(request.target)
@@ -29993,10 +30113,12 @@ async def _submit_scan(
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
 
-    approval_receipt_id = request.approval_receipt_id or request.options.approval_receipt_id
+    approval_receipt_id = (
+        request.approval_receipt_id or execution_options.approval_receipt_id
+    )
     try:
         scan_contract = resolve_scan_contract(
-            budget_profile=request.budget_profile or request.options.budget_profile,
+            budget_profile=request.budget_profile or execution_options.budget_profile,
             policy=request.policy,
             advanced=(
                 request.advanced.model_dump(exclude_none=True)
@@ -30007,13 +30129,13 @@ async def _submit_scan(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     public_scan_type = "scan"
-    request.options.approval_receipt_id = approval_receipt_id
-    request.options.budget_profile = scan_contract.budget_profile
-    request.options.subfinder = bool(scan_contract.policy.subdomain_discovery)
-    request.options.shard_concurrency = min(20, scan_contract.budget.max_workers)
+    execution_options.approval_receipt_id = approval_receipt_id
+    execution_options.budget_profile = scan_contract.budget_profile
+    execution_options.subfinder = bool(scan_contract.policy.subdomain_discovery)
+    execution_options.shard_concurrency = min(20, scan_contract.budget.max_workers)
 
     # Validate: public mode is incompatible with active testing.
-    if scan_contract.policy.active_testing and request.options.public:
+    if scan_contract.policy.active_testing and execution_options.public:
         raise HTTPException(
             status_code=400,
             detail={
@@ -30027,7 +30149,7 @@ async def _submit_scan(
     # known. Apply registry narrowing now, but defer credential preconditions
     # until the target-bound managed-profile refs have been attached below.
     options_payload = _build_canonical_scan_options_payload(
-        request.options,
+        execution_options,
         scan_contract,
         defer_family_preconditions=True,
     )
@@ -30054,7 +30176,7 @@ async def _submit_scan(
     # identified and current (opt-in, fail-closed).
     _freshness = _worker_freshness_snapshot()
     require_current_workers = bool(
-        getattr(request.options, "require_current_workers", False)
+        getattr(execution_options, "require_current_workers", False)
         and scan_contract.policy.active_testing
     )
     if require_current_workers and (
@@ -30246,7 +30368,7 @@ async def _submit_scan(
             options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)
         options_payload, _family = _apply_scan_check_family_policy(options_payload)
         parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
-            request.options,
+            execution_options,
             options_payload,
             scan_contract.policy.active_testing,
         )
@@ -30517,7 +30639,27 @@ async def _submit_scan(
     return response
 
 
-@app.post("/scans/batch")
+@app.post(
+    "/scans/batch",
+    operation_id="submit_batch_scans_batch_post",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": BatchRequest.model_json_schema(),
+                },
+            },
+        },
+    },
+)
+async def submit_batch_endpoint(request: Request):
+    parsed = await _parse_public_json_model(
+        request, BatchRequest, product="Scan batch",
+    )
+    return await submit_batch(parsed)
+
+
 async def submit_batch(request: BatchRequest):
     """Submit a bounded batch and report every accepted and rejected target."""
     return await _submit_batch(request)
@@ -34277,8 +34419,12 @@ async def delete_target(target_id: str):
 
 
 @app.post("/targets/{target_id}/scan")
-async def scan_target(target_id: str, options: ScanOptions = None):
+async def scan_target(
+    target_id: str,
+    request: Optional[TargetScanRequest] = None,
+):
     """Start a scan for a specific target."""
+    request = request or TargetScanRequest()
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow(
             "SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id)
@@ -34286,15 +34432,6 @@ async def scan_target(target_id: str, options: ScanOptions = None):
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
 
-    if options and _new_legacy_scan_fields(options):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "target Scan rejects legacy option authority: "
-                + ", ".join(_new_legacy_scan_fields(options))
-                + "; use budget_profile and policy controls"
-            ),
-        )
     # Historical target defaults remain readable, but old mode fields are never
     # allowed to authorize a new execution.
     stored_options = target['scan_options']
@@ -34304,11 +34441,17 @@ async def scan_target(target_id: str, options: ScanOptions = None):
         merged_options = stored_options or {}
     for key in LEGACY_SCAN_WRITE_FIELDS:
         merged_options.pop(key, None)
-    if options:
-        merged_options.update(options.dict(exclude_unset=True))
+    merged_options.update(request.options.model_dump(exclude_unset=True))
 
-    request = ScanRequest(target=target['url'], options=ScanOptions(**merged_options))
-    return await submit_scan(request)
+    scan_request = ScanInternalCompatibilityRequest(
+        target=target['url'],
+        budget_profile=request.budget_profile,
+        policy=dict(request.policy or {}),
+        advanced=request.advanced,
+        approval_receipt_id=request.approval_receipt_id,
+        options=ScanOptions(**merged_options),
+    )
+    return await _submit_scan(scan_request)
 
 
 # ============================================================
@@ -39874,16 +40017,32 @@ async def _parse_hunt_start_body(
 ) -> HuntStartV2Request:
     raw_body = await request.body()
     if len(raw_body) > MAX_HUNT_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Hunt request body is too large")
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "request_body_too_large",
+                "message": "Hunt request body exceeds the public API limit.",
+                "max_bytes": MAX_HUNT_BODY_BYTES,
+            },
+        )
     try:
         decoded = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=400,
-            detail="Hunt request body must be valid JSON",
+            detail={
+                "error": "invalid_json",
+                "message": "Hunt request body must be valid JSON.",
+            },
         ) from exc
     if not isinstance(decoded, Mapping):
-        raise HTTPException(status_code=422, detail="Hunt request body must be an object")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_request_shape",
+                "message": "Hunt request body must be an object.",
+            },
+        )
     if "policy" not in decoded:
         raise HTTPException(
             status_code=422,
@@ -39896,7 +40055,7 @@ async def _parse_hunt_start_body(
     try:
         return HuntStartV2Request.model_validate(decoded)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        raise RequestValidationError(exc.errors()) from exc
 
 
 @app.post(
@@ -50775,7 +50934,7 @@ async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_rece
         })
     for key in LEGACY_SCAN_WRITE_FIELDS:
         option_payload.pop(key, None)
-    body = ScanRequest(
+    body = ScanInternalCompatibilityRequest(
         target=target,
         name=p.get("name"),
         budget_profile="thorough",
@@ -50789,7 +50948,7 @@ async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_rece
         approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"),
         options=ScanOptions(**option_payload),
     )
-    return await submit_scan(body)
+    return await _submit_scan(body)
 
 
 async def _arsenal_dispatch_ai_gate_replay_probe(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
@@ -58973,7 +59132,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             custom_endpoints.append(f"{method} {path}")
 
     try:
-        queued = await submit_scan(ScanRequest(
+        queued = await _submit_scan(ScanInternalCompatibilityRequest(
             target=str(target["url"]),
             budget_profile="thorough",
             policy={
@@ -66637,6 +66796,11 @@ async def ai_ops_route(request: AIOpsRouterRequest):
         and method == "POST"
         and path == "/scans"
     ):
+        public_scan_options = {
+            key: value
+            for key, value in (body.get("options") or {}).items()
+            if key in ScanPublicCompatibilityOptions.model_fields
+        }
         result = await submit_scan(
             ScanRequest(
                 target=body["target"],
@@ -66647,7 +66811,7 @@ async def ai_ops_route(request: AIOpsRouterRequest):
                     if isinstance(body.get("advanced"), dict) else None
                 ),
                 approval_receipt_id=body.get("approval_receipt_id"),
-                options=ScanOptions(**(body.get("options") or {})),
+                options=ScanPublicCompatibilityOptions(**public_scan_options),
             )
         )
         executed = {
