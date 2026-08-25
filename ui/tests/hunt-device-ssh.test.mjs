@@ -6,6 +6,7 @@ import test from 'node:test'
 const root = path.resolve(import.meta.dirname, '..')
 const page = fs.readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+const huntClient = fs.readFileSync(path.join(root, 'src/lib/huntV2.ts'), 'utf8')
 
 test('unified Hunt binds generic principal profiles without treating SSH proposal as execution', () => {
   assert.match(page, /listCredentialProfiles/)
@@ -23,9 +24,10 @@ test('unified Hunt renders and explicitly confirms immutable SSH command plans',
   assert.match(page, /Confirm and queue these exact remote commands/)
   assert.match(page, /expected_host_key_fingerprint/)
   assert.match(page, /plan_digest/)
-  assert.match(api, /hunts\/\$\{encodeURIComponent\(huntId\)\}\/shell-plans/)
-  assert.match(api, /confirm_exact_commands: true/)
-  assert.match(api, /confirm_remote_device_effects: true/)
+  assert.match(huntClient, /hunts\/\$\{encodeURIComponent\(huntId\)\}\/shell-plans/)
+  assert.match(huntClient, /confirm_exact_commands: true/)
+  assert.match(huntClient, /confirm_remote_device_effects: true/)
+  assert.doesNotMatch(api, /export async function confirmHuntShellPlan/)
 })
 
 test('active unified Hunts refresh so external planner proposals appear', () => {
