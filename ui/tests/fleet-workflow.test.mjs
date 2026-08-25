@@ -18,6 +18,7 @@ test('fleet access failure does not render an empty fleet as authoritative state
 test('worker labels stay grammatical and completed shards show useful attribution', () => {
   assert.match(dashboard, /=== 1 \? 'worker' : 'workers'/)
   assert.match(newScan, /active_worker_count === 1 \? 'worker' : 'workers'/)
-  assert.match(scanDetail, /shard\.current_phase !== shard\.status/)
+  assert.match(scanDetail, /const phaseLabel = terminal/)
+  assert.match(scanDetail, /rawPhase \|\| \(shard\.executing_node_id/)
   assert.match(scanDetail, /`node \$\{String\(shard\.executing_node_id\)\.slice\(0, 8\)\}`/)
 })
