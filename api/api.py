@@ -815,6 +815,7 @@ try:
         select_hunt_principal_reference,
         validate_generic_credential_references,
     )
+    from runtime.auth_session_store import PostgresAuthSessionStore
     from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from runtime.credential_resolver import (
         CredentialResolutionError,
@@ -861,6 +862,7 @@ except ModuleNotFoundError:
         select_hunt_principal_reference,
         validate_generic_credential_references,
     )
+    from api.runtime.auth_session_store import PostgresAuthSessionStore
     from api.runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from api.runtime.credential_resolver import (
         CredentialResolutionError,
@@ -3821,6 +3823,7 @@ async def stale_scan_checker(pool: asyncpg.Pool):
             await cleanup_stale_parents(pool)
             await cleanup_stale_device_lifecycle(pool)
             await cleanup_orphaned_scan_queue_handoffs(pool)
+            await cleanup_expired_auth_sessions_once(pool)
         except asyncio.CancelledError:
             print("[cleanup] Stale scan checker stopped", flush=True)
             break
@@ -4564,6 +4567,18 @@ async def asm_dispatcher(pool: asyncpg.Pool):
 # Database connection pool
 db_pool: Optional[asyncpg.Pool] = None
 _generic_credential_store = PostgresCredentialProfileStore()
+_auth_session_store = PostgresAuthSessionStore()
+
+
+async def cleanup_expired_auth_sessions_once(
+    pool: asyncpg.Pool,
+    *,
+    limit: int = 500,
+) -> int:
+    """Destroy a bounded batch of expired worker-only session ciphertext."""
+
+    async with pool.acquire() as conn:
+        return await _auth_session_store.expire_stale(conn, limit=limit)
 
 
 async def cleanup_expired_scan_artifacts_once(

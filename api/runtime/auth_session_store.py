@@ -479,7 +479,13 @@ class PostgresAuthSessionStore:
         owner_kind: str,
         owner_id: Any,
         target: TargetBinding,
+        now: datetime | None = None,
     ) -> AuthSessionMetadata:
+        current = (
+            _utc(now, name="operation time")
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
         row = await self._load_row(
             conn,
             session_ref=session_ref,
@@ -487,10 +493,11 @@ class PostgresAuthSessionStore:
             owner_id=owner_id,
             target=target,
             for_update=False,
+            now=current,
         )
         metadata = AuthSessionMetadata.from_row(row)
-        if metadata.status != "active":
-            raise AuthSessionStoreError("authentication session is revoked")
+        if metadata.status != "active" or metadata.expires_at <= current:
+            raise AuthSessionStoreError("authentication session is expired or revoked")
         return metadata
 
     async def refresh(
@@ -508,7 +515,13 @@ class PostgresAuthSessionStore:
         refresh_after: datetime,
         evidence_receipt_digest: str,
         source_action_id: Any,
+        now: datetime | None = None,
     ) -> AuthSessionMetadata:
+        operation_time = (
+            _utc(now, name="operation time")
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
         row = await self._load_row(
             conn,
             session_ref=session_ref,
@@ -516,10 +529,13 @@ class PostgresAuthSessionStore:
             owner_id=owner_id,
             target=target,
             for_update=True,
+            now=operation_time,
         )
         current = AuthSessionMetadata.from_row(row)
-        if current.status != "active" or current.profile_version != int(
-            expected_profile_version
+        if (
+            current.status != "active"
+            or current.expires_at <= operation_time
+            or current.profile_version != int(expected_profile_version)
         ):
             raise AuthSessionStoreError("authentication session cannot be refreshed")
         encrypted = encrypt_secret(json.dumps(
@@ -587,6 +603,42 @@ class PostgresAuthSessionStore:
         if not updated:
             raise AuthSessionStoreError("authentication session changed before revocation")
         return AuthSessionMetadata.from_row(updated)
+
+    async def expire_stale(
+        self,
+        conn: Any,
+        *,
+        now: datetime | None = None,
+        limit: int = 500,
+    ) -> int:
+        """Destroy ciphertext for a bounded batch of expired active sessions."""
+
+        timestamp = (
+            _utc(now, name="operation time")
+            if now is not None
+            else datetime.now(timezone.utc)
+        )
+        bounded_limit = max(1, min(int(limit), 5_000))
+        destroyed = encrypt_secret("{}")
+        rows = await conn.fetch(
+            """WITH claimed AS (
+                   SELECT id FROM auth_sessions
+                   WHERE status='active' AND expires_at <= $1
+                   ORDER BY expires_at, id
+                   LIMIT $3
+                   FOR UPDATE SKIP LOCKED
+               )
+               UPDATE auth_sessions AS session
+               SET status='expired', encrypted_headers=$2, revoked_at=$1,
+                   revocation_reason='expired_cleanup', updated_at=$1
+               FROM claimed
+               WHERE session.id=claimed.id
+               RETURNING session.id""",
+            timestamp,
+            destroyed,
+            bounded_limit,
+        )
+        return len(rows)
 
     async def bind_evidence_receipt(
         self,

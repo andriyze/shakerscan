@@ -40,6 +40,7 @@ class SessionConn:
     def __init__(self):
         self.row = None
         self.executed = []
+        self.fetched = []
 
     async def execute(self, query, *args):
         self.executed.append((query, args))
@@ -106,7 +107,7 @@ class SessionConn:
                 **self.row,
                 "live_profile_version": self.row["profile_version"],
                 "live_profile_active": True,
-                "live_profile_expires_at": NOW + timedelta(days=1),
+                "live_profile_expires_at": NOW + timedelta(days=365),
                 "live_allowed_capabilities": [
                     "auth.session.establish", "auth.session.refresh",
                     "auth.session.revoke", "authz.verify", "http.request",
@@ -123,6 +124,46 @@ class SessionConn:
                 "revocation_reason": reason,
             })
             return dict(self.row)
+        if normalized.startswith("UPDATE auth_sessions SET encrypted_headers"):
+            (
+                encrypted, established_at, expires_at, refresh_after,
+                evidence_digest, source_action_id, session_id,
+            ) = args
+            if not self.row or self.row["id"] != session_id:
+                return None
+            self.row.update({
+                "encrypted_headers": encrypted,
+                "established_at": established_at,
+                "expires_at": expires_at,
+                "refresh_after": refresh_after,
+                "last_refreshed_at": established_at,
+                "refresh_count": self.row["refresh_count"] + 1,
+                "evidence_receipt_digest": evidence_digest,
+                "evidence_receipt_id": None,
+                "source_action_id": source_action_id,
+            })
+            return dict(self.row)
+        raise AssertionError(normalized)
+
+    async def fetch(self, query, *args):
+        self.fetched.append((query, args))
+        normalized = " ".join(query.split())
+        if normalized.startswith("WITH claimed AS"):
+            timestamp, destroyed, limit = args
+            if (
+                self.row
+                and self.row["status"] == "active"
+                and self.row["expires_at"] <= timestamp
+                and limit > 0
+            ):
+                self.row.update({
+                    "status": "expired",
+                    "encrypted_headers": destroyed,
+                    "revoked_at": timestamp,
+                    "revocation_reason": "expired_cleanup",
+                })
+                return [{"id": self.row["id"]}]
+            return []
         raise AssertionError(normalized)
 
 
@@ -210,6 +251,15 @@ def test_expiry_rotation_and_live_capability_changes_fail_closed(monkeypatch):
             capability="http.request",
             now=NOW + timedelta(hours=2),
         ))
+    with pytest.raises(sessions.AuthSessionStoreError, match="expired"):
+        asyncio.run(store.load_for_refresh(
+            conn,
+            session_ref=SESSION_ID,
+            owner_kind="hunt",
+            owner_id=OWNER_ID,
+            target=target(),
+            now=NOW + timedelta(hours=2),
+        ))
 
     original = conn.fetchrow
 
@@ -227,6 +277,7 @@ def test_expiry_rotation_and_live_capability_changes_fail_closed(monkeypatch):
             owner_kind="hunt",
             owner_id=OWNER_ID,
             target=target(),
+            now=NOW + timedelta(minutes=1),
         ))
 
     conn.fetchrow = original
@@ -284,3 +335,49 @@ def test_revocation_destroys_ciphertext_and_binds_evidence(monkeypatch):
         evidence_receipt_digest=EVIDENCE_DIGEST,
     ))
     assert conn.row["evidence_receipt_id"] == RECEIPT_ID
+
+
+def test_refresh_replaces_ciphertext_and_advances_bounded_lifecycle(monkeypatch):
+    install_fake_crypto(monkeypatch)
+    conn = SessionConn()
+    asyncio.run(created(conn))
+    refreshed_at = NOW + timedelta(minutes=30)
+    refreshed = asyncio.run(sessions.PostgresAuthSessionStore().refresh(
+        conn,
+        session_ref=SESSION_ID,
+        owner_kind="hunt",
+        owner_id=OWNER_ID,
+        target=target(),
+        expected_profile_version=3,
+        headers={"Authorization": "Bearer refreshed-session-canary"},
+        established_at=refreshed_at,
+        expires_at=refreshed_at + timedelta(hours=1),
+        refresh_after=refreshed_at + timedelta(minutes=50),
+        evidence_receipt_digest="b" * 64,
+        source_action_id=uuid.uuid4(),
+        now=refreshed_at,
+    ))
+
+    assert refreshed.status == "active"
+    assert refreshed.refresh_count == 1
+    assert refreshed.last_refreshed_at == refreshed_at
+    assert "refreshed-session-canary" not in json.dumps(refreshed.public_dict())
+    assert "refreshed-session-canary" in conn.row["encrypted_headers"]
+
+
+def test_expiry_cleanup_is_bounded_lock_safe_and_destroys_ciphertext(monkeypatch):
+    install_fake_crypto(monkeypatch)
+    conn = SessionConn()
+    asyncio.run(created(conn))
+    expired_at = NOW + timedelta(hours=2)
+    count = asyncio.run(sessions.PostgresAuthSessionStore().expire_stale(
+        conn, now=expired_at, limit=50_000,
+    ))
+
+    assert count == 1
+    assert conn.row["status"] == "expired"
+    assert conn.row["encrypted_headers"] == "enc:fernet:{}"
+    assert conn.row["revocation_reason"] == "expired_cleanup"
+    cleanup_query, cleanup_args = conn.fetched[-1]
+    assert "FOR UPDATE SKIP LOCKED" in cleanup_query
+    assert cleanup_args[2] == 5_000

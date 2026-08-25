@@ -204,7 +204,7 @@ def test_oauth_session_records_bounded_lifecycle_and_evidence_receipt():
     assert len(public["evidence_receipt_digest"]) == 64
 
 
-def test_oauth_password_requires_explicit_profile_authorization():
+def test_resource_owner_exchange_requires_explicit_profile_authorization():
     try:
         asyncio.run(establish_target_bound_http_session(
             TargetBoundSessionCredential(

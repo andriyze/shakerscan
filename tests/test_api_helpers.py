@@ -596,6 +596,33 @@ def test_stale_scan_stage_checkpoint_preserves_failure_truth(monkeypatch, tmp_pa
     assert persisted["scan_metadata"]["terminated_at_phase"] == "discover_surface"
 
 
+def test_expired_auth_session_cleanup_uses_bounded_store_operation(monkeypatch):
+    conn = object()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    class _Store:
+        async def expire_stale(self, actual_conn, *, limit):
+            assert actual_conn is conn
+            assert limit == 321
+            return 7
+
+    monkeypatch.setattr(api_module, "_auth_session_store", _Store())
+
+    assert asyncio.run(api_module.cleanup_expired_auth_sessions_once(
+        _Pool(), limit=321,
+    )) == 7
+
+
 class _BodyRequest:
     def __init__(self, payload: bytes):
         self._payload = payload

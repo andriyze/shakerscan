@@ -91,7 +91,29 @@
       "label": "Credentials",
       "controls": [
         {"id":"live_lifecycle","label":"Real-stack encrypted lifecycle","e2e":{"area":"platform","row":"P-9 encrypted credential create and rotation stay metadata-only"}},
-        {"id":"contract","label":"Metadata-only CRUD and rotation","pytest_selector":"tests/test_credential_api.py::test_metadata_only_crud_and_rotation_never_return_secret_material"}
+        {"id":"contract","label":"Metadata-only CRUD and rotation","pytest_selector":"tests/test_credential_api.py::test_metadata_only_crud_and_rotation_never_return_secret_material"},
+        {"id":"immediate_kinds","label":"Immediate header, token, cookie, and basic-auth envelopes","pytest_selector":"tests/test_runtime_credentials.py::test_credential_envelopes_round_trip_all_supported_kinds"},
+        {"id":"custom_headers","label":"Custom headers and form-login fields survive worker binding","pytest_selector":"tests/test_scan_credentials.py::test_scan_worker_binding_preserves_custom_headers_and_form_login"},
+        {"id":"form_login","label":"Form login returns only worker-private session headers","pytest_selector":"tests/test_auth_session_capability.py::test_target_bound_form_login_returns_only_worker_private_session_headers"},
+        {"id":"oauth_client","label":"OAuth client credentials exchange remains metadata-only","pytest_selector":"tests/test_auth_session_capability.py::test_target_bound_oauth_exchange_extracts_token_without_public_exposure"},
+        {"id":"resource_owner_exchange","label":"Resource-owner token exchange requires explicit profile authority","pytest_selector":"tests/test_auth_session_capability.py::test_resource_owner_exchange_requires_explicit_profile_authorization"},
+        {"id":"session_expiry","label":"Expired, rotated, and narrowed sessions fail closed","pytest_selector":"tests/test_auth_session_store.py::test_expiry_rotation_and_live_capability_changes_fail_closed"},
+        {"id":"session_refresh","label":"Session refresh replaces ciphertext and advances lifecycle","pytest_selector":"tests/test_auth_session_store.py::test_refresh_replaces_ciphertext_and_advances_bounded_lifecycle"},
+        {"id":"session_revoke","label":"Session revocation destroys ciphertext and binds evidence","pytest_selector":"tests/test_auth_session_store.py::test_revocation_destroys_ciphertext_and_binds_evidence"},
+        {"id":"session_cleanup","label":"Expired session cleanup is bounded and lock-safe","pytest_selector":"tests/test_auth_session_store.py::test_expiry_cleanup_is_bounded_lock_safe_and_destroys_ciphertext"},
+        {"id":"session_cleanup_runtime","label":"Running cleanup controller invokes the session store","pytest_selector":"tests/test_api_helpers.py::test_expired_auth_session_cleanup_uses_bounded_store_operation"},
+        {"id":"primary_secondary","label":"Primary and secondary identities remain isolated","pytest_selector":"tests/test_scan_credentials.py::test_scan_worker_binding_projects_primary_and_secondary_headers"},
+        {"id":"local_replay","label":"Local worker authority, replay, and receipt form one chain","pytest_selector":"tests/test_managed_credential_replay.py::test_worker_authority_resolution_binding_execution_and_receipt_are_one_chain"},
+        {"id":"broker_replay","label":"Broker private input is lease-bound and ciphertext-only","pytest_selector":"tests/test_broker_sealed_inputs.py::test_private_input_round_trip_is_lease_bound_and_ciphertext_only"},
+        {"id":"broker_isolation","label":"Broker workers need no public data-store credentials","pytest_selector":"tests/test_broker_worker.py::test_broker_state_requires_owner_only_https_but_not_data_store_credentials"},
+        {"id":"parallel_principals","label":"Parallel plans explicitly isolate principals","pytest_selector":"tests/test_parallel_action_compiler.py::test_typed_parent_plan_is_stable_and_explicitly_isolates_principals"},
+        {"id":"hunt_principals","label":"Hunt selection is exact, content-free, and capability-bound","pytest_selector":"tests/test_credential_refs.py::test_hunt_principal_selection_is_exact_content_free_and_capability_bound"},
+        {"id":"exact_replay","label":"Pinned replay preserves exact headers and body","pytest_selector":"tests/test_v2_worker_replay.py::test_pinned_transport_preserves_exact_headers_and_body_without_dns"},
+        {"id":"wrong_target_capability","label":"Wrong target or capability fails before decryption","pytest_selector":"tests/test_credential_store.py::test_worker_lookup_requires_exact_target_and_capability_binding"},
+        {"id":"scope_mismatch","label":"Wrong scope fails before profile lookup","pytest_selector":"tests/test_credential_resolver.py::test_scope_mismatch_fails_before_profile_lookup"},
+        {"id":"expired_profile","label":"Wrong role, target, status, or expiry fails closed","pytest_selector":"tests/test_credential_refs.py::test_role_target_status_and_expiry_are_fail_closed"},
+        {"id":"approval_revoked","label":"Approval revoked after queueing fails at worker resolution","pytest_selector":"tests/test_credential_resolver.py::test_worker_approval_revalidation_fails_closed"},
+        {"id":"secret_canary","label":"Secret canaries never enter public session metadata","pytest_selector":"tests/test_auth_session_store.py::test_session_is_encrypted_opaque_worker_only_and_clearable"}
       ]
     },
     "collections": {
