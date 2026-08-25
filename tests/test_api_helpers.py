@@ -276,6 +276,93 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 
+class _ApprovalPoolContext:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _ApprovalPool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _ApprovalPoolContext(self.conn)
+
+
+def test_arsenal_approval_revocation_is_irreversible_and_public(monkeypatch):
+    approval_id = uuid.uuid4()
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "UPDATE approval_receipts" in query
+            assert args == (approval_id, "release-e2e", "authority no longer valid")
+            return {
+                "id": approval_id,
+                "scope_receipt_id": "scope-1",
+                "risk_tier": "active",
+                "confirmations": ["confirm_authorized"],
+                "action_context": {},
+                "approved_by": "operator",
+                "denial_reason": None,
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+                "status": "revoked",
+                "revoked_by": args[1],
+                "revocation_reason": args[2],
+            }
+
+    monkeypatch.setattr(api_module, "db_pool", _ApprovalPool(Conn()))
+    result = asyncio.run(api_module.arsenal_revoke_approval(
+        str(approval_id),
+        api_module.ApprovalReceiptRevocationRequest(
+            revoked_by="release-e2e",
+            reason="authority no longer valid",
+        ),
+    ))
+
+    assert result["revoked"] is True
+    assert result["execution_enabled"] is False
+    assert result["approval_receipt"]["status"] == "revoked"
+
+
+def test_revoked_approval_fails_closed_before_scope_or_action_validation():
+    approval_id = uuid.uuid4()
+
+    class Conn:
+        async def fetchrow(self, query, *_args):
+            assert "FROM approval_receipts" in query
+            return {
+                "id": approval_id,
+                "scope_receipt_id": "scope-1",
+                "risk_tier": "active",
+                "confirmations": ["confirm_authorized"],
+                "action_context": {},
+                "approved_by": "operator",
+                "denial_reason": None,
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+                "status": "revoked",
+            }
+
+    with pytest.raises(api_module.HTTPException, match="revoked") as exc:
+        asyncio.run(api_module._validate_approval_receipt_for_action(
+            Conn(),
+            str(approval_id),
+            target_url="https://example.test",
+            target_id=uuid.uuid4(),
+            action_name="hunt.capability:xss.verify",
+            risk_tier="active",
+            always_require_receipt=True,
+            record_blocked=False,
+        ))
+
+    assert exc.value.status_code == 400
+
+
 def test_scan_detail_exposes_verified_content_free_stage_prefix(monkeypatch):
     scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
     checkpoint = {

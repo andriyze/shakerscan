@@ -6103,6 +6103,13 @@ class ApprovalReceiptRequest(BaseModel):
     expires_at: Optional[datetime] = None
 
 
+class ApprovalReceiptRevocationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revoked_by: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
 class OperationPlanAction(BaseModel):
     command: str
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -34338,6 +34345,7 @@ def _public_approval_receipt_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     payload["confirmations"] = _decode_json_value(payload.get("confirmations")) or []
     payload["action_context"] = _decode_json_value(payload.get("action_context")) or {}
+    payload["status"] = str(payload.get("status") or "active")
     return payload
 
 
@@ -47716,6 +47724,12 @@ async def _validate_approval_receipt_for_action(
         await _deny("approval_receipt_not_found", "Approval receipt not found", http_status=404)
     approval_ref = str(approval_uuid)
     approval = _public_approval_receipt_row(approval_row)
+    if approval.get("status") == "revoked":
+        await _deny(
+            "approval_receipt_revoked",
+            "Approval receipt is revoked",
+            approval_ref=approval_ref,
+        )
     if not approval.get("approved_by") or approval.get("denial_reason"):
         await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
     approved_risk = str(approval.get("risk_tier") or "active")
@@ -47957,6 +47971,49 @@ async def arsenal_create_approval(req: ApprovalReceiptRequest):
     return {
         "approval_receipt": _public_approval_receipt_row(row),
         "scope_receipt": scope,
+        "execution_enabled": False,
+    }
+
+
+@app.post("/arsenal/approvals/{approval_receipt_id}/revoke")
+async def arsenal_revoke_approval(
+    approval_receipt_id: str,
+    req: ApprovalReceiptRevocationRequest,
+):
+    """Irreversibly revoke reusable target-bound authority without executing work."""
+    approval_uuid = _uuid_or_400(approval_receipt_id, "approval receipt id")
+    revoked_by = req.revoked_by.strip()
+    reason = req.reason.strip()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE approval_receipts
+            SET status='revoked', revoked_at=NOW(), revoked_by=$2,
+                revocation_reason=$3
+            WHERE id=$1 AND status='active' AND approved_by IS NOT NULL
+            RETURNING *
+            """,
+            approval_uuid,
+            revoked_by,
+            reason,
+        )
+        if row is None:
+            row = await conn.fetchrow(
+                "SELECT * FROM approval_receipts WHERE id=$1",
+                approval_uuid,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Approval receipt not found")
+            public = _public_approval_receipt_row(row)
+            if public.get("status") != "revoked":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only active approval receipts can be revoked",
+                )
+        public = _public_approval_receipt_row(row)
+    return {
+        "approval_receipt": public,
+        "revoked": True,
         "execution_enabled": False,
     }
 

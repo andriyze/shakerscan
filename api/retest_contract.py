@@ -1711,17 +1711,27 @@ async def run_schema_migrations(pool) -> None:
                     approved_by TEXT,
                     denial_reason TEXT,
                     expires_at TIMESTAMPTZ,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    revoked_at TIMESTAMPTZ,
+                    revoked_by TEXT,
+                    revocation_reason TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT approval_receipts_risk_check
                         CHECK (risk_tier IN ('active','intrusive','credential','dangerous')),
                     CONSTRAINT approval_receipts_approved_or_denied_check
-                        CHECK (approved_by IS NOT NULL OR denial_reason IS NOT NULL)
+                        CHECK (approved_by IS NOT NULL OR denial_reason IS NOT NULL),
+                    CONSTRAINT approval_receipts_status_check
+                        CHECK (status IN ('active','revoked'))
                 )
             """)
             await conn.execute("""
                 ALTER TABLE approval_receipts
                 ADD COLUMN IF NOT EXISTS action_name TEXT,
-                ADD COLUMN IF NOT EXISTS action_context JSONB NOT NULL DEFAULT '{}'::jsonb
+                ADD COLUMN IF NOT EXISTS action_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+                ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS revoked_by TEXT,
+                ADD COLUMN IF NOT EXISTS revocation_reason TEXT
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_approval_receipts_scope
