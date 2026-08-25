@@ -4871,14 +4871,12 @@ app.add_middleware(LegacyHuntIsolationMiddleware)
 app.add_middleware(PublicV2IdempotencyMiddleware)
 app.add_middleware(PublicV2BodyLimitMiddleware)
 
-_fastapi_openapi = app.openapi
+_fastapi_openapi = getattr(app, "openapi", None)
+if callable(_fastapi_openapi):
+    def _public_v2_openapi() -> dict[str, Any]:
+        return add_public_v2_idempotency_openapi(_fastapi_openapi())
 
-
-def _public_v2_openapi() -> dict[str, Any]:
-    return add_public_v2_idempotency_openapi(_fastapi_openapi())
-
-
-app.openapi = _public_v2_openapi
+    app.openapi = _public_v2_openapi
 
 
 @app.exception_handler(RequestValidationError)
