@@ -1,8 +1,9 @@
 # ShakerScan 2.0.0 Release Readiness
 
-**Status (2026-08-25): candidate preparation; not approved for publication.** The V2 source and
-manual product audit are in progress on the `v2` branch. `VERSION` and release notes are prepared for
-2.0.0, but no release tag, candidate image publication, GitHub Release, `latest` alias, hosted
+**Status (2026-08-25): candidate preparation; not approved for publication.** The V2 source audit
+and current-head manual product pass are complete on the `v2` branch; fresh long-running Scan
+submissions and frozen-candidate qualification remain separate follow-up gates. `VERSION` and release
+notes are prepared for 2.0.0, but no release tag, candidate image publication, GitHub Release, `latest` alias, hosted
 installer change, or stable-channel promotion is authorized by this document. The stable installer
 must remain on 0.8.18 until every frozen-candidate gate below has a successful exact-SHA receipt.
 
@@ -57,17 +58,70 @@ failed Model Intake containment, digest drift, or unaccepted high/critical produ
 These checks were run during the working audit and must be repeated if product/runtime code changes
 after the candidate is frozen:
 
-- [x] Complete candidate-runtime Python suite: 1,080 package-native and 3,635 compatibility tests.
-- [x] Named release gates pass after exercising their canonical `api` package layout.
-- [x] UI tests (158) and production Next.js build pass.
+- [x] Complete candidate-runtime Python suite: 1,143 package-native and 3,686 compatibility tests
+  (4,829 total).
+- [x] All 17 named release gates pass after exercising their canonical `api` package layout.
+- [x] UI unit contracts (167), browser acceptance (30 passed, 2 intentionally skipped), and the
+  production Next.js build pass.
 - [x] Production npm and locked Python dependency audits report no known vulnerabilities.
 - [x] Generated capability inventory is current.
 - [x] Frozen-source installer smoke passes without retired V1 command files.
 - [x] Clean, duplicate-dirty, verification, and rollback migration scenarios pass from v0.8.17.
 - [x] Manual MCP initialize/tool-list/read-only Arsenal execution was exercised; target inventory is bounded.
-- [ ] The latest exact V2 migration workflow completes successfully without cancellation by a later push.
+- [x] The latest exact V2 migration workflow completes successfully without cancellation by a later push:
+  [`33e9629f` run 32879562615](https://github.com/andriyze/shakerscan/actions/runs/32879562615).
 - [ ] Final live stack is rebuilt at the exact candidate SHA with uniform current fingerprints.
 - [ ] Final UI/API/CLI/MCP/Hunt/device/DAST submissions and navigation checks are recorded.
+
+### Current-head manual audit receipts
+
+These are pre-candidate acceptance records, not substitutes for the frozen-candidate gates below:
+
+- Runtime revision `60d2fa35` was rebuilt locally with uniform UI, API, general-worker,
+  agent-tool-worker, and device-worker identity. Every static UI route and representative dynamic
+  Scan, finding, campaign, target-graph, device, and Hunt detail was exercised at desktop and
+  390-by-844 viewports with no console/runtime errors. Filters, mobile navigation, detail links, and
+  intentional table scrollers were clicked rather than inferred from unit tests.
+- Historical Scan `315c0e48-014e-4360-b56a-ecc315b71e45` is a failed child shard, not a running
+  two-shard parent. Its parent `1a05c2b0-6ad2-4125-b927-066f05c97d5c` is terminal with two failed
+  shards and an invalid old parallel authority. The UI now labels the child as non-verdict evidence,
+  links to the parent, and distinguishes that record from newer healthy parallel Honey completion
+  `14b3212c-0f9a-49c3-9563-1fde4ed07021` (three of three shards, five findings).
+- Existing complete and partial Honey, Juice Shop, device, finding, and Hunt records were cross-checked
+  against API data. Partial Honey `5160e342...` truthfully shows two completed and one failed shard;
+  LG posture `020f7699...` truthfully shows provisional B/84 with incomplete required checks. No
+  terminal parent had a non-terminal child.
+- Web Hunt `8684a29d-c163-486e-b3e5-19bf99320f03` completed against Juice Shop using its saved
+  collection: four safe replays returned HTTP 200, direct product search returned HTTP 200, and the
+  same-origin browser capability preserved partial output when its 20-request ceiling was reached.
+- Passive LG Hunt `9295b45d-9d05-4e6d-9cab-ed9585397169` used saved selection
+  `740bd8fd-2d00-4a89-af52-1fd8e574c151`; HTTPS 3001 timed out and HTTP 7000 returned 403. A direct
+  probe failed closed because the latest posture scan had no current confirmed web origin. Its
+  durable replay now preserves the exact safety reason and charges zero unattempted traffic.
+- Credential-bound LG Hunt `cf9e1e68-c1cf-43f8-8ecf-994dcbf6bd51` used saved SSH profile metadata
+  and a UI-created lab approval. Inventory/capability inspection succeeded; the read-only immutable
+  SSH proposal failed closed because port 22 was not a confirmed, host-key-pinned SSH service. No
+  command or plan executed and active/network/fragility use remained zero.
+- Source CLI help/status, credential test, evidence manifest export, Hunt capability calls, retry-safe
+  idempotency, and safety failures were exercised. MCP initialized, enumerated its generated tools,
+  and executed bounded read-only Arsenal work without exposing secret values.
+- The manually dispatched installed-stack acceptance at `de634236` built every image and passed the
+  scanner/API overlay, startup/schema/real-tool smoke, external wire ceilings, cancellation admission,
+  reservation identity, resume-without-repeat-traffic, and production UI build. It then exposed two
+  browser-test assumptions rather than hiding them behind retries: an ambiguous Hunt label query and
+  a literal `127.0.0.1` expectation for a valid `localhost` API origin. `33e9629f` fixes both acceptance
+  tests and the one stale source-inspection assertion; its path-filtered follow-up passed all 4,829
+  Python tests plus focused and UI contracts. The installed browser and Model Intake rerun remains a
+  local final-head preparation receipt, not a release-publication action.
+
+### CI cost control
+
+V2 does not rebuild every image on every commit. `V2 source bundle` creates only the source archive;
+the migration workflow first classifies changed paths, runs UI contracts only for UI changes, and
+runs backend contracts/complete Python only for backend changes. The `images-api-ui` job is skipped
+on pushes and is available only through explicit `workflow_dispatch`. Full image construction and
+installed-stack E2E belong to non-publishing candidate acceptance, where paying that cost once per
+exact candidate is intentional.
 
 ## Frozen-candidate validation
 
