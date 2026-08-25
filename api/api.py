@@ -693,6 +693,12 @@ try:
         HuntActionResult,
         RegisteredHuntAdapterFactory,
     )
+    from hunt.action_service import (
+        HUNT_ACTION_SERVICE,
+        HuntActionInputError,
+        HuntActionLifecycle,
+        HuntActionNotFound,
+    )
     from hunt.capability_reservations import (
         hunt_capability_action_digest,
         hunt_capability_lease_seconds,
@@ -729,6 +735,12 @@ except ModuleNotFoundError:
         HuntActionRequest,
         HuntActionResult,
         RegisteredHuntAdapterFactory,
+    )
+    from api.hunt.action_service import (
+        HUNT_ACTION_SERVICE,
+        HuntActionInputError,
+        HuntActionLifecycle,
+        HuntActionNotFound,
     )
     from api.hunt.capability_reservations import (
         hunt_capability_action_digest,
@@ -38902,6 +38914,21 @@ def _hunt_json(value: Any, default: Any) -> Any:
     return decoded if isinstance(decoded, type(default)) else default
 
 
+def _hunt_device_adapter_execution_state(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Read a transient adapter state without making it persisted Hunt context.
+
+    The nested ``device_state`` form is accepted only for historical helper
+    callers and migration tests. New Hunt execution passes the typed transient
+    ``hunt-device-adapter-state/v2`` mapping directly.
+    """
+    legacy = value.get("device_state")
+    if isinstance(legacy, Mapping):
+        return dict(legacy)
+    if value.get("schema_version") == "hunt-device-adapter-state/v2":
+        return dict(value)
+    return {}
+
+
 def _merge_hunt_device_control_context(
     persisted_context: Mapping[str, Any],
     execution_context_before: Mapping[str, Any],
@@ -38914,16 +38941,10 @@ def _merge_hunt_device_control_context(
         if isinstance(merged.get("device_runtime"), Mapping)
         else {}
     )
-    before_state = (
-        dict(execution_context_before.get("device_state") or {})
-        if isinstance(execution_context_before.get("device_state"), Mapping)
-        else {}
+    before_state = _hunt_device_adapter_execution_state(
+        execution_context_before
     )
-    after_state = (
-        dict(execution_context_after.get("device_state") or {})
-        if isinstance(execution_context_after.get("device_state"), Mapping)
-        else {}
-    )
+    after_state = _hunt_device_adapter_execution_state(execution_context_after)
     before_evidence = (
         dict(before_state.get("evidence") or {})
         if isinstance(before_state.get("evidence"), Mapping)
@@ -39024,8 +39045,10 @@ def _merge_hunt_device_ssh_proposal_context(
         execution_context_after,
     )
     persisted_runtime = dict(merged.get("device_runtime") or {})
-    before_state = dict(execution_context_before.get("device_state") or {})
-    after_state = dict(execution_context_after.get("device_state") or {})
+    before_state = _hunt_device_adapter_execution_state(
+        execution_context_before
+    )
+    after_state = _hunt_device_adapter_execution_state(execution_context_after)
     before_plan_ids = {
         str(item.get("plan_id") or "")
         for item in before_state.get("shell_plans") or []
@@ -39082,8 +39105,10 @@ def _hunt_device_ssh_proposal_delta(
     device_target_id: Any,
 ) -> dict[str, Any] | None:
     """Return the one validated plan appended by an inert SSH proposal."""
-    before_state = dict(execution_context_before.get("device_state") or {})
-    after_state = dict(execution_context_after.get("device_state") or {})
+    before_state = _hunt_device_adapter_execution_state(
+        execution_context_before
+    )
+    after_state = _hunt_device_adapter_execution_state(execution_context_after)
     before_plan_ids = {
         str(item.get("plan_id") or "")
         for item in before_state.get("shell_plans") or []
@@ -39912,6 +39937,12 @@ async def get_hunt_contract():
     return hunt_start_public_contract()
 
 
+@app.get("/hunts/lifecycle-metrics", tags=["Hunt"])
+async def get_hunt_lifecycle_metrics():
+    """Return content-free lifecycle reconciliation counts by registry placement."""
+    return HUNT_ACTION_SERVICE.metrics.snapshot()
+
+
 @app.get("/hunts/{hunt_id}")
 async def get_hunt(hunt_id: str):
     async with db_pool.acquire() as conn:
@@ -40005,6 +40036,26 @@ async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
     name = str(capability_name or "").strip().lower()
+    try:
+        return await HUNT_ACTION_SERVICE.execute(
+            name,
+            request.input,
+            lambda lifecycle: _execute_hunt_capability_lifecycle(
+                hunt_id, name, request, lifecycle,
+            ),
+        )
+    except HuntActionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HuntActionInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _execute_hunt_capability_lifecycle(
+    hunt_id: str,
+    name: str,
+    request: HuntCapabilityRequest,
+    lifecycle: HuntActionLifecycle,
+):
     prepared_network = None
     network_target = None
     network_policy = None
@@ -40013,11 +40064,8 @@ async def execute_hunt_capability(
     device_adapter_name = None
     validated_device_input = None
     call_approval_context = None
-    try:
-        spec = HUNT_ACTION_DISPATCHER.require(name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    placement = HUNT_ACTION_DISPATCHER.placement(name)
+    spec = lifecycle.specification
+    placement = lifecycle.placement
     is_network = placement == "worker_network"
     is_browser = placement == "worker_browser"
     is_http_worker = placement in {"worker_auth", "worker_http"}
@@ -40030,10 +40078,6 @@ async def execute_hunt_capability(
         "device_control", "device_http", "device_queue",
         "device_ssh_proposal",
     }
-    try:
-        HUNT_ACTION_DISPATCHER.registry.validate_hunt_input(name, request.input)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     action_id: uuid.UUID | None = None
     capability_input_digest = hashlib.sha256(json.dumps(
         request.input,
@@ -40085,6 +40129,7 @@ async def execute_hunt_capability(
                     existing_action["result_summary"], {}
                 )
                 existing_status = str(existing_action["status"])
+                lifecycle.mark_replayed()
                 return {
                     "hunt_id": hunt_id,
                     "capability": name,
@@ -40327,6 +40372,7 @@ async def execute_hunt_capability(
                     )
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
+            lifecycle.advance("revalidated")
             worker_managed_budget = spec.hunt_executor == "worker_replay"
             worker_durable_budget = spec.hunt_executor in {
                 "worker_network", "worker_scanner", "worker_browser",
@@ -40511,6 +40557,7 @@ async def execute_hunt_capability(
                 json.dumps(admission_result_summary),
             )
 
+    lifecycle.advance("admitted")
     assert action_id is not None
     if admission_error is not None:
         raise admission_error
@@ -40568,6 +40615,7 @@ async def execute_hunt_capability(
                         detail="Hunt capability action changed before dispatch",
                     )
 
+    lifecycle.advance("dispatching")
     context = _hunt_json(run["context_pack"], {})
 
     def inline_web_target_binding() -> TargetBinding:
@@ -40666,6 +40714,7 @@ async def execute_hunt_capability(
             "secret_values_visible": False,
         }
 
+    device_adapter_state: dict[str, Any] | None = None
     if is_device_adapter:
         try:
             native_device_policy = DeviceHuntPolicyState.from_mapping(
@@ -40678,7 +40727,7 @@ async def execute_hunt_capability(
                 status_code=409,
                 detail="Native device Hunt policy state is unavailable",
             ) from exc
-        context["device_state"] = native_device_policy.adapter_state(
+        device_adapter_state = native_device_policy.adapter_state(
             credential_refs=[
                 dict(item)
                 for item in context.get("credential_refs") or []
@@ -40699,7 +40748,11 @@ async def execute_hunt_capability(
             ),
         )
 
-    device_context_before = copy.deepcopy(context) if is_device_adapter else {}
+    device_adapter_state_before = (
+        copy.deepcopy(device_adapter_state)
+        if device_adapter_state is not None
+        else {}
+    )
     execution_started = time.perf_counter()
     status, result = "failed", {}
     capability_execution = None
@@ -40750,7 +40803,7 @@ async def execute_hunt_capability(
             )
         elif str(run["target_kind"]) == "device":
             assert device_adapter_name is not None and validated_device_input is not None
-            device_state = context.get("device_state")
+            device_state = device_adapter_state
             if not isinstance(device_state, dict):
                 raise HTTPException(
                     status_code=409,
@@ -40815,9 +40868,6 @@ async def execute_hunt_capability(
                     _HUNT_DEVICE_QUEUE_CORRELATION.reset(
                         queue_correlation_token
                     )
-                # Device counters can advance before a socket or downstream
-                # queue raises, so settlement must retain the execution state.
-                context["device_state"] = device_state
         elif is_http_worker:
             if durable_reservation is None or durable_action_digest is None:
                 raise RuntimeError(
@@ -40936,18 +40986,17 @@ async def execute_hunt_capability(
         status = "failed"
         result = {"ok": False, "error": f"capability_fault:{type(exc).__name__}"}
     finally:
+        lifecycle.advance("persisting")
         async with db_pool.acquire() as conn:
             receipt_id = None
             receipt_payload = locals().get("result", {})
             device_queue_state_advanced = bool(
                 is_device_queue
                 and int(
-                    (context.get("device_state") or {}).get("scans_queued") or 0
+                    (device_adapter_state or {}).get("scans_queued") or 0
                 )
                 > int(
-                    (device_context_before.get("device_state") or {}).get(
-                        "scans_queued"
-                    )
+                    device_adapter_state_before.get("scans_queued")
                     or 0
                 )
             )
@@ -40978,11 +41027,11 @@ async def execute_hunt_capability(
                         "Device queue reported success without a downstream scan"
                     )
                 if device_queue_enqueued and not device_queue_state_advanced:
-                    device_state = dict(context.get("device_state") or {})
+                    device_state = dict(device_adapter_state or {})
                     device_state["scans_queued"] = (
                         int(device_state.get("scans_queued") or 0) + 1
                     )
-                    context["device_state"] = device_state
+                    device_adapter_state = device_state
                     recovered_queue = {
                         "scan_id": str(correlated_scan["id"]),
                         "job_id": str(correlated_scan["job_id"]),
@@ -41005,8 +41054,8 @@ async def execute_hunt_capability(
             if is_device_ssh_proposal:
                 try:
                     proposed_ssh_plan = _hunt_device_ssh_proposal_delta(
-                        device_context_before,
-                        context,
+                        device_adapter_state_before,
+                        device_adapter_state or {},
                         receipt_payload if isinstance(receipt_payload, Mapping) else {},
                         hunt_id=run["id"],
                         device_target_id=run["device_target_id"],
@@ -41026,13 +41075,13 @@ async def execute_hunt_capability(
             device_http_attempted = bool(
                 is_device_http
                 and int(
-                    (context.get("device_state") or {}).get(
+                    (device_adapter_state or {}).get(
                         "device_http_requests_used"
                     )
                     or 0
                 )
                 > int(
-                    (device_context_before.get("device_state") or {}).get(
+                    device_adapter_state_before.get(
                         "device_http_requests_used"
                     )
                     or 0
@@ -41131,17 +41180,15 @@ async def execute_hunt_capability(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
                 )
                 actual_charges["tool_wall_seconds"] = min(int(charges.get("tool_wall_seconds") or 0), elapsed_wall)
-            if is_device_adapter and isinstance(context.get("device_state"), dict):
-                before_device_state = dict(
-                    device_context_before.get("device_state") or {}
-                )
-                context["device_state"]["fragility_used"] = (
+            if is_device_adapter and isinstance(device_adapter_state, dict):
+                before_device_state = dict(device_adapter_state_before)
+                device_adapter_state["fragility_used"] = (
                     int(before_device_state.get("fragility_used") or 0)
                     + int(actual_charges.get("device_fragility_points") or 0)
                 )
                 if is_device_http and device_http_attempted:
-                    context["device_state"]["health_observed"] = True
-                    context["device_state"]["health_failed"] = status in {
+                    device_adapter_state["health_observed"] = True
+                    device_adapter_state["health_failed"] = status in {
                         "failed", "blocked"
                     }
             reconciled_used = dict(used)
@@ -41220,8 +41267,8 @@ async def execute_hunt_capability(
                         merged_device_context, evidence_ref_map = (
                             merge_device_context(
                                 _hunt_json(locked["context_pack"], {}),
-                                device_context_before,
-                                context,
+                                device_adapter_state_before,
+                                device_adapter_state or {},
                             )
                         )
                         if (
@@ -41522,8 +41569,7 @@ async def execute_hunt_capability(
                     action_id, status, json.dumps(_redact_agent_payload(receipt_payload), default=str),
                     _optional_uuid(receipt_id) if receipt_id else None,
                 )
-                if str(run["target_kind"]) == "device":
-                    await conn.execute("UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(context, default=str))
+        lifecycle.advance("settled")
     canonical_action_result = (
         capability_execution.public_dict()
         if capability_execution is not None

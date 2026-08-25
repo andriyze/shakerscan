@@ -32,7 +32,8 @@ def test_device_queue_actions_reserve_before_downstream_submission():
         "_execute_device_capability_operation("
     )
     assert "_merge_hunt_device_queue_context" in handler
-    assert 'context["device_state"] = device_state' in handler
+    assert "device_adapter_state = device_state" in handler
+    assert 'context["device_state"]' not in handler
 
 
 def test_device_queue_job_carries_server_owned_hunt_correlation():
