@@ -33,7 +33,7 @@ def _plan(name, reserved, *, runtime_paths=None):
     )
 
 
-@pytest.mark.parametrize("http,wall", [(2, 1), (3, 2), (17, 16), (150, 75)])
+@pytest.mark.parametrize("http,wall", [(3, 2), (17, 16), (150, 75)])
 def test_katana_command_is_derived_from_each_reservation(http, wall):
     plan = _plan("katana", {"http_requests": http, "tool_wall_seconds": wall})
 
@@ -44,6 +44,23 @@ def test_katana_command_is_derived_from_each_reservation(http, wall):
     assert plan.argv[plan.argv.index("-retry") + 1] == "0"
     assert "-disable-redirects" in plan.argv
     assert plan.budget_proof["method"] == "rate_time_upper_bound"
+
+
+def test_katana_supervisor_deadline_includes_bounded_shutdown_grace():
+    plan = _plan(
+        "katana", {"http_requests": 150, "tool_wall_seconds": 75}
+    )
+
+    crawl_seconds = int(
+        plan.argv[plan.argv.index("-crawl-duration") + 1].removesuffix("s")
+    )
+    assert crawl_seconds == 30
+    assert plan.timeout_ms == 35_000
+    assert plan.hard_budget_dict == {
+        "http_requests": 31,
+        "tool_wall_seconds": 35,
+    }
+    assert plan.budget_proof["inputs"]["shutdown_grace_seconds"] == 5
 
 
 def test_httpx_is_exactly_one_request_without_fallback_or_redirects():

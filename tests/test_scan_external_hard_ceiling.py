@@ -116,6 +116,7 @@ def test_every_external_adapter_has_a_prelaunch_wire_proof(
     [
         ("httpx", {"tool_wall_seconds": 10}),
         ("katana", {"http_requests": 1, "tool_wall_seconds": 10}),
+        ("katana", {"http_requests": 2, "tool_wall_seconds": 1}),
         ("nuclei", {"tool_wall_seconds": 10}),
         ("dalfox", {"http_requests": 1, "tool_wall_seconds": 10}),
         ("sqlmap", {"http_requests": 1, "tool_wall_seconds": 10}),

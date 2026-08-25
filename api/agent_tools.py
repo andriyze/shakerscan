@@ -683,21 +683,35 @@ def build_enforced_scanner_plan(
         }
     elif scanner == "katana":
         http = int(reservation.get("http_requests") or 0)
-        duration = min(30, wall, max(0, http - 1))
+        # Katana needs a small process-shutdown window after its internal crawl
+        # duration expires.  Giving the crawler and the supervising worker the
+        # same deadline makes normal teardown race the hard kill and turns a
+        # healthy bounded crawl into a timeout with partial output.
+        if wall < 2:
+            raise AgentToolError(
+                "katana requires two reserved wall-clock seconds"
+            )
+        desired_duration = min(30, max(0, http - 1))
+        duration = min(desired_duration, wall - 1)
         if duration < 1:
             raise AgentToolError("katana requires two reserved HTTP requests")
+        shutdown_grace = min(5, wall - duration)
         _replace_argv_value(argv, "-rate-limit", 1)
         _replace_argv_value(argv, "-concurrency", 1)
         _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
-        timeout_seconds = duration
-        timeout_ms = duration * 1_000
+        timeout_seconds = duration + shutdown_grace
+        timeout_ms = timeout_seconds * 1_000
         # One initial token plus one token for each elapsed second.
-        hard = {"http_requests": duration + 1, "tool_wall_seconds": duration}
+        hard = {
+            "http_requests": duration + 1,
+            "tool_wall_seconds": timeout_seconds,
+        }
         mode, method = "conservative", "rate_time_upper_bound"
         proof_inputs = {
             "rate_per_second": 1, "duration_seconds": duration,
             "startup_burst": 1, "redirects": 0, "form_fill": False,
             "depth": 2, "concurrency": 1,
+            "shutdown_grace_seconds": shutdown_grace,
         }
     elif scanner == "ffuf":
         wordlist_path = str(runtime.get("ffuf_wordlist") or "")
