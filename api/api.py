@@ -32088,7 +32088,11 @@ async def list_targets_grouped(
     async with db_pool.acquire() as conn:
         query = """
             SELECT
-                t.id, t.url, t.name, t.root_domain, t.is_root,
+                t.id,
+                LEFT(t.url, 2049) AS url,
+                LEFT(t.name, 512) AS name,
+                LEFT(t.root_domain, 253) AS root_domain,
+                t.is_root,
                 t.discovery_source, t.is_active,
                 t.last_scanned_at, t.last_score, t.last_grade,
                 t.total_scans, t.active_findings_count,
