@@ -17,6 +17,7 @@ import {
   type DeviceTarget,
   type Target,
 } from '@/lib/api'
+import { SCAN_PUBLIC_CONTRACT_SNAPSHOT } from '@/lib/scanContract.generated'
 import {
   Button,
   Card,
@@ -70,6 +71,12 @@ type Draft = {
 
 type DraftErrors = Partial<Record<keyof Draft, string>>
 
+const DEFAULT_WEB_CAPABILITIES = Array.from(new Set([
+  ...SCAN_PUBLIC_CONTRACT_SNAPSHOT.credentials.semantic_capabilities,
+  'auth.session.refresh',
+  'auth.session.revoke',
+])).sort().join(', ')
+
 const EMPTY_DRAFT: Draft = {
   name: '',
   authKind: 'bearer_token',
@@ -84,7 +91,7 @@ const EMPTY_DRAFT: Draft = {
   scopes: '',
   customHeaders: '',
   expiresAt: '',
-  capabilities: 'auth.session.establish, auth.session.refresh, auth.session.revoke, authz.verify, http.request, request.replay, scan.execute',
+  capabilities: DEFAULT_WEB_CAPABILITIES,
 }
 
 function splitValues(value: string): string[] {
