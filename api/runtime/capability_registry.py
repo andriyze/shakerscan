@@ -869,6 +869,29 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="inline",
         ),
         CapabilitySpec(
+            "candidate.verify",
+            "Run one server-owned deterministic verifier for a candidate produced by this Hunt.",
+            "internal", "active", frozenset({"web", "api", "device"}),
+            "candidate.deterministic_verifier", "1", "active_testing",
+            {"tool_wall_seconds": 180},
+            {
+                "control_plane": True,
+                "runtime_target_binding": True,
+                "durable_reservation": True,
+                "deterministic_proof_contract": True,
+            },
+            _schema({
+                "candidate_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+                },
+            }, required=("candidate_id",)),
+            "candidate-verification/v2",
+            ("deterministic_verification", "tool_receipt"),
+            default_timeout_ms=180_000,
+            hunt_executor="inline",
+        ),
+        CapabilitySpec(
             "collections.select", "Select a bounded redacted request subset from a bound collection.",
             "internal", "read_only", frozenset({"web", "api", "device"}),
             "collections.select", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True},

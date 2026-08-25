@@ -12,6 +12,7 @@ import re
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--baseline-version", required=True)
     parser.add_argument("--baseline-source-sha", required=True)
     parser.add_argument("--candidate-source-sha", required=True)
     parser.add_argument("--baseline-image", required=True)
@@ -24,6 +25,8 @@ def main() -> int:
     for value in (args.baseline_image, args.candidate_image):
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
             parser.error("image identities must be exact sha256 digests")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?", args.baseline_version):
+        parser.error("baseline version must be an explicit release version")
     checks = {
         "previous_stable_runtime_migrations_twice": "pass",
         "representative_scan_and_pending_work_preserved": "pass",
@@ -36,11 +39,13 @@ def main() -> int:
         "candidate_migrations_twice": "pass",
         "database_restart_preserved_state": "pass",
         "backup_restore_rollback_boundary": "pass",
+        "previous_stable_api_ui_worker_boot_after_restore": "pass",
     }
     receipt = {
         "schema_version": "stateful-upgrade-acceptance/v2",
         "status": "pass",
         "baseline": {
+            "version": args.baseline_version,
             "source_sha": args.baseline_source_sha,
             "image_digest": args.baseline_image,
         },
@@ -48,7 +53,7 @@ def main() -> int:
             "source_sha": args.candidate_source_sha,
             "image_digest": args.candidate_image,
         },
-        "rollback_boundary": "pre-upgrade pg_dump restore",
+        "rollback_boundary": "pre-upgrade pg_dump restore plus previous-stable runtime boot",
         "checks": checks,
     }
     receipt["receipt_sha256"] = hashlib.sha256(

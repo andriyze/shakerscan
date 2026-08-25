@@ -52,7 +52,7 @@ def _context() -> CapabilityExecutionContext:
     )
 
 
-def test_executor_validates_registry_identity_and_clamps_measured_budget():
+def test_executor_fails_closed_when_adapter_exceeds_or_expands_reserved_budget():
     heartbeats = []
     adapter = _Adapter(CapabilityAdapterResult(
         status="partial",
@@ -77,13 +77,18 @@ def test_executor_validates_registry_identity_and_clamps_measured_budget():
 
     assert adapter.called
     assert heartbeats == [True]
+    assert result.status == "failed"
+    assert result.execution_started is True
     assert result.actual_budget == {
-        "browser_actions": 1,
-        "http_requests": 2,
-        "tool_wall_seconds": 10,
         "agent_actions": 1,
+        "browser_actions": 1,
+        "http_requests": 5,
+        "tool_wall_seconds": 10,
     }
-    assert "unreserved" not in result.actual_budget
+    assert result.errors[-1] == (
+        "adapter_budget_contract_violation:over_reservation:browser_actions,"
+        "over_reservation:tool_wall_seconds,unreserved_dimension:unreserved"
+    )
 
 
 def test_executor_cancellation_is_distinct_and_does_not_start_adapter():

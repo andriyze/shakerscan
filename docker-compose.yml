@@ -6,7 +6,7 @@ services:
   # PostgreSQL Database
   # ============================================================
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}
     environment:
       POSTGRES_USER: scanner
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; run ./scanner.sh start}
@@ -30,7 +30,7 @@ services:
   # Redis Queue
   # ============================================================
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis:7.4.11-alpine3.21@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf}
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}
@@ -247,7 +247,7 @@ services:
       - signer-control
 
   model-intake-signer-db-init:
-    image: postgres:16-alpine
+    image: ${MODEL_INTAKE_SIGNER_POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - MODEL_INTAKE_SIGNER_DATABASE_PASSWORD=${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required; run ./scanner.sh start}

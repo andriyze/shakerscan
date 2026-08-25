@@ -1,0 +1,59 @@
+name: Device physical acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact deployed candidate SHA"
+        required: true
+      api_url:
+        description: "API URL backed by the exact-SHA device worker"
+        required: true
+      device_locator:
+        description: "Authorized reachable physical device locator"
+        required: true
+      port:
+        description: "Known safe TCP port hint"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: device-physical-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    name: Authorized physical device scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: device-physical
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - name: Exercise exact deployed device worker
+        env:
+          ACCEPTANCE_API_URL: ${{ inputs.api_url }}
+          ACCEPTANCE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          ACCEPTANCE_DEVICE_LOCATOR: ${{ inputs.device_locator }}
+          ACCEPTANCE_DEVICE_PORT: ${{ inputs.port }}
+        run: |
+          python3 tests/e2e/run_device_physical_acceptance.py \
+            --api-url "$ACCEPTANCE_API_URL" \
+            --candidate-sha "$ACCEPTANCE_CANDIDATE_SHA" \
+            --locator "$ACCEPTANCE_DEVICE_LOCATOR" \
+            --port "$ACCEPTANCE_DEVICE_PORT" \
+            --output artifacts/device-physical-acceptance.json
+
+      - name: Upload candidate-bound physical receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: device-physical-${{ inputs.candidate_sha }}
+          path: artifacts/device-physical-acceptance.json
+          if-no-files-found: error
+          retention-days: 30

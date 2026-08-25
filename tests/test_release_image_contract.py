@@ -20,8 +20,8 @@ def test_release_images_keep_docker_client_at_control_plane_boundary():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     api_dockerfile = (ROOT / "scanner" / "Dockerfile.api").read_text()
 
-    assert "${API_IMAGE_REPO:-shakerscan/shakerscan-api}" in _service_block(compose, "api")
-    assert "${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}" in _service_block(compose, "worker")
+    assert "${API_IMAGE:-shakerscan/shakerscan-api:latest}" in _service_block(compose, "api")
+    assert "${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}" in _service_block(compose, "worker")
     assert "DOCKER_CLI_SHA256" not in dockerfile
     assert "ARG SCANNER_RUNTIME_IMAGE=" in api_dockerfile
     assert "FROM ${SCANNER_RUNTIME_IMAGE}" in api_dockerfile
@@ -61,7 +61,9 @@ def test_release_images_publish_sboms_and_verified_final_digest_provenance():
 
     assert workflow.count("provenance: mode=max") == 4
     assert workflow.count("sbom: true") == 4
-    assert workflow.count("uses: actions/attest@v4") == 4
+    attest_uses = re.findall(r"uses: actions/attest@([0-9a-f]{40})", workflow)
+    assert len(attest_uses) == 4
+    assert len(set(attest_uses)) == 1
     assert workflow.count("push-to-registry: true") == 4
     assert workflow.count("create-storage-record: false") == 4
     assert workflow.count("gh attestation verify") == 4
@@ -73,6 +75,17 @@ def test_release_images_publish_sboms_and_verified_final_digest_provenance():
     assert "Reverify signed candidate provenance" in promotion
     assert "gh attestation verify" in promotion
     assert ".provenance.verified == true" in promotion
+
+
+def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
+    assert "needs: [meta, merge, vulnerability-scan]" in workflow
+    for image in ("scanner", "api", "ui", "signer"):
+        assert f"- name: {image}" in workflow
+    assert "severity: HIGH,CRITICAL" in workflow
+    assert "ignore-unfixed: false" in workflow
+    assert "exit-code: 1" in workflow
+    assert "validate_vulnerability_waivers.py" in workflow
 
 
 def test_scanner_image_bakes_release_identity_for_broker_workers():

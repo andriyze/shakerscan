@@ -198,6 +198,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         requested_budget: Mapping[str, int],
         redacted_execution: Mapping[str, Any],
         blocked_exceptions: tuple[type[BaseException], ...],
+        conservative_full_budget: bool = False,
     ) -> None:
         super().__init__(
             specification=specification,
@@ -206,6 +207,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             redacted_execution=redacted_execution,
         )
         self._blocked_exceptions = blocked_exceptions
+        self._conservative_full_budget = conservative_full_budget
         self.blocked_exception: BaseException | None = None
 
     async def execute(
@@ -226,7 +228,15 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             result.get("ok")
             or str(result.get("status") or "").strip().lower() == "success"
         )
-        actual = self._wall_budget(started, execution_started=succeeded)
+        # A conservative control-plane operation may have emitted traffic or
+        # mutated verifier state before returning a failure/blocked result.
+        # Once invoked, settle its complete hold rather than claiming the
+        # unobservable partial execution consumed nothing.
+        actual = (
+            dict(self._requested_budget)
+            if self._conservative_full_budget
+            else self._wall_budget(started, execution_started=succeeded)
+        )
         status = (
             "blocked"
             if self.blocked_exception is not None
@@ -252,7 +262,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             observations=(observation,),
             errors=(error,) if error else (),
             actual_budget=actual,
-            execution_started=succeeded,
+            execution_started=(True if self._conservative_full_budget else succeeded),
             parser_version=self._specification.output_schema,
             redacted_execution=dict(self._redacted_execution),
         )

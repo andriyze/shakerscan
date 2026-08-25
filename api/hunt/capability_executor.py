@@ -121,11 +121,42 @@ class CapabilityExecutor:
         result: CapabilityAdapterResult,
         requested: Mapping[str, int],
     ) -> CapabilityAdapterResult:
+        violations: list[str] = []
         actual: dict[str, int] = {}
-        for name, amount in dict(result.actual_budget).items():
+        for name, raw_amount in dict(result.actual_budget).items():
             if name not in requested:
+                violations.append(f"unreserved_dimension:{name}")
                 continue
-            actual[name] = min(int(requested[name]), max(0, int(amount)))
+            try:
+                amount = int(raw_amount)
+            except (TypeError, ValueError):
+                violations.append(f"non_integer_usage:{name}")
+                continue
+            if amount < 0:
+                violations.append(f"negative_usage:{name}")
+                continue
+            if amount > int(requested[name]):
+                violations.append(f"over_reservation:{name}")
+                continue
+            actual[name] = amount
+        if violations:
+            # An invalid report cannot prove how much target traffic occurred. Fail
+            # the adapter contract and conservatively settle the complete hold.
+            return CapabilityAdapterResult(
+                status="failed",
+                observations=tuple(dict(item) for item in result.observations),
+                errors=tuple(result.errors) + (
+                    "adapter_budget_contract_violation:" + ",".join(sorted(violations)),
+                ),
+                actual_budget={
+                    str(name): int(amount) for name, amount in requested.items()
+                },
+                partial=result.partial,
+                timed_out=result.timed_out,
+                execution_started=True,
+                parser_version=result.parser_version,
+                redacted_execution=dict(result.redacted_execution),
+            )
         if "agent_actions" in requested:
             actual["agent_actions"] = min(1, int(requested["agent_actions"]))
         if "active_actions" in requested and result.execution_started:

@@ -6,12 +6,14 @@ set -eu
 
 INSTALL_URL="https://install.shakerscan.com"
 CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"
+RELEASE_ASSET_ROOT="${SHAKERSCAN_RELEASE_ASSET_ROOT:-https://github.com/andriyze/shakerscan/releases/download}"
 REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-}"
 INSTALL_VERSION="${SHAKERSCAN_INSTALL_VERSION:-}"
 INSTALL_DIR="${SHAKERSCAN_HOME:-$HOME/.shakerscan}"
 BIN_DIR="${SHAKERSCAN_BIN_DIR:-$HOME/.local/bin}"
 START_AFTER_INSTALL="${SHAKERSCAN_START:-1}"
 REMOTE_ACCESS="${SHAKERSCAN_REMOTE:-0}"
+INSTALL_STAGE=""
 
 say() {
     printf '%s\n' "$*"
@@ -96,12 +98,37 @@ install_bootstrap_deps() {
 download() {
     src="$1"
     dst="$2"
-    tmp="${dst}.tmp"
+    case "$dst" in
+        "$INSTALL_DIR"/*)
+            [ -n "$INSTALL_STAGE" ] || fail "installer staging directory is unavailable"
+            relative="${dst#"$INSTALL_DIR"/}"
+            staged_dst="$INSTALL_STAGE/$relative"
+            mkdir -p "$(dirname "$staged_dst")"
+            ;;
+        *)
+            fail "refusing to download outside the installation directory"
+            ;;
+    esac
+    tmp="${staged_dst}.tmp"
     if ! curl -fsSL "$src" -o "$tmp"; then
         rm -f "$tmp"
         fail "failed to download $src"
     fi
-    mv "$tmp" "$dst"
+    mv "$tmp" "$staged_dst"
+}
+
+cleanup_install_stage() {
+    if [ -n "$INSTALL_STAGE" ] && [ -d "$INSTALL_STAGE" ]; then
+        rm -rf -- "$INSTALL_STAGE"
+    fi
+}
+
+commit_staged_downloads() {
+    [ -n "$INSTALL_STAGE" ] && [ -d "$INSTALL_STAGE" ] || \
+        fail "installer staging directory is unavailable"
+    cp -R "$INSTALL_STAGE/." "$INSTALL_DIR/"
+    cleanup_install_stage
+    INSTALL_STAGE=""
 }
 
 add_path_to_profile() {
@@ -181,6 +208,20 @@ install_command() {
 #!/bin/sh
 : "\${SCANNER_IMAGE_TAG:=$release_image_tag}"
 export SCANNER_IMAGE_TAG
+if [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/release-image-lock.env" ]; then
+    while IFS='=' read -r key value; do
+        case "\$key" in
+            SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE)
+                case "\$value" in
+                    *@sha256:????????????????????????????????????????????????????????????????) export "\$key=\$value" ;;
+                    *) printf 'Invalid release image lock for %s\n' "\$key" >&2; exit 1 ;;
+                esac
+                ;;
+            ''|'#'*) ;;
+            *) printf 'Unsupported release image lock key: %s\n' "\$key" >&2; exit 1 ;;
+        esac
+    done < "$INSTALL_DIR/release-image-lock.env"
+fi
 exec "$INSTALL_DIR/scanner.sh" "\$@"
 EOF
     chmod +x "$launcher"
@@ -289,6 +330,8 @@ mkdir -p "$INSTALL_DIR/skills/research-agent/agents"
 mkdir -p "$INSTALL_DIR/skills/shakerscan/agents" "$INSTALL_DIR/skills/shakerscan/references"
 mkdir -p "$INSTALL_DIR/.claude/agents" "$INSTALL_DIR/.claude/commands" "$INSTALL_DIR/.claude/hooks"
 touch "$INSTALL_DIR/.env"
+INSTALL_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-install.XXXXXX")"
+trap cleanup_install_stage EXIT HUP INT TERM
 
 say "Downloading ShakerScan runtime files..."
 download "$REPO_RAW_BASE/scanner.sh" "$INSTALL_DIR/scanner.sh"
@@ -296,12 +339,29 @@ download "$REPO_RAW_BASE/docker-compose.release.yml" "$INSTALL_DIR/docker-compos
 download "$REPO_RAW_BASE/docker-compose.worker.yml" "$INSTALL_DIR/docker-compose.worker.yml"
 download "$REPO_RAW_BASE/docker-compose.broker-worker.yml" "$INSTALL_DIR/docker-compose.broker-worker.yml"
 download "$REPO_RAW_BASE/db/init.sql" "$INSTALL_DIR/db/init.sql"
-if [ -d "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" ]; then
-    rmdir "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" || \
-        fail "cannot replace non-empty signer role script directory from an earlier broken install"
-fi
 download "$REPO_RAW_BASE/db/configure-model-intake-signer-role.sh" "$INSTALL_DIR/db/configure-model-intake-signer-role.sh"
 download "$REPO_RAW_BASE/VERSION" "$INSTALL_DIR/VERSION"
+release_version="$(tr -d '[:space:]' < "$INSTALL_STAGE/VERSION")"
+case "$release_version" in
+    2.*)
+        download "$RELEASE_ASSET_ROOT/v${release_version}/release-image-lock.env" \
+            "$INSTALL_DIR/release-image-lock.env"
+        for binding in \
+            "SCANNER_IMAGE=shakerscan/shakerscan-scanner" \
+            "API_IMAGE=shakerscan/shakerscan-api" \
+            "UI_IMAGE=shakerscan/shakerscan-ui" \
+            "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer"; do
+            key="${binding%%=*}"
+            repository="${binding#*=}"
+            value="$(sed -n "s/^${key}=//p" "$INSTALL_STAGE/release-image-lock.env")"
+            if ! printf '%s' "$value" | grep -Eq "^${repository}@sha256:[0-9a-f]{64}$"; then
+                fail "release image lock is missing an exact ${key} digest"
+            fi
+        done
+        [ "$(wc -l < "$INSTALL_STAGE/release-image-lock.env" | tr -d ' ')" -eq 4 ] || \
+            fail "release image lock must contain exactly four images"
+        ;;
+esac
 download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
 download "$REPO_RAW_BASE/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
@@ -406,6 +466,11 @@ download "$REPO_RAW_BASE/.claude/commands/subdomains.md" "$INSTALL_DIR/.claude/c
 download "$REPO_RAW_BASE/.claude/commands/workers.md" "$INSTALL_DIR/.claude/commands/workers.md"
 download "$REPO_RAW_BASE/.claude/hooks/session-start.sh" "$INSTALL_DIR/.claude/hooks/session-start.sh"
 download "$REPO_RAW_BASE/.claude/settings.json" "$INSTALL_DIR/.claude/settings.json"
+if [ -d "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" ]; then
+    rmdir "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" || \
+        fail "cannot replace non-empty signer role script directory from an earlier broken install"
+fi
+commit_staged_downloads
 chmod +x "$INSTALL_DIR/scanner.sh"
 chmod +x "$INSTALL_DIR/db/configure-model-intake-signer-role.sh"
 chmod +x "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"

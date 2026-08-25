@@ -4136,15 +4136,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
                 """, next_run, schedule_id)
                 continue
-            # Managed credential refs are target-bound and are resolved below. Defer
-            # focused-family auth preconditions until those refs are present; otherwise
-            # scheduled auth/BOLA scans fail even though the target has valid profiles.
             scan_options = _build_canonical_scan_options_payload(
                 scan_options_model,
                 scan_contract,
-                defer_family_preconditions=True,
             )
-            scan_options = await _resolve_target_credential_profiles(conn, target_id, scan_options)
             scan_options, _family = _apply_scan_check_family_policy(scan_options)
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
                 scan_options_model,
@@ -4515,8 +4510,6 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                 base_opts = _decode_json_value(t['scan_options']) or {}
                 if not isinstance(base_opts, dict):
                     base_opts = {}
-                base_opts = await _resolve_target_credential_profiles(conn, t['id'], base_opts)
-
                 if action == 'recon':
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
                     await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
@@ -30435,8 +30428,6 @@ async def _submit_scan(
                     generate_scan_private_state_key()
                 )
 
-        if not credential_refs:
-            options_payload = await _resolve_target_credential_profiles(conn, target_id, options_payload)
         options_payload, _family = _apply_scan_check_family_policy(options_payload)
         parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
             execution_options,
@@ -32847,11 +32838,11 @@ async def _resolve_target_credential_profiles(
     target_id: uuid.UUID,
     options_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Attach content-free managed-profile refs for worker-time resolution.
+    """Construct content-free managed-profile refs for legacy compatibility.
 
     Managed secret values must never be copied into scan rows or Redis jobs.
-    Workers resolve these target-bound profile ids in memory immediately before
-    execution. Explicit per-scan auth still wins for its auth state.
+    Canonical Scan, schedules, and ASM do not call this compatibility helper;
+    they require explicit profile IDs during admission.
     """
     rows = await conn.fetch(
         """
@@ -40059,6 +40050,7 @@ async def _execute_hunt_capability_lifecycle(
     browser_target = None
     device_adapter_name = None
     validated_device_input = None
+    candidate_record = None
     call_approval_context = None
     spec = lifecycle.specification
     placement = lifecycle.placement
@@ -40166,6 +40158,61 @@ async def _execute_hunt_capability_lifecycle(
             if run["status"] not in {"active", "awaiting_planner"}:
                 raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
             policy = _hunt_json(run["policy_json"], {})
+            context = _hunt_json(run["context_pack"], {})
+            target_context = (
+                dict(context.get("target") or {})
+                if isinstance(context.get("target"), Mapping)
+                else {}
+            )
+            if run["device_target_id"]:
+                current_target = await conn.fetchrow(
+                    "SELECT primary_locator, is_active FROM device_targets WHERE id=$1",
+                    run["device_target_id"],
+                )
+                frozen_locator = str(target_context.get("locator") or "").strip()
+                current_locator = str(
+                    current_target["primary_locator"] if current_target else ""
+                ).strip()
+            else:
+                current_target = await conn.fetchrow(
+                    "SELECT url, is_active FROM targets WHERE id=$1", run["target_id"],
+                )
+                frozen_locator = str(target_context.get("url") or "").strip()
+                current_locator = str(current_target["url"] if current_target else "").strip()
+            if not current_target or not current_target["is_active"]:
+                raise HTTPException(status_code=409, detail="Hunt target is no longer active")
+            if not frozen_locator or current_locator != frozen_locator:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Hunt target locator changed after admission",
+                )
+            if name == "candidate.verify":
+                candidate_uuid = _uuid_or_400(
+                    str(request.input.get("candidate_id") or ""), "candidate id",
+                )
+                candidate_record = await conn.fetchrow(
+                    """SELECT c.* FROM investigation_candidates c
+                       WHERE c.id=$1
+                         AND (($3::uuid IS NOT NULL AND c.target_id=$3) OR
+                              ($4::uuid IS NOT NULL AND c.device_target_id=$4))
+                         AND EXISTS (
+                             SELECT 1 FROM investigation_candidate_observations o
+                             WHERE o.candidate_id=c.id AND o.hunt_run_id=$2
+                         )""",
+                    candidate_uuid, run["id"], run["target_id"], run["device_target_id"],
+                )
+                if candidate_record is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Candidate was not produced or observed by this Hunt",
+                    )
+                if str(candidate_record["status"] or "") in {
+                    "verified", "refuted", "expired",
+                }:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Candidate is {candidate_record['status']}",
+                    )
             allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
             if name not in allowed:
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
@@ -40229,6 +40276,14 @@ async def _execute_hunt_capability_lifecycle(
                 validated_scope_receipt_id = current_scope_receipt_id
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
+            if name == "candidate.verify":
+                if int(used.get("verifications") or 0) >= int(
+                    budget.get("max_verifications") or 0
+                ):
+                    raise HTTPException(
+                        status_code=409, detail="Hunt verification budget exhausted",
+                    )
+                used["verifications"] = int(used.get("verifications") or 0) + 1
             limits = _hunt_ledger_limits(budget)
             if is_network:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -40305,6 +40360,43 @@ async def _execute_hunt_capability_lifecycle(
                 charges = {
                     key: int(value) for key, value in spec.budget_cost.items() if key in limits
                 }
+                if name == "candidate.verify":
+                    assert candidate_record is not None
+                    if str(run["target_kind"]) == "device":
+                        contract_id = str(
+                            candidate_record["verifier_contract_id"] or ""
+                        )
+                        charges["device_fragility_points"] = 1
+                        if contract_id == "device.service_exposure":
+                            locus = _hunt_json(
+                                candidate_record["canonical_locus"], {}
+                            )
+                            transport_dimension = (
+                                "udp_ports_attempted"
+                                if str(locus.get("transport") or "").lower() == "udp"
+                                else "tcp_ports_attempted"
+                            )
+                            charges[transport_dimension] = 1
+                        elif contract_id not in {
+                            "device.control_authorization", "device.firmware_advisory",
+                        }:
+                            charges["http_requests"] = 40
+                    else:
+                        charges["http_requests"] = 24
+                        charges["browser_actions"] = 12
+                        family = family_proof.canonical_family(
+                            candidate_record["family"]
+                        )
+                        if family in _AGENT_MUTATING_VERIFY_FAMILIES:
+                            if not policy.get("allow_state_changing_http"):
+                                raise HTTPException(
+                                    status_code=403,
+                                    detail=(
+                                        "Candidate verification requires state-changing "
+                                        "HTTP authority for this proof family"
+                                    ),
+                                )
+                            charges["state_changing_requests"] = 12
                 if name == "http.request" and request.input.get("follow_redirects") is True:
                     # Reserve the complete same-origin redirect envelope before the
                     # first request. The planner cannot expand this fixed server limit.
@@ -40753,7 +40845,44 @@ async def _execute_hunt_capability_lifecycle(
     status, result = "failed", {}
     capability_execution = None
     try:
-        if name == "collections.inspect":
+        if name == "candidate.verify":
+            assert candidate_record is not None
+
+            async def verify_hunt_candidate_operation() -> dict[str, Any]:
+                verification = await _execute_hunt_candidate_verification(
+                    run=run,
+                    context=context,
+                    policy=policy,
+                    candidate_uuid=_uuid_or_400(
+                        str(request.input.get("candidate_id") or ""), "candidate id",
+                    ),
+                )
+                return {
+                    "ok": True,
+                    "status": "success",
+                    "candidate_id": str(request.input["candidate_id"]),
+                    "verification": verification,
+                }
+
+            candidate_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=verify_hunt_candidate_operation,
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution=_hunt_redacted_capability_input(
+                    name, request.input,
+                ),
+                blocked_exceptions=(HTTPException,),
+                conservative_full_budget=True,
+            )
+            capability_execution = await dispatch_registered_adapter(
+                candidate_adapter,
+                target=inline_hunt_target_binding(),
+                requested_budget=durable_reservation.record.requested,
+            )
+            result = candidate_adapter.result
+            if candidate_adapter.blocked_exception is not None:
+                raise candidate_adapter.blocked_exception
+        elif name == "collections.inspect":
             collection_adapter = ControlPlaneExecutionAdapter(
                 specification=spec,
                 operation=inspect_bound_collections,
@@ -42401,33 +42530,15 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
 
 
-@app.post("/hunts/{hunt_id}/candidates/{candidate_id}/verify")
-async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-            policy = _hunt_json(run["policy_json"], {})
-            if not policy.get("approval_receipt_id"):
-                raise HTTPException(status_code=403, detail="Deterministic verification requires a target-bound approval receipt")
-            authority_context = _hunt_json(run["context_pack"], {})
-            target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
-            await _validate_approval_receipt_for_action(
-                conn, policy["approval_receipt_id"],
-                target_url=str(target_context.get("url") or target_context.get("locator") or ""),
-                target_id=run["target_id"], action_name="hunt.verify", command="hunt.verify",
-                risk_tier="active", always_require_receipt=True,
-                require_target_binding=str(run["target_kind"]) != "device",
-                require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
-            )
-            used = _hunt_json(run["budget_used_json"], {})
-            budget = _hunt_json(run["budget_json"], {})
-            if int(used.get("verifications") or 0) >= int(budget.get("max_verifications") or 0):
-                raise HTTPException(status_code=409, detail="Hunt verification budget exhausted")
-            used["verifications"] = int(used.get("verifications") or 0) + 1
-            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
-    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+async def _execute_hunt_candidate_verification(
+    *,
+    run: Mapping[str, Any],
+    context: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    candidate_uuid: uuid.UUID,
+) -> dict[str, Any]:
+    """Execute the server-owned verifier after canonical action admission."""
     if run["device_target_id"]:
-        context = _hunt_json(run["context_pack"], {})
         try:
             native_device_policy = DeviceHuntPolicyState.from_mapping(
                 context.get("device_policy_state") or {}
@@ -42465,9 +42576,36 @@ async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
         )
     else:
         result = await _verify_suspected_finding_workflow(
-            candidate_uuid, policy["approval_receipt_id"], created_by=f"hunt_v2:{hunt_id}",
+            candidate_uuid,
+            str(policy["approval_receipt_id"]),
+            created_by=f"hunt_v2:{run['id']}",
         )
-    return {"hunt_id": hunt_id, "candidate_id": candidate_id, "verification": result}
+    return result
+
+
+@app.post("/hunts/{hunt_id}/candidates/{candidate_id}/verify")
+async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    action = await execute_hunt_capability(
+        hunt_id,
+        "candidate.verify",
+        HuntCapabilityRequest(
+            idempotency_key=f"candidate-verify:{candidate_uuid}",
+            input={"candidate_id": str(candidate_uuid)},
+        ),
+    )
+    result = action.get("result") if isinstance(action.get("result"), Mapping) else {}
+    verification = (
+        result.get("verification")
+        if isinstance(result.get("verification"), Mapping)
+        else result
+    )
+    return {
+        "hunt_id": hunt_id,
+        "candidate_id": str(candidate_uuid),
+        "verification": verification,
+        "action": action,
+    }
 
 
 class AgentHuntRequest(BaseModel):
@@ -65926,7 +66064,6 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         )
         if approval_context:
             base_opts.update(approval_context)
-        base_opts = await _resolve_target_credential_profiles(conn, uuid.UUID(target_id), base_opts)
         enq = await _enqueue_asm_exploit_batch(
             conn, r, target_id, target["url"], base_opts,
             batch_size=request.batch_size, stale_days=request.stale_days,
@@ -65996,7 +66133,6 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
         )
         if approval_context:
             base_opts.update(approval_context)
-        base_opts = await _resolve_target_credential_profiles(conn, uuid.UUID(target_id), base_opts)
         if request.budget_profile:
             base_opts["budget_profile"] = request.budget_profile
         enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="api")
@@ -66142,7 +66278,6 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
         )
         if approval_context:
             base_opts.update(approval_context)
-        base_opts = await _resolve_target_credential_profiles(conn, uuid.UUID(target_id), base_opts)
         if rec["next_action"] == "recon":
             enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
             await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))

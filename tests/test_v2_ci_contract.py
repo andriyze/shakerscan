@@ -13,35 +13,12 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def test_v2_workflow_watches_runtime_scanner_and_gate_paths():
+def test_v2_workflow_runs_for_every_v2_push_and_pull_request():
     text = _workflow_text()
-
-    for path in (
-        "api/capabilities/**",
-        "api/agent_tools.py",
-        "api/hunt/capability_executor.py",
-        "api/parallel_scan.py",
-        "api/broker_worker.py",
-        "api/scan/**",
-        "api/worker.py",
-        "scanner/scanner.py",
-        "scanner/scanner_tools/**",
-        "scripts/upgrade_smoke.sh",
-        "scripts/release_gates.py",
-        "tests/test_scan_*.py",
-        "tests/test_hunt_*.py",
-        "tests/test_*capability*.py",
-        "tests/test_*adapter*.py",
-        "tests/test_parallel_*.py",
-        "tests/test_request_meter.py",
-        "tests/test_subprocess_receipts.py",
-        "tests/test_worker_scan_ai_gating.py",
-        "tests/test_api_scan_option_masking.py",
-        "tests/test_api_helpers.py",
-        "tests/**",
-        "ui/**",
-    ):
-        assert text.count(f"- {path}") >= 2, path
+    trigger = text.split("permissions:", 1)[0]
+    assert "push:\n    branches:\n      - v2" in trigger
+    assert "pull_request:" in trigger
+    assert "paths:" not in trigger
 
 
 def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
@@ -131,9 +108,9 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     steps = workflow["jobs"]["contracts"]["steps"]
     assert len([step for step in steps if "run" in step]) >= 10
     image_steps = workflow["jobs"]["images-api-ui"]["steps"]
-    image_checkout = next(
-        step for step in image_steps if step.get("uses") == "actions/checkout@v6"
-    )
+    image_checkout = next(step for step in image_steps if str(step.get("uses", "")).startswith("actions/checkout@"))
+    assert image_checkout["uses"].split("@", 1)[1].isalnum()
+    assert len(image_checkout["uses"].split("@", 1)[1]) == 40
     assert image_checkout["with"]["fetch-depth"] == 0
     text = _workflow_text()
     assert "scripts/run_complete_python_suite.py --collect-only" in text

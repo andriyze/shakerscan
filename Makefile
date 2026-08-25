@@ -20,6 +20,7 @@ dependency-audit:
 ## Install from this exact checkout into an empty temporary home without starting services.
 installer-smoke:
 	scripts/installer_smoke.sh
+	scripts/installer_channel_smoke.sh
 
 ## Start the exact curl-installed release stack and verify user-visible contracts.
 installed-stack-smoke:

@@ -27,6 +27,9 @@ cleanup() {
     docker rm -f "$JUICE_CONTAINER" >/dev/null 2>&1 || true
     if [ -x "$BIN_DIR/shakerscan" ]; then
         HOME="$SMOKE_HOME" COMPOSE_PROJECT_NAME="$PROJECT" \
+            SHAKERSCAN_DISABLE_IMAGE_LOCK=1 \
+            SCANNER_IMAGE="shakerscan-scanner:$VERSION" API_IMAGE="shakerscan-api:$VERSION" \
+            UI_IMAGE="shakerscan-ui:$VERSION" SIGNER_IMAGE="shakerscan-model-intake-signer:$VERSION" \
             SCANNER_IMAGE_TAG="$VERSION" SCANNER_IMAGE_REPO=shakerscan-scanner \
             API_IMAGE_REPO=shakerscan-api UI_IMAGE_REPO=shakerscan-ui \
             MODEL_INTAKE_SIGNER_IMAGE_REPO=shakerscan-model-intake-signer \
@@ -42,11 +45,23 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$SMOKE_HOME"
+mkdir -p "$SMOKE_ROOT/assets/v$VERSION"
+printf '%s\n' \
+  "SCANNER_IMAGE=shakerscan/shakerscan-scanner@sha256:$(printf '1%.0s' {1..64})" \
+  "API_IMAGE=shakerscan/shakerscan-api@sha256:$(printf '2%.0s' {1..64})" \
+  "UI_IMAGE=shakerscan/shakerscan-ui@sha256:$(printf '3%.0s' {1..64})" \
+  "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@sha256:$(printf '4%.0s' {1..64})" \
+  > "$SMOKE_ROOT/assets/v$VERSION/release-image-lock.env"
 HOME="$SMOKE_HOME" SHAKERSCAN_HOME="$RUNTIME" SHAKERSCAN_BIN_DIR="$BIN_DIR" \
-    SHAKERSCAN_RAW_BASE="file://$ROOT_DIR" SHAKERSCAN_START=0 SHELL=/bin/bash \
+    SHAKERSCAN_RAW_BASE="file://$ROOT_DIR" SHAKERSCAN_START=0 \
+    SHAKERSCAN_DISABLE_IMAGE_LOCK=1 \
+    SHAKERSCAN_RELEASE_ASSET_ROOT="file://$SMOKE_ROOT/assets" SHELL=/bin/bash \
     sh "$ROOT_DIR/install/index.sh" >/dev/null
 
 HOME="$SMOKE_HOME" COMPOSE_PROJECT_NAME="$PROJECT" WORKERS=1 \
+    SHAKERSCAN_DISABLE_IMAGE_LOCK=1 \
+    SCANNER_IMAGE="shakerscan-scanner:$VERSION" API_IMAGE="shakerscan-api:$VERSION" \
+    UI_IMAGE="shakerscan-ui:$VERSION" SIGNER_IMAGE="shakerscan-model-intake-signer:$VERSION" \
     SCANNER_IMAGE_TAG="$VERSION" SCANNER_IMAGE_REPO=shakerscan-scanner \
     API_IMAGE_REPO=shakerscan-api UI_IMAGE_REPO=shakerscan-ui \
     MODEL_INTAKE_SIGNER_IMAGE_REPO=shakerscan-model-intake-signer \

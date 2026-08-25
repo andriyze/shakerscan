@@ -19861,6 +19861,19 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
             "collections.replay_safe"
         )
+        async with db_pool.acquire() as authority_conn:
+            await _revalidate_hunt_action_authority(
+                authority_conn,
+                run=run,
+                target=target,
+                target_url=target_url,
+                policy=ScanPolicy(
+                    active_testing=bool(hunt_policy.get("active_testing")),
+                    scope_receipt_id=target.scope_receipt_id,
+                    approval_receipt_id=hunt_policy.get("approval_receipt_id"),
+                ),
+                capability_name=replay_spec.name,
+            )
         replay_adapter = ReplayExecutionAdapter(
             specification=replay_spec,
             execution_kwargs={
@@ -20073,6 +20086,51 @@ def _worker_hunt_web_target(
         scope_receipt_id=str(policy.get("scope_receipt_id") or "") or None,
     )
     return target, target_url
+
+
+async def _revalidate_hunt_action_authority(
+    conn: Any,
+    *,
+    run: Mapping[str, Any],
+    target: TargetBinding,
+    target_url: str,
+    policy: ScanPolicy,
+    capability_name: str,
+) -> None:
+    """Recheck mutable target and receipt authority immediately before traffic."""
+    if run.get("device_target_id"):
+        current = await conn.fetchrow(
+            "SELECT primary_locator AS locator, is_active FROM device_targets WHERE id=$1",
+            run["device_target_id"],
+        )
+        frozen_locator = str(target.canonical_host or "").strip()
+    else:
+        current = await conn.fetchrow(
+            "SELECT url AS locator, is_active FROM targets WHERE id=$1",
+            run["target_id"],
+        )
+        frozen_locator = str(target_url or "").strip()
+    if not current or not current["is_active"]:
+        raise CapabilityInputError("Hunt target is no longer active")
+    if str(current["locator"] or "").strip() != frozen_locator:
+        raise CapabilityInputError("Hunt target locator changed after admission")
+    authority_decision = await revalidate_scan_action_authority(
+        conn,
+        action=SimpleNamespace(capability_name=capability_name),
+        target_binding=target,
+        scope_receipt_id=target.scope_receipt_id,
+        approval_receipt_id=policy.approval_receipt_id,
+    )
+    if authority_decision is ActionAuthorityDecision.ALLOWED:
+        return
+    if authority_decision is ActionAuthorityDecision.REJECTED_REVOKED:
+        record_operational_event(get_redis(), "approval_revocation")
+    if authority_decision is ActionAuthorityDecision.REJECTED_SCOPE:
+        record_operational_event(get_redis(), "target_transport_block")
+    raise CapabilityInputError(
+        "Hunt action authority rejected at dispatch: "
+        f"{authority_decision.value}"
+    )
 
 
 def _worker_hunt_profile_context(
@@ -20458,6 +20516,14 @@ async def process_canonical_scanner_capability_job(
                     approval_receipt_id=hunt_policy.get(
                         "approval_receipt_id"
                     ),
+                )
+                await _revalidate_hunt_action_authority(
+                    conn,
+                    run=run,
+                    target=target,
+                    target_url=registered_target,
+                    policy=policy,
+                    capability_name=capability_name,
                 )
                 limits = _worker_hunt_ledger_limits(
                     _worker_json_object(run["budget_json"])
@@ -21001,6 +21067,14 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         "approval_receipt_id"
                     ),
                 )
+                await _revalidate_hunt_action_authority(
+                    conn,
+                    run=run,
+                    target=target,
+                    target_url=target_url,
+                    policy=policy,
+                    capability_name=capability_name,
+                )
                 browser_adapter = browser_capability_adapter(capability_name)
                 prepared = browser_adapter.prepare(
                     target=target,
@@ -21464,6 +21538,14 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     subdomain_discovery=capability_name == "subdomains.discover",
                     scope_receipt_id=target.scope_receipt_id,
                     approval_receipt_id=hunt_policy.get("approval_receipt_id"),
+                )
+                await _revalidate_hunt_action_authority(
+                    conn,
+                    run=run,
+                    target=target,
+                    target_url=target_url,
+                    policy=policy,
+                    capability_name=capability_name,
                 )
                 adapter = network_capability_adapter(capability_name)
                 prepared = adapter.prepare(
@@ -21954,22 +22036,14 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     raise ReservationConflict(
                         "HTTP queue payload does not match its durable action"
                     )
-                authority_decision = await revalidate_scan_action_authority(
+                await _revalidate_hunt_action_authority(
                     conn,
-                    action=SimpleNamespace(capability_name=capability_name),
-                    target_binding=target,
-                    scope_receipt_id=target.scope_receipt_id,
-                    approval_receipt_id=policy.approval_receipt_id,
+                    run=run,
+                    target=target,
+                    target_url=target_url,
+                    policy=policy,
+                    capability_name=capability_name,
                 )
-                if authority_decision is not ActionAuthorityDecision.ALLOWED:
-                    if authority_decision is ActionAuthorityDecision.REJECTED_REVOKED:
-                        record_operational_event(get_redis(), "approval_revocation")
-                    if authority_decision is ActionAuthorityDecision.REJECTED_SCOPE:
-                        record_operational_event(get_redis(), "target_transport_block")
-                    raise CapabilityInputError(
-                        "HTTP action authority rejected at dispatch: "
-                        f"{authority_decision.value}"
-                    )
                 lease_seconds = hunt_capability_lease_seconds(requested_budget)
                 running = stored.record.start(
                     worker_id=worker_id,

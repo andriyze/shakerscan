@@ -482,10 +482,10 @@ pull_prebuilt_images() {
     if ! compose pull api worker ui model-intake-signer; then
         local image
         for image in \
-            "${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}" \
-            "${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}" \
-            "${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}" \
-            "${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"; do
+            "${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+            "${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+            "${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+            "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
             if ! docker image inspect "$image" >/dev/null 2>&1; then
                 echo -e "${RED}Error: image pull failed and $image is not cached.${NC}" >&2
                 echo "Check Docker Hub/network access and run './scanner.sh start' again." >&2
@@ -1446,6 +1446,10 @@ configure_runtime_mode() {
     else
         export SCANNER_IMAGE_TAG
     fi
+    export SCANNER_IMAGE="${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export API_IMAGE="${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export UI_IMAGE="${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export SIGNER_IMAGE="${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
 
     if [ -f "$LOCAL_BUILD_MARKER" ]; then
         persisted_mode="$(head -n 1 "$LOCAL_BUILD_MARKER" 2>/dev/null | tr -d '[:space:]')"
@@ -1966,9 +1970,9 @@ start_services() {
     fi
     if [ "$USE_PREBUILT" -eq 1 ]; then
         echo "Mode: prebuilt images"
-        echo "  api:     ${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
-        echo "  scanner: ${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
-        echo "  ui:      ${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}"
+        echo "  api:     ${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+        echo "  scanner: ${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+        echo "  ui:      ${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
         pull_prebuilt_images
     else
         echo "Mode: local build"

@@ -3,7 +3,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}
     environment:
       POSTGRES_USER: scanner
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; run ./scanner.sh start}
@@ -24,7 +24,7 @@ services:
       - signer-control
 
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis:7.4.11-alpine3.21@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf}
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required; run ./scanner.sh start}
@@ -97,7 +97,7 @@ services:
     # image. It contains the checksum-pinned Docker client required to stage
     # the fixed Model Intake Firecracker guest through the mounted socket.
     # Workers continue to use SCANNER_IMAGE_REPO and carry no Docker client.
-    image: ${API_IMAGE_REPO:-shakerscan/shakerscan-api}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${API_IMAGE:-shakerscan/shakerscan-api:latest}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
@@ -214,7 +214,7 @@ services:
       - signer-control
 
   model-intake-signer-db-init:
-    image: postgres:16-alpine
+    image: ${MODEL_INTAKE_SIGNER_POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - MODEL_INTAKE_SIGNER_DATABASE_PASSWORD=${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required; run ./scanner.sh start}
@@ -236,7 +236,7 @@ services:
     restart: "no"
 
   model-intake-signer:
-    image: ${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SIGNER_IMAGE:-shakerscan/shakerscan-model-intake-signer:latest}
     environment:
       - DATABASE_URL=postgresql://model_intake_signer:${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required}@postgres:5432/scanner
       - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
@@ -264,7 +264,7 @@ services:
   fleet-edge:
     profiles: ["fleet"]
     network_mode: host
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${SHAKERSCAN_DATA_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}/scanner
@@ -323,7 +323,7 @@ services:
 
   worker:
     init: true
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -402,7 +402,7 @@ services:
   agent-tool-worker:
     init: true
     hostname: shakerscan-agent-tool-worker
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -442,7 +442,7 @@ services:
     profiles: ["devices"]
     init: true
     hostname: shakerscan-device-worker
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -491,7 +491,7 @@ services:
 
   model-intake-sandbox:
     init: true
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
     user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"
     network_mode: none
     read_only: true
@@ -522,7 +522,7 @@ services:
     restart: unless-stopped
 
   gungnir-worker:
-    image: ${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
@@ -545,7 +545,7 @@ services:
     restart: unless-stopped
 
   ui:
-    image: ${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}:${SCANNER_IMAGE_TAG:-latest}
+    image: ${UI_IMAGE:-shakerscan/shakerscan-ui:latest}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_UI_PORT:-3000}:3000"
     environment:

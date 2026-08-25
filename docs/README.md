@@ -22,7 +22,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 |---|---|
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Future-only product roadmap and remaining release-validation work |
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
-| [`release-process.md`](release-process.md) | Enforced candidate, digest promotion, optional physical acceptance, public smoke, and stable-channel sequence |
+| [`release-process.md`](release-process.md) | Enforced candidate, required exact-SHA physical gates, digest promotion, public smoke, and stable-channel sequence |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`multi-node-guide.md`](multi-node-guide.md) | Set up and operate WireGuard or outbound-HTTPS multi-node fleets |
 | [`releases/2.0.0.md`](releases/2.0.0.md) | Pending ShakerScan 2.0.0 AI-native architecture release notes and validation boundary |

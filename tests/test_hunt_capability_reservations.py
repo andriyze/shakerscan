@@ -47,6 +47,7 @@ def _running_reservation():
 
 def test_inline_hunt_capability_set_is_explicit_and_bounded():
     assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("inline")} == {
+        "candidate.verify",
         "collections.inspect",
         "collections.select",
         "tls.inspect",

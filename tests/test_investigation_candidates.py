@@ -3,6 +3,7 @@ import os
 import uuid
 
 from api import investigation_candidates as candidates
+from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
 def test_web_and_device_candidate_boundaries_are_mutually_exclusive():
@@ -140,6 +141,25 @@ def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():
     assert 'payload["authoritative"] = False' in api_source
     assert "FROM finding_verifications WHERE candidate_id=$1" in api_source
     assert "FROM evidence_instances WHERE candidate_id=$1" in api_source
+
+
+def test_candidate_verification_is_an_approval_bound_canonical_capability():
+    specification = CAPABILITY_REGISTRY.require("candidate.verify")
+    assert specification.hunt_executor == "inline"
+    assert specification.requires_active_approval
+    assert specification.target_kinds == frozenset({"web", "api", "device"})
+    assert specification.budget_cost == {"tool_wall_seconds": 180}
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    api_source = open(os.path.join(root, "api", "api.py"), encoding="utf-8").read()
+    route_start = api_source.index(
+        '@app.post("/hunts/{hunt_id}/candidates/{candidate_id}/verify")'
+    )
+    route_end = api_source.index("\n@app.", route_start)
+    route_source = api_source[route_start:route_end]
+    assert '"candidate.verify"' in route_source
+    assert "execute_hunt_capability(" in route_source
+    assert "_execute_hunt_candidate_verification(" not in route_source
 
 
 def test_deep_hunt_claim_persistence_is_candidate_only_and_legacy_rows_are_migrated():

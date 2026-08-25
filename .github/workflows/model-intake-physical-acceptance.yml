@@ -1,0 +1,54 @@
+name: Model Intake physical acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact deployed candidate SHA"
+        required: true
+      api_url:
+        description: "API URL backed by the exact-SHA KVM deployment"
+        required: true
+      huggingface_source:
+        description: "Authorized public Hugging Face model reference"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-intake-physical-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    name: Real Hugging Face and KVM execution
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    environment: model-intake-physical
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - name: Exercise exact deployed KVM runner
+        env:
+          ACCEPTANCE_API_URL: ${{ inputs.api_url }}
+          ACCEPTANCE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          ACCEPTANCE_HUGGINGFACE_SOURCE: ${{ inputs.huggingface_source }}
+        run: |
+          python3 tests/e2e/run_model_intake_physical_acceptance.py \
+            --api-url "$ACCEPTANCE_API_URL" \
+            --candidate-sha "$ACCEPTANCE_CANDIDATE_SHA" \
+            --source "$ACCEPTANCE_HUGGINGFACE_SOURCE" \
+            --output artifacts/model-intake-physical-acceptance.json
+
+      - name: Upload candidate-bound physical receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: model-intake-physical-${{ inputs.candidate_sha }}
+          path: artifacts/model-intake-physical-acceptance.json
+          if-no-files-found: error
+          retention-days: 30

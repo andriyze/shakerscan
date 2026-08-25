@@ -4,141 +4,7 @@ on:
   push:
     branches:
       - v2
-    paths:
-      - api/runtime/**
-      - api/scan/**
-      - api/hunt/**
-      - api/capabilities/**
-      - api/agent_tools.py
-      - api/hunt/capability_executor.py
-      - api/parallel_scan.py
-      - api/api.py
-      - api/broker_worker.py
-      - api/worker.py
-      - api/retest_contract.py
-      - scripts/upgrade_schema_smoke.py
-      - scripts/upgrade_smoke.sh
-      - db/repairs/2026-08-22_v2_budget_reservations.sql
-      - db/**
-      - scanner/*.py
-      - scanner/manifests.py
-      - scanner/scanner.py
-      - scanner/scanner_tools/**
-      - scanner/scanner_tools/build_fingerprint.py
-      - scanner/scanner_tools/request_collections.py
-      - scanner/scanner_tools/request_replay.py
-      - scanner/scanner_tools/url_redaction.py
-      - scanner/scanner_tools/v2_request_replay_hardening.py
-      - scanner/scanner_tools/v2_fingerprint_hardening.py
-      - tests/test_scan_*.py
-      - tests/test_hunt_*.py
-      - tests/test_*capability*.py
-      - tests/test_*adapter*.py
-      - tests/test_parallel_*.py
-      - tests/test_broker_scan_execution.py
-      - tests/test_broker_worker.py
-      - tests/test_sitecustomize_frozen_dns.py
-      - tests/test_request_meter.py
-      - tests/test_subprocess_receipts.py
-      - tests/test_worker_scan_ai_gating.py
-      - tests/test_api_scan_option_masking.py
-      - tests/test_api_helpers.py
-      - tests/test_request_collections_v2.py
-      - tests/test_budget_reservation_lifecycle.py
-      - tests/test_reservation_store.py
-      - tests/test_retest_contract_migrations.py
-      - tests/test_runtime_receipts.py
-      - tests/test_v2_native_fingerprint.py
-      - tests/test_v2_native_receipt_hardening.py
-      - tests/test_discovery_recovery_checkpoint.py
-      - tests/test_hunt_start_contract.py
-      - tests/test_hunt_authority_integrity.py
-      - tests/test_request_replay.py
-      - tests/test_request_replay_executor.py
-      - tests/test_v2_native_replay_primitives.py
-      - tests/test_v2_replay_executor_durability.py
-      - tests/test_v2_worker_replay.py
-      - tests/test_v2_public_url_redaction.py
-      - tests/test_scan_execution_plan.py
-      - tests/test_scan_job_contract.py
-      - tests/test_scan_v2_contract.py
-      - tests/test_scan_worker_contract.py
-      - tests/test_scan_worker_dispatch.py
-      - tests/**
-      - tests/test_v2_ci_contract.py
-      - scripts/release_gates.py
-      - scripts/generate_scan_contract.py
-      - scripts/generate_hunt_contract.py
-      - ui/**
-      - .github/workflows/v2-*.yml
   pull_request:
-    paths:
-      - api/runtime/**
-      - api/scan/**
-      - api/hunt/**
-      - api/capabilities/**
-      - api/agent_tools.py
-      - api/hunt/capability_executor.py
-      - api/parallel_scan.py
-      - api/api.py
-      - api/broker_worker.py
-      - api/worker.py
-      - api/retest_contract.py
-      - scripts/upgrade_schema_smoke.py
-      - scripts/upgrade_smoke.sh
-      - db/repairs/2026-08-22_v2_budget_reservations.sql
-      - db/**
-      - scanner/*.py
-      - scanner/manifests.py
-      - scanner/scanner.py
-      - scanner/scanner_tools/**
-      - scanner/scanner_tools/build_fingerprint.py
-      - scanner/scanner_tools/request_collections.py
-      - scanner/scanner_tools/request_replay.py
-      - scanner/scanner_tools/url_redaction.py
-      - scanner/scanner_tools/v2_request_replay_hardening.py
-      - scanner/scanner_tools/v2_fingerprint_hardening.py
-      - tests/test_scan_*.py
-      - tests/test_hunt_*.py
-      - tests/test_*capability*.py
-      - tests/test_*adapter*.py
-      - tests/test_parallel_*.py
-      - tests/test_broker_scan_execution.py
-      - tests/test_broker_worker.py
-      - tests/test_sitecustomize_frozen_dns.py
-      - tests/test_request_meter.py
-      - tests/test_subprocess_receipts.py
-      - tests/test_worker_scan_ai_gating.py
-      - tests/test_api_scan_option_masking.py
-      - tests/test_api_helpers.py
-      - tests/test_request_collections_v2.py
-      - tests/test_budget_reservation_lifecycle.py
-      - tests/test_reservation_store.py
-      - tests/test_retest_contract_migrations.py
-      - tests/test_runtime_receipts.py
-      - tests/test_v2_native_fingerprint.py
-      - tests/test_v2_native_receipt_hardening.py
-      - tests/test_discovery_recovery_checkpoint.py
-      - tests/test_hunt_start_contract.py
-      - tests/test_hunt_authority_integrity.py
-      - tests/test_request_replay.py
-      - tests/test_request_replay_executor.py
-      - tests/test_v2_native_replay_primitives.py
-      - tests/test_v2_replay_executor_durability.py
-      - tests/test_v2_worker_replay.py
-      - tests/test_v2_public_url_redaction.py
-      - tests/test_scan_execution_plan.py
-      - tests/test_scan_job_contract.py
-      - tests/test_scan_v2_contract.py
-      - tests/test_scan_worker_contract.py
-      - tests/test_scan_worker_dispatch.py
-      - tests/**
-      - tests/test_v2_ci_contract.py
-      - scripts/release_gates.py
-      - scripts/generate_scan_contract.py
-      - scripts/generate_hunt_contract.py
-      - ui/**
-      - .github/workflows/v2-*.yml
   workflow_dispatch:
 
 permissions:
@@ -155,7 +21,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       ui: ${{ steps.filter.outputs.ui }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
 
@@ -208,9 +74,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
 
@@ -413,7 +279,7 @@ jobs:
 
       - name: Record focused contract results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v2-focused-contract-results
           path: artifacts/v2-focused.xml
@@ -425,9 +291,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
           cache: pip
@@ -451,7 +317,7 @@ jobs:
 
       - name: Upload full-suite results and coverage
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v2-full-python-results
           path: artifacts/
@@ -463,10 +329,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
       - name: Set up supported Node runtime
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
           cache: npm
@@ -496,14 +362,14 @@ jobs:
       MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
       MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           # The upgrade receipt resolves the v0.8.17 baseline tag to its exact
           # source commit. A depth-1 checkout contains only the candidate.
           fetch-depth: 0
 
       - name: Set up supported Node runtime
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
           cache: npm
@@ -545,7 +411,7 @@ jobs:
 
       - name: Upload external wire acceptance receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: external-wire-${{ github.sha }}
           path: artifacts/v2-external-wire.json
@@ -563,7 +429,7 @@ jobs:
 
       - name: Upload Scan cancellation race receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v2-scan-cancellation-race
           path: artifacts/v2-scan-cancellation-race.json
@@ -580,7 +446,7 @@ jobs:
 
       - name: Upload Scan reservation identity receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v2-scan-reservation-identity
           path: artifacts/v2-scan-reservation-identity.json
@@ -599,7 +465,7 @@ jobs:
 
       - name: Upload Scan action resume receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v2-scan-action-resume
           path: artifacts/v2-scan-action-resume.json
@@ -628,7 +494,7 @@ jobs:
 
       - name: Upload Model Intake scorecard
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v2-model-intake-e2e
           path: artifacts/v2-model-intake-scorecard.json

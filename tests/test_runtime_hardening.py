@@ -74,10 +74,10 @@ def test_release_compose_separates_api_control_plane_from_workers():
         r"(?ms)^  worker:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", compose
     ).group(0)
 
-    assert "${API_IMAGE_REPO:-shakerscan/shakerscan-api}" in api_block
-    assert "${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}" not in api_block
-    assert "${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}" in worker_block
-    assert "${API_IMAGE_REPO:-shakerscan/shakerscan-api}" not in worker_block
+    assert "${API_IMAGE:-shakerscan/shakerscan-api:latest}" in api_block
+    assert "${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}" not in api_block
+    assert "${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}" in worker_block
+    assert "${API_IMAGE:-shakerscan/shakerscan-api:latest}" not in worker_block
 
 
 def test_docs_page_renders_markdown_without_raw_html_injection():
@@ -207,8 +207,10 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert "dropdb -U scanner scanner_dirty" in script
     assert "pg_restore" in script
     assert "run_scenario scanner_dirty rollback" in script
-    assert "BASELINE_REF:-v0.8.17" in script
-    assert "shakerscan/shakerscan-scanner:0.8.17" in script
+    assert 'STABLE_VERSION="$(tr -d' in script
+    assert 'BASELINE_REF:-v${STABLE_VERSION}' in script
+    assert "previous-stable API/UI did not become healthy" in script
+    assert "shakerscan/shakerscan-scanner@sha256:1bfdd22e87bf90cead6a2c38cd98abd94c5a8eadeea9cee351ea9a484bd1d1fd" in script
     assert "run_baseline_migrations scanner_dirty" in script
     assert 'docker restart "$SMOKE_CONTAINER"' in script
     assert "run_scenario scanner_dirty verify_dirty" in script

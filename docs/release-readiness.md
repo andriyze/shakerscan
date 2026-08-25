@@ -136,7 +136,8 @@ receipts.
 - [ ] Scanner, API overlay, UI, signer, and fixed Firecracker guest build and self-test.
 - [ ] External adapter wire acceptance proves observed request/connection ceilings for all adapters.
 - [ ] Clean installer, duplicate dirty upgrade, required-migration failure, backup, and rollback pass.
-- [ ] CodeQL, security/static checks, commit policy, V2 contracts, full E2E, and real-fleet parity are
+- [ ] CodeQL, security/static checks, exact-manifest vulnerability scans, commit policy, V2
+  contracts, full E2E, real-fleet parity, Model Intake KVM, and physical-device acceptance are
   successful for the same 40-character source SHA.
 
 ### Manual UI acceptance
@@ -184,13 +185,16 @@ receipts.
 - [ ] Public-model E2E and report/artifact parity pass on an authorized networked runner.
 - [ ] AMD64 Linux/KVM qualification passes on a compatible host or remains an explicit stop-ship item
   for the claimed support tier.
+- [ ] One authorized physical device completes a safe-remote posture scan with confirmed online
+  reachability on an exact-SHA device worker.
 - [ ] Exact-SHA broker parity covers local/broker/parallel semantics, worker loss/reclaim, lease
   authority, centralized artifacts, finding dedupe, and build identity.
 
 ## Publication sequence (not authorized by preparation)
 
 1. Freeze one exact candidate SHA after all implementation and manual fixes.
-2. Obtain successful exact-SHA full E2E, CodeQL, and V2 real-fleet parity runs.
+2. Obtain successful exact-SHA full E2E, CodeQL, V2 real-fleet parity, Model Intake KVM, and
+   physical-device acceptance runs.
 3. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
 4. Complete candidate-image, upgrade, Model Intake, UI/API/CLI/MCP, and public-install acceptance.
 5. Run **Promote release** to map version tags to accepted digests without rebuilding.

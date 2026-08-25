@@ -112,7 +112,7 @@ class ApiClient:
     def post(
         self,
         path: str,
-        payload: Mapping[str, Any],
+        payload: Mapping[str, Any] | None = None,
         *,
         idempotency_key: str | None = None,
     ) -> Any:
@@ -351,6 +351,23 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             _hunt_start_payload(args, contract),
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
+    if args.hunt_command == "get":
+        return client.get(f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}")
+    if args.hunt_command == "list":
+        query = {"limit": str(args.limit)}
+        if args.target_id:
+            query["target_id"] = args.target_id
+        if args.status:
+            query["status"] = args.status
+        return client.get(f"/hunts?{urllib.parse.urlencode(query)}")
+    if args.hunt_command == "query":
+        filters = _read_json(args.filter, default={})
+        if not isinstance(filters, dict):
+            raise CliError("Hunt query filter must be one JSON object")
+        return client.post(
+            f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/query",
+            {"kind": args.kind, "filter": filters, "limit": args.limit},
+        )
     if args.hunt_command == "call":
         run = client.get(f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}")
         if not isinstance(run, Mapping):
@@ -375,6 +392,50 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             {"idempotency_key": key, "input": inputs},
         )
         return {"idempotency_key": key, "response": response}
+    if args.hunt_command == "candidate":
+        if args.request:
+            payload = _read_json(args.request, default={})
+            if not isinstance(payload, dict):
+                raise CliError("Hunt candidate request must be one JSON object")
+        else:
+            if not args.family or not args.title or not args.claim or not args.evidence_ref:
+                raise CliError(
+                    "candidate requires --family, --title, --claim, and --evidence-ref"
+                )
+            locus = _read_json(args.locus, default={})
+            if not isinstance(locus, dict):
+                raise CliError("Hunt candidate locus must be one JSON object")
+            payload = {
+                "family": args.family,
+                "locus": locus,
+                "title": args.title,
+                "claim": args.claim,
+                "severity": args.severity,
+                "evidence_refs": list(dict.fromkeys(args.evidence_ref)),
+            }
+            if args.verifier_contract_id:
+                payload["verifier_contract_id"] = args.verifier_contract_id
+        return client.post(
+            f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/candidates",
+            payload,
+            idempotency_key=_validate_idempotency_key(args.idempotency_key),
+        )
+    if args.hunt_command == "verify":
+        return client.post(
+            "/hunts/{}/candidates/{}/verify".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.candidate_id, safe=""),
+            ),
+        )
+    if args.hunt_command == "finish":
+        return client.post(
+            f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/finish",
+            {"summary": args.summary, "next_actions": args.next_action},
+        )
+    if args.hunt_command in {"cancel", "resume"}:
+        return client.post(
+            f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/{args.hunt_command}",
+        )
     raise CliError("unknown Hunt command")
 
 
@@ -586,7 +647,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-url", required=True, help=argparse.SUPPRESS)
     products = parser.add_subparsers(dest="product", required=True)
 
-    hunt = products.add_parser("hunt", help="Start or drive one canonical Hunt")
+    hunt = products.add_parser("hunt", help="Manage the complete canonical Hunt lifecycle")
     hunt_commands = hunt.add_subparsers(dest="hunt_command", required=True)
     hunt_start = hunt_commands.add_parser("start", help="Start a target-bound Hunt")
     hunt_start.add_argument("--request", metavar="FILE", help="Complete JSON contract; use - for stdin")
@@ -607,11 +668,54 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
 
+    hunt_get = hunt_commands.add_parser("get", help="Read one Hunt and its capability manifest")
+    hunt_get.add_argument("hunt_id")
+
+    hunt_list = hunt_commands.add_parser("list", help="List Hunts using bounded server filters")
+    hunt_list.add_argument("--target-id")
+    hunt_list.add_argument("--status")
+    hunt_list.add_argument("--limit", type=int, choices=range(1, 201), default=50)
+
+    hunt_query = hunt_commands.add_parser("query", help="Query bounded Hunt context")
+    hunt_query.add_argument("hunt_id")
+    hunt_query.add_argument(
+        "kind",
+        choices=("summary", "endpoints", "findings", "principals", "services", "scans", "collections", "candidates", "notes", "receipts"),
+    )
+    hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
+    hunt_query.add_argument("--limit", type=int, choices=range(1, 501), default=100)
+
     hunt_call = hunt_commands.add_parser("call", help="Call one server-returned capability")
     hunt_call.add_argument("hunt_id")
     hunt_call.add_argument("capability_name")
     hunt_call.add_argument("--input", metavar="FILE", help="JSON object; use - for stdin")
     hunt_call.add_argument("--idempotency-key")
+
+    hunt_candidate = hunt_commands.add_parser("candidate", help="Record a bounded investigation candidate")
+    hunt_candidate.add_argument("hunt_id")
+    hunt_candidate.add_argument("--request", metavar="FILE", help="Complete JSON request; use - for stdin")
+    hunt_candidate.add_argument("--family")
+    hunt_candidate.add_argument("--locus", metavar="FILE", help="JSON locus object; use - for stdin")
+    hunt_candidate.add_argument("--title")
+    hunt_candidate.add_argument("--claim")
+    hunt_candidate.add_argument("--severity", choices=("critical", "high", "medium", "low", "info"), default="info")
+    hunt_candidate.add_argument("--evidence-ref", action="append", default=[])
+    hunt_candidate.add_argument("--verifier-contract-id")
+    hunt_candidate.add_argument("--idempotency-key")
+
+    hunt_verify = hunt_commands.add_parser("verify", help="Run canonical deterministic candidate verification")
+    hunt_verify.add_argument("hunt_id")
+    hunt_verify.add_argument("candidate_id")
+
+    hunt_finish = hunt_commands.add_parser("finish", help="Finish a Hunt with its debrief")
+    hunt_finish.add_argument("hunt_id")
+    hunt_finish.add_argument("--summary", required=True)
+    hunt_finish.add_argument("--next-action", action="append", default=[])
+
+    hunt_cancel = hunt_commands.add_parser("cancel", help="Cancel an active Hunt")
+    hunt_cancel.add_argument("hunt_id")
+    hunt_resume = hunt_commands.add_parser("resume", help="Resume a paused or interrupted Hunt")
+    hunt_resume.add_argument("hunt_id")
 
     credentials = products.add_parser(
         "credentials", help="Create, rotate, or admission-test an encrypted profile",

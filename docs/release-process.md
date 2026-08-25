@@ -17,21 +17,25 @@ version, notes, and provenance metadata.
 
 ## 1. Freeze and build a candidate
 
-Merge the intended commit through protected `main`, run full E2E and CodeQL on that exact commit,
-then run **Release candidate** with `version`, the exact 40-character SHA, and both successful run
-IDs. The workflow verifies those runs against the same SHA, runs the remaining frozen-source gates and native builds,
+Merge the intended commit through protected `main`, then run full E2E, CodeQL, real-fleet Scan
+parity, Model Intake physical acceptance, and Connected Device physical acceptance on that exact
+commit. Run **Release candidate** with `version`, the exact 40-character SHA, and all five successful
+run IDs. The workflow verifies each workflow name, conclusion, and head SHA, runs the remaining
+frozen-source gates and native builds,
 bakes version plus source revision into `/opt/shakerscan/release-manifest.json`, pushes only
 `candidate-<sha>-<run-id>` multi-architecture manifests, and uploads
 `release-candidate-receipt.json`. Each platform build publishes BuildKit provenance and an SBOM;
 the final multi-architecture scanner, API, UI, and signer digests receive GitHub/Sigstore build
-attestations that are verified immediately and recorded in the receipt.
+attestations that are verified immediately and recorded in the receipt. The final four manifest
+digests are scanned for unwaived high/critical vulnerabilities before certification.
 
 Never deploy by a mutable version or `latest` during acceptance. Use the candidate tag or, for the
 strongest binding, the digests in the receipt.
 
-## 2. Physical acceptance (optional)
+## 2. Additional Fleet topology acceptance (optional)
 
-Operators may use a clean hosted-installer control plane and multiple broker VPS nodes on the exact
+Model Intake KVM and one authorized physical Connected Device are mandatory exact-SHA gates above.
+Operators may additionally use a clean hosted-installer control plane and multiple broker VPS nodes on the exact
 candidate digest to exercise cross-node placement, worker loss/reclaim, lease isolation, dedupe,
 centralized artifacts, and public datastore isolation. This is operational evidence, not a release
 promotion requirement, and it may be performed before or after publication.

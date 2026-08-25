@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,15 @@ from api.runtime.scan_credentials import (
 
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
 TARGET_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def test_canonical_scan_paths_never_auto_attach_target_credentials():
+    source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text(
+        encoding="utf-8"
+    )
+    # The sole occurrence is the isolated legacy compatibility definition.
+    # Scan, schedules, and ASM must instead carry explicit opaque profile IDs.
+    assert source.count("_resolve_target_credential_profiles(") == 1
 
 
 def _profile(

@@ -2,19 +2,34 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASELINE_REF="${BASELINE_REF:-v0.8.17}"
-BASELINE_IMAGE="${BASELINE_IMAGE:-shakerscan/shakerscan-scanner:0.8.17}"
+STABLE_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/install/STABLE_VERSION")"
+BASELINE_REF="${BASELINE_REF:-v${STABLE_VERSION}}"
+BASELINE_IMAGE="${BASELINE_IMAGE:-shakerscan/shakerscan-scanner@sha256:1bfdd22e87bf90cead6a2c38cd98abd94c5a8eadeea9cee351ea9a484bd1d1fd}"
+BASELINE_API_IMAGE="${BASELINE_API_IMAGE:-shakerscan/shakerscan-api@sha256:9349c5c0b4dc59c4c43de0583770ed03a996df6601adf49b175d40747a7f4a0a}"
+BASELINE_UI_IMAGE="${BASELINE_UI_IMAGE:-shakerscan/shakerscan-ui@sha256:7811dd9ff647c546fe695cc139171694e90b2bc26a725ec6b0534fe94c8ce7bb}"
 SCANNER_IMAGE="${SCANNER_IMAGE:-shakerscan-scanner:upgrade-smoke}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}"
+REDIS_IMAGE="${REDIS_IMAGE:-redis:7.4.11-alpine3.21@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf}"
 UPGRADE_FERNET_KEY="${UPGRADE_FERNET_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}"
 SMOKE_CONTAINER="shakerscan-upgrade-smoke-$$"
+ROLLBACK_REDIS_CONTAINER="shakerscan-rollback-redis-$$"
+ROLLBACK_API_CONTAINER="shakerscan-rollback-api-$$"
+ROLLBACK_UI_CONTAINER="shakerscan-rollback-ui-$$"
+ROLLBACK_WORKER_CONTAINER="shakerscan-rollback-worker-$$"
 SMOKE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-upgrade-smoke.XXXXXX")"
 
 cleanup() {
+    docker rm -f "$ROLLBACK_WORKER_CONTAINER" "$ROLLBACK_UI_CONTAINER" \
+        "$ROLLBACK_API_CONTAINER" "$ROLLBACK_REDIS_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$SMOKE_CONTAINER" >/dev/null 2>&1 || true
-    rm -rf "$SMOKE_TMP"
+    rm -rf -- "$SMOKE_TMP"
 }
 trap cleanup EXIT INT TERM
+
+if [ "$BASELINE_REF" != "v$STABLE_VERSION" ]; then
+    echo "BASELINE_REF must match install/STABLE_VERSION (v$STABLE_VERSION)" >&2
+    exit 1
+fi
 
 git -C "$REPO_ROOT" cat-file -e "${BASELINE_REF}:db/init.sql"
 git -C "$REPO_ROOT" show "${BASELINE_REF}:db/init.sql" > "$SMOKE_TMP/baseline.sql"
@@ -220,19 +235,78 @@ docker exec -i "$SMOKE_CONTAINER" pg_restore \
     < "$SMOKE_TMP/scanner_dirty.before-upgrade.dump" >/dev/null
 run_scenario scanner_dirty rollback
 
+run_operational_rollback() {
+    docker run --detach --name "$ROLLBACK_REDIS_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        "$REDIS_IMAGE" redis-server --requirepass scanner >/dev/null
+    docker run --detach --name "$ROLLBACK_API_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
+        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
+        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
+        -e SCANNER_VERSION="$STABLE_VERSION" \
+        -e SCANNER_EXPECTED_VERSION="$STABLE_VERSION" \
+        -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
+        -e RESULTS_DIR=/results \
+        -v "$SMOKE_TMP/results:/results" \
+        "$BASELINE_API_IMAGE" >/dev/null
+    docker run --detach --name "$ROLLBACK_UI_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
+        -e NEXT_PUBLIC_APP_VERSION="$STABLE_VERSION" \
+        "$BASELINE_UI_IMAGE" >/dev/null
+    docker run --detach --name "$ROLLBACK_WORKER_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
+        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
+        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
+        -e SCANNER_VERSION="$STABLE_VERSION" \
+        -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
+        "$BASELINE_IMAGE" python3 /app/worker.py >/dev/null
+
+    local healthy=0
+    for _attempt in $(seq 1 90); do
+        if docker run --rm --network "container:$SMOKE_CONTAINER" \
+            --entrypoint sh "$SCANNER_IMAGE" -c \
+            "curl -sf http://127.0.0.1:8080/health >/dev/null && curl -sf http://127.0.0.1:3000/ >/dev/null"; then
+            healthy=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$healthy" -ne 1 ]; then
+        echo "previous-stable API/UI did not become healthy after rollback" >&2
+        docker logs "$ROLLBACK_API_CONTAINER" >&2 || true
+        docker logs "$ROLLBACK_UI_CONTAINER" >&2 || true
+        exit 1
+    fi
+    docker run --rm --network "container:$SMOKE_CONTAINER" \
+        --entrypoint sh "$SCANNER_IMAGE" -c \
+        "curl -sf 'http://127.0.0.1:8080/targets?limit=100' | grep -F 'upgrade.example.test' >/dev/null"
+    if [ "$(docker inspect --format '{{.State.Running}}' "$ROLLBACK_WORKER_CONTAINER")" != "true" ]; then
+        echo "Previous-stable worker did not remain running after rollback" >&2
+        docker logs "$ROLLBACK_WORKER_CONTAINER" >&2 || true
+        exit 1
+    fi
+}
+
+mkdir -p "$SMOKE_TMP/results"
+run_operational_rollback
+
 baseline_source_sha="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")"
 candidate_source_sha="${CANDIDATE_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 baseline_image_id="${BASELINE_IMAGE_DIGEST:-$(docker image inspect --format '{{.Id}}' "$BASELINE_IMAGE")}"
 candidate_image_id="${CANDIDATE_IMAGE_DIGEST:-$(docker image inspect --format '{{.Id}}' "$SCANNER_IMAGE")}"
 receipt_path="${UPGRADE_RECEIPT_PATH:-$SMOKE_TMP/upgrade-receipt.json}"
 python3 "$REPO_ROOT/scripts/upgrade_acceptance_receipt.py" \
+    --baseline-version "$STABLE_VERSION" \
     --baseline-source-sha "$baseline_source_sha" \
     --candidate-source-sha "$candidate_source_sha" \
     --baseline-image "$baseline_image_id" \
     --candidate-image "$candidate_image_id" \
     --output "$receipt_path"
 
-echo "Upgrade and rollback smoke passed from $BASELINE_REF using $SCANNER_IMAGE"
+echo "Upgrade and operational rollback smoke passed from $BASELINE_REF using $SCANNER_IMAGE"
 if [ -n "${UPGRADE_RECEIPT_PATH:-}" ]; then
     echo "Upgrade receipt: $receipt_path"
 fi

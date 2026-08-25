@@ -1,5 +1,5 @@
 const INSTALL_SCRIPT_URL =
-  'https://raw.githubusercontent.com/andriyze/shakerscan/main/install/index.sh'
+  'https://raw.githubusercontent.com/andriyze/shakerscan/main/install/bootstrap.sh'
 
 export default {
   async fetch() {

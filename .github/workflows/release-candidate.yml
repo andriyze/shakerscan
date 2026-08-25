@@ -18,6 +18,12 @@ on:
       parity_run_id:
         description: "Successful real-fleet Scan parity workflow run ID for this exact SHA"
         required: true
+      model_intake_physical_run_id:
+        description: "Successful real Hugging Face/KVM acceptance run ID for this exact SHA"
+        required: true
+      device_physical_run_id:
+        description: "Successful physical-device acceptance run ID for this exact SHA"
+        required: true
 
 # Serialize candidate construction. This workflow never publishes a version,
 # `latest`, an installer channel, a Git tag, or a GitHub Release.
@@ -50,7 +56,7 @@ jobs:
       workflow_sha: ${{ steps.meta.outputs.workflow_sha }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           # Manual publication validates and builds the explicitly approved
           # candidate, even when main has moved on with workflow-only fixes.
@@ -61,10 +67,14 @@ jobs:
 
       - name: Resolve release metadata
         id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         shell: bash
         run: |
-          version="${{ inputs.version }}"
-          candidate_sha="${{ inputs.candidate_sha }}"
+          version="$INPUT_VERSION"
+          candidate_sha="$INPUT_CANDIDATE_SHA"
           if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
             echo "Release candidates must run from refs/heads/main, got ${GITHUB_REF}" >&2
             exit 1
@@ -93,7 +103,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
-          echo "workflow_sha=${{ github.workflow_sha }}" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Verify candidate is on main
         shell: bash
@@ -119,7 +129,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout approved candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
           # The upgrade smoke loads the 0.5.7 schema from its historical
@@ -137,6 +147,8 @@ jobs:
           E2E_RUN_ID: ${{ inputs.e2e_run_id }}
           CODEQL_RUN_ID: ${{ inputs.codeql_run_id }}
           PARITY_RUN_ID: ${{ inputs.parity_run_id }}
+          MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
+          DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
         shell: bash
         run: |
           verify_run() {
@@ -148,6 +160,8 @@ jobs:
           verify_run "$E2E_RUN_ID" "E2E (full release gate)"
           verify_run "$CODEQL_RUN_ID" "CodeQL"
           verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
+          verify_run "$MODEL_INTAKE_PHYSICAL_RUN_ID" "Model Intake physical acceptance"
+          verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"
 
       - name: Download exact-SHA E2E scorecard
         env:
@@ -223,7 +237,7 @@ jobs:
 
       - name: Upload candidate external wire receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: external-wire-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/release-external-wire.json
@@ -233,7 +247,7 @@ jobs:
       - name: Build and self-test fixed Firecracker guest payload
         run: scripts/selftest-model-intake-guest.sh
 
-      - name: Unit, contract, documentation, and release gates
+      - name: Unit, contract, documentation, and release gates from exact source
         run: |
           mkdir -p artifacts
           docker run --rm --entrypoint python \
@@ -249,11 +263,18 @@ jobs:
             shakerscan-scanner:release-candidate \
             scripts/release_gates.py
 
+      - name: Verify baked candidate runtime without source shadowing
+        run: |
+          docker run --rm --entrypoint python \
+            -v "$PWD/scripts/verify_installed_runtime.py:/tmp/verify-installed-runtime.py:ro" \
+            shakerscan-scanner:release-candidate \
+            /tmp/verify-installed-runtime.py
+
       - name: Verify clean and dirty schema upgrades
         run: SCANNER_IMAGE=shakerscan-scanner:release-candidate scripts/upgrade_smoke.sh
 
       - name: Set up supported Node runtime
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
           cache: npm
@@ -303,10 +324,19 @@ jobs:
 
       - name: Upload candidate preservation receipt
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-preservation-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/release-preservation.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload exact-source Python contract report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/v2-full-python.xml
           if-no-files-found: error
           retention-days: 30
 
@@ -335,7 +365,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
@@ -346,17 +376,17 @@ jobs:
           echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push scanner by digest
         id: scanner
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           file: scanner/Dockerfile
@@ -382,7 +412,7 @@ jobs:
 
       - name: Build and push API control plane by digest
         id: api
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           file: scanner/Dockerfile.api
@@ -407,7 +437,7 @@ jobs:
 
       - name: Build and push UI by digest
         id: ui
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: ./ui
           file: ui/Dockerfile
@@ -432,7 +462,7 @@ jobs:
 
       - name: Build and push Model Intake signer by digest
         id: signer
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           file: api/model_intake_signer.Dockerfile
@@ -494,7 +524,7 @@ jobs:
           touch "/tmp/digests/signer/${signer_digest#sha256:}"
 
       - name: Upload digests
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -517,19 +547,23 @@ jobs:
       api_image: shakerscan/shakerscan-api:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
       ui_image: shakerscan/shakerscan-ui:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
       signer_image: shakerscan/shakerscan-model-intake-signer:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
+      scanner_digest: ${{ steps.receipt.outputs.scanner_digest }}
+      api_digest: ${{ steps.receipt.outputs.api_digest }}
+      ui_digest: ${{ steps.receipt.outputs.ui_digest }}
+      signer_digest: ${{ steps.receipt.outputs.signer_digest }}
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -605,7 +639,7 @@ jobs:
             > release-candidate-receipt.json
 
       - name: Attest final scanner manifest provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.SCANNER_IMAGE }}
           subject-digest: ${{ steps.receipt.outputs.scanner_digest }}
@@ -613,7 +647,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final API manifest provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.API_IMAGE }}
           subject-digest: ${{ steps.receipt.outputs.api_digest }}
@@ -621,7 +655,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final UI manifest provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.UI_IMAGE }}
           subject-digest: ${{ steps.receipt.outputs.ui_digest }}
@@ -629,7 +663,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final signer manifest provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.SIGNER_IMAGE }}
           subject-digest: ${{ steps.receipt.outputs.signer_digest }}
@@ -656,10 +690,65 @@ jobs:
           mv "$receipt_tmp" release-candidate-receipt.json
 
       - name: Upload uncertified manifest receipt
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: release-candidate-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  vulnerability-scan:
+    name: Scan exact ${{ matrix.name }} manifest
+    needs: [meta, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: scanner
+            image: shakerscan/shakerscan-scanner
+            digest: ${{ needs.merge.outputs.scanner_digest }}
+          - name: api
+            image: shakerscan/shakerscan-api
+            digest: ${{ needs.merge.outputs.api_digest }}
+          - name: ui
+            image: shakerscan/shakerscan-ui
+            digest: ${{ needs.merge.outputs.ui_digest }}
+          - name: signer
+            image: shakerscan/shakerscan-model-intake-signer
+            digest: ${{ needs.merge.outputs.signer_digest }}
+    steps:
+      - name: Checkout waiver policy
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+
+      - name: Validate active vulnerability waivers
+        run: |
+          python3 scripts/validate_vulnerability_waivers.py \
+            --file security/image-vulnerability-waivers.json \
+            --image "${{ matrix.name }}" \
+            --output .trivyignore
+
+      - name: Reject high or critical image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: docker.io/${{ matrix.image }}@${{ matrix.digest }}
+          format: json
+          output: trivy-${{ matrix.name }}.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 1
+          trivyignores: .trivyignore
+
+      - name: Upload vulnerability report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vulnerability-${{ matrix.name }}-${{ needs.meta.outputs.candidate_sha }}
+          path: trivy-${{ matrix.name }}.json
           if-no-files-found: error
           retention-days: 30
 
@@ -668,7 +757,7 @@ jobs:
   # pre-manifest build images cannot stand in for them.
   certify:
     name: Certify final manifest digests
-    needs: [meta, merge]
+    needs: [meta, merge, vulnerability-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -676,16 +765,22 @@ jobs:
       packages: read
     steps:
       - name: Checkout exact candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
           fetch-depth: 0
 
       - name: Download immutable manifest receipt
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/uncertified
+
+      - name: Download exact-source Python contract report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/certification
 
       - name: Pull and identify exact final manifests
         env:
@@ -715,7 +810,7 @@ jobs:
               --entrypoint python3 "$image" /app/release_identity.py --verify
           done
 
-      - name: Run complete contracts in final scanner runtime
+      - name: Verify exact final scanner runtime without source shadowing
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
@@ -723,11 +818,9 @@ jobs:
           mkdir -p artifacts/certification
           scanner_digest="$(jq -r '.images.scanner' artifacts/uncertified/release-candidate-receipt.json)"
           docker run --rm --entrypoint python \
-            -e PYTHONPATH=/src/api:/src/scanner:/src \
-            -v "$PWD:/src:ro" -w /src \
-            -v "$PWD/artifacts/certification:/artifacts" \
+            -v "$PWD/scripts/verify_installed_runtime.py:/tmp/verify-installed-runtime.py:ro" \
             "${SCANNER_IMAGE}@${scanner_digest}" \
-            scripts/run_complete_python_suite.py --artifacts-dir /artifacts
+            /tmp/verify-installed-runtime.py
 
       - name: Prove previous-stable upgrade, restart, and rollback
         env:
@@ -741,7 +834,7 @@ jobs:
             scripts/upgrade_smoke.sh
 
       - name: Set up supported Node browser runtime
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
           cache: npm
@@ -790,7 +883,7 @@ jobs:
           test "$(jq -r '.certification.status' release-candidate-receipt.json)" = pass
 
       - name: Upload promotion-ready receipt
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-candidate-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
           path: release-candidate-receipt.json
@@ -799,7 +892,7 @@ jobs:
 
       - name: Upload exact-digest certification evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-certification-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification

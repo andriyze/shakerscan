@@ -17,6 +17,7 @@ import {
 import {
   createAITarget,
   deleteAITarget,
+  getApiUrl,
   getAIInventory,
   getAISettings,
   getAITestScenarios,
@@ -46,14 +47,12 @@ import {
   type AITargetType,
 } from '@/lib/api'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
-
 const REDTEAM_RESOURCE_LINKS = [
-  { label: 'Learning map', href: `${API_URL}/ai/learning-guide` },
-  { label: 'Test cases', href: `${API_URL}/ai/test-cases` },
-  { label: 'promptfoo export', href: `${API_URL}/ai/test-cases/export?format=promptfoo` },
-  { label: 'PyRIT export', href: `${API_URL}/ai/test-cases/export?format=pyrit` },
-  { label: 'garak seed', href: `${API_URL}/ai/test-cases/export?format=garak` },
+  { label: 'Learning map', path: '/ai/learning-guide' },
+  { label: 'Test cases', path: '/ai/test-cases' },
+  { label: 'promptfoo export', path: '/ai/test-cases/export?format=promptfoo' },
+  { label: 'PyRIT export', path: '/ai/test-cases/export?format=pyrit' },
+  { label: 'garak seed', path: '/ai/test-cases/export?format=garak' },
 ]
 
 const TARGET_TYPES: Array<{ value: AITargetType; label: string; probePack: AIProbePack; responsePath: string; template: Record<string, unknown> }> = [
@@ -364,6 +363,7 @@ export default function AIGateSettingsPage() {
   const router = useRouter()
   const toast = useToast()
   const initialType = TARGET_TYPES[0]
+  const [runtimeApiUrl, setRuntimeApiUrl] = useState('')
   const [targets, setTargets] = useState<AITarget[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -464,6 +464,10 @@ export default function AIGateSettingsPage() {
     } finally {
       setLoadingCampaignHistory(null)
     }
+  }, [])
+
+  useEffect(() => {
+    setRuntimeApiUrl(getApiUrl())
   }, [])
 
   useEffect(() => {
@@ -1390,7 +1394,8 @@ export default function AIGateSettingsPage() {
                       <div className="flex flex-wrap gap-2">
                         {campaignHistory && (
                           <a
-                            href={`${API_URL}/ai/targets/${target.id}/campaign-history/export?limit=12`}
+                            href={runtimeApiUrl ? `${runtimeApiUrl}/ai/targets/${target.id}/campaign-history/export?limit=12` : undefined}
+                            aria-disabled={!runtimeApiUrl}
                             target="_blank"
                             rel="noreferrer"
                             className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
@@ -1578,7 +1583,8 @@ export default function AIGateSettingsPage() {
             {REDTEAM_RESOURCE_LINKS.map((item) => (
               <a
                 key={item.label}
-                href={item.href}
+                href={runtimeApiUrl ? `${runtimeApiUrl}${item.path}` : undefined}
+                aria-disabled={!runtimeApiUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"

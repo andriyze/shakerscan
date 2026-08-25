@@ -11,9 +11,19 @@ export SHAKERSCAN_HOME="$HOME/.shakerscan"
 export SHAKERSCAN_BIN_DIR="$HOME/.local/bin"
 export SHAKERSCAN_RAW_BASE="file://$ROOT_DIR"
 export SHAKERSCAN_START=0
+export SHAKERSCAN_DISABLE_IMAGE_LOCK=1
 export SHELL=/bin/bash
 
 mkdir -p "$HOME"
+version="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
+mkdir -p "$SMOKE_ROOT/assets/v$version"
+printf '%s\n' \
+  "SCANNER_IMAGE=shakerscan/shakerscan-scanner@sha256:$(printf '1%.0s' {1..64})" \
+  "API_IMAGE=shakerscan/shakerscan-api@sha256:$(printf '2%.0s' {1..64})" \
+  "UI_IMAGE=shakerscan/shakerscan-ui@sha256:$(printf '3%.0s' {1..64})" \
+  "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@sha256:$(printf '4%.0s' {1..64})" \
+  > "$SMOKE_ROOT/assets/v$version/release-image-lock.env"
+export SHAKERSCAN_RELEASE_ASSET_ROOT="file://$SMOKE_ROOT/assets"
 # Docker created this empty directory on affected 0.8.0 installs because the
 # bootstrap omitted the bind-mounted signer role script. The next installer
 # must repair that state rather than nesting the script inside the directory.
@@ -29,6 +39,7 @@ required_files=(
   db/init.sql
   db/configure-model-intake-signer-role.sh
   VERSION
+  release-image-lock.env
   README.md
   AGENTS.md
   CLAUDE.md

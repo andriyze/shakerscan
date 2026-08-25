@@ -187,6 +187,45 @@ def test_hunt_call_retry_without_explicit_key_is_content_stable():
     assert first["response"]["payload"]["input"]["limit"] == 0
 
 
+def test_hunt_cli_exposes_complete_lifecycle_and_uses_canonical_routes(tmp_path):
+    candidate_request = tmp_path / "candidate.json"
+    candidate_request.write_text(json.dumps({
+        "family": "authorization",
+        "locus": {"path": "/account"},
+        "title": "Candidate",
+        "claim": "The control may be inconsistent.",
+        "severity": "medium",
+        "evidence_refs": ["receipt-1"],
+    }))
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, path):
+            self.calls.append(("GET", path, None))
+            return {"path": path}
+
+        def post(self, path, payload=None, **_kwargs):
+            self.calls.append(("POST", path, payload))
+            return {"path": path, "payload": payload}
+
+    cases = (
+        (("hunt", "get", "hunt-1"), "GET", "/hunts/hunt-1"),
+        (("hunt", "list", "--status", "active", "--limit", "10"), "GET", "/hunts?limit=10&status=active"),
+        (("hunt", "query", "hunt-1", "candidates", "--limit", "8"), "POST", "/hunts/hunt-1/query"),
+        (("hunt", "candidate", "hunt-1", "--request", str(candidate_request)), "POST", "/hunts/hunt-1/candidates"),
+        (("hunt", "verify", "hunt-1", "candidate-1"), "POST", "/hunts/hunt-1/candidates/candidate-1/verify"),
+        (("hunt", "finish", "hunt-1", "--summary", "done"), "POST", "/hunts/hunt-1/finish"),
+        (("hunt", "cancel", "hunt-1"), "POST", "/hunts/hunt-1/cancel"),
+        (("hunt", "resume", "hunt-1"), "POST", "/hunts/hunt-1/resume"),
+    )
+    for argv, expected_method, expected_path in cases:
+        client = FakeClient()
+        v2_cli._run_hunt(_parse(*argv), client)
+        assert client.calls[0][:2] == (expected_method, expected_path)
+
+
 def test_cli_errors_are_stable_json_and_preserve_api_shape(monkeypatch, capsys):
     args = [
         "--api-url", "http://localhost:8080",

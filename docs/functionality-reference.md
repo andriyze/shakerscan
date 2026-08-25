@@ -1445,7 +1445,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 18 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 353 | Python sources + Compose manifests |
+| Runtime environment keys | 355 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2193,7 +2193,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_VERIFY_MAX_PER_SCAN` | `api/worker.py` |
 | `AI_VERIFY_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_VERIFY_USE_BROWSER` | `api/worker.py` |
-| `API_IMAGE_REPO` | `docker-compose.release.yml` |
+| `API_IMAGE` | `docker-compose.release.yml` |
 | `APPROVAL_RECEIPTS_REQUIRED_FOR_STATE_CHANGING_ACTIONS` | `api/api.py` |
 | `ARTIFACT_CHECKPOINT_INTERVAL_SECONDS` | `api/worker.py` |
 | `ARTIFACT_REFERENCED_FILE_MAX_BYTES` | `api/worker.py` |
@@ -2355,8 +2355,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_BACKEND` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_DATABASE_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SIGNER_IMAGE_REPO` | `docker-compose.release.yml` |
 | `MODEL_INTAKE_SIGNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_POSTGRES_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_URL` | `api/api.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
@@ -2369,9 +2369,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `PATH` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `PLAYWRIGHT_BROWSERS_PATH` | `api/ai_gate/targets/widget_playwright.py`, `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
 | `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` | `scanner/scanner_tools/form_login.py`, `scanner/scanner_tools/http_scanner.py` |
+| `POSTGRES_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `POSTGRES_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `POSTGRES_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
+| `REDIS_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
@@ -2405,8 +2407,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_DNS_RESOLVERS` | `scanner/scanner.py` |
 | `SCANNER_EXPECTED_REVISION` | `scanner/release_identity.py` |
 | `SCANNER_EXPECTED_VERSION` | `scanner/release_identity.py` |
-| `SCANNER_IMAGE_REPO` | `docker-compose.release.yml` |
-| `SCANNER_IMAGE_TAG` | `docker-compose.release.yml` |
+| `SCANNER_IMAGE` | `docker-compose.release.yml` |
 | `SCANNER_LOCAL_WORKER_IMAGE` | `docker-compose.yml` |
 | `SCANNER_MAX_CONCURRENT` | `scanner/scanner_tools/common.py` |
 | `SCANNER_RELEASE_VERSION` | `docker-compose.release.yml` |
@@ -2500,9 +2501,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_WORKER_MEM_LIMIT_GB` | `api/api.py` |
+| `SIGNER_IMAGE` | `docker-compose.release.yml` |
 | `SMART_BOLA_LANE_MAX_SECONDS` | `scanner/scanner.py` |
 | `TESTSSL_BIN` | `scanner/scanner_tools/tls_scanner.py` |
-| `UI_IMAGE_REPO` | `docker-compose.release.yml` |
+| `UI_IMAGE` | `docker-compose.release.yml` |
 | `VERIFICATION_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
 | `VIRUSTOTAL_API_KEY` | `scanner/scanner.py` |
 | `WORKER_ID` | `api/broker_worker.py`, `api/worker.py` |

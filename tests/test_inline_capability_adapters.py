@@ -537,3 +537,35 @@ def test_device_adapter_fault_conservatively_charges_the_full_hold():
     assert result.status == "failed"
     assert result.actual_budget == requested
     assert result.errors == ("adapter_fault:RuntimeError",)
+
+
+def test_candidate_verifier_block_conservatively_charges_the_full_hold():
+    specification = CAPABILITY_REGISTRY.require("candidate.verify")
+    requested = {
+        "agent_actions": 1,
+        "active_actions": 1,
+        "http_requests": 24,
+        "browser_actions": 12,
+        "tool_wall_seconds": 180,
+    }
+
+    async def operation():
+        raise RuntimeError("verifier stopped after uncertain wire activity")
+
+    result = _execute(
+        specification,
+        ControlPlaneExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={"candidate_id": "redacted"},
+            blocked_exceptions=(RuntimeError,),
+            conservative_full_budget=True,
+        ),
+        requested,
+    )
+
+    assert result.status == "blocked"
+    assert result.execution_started is True
+    assert result.actual_budget == requested
+    assert result.errors == ("verifier stopped after uncertain wire activity",)

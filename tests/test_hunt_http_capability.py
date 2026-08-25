@@ -96,7 +96,7 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
     )
     for required in (
         "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE",
-        "revalidate_scan_action_authority(",
+        "_revalidate_hunt_action_authority(",
         "validate_worker_credential_authority(",
         "WorkerCredentialResolver().resolve(",
         "session_store.load_for_worker(",
@@ -114,6 +114,15 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
     assert "secondary_worker_session.close()" in handler
     assert "private_session.close()" in handler
     assert "credential_stack.aclose()" in handler
+
+    authority_helper = _slice(
+        source,
+        "async def _revalidate_hunt_action_authority(",
+        "\n\ndef _worker_hunt_profile_context(",
+    )
+    assert "revalidate_scan_action_authority(" in authority_helper
+    assert "Hunt target is no longer active" in authority_helper
+    assert "Hunt target locator changed after admission" in authority_helper
 
 
 def test_worker_router_accepts_the_opaque_http_job_type():
