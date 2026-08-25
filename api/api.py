@@ -72345,6 +72345,11 @@ async def queue_stats():
         for row in active_rows
         if row["status"] == "running"
     }
+    # A worker may claim the Redis handoff before the planner moves the durable
+    # scan row from pending/queued to running.  That is a valid in-flight
+    # transition, not an orphan.  Reconcile running hashes against every active
+    # durable handoff; the logical headline still comes from the DB status.
+    active_job_ids = active_scan_job_ids | active_running_job_ids
     hidden_roles = set(_hidden_scan_roles_for_list())
     logical_pending = sum(
         1 for row in active_rows
@@ -72368,7 +72373,7 @@ async def queue_stats():
 
         if status_str == 'running':
             job_id = str(key).split("job:", 1)[-1]
-            if job_id not in active_running_job_ids:
+            if job_id not in active_job_ids:
                 stale_running_job_hashes += 1
                 r.hset(key, mapping={
                     "status": "orphaned",

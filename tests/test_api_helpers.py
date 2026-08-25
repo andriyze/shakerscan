@@ -20785,6 +20785,7 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
                 {"job_id": "parent-job", "status": "running", "scan_role": "parent"},
                 {"job_id": "shard-job", "status": "running", "scan_role": "shard"},
                 {"job_id": "asm-job", "status": "running", "scan_role": "asm_batch"},
+                {"job_id": "planning-job", "status": "pending", "scan_role": "parent"},
             ]
 
     class Redis:
@@ -20793,6 +20794,7 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
                 "job:parent-job": {"status": "running"},
                 "job:shard-job": {"status": "running"},
                 "job:asm-job": {"status": "running"},
+                "job:planning-job": {"status": "running"},
                 "job:stale-job": {"status": "running"},
             }
 
@@ -20827,9 +20829,10 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
     result = asyncio.run(api_module.queue_stats())
 
     assert result["running"] == 1
-    assert result["work_running"] == 3
-    assert result["pending"] == 0
+    assert result["work_running"] == 4
+    assert result["pending"] == 1
     assert result["queue_consistency"]["stale_running_job_hashes"] == 1
+    assert redis.jobs["job:planning-job"]["status"] == "running"
     assert redis.jobs["job:stale-job"]["status"] == "orphaned"
 
 
