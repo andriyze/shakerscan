@@ -187,7 +187,10 @@ from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.activity import scan_action_activity_event
 from scan.action_store import PostgresScanActionStore
 from scan.operational_metrics import record_operational_event
-from scan.budget_allocator import allocate_scan_action_plan
+from scan.budget_allocator import (
+    ScanBudgetAllocationError,
+    allocate_scan_action_plan,
+)
 from scan.continuation import (
     ContinuationBudgetCeiling,
     ScanContinuationAllocation,
@@ -15169,12 +15172,21 @@ def _compile_parallel_child_action_plan(
         include_finalizer=True,
         action_budgets={},
     )
-    return allocate_scan_action_plan(
-        raw_plan,
-        child_job.shard.sub_budget,
-        assign_residual_to_finalizer=False,
-        require_finalizer=True,
-    ).plan
+    try:
+        return allocate_scan_action_plan(
+            raw_plan,
+            child_job.shard.sub_budget,
+            assign_residual_to_finalizer=False,
+            require_finalizer=True,
+        ).plan
+    except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
+        # A deterministic child-plan refusal is an execution-contract failure,
+        # not a transient worker crash. Convert it at the compilation boundary
+        # so process_job terminalizes the parent instead of leaving the Stream
+        # lease pending for repeated delivery with a misleading UI state.
+        raise ExecutionScopeError(
+            f"canonical parallel child action plan rejected: {exc}"
+        ) from exc
 
 
 def _compile_parallel_child_work_manifests(

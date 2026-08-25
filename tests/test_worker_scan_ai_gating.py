@@ -2648,6 +2648,53 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
     assert "private-body-canary" not in json.dumps(options)
 
 
+def test_parallel_child_budget_refusal_is_an_execution_contract_failure(monkeypatch):
+    from runtime.models import TargetBinding
+    from scan.budget_allocator import ScanBudgetAllocationError
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    contract = resolve_scan_contract(budget_profile="fast")
+    parent = CanonicalScanJob.create(
+        job_id="parent-job",
+        scan_id="parent-scan",
+        target=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
+        execution_plan=contract.execution_plan,
+    )
+    child, options, _payload = worker._canonical_shard_job(
+        parent,
+        child_id="22222222-2222-4222-8222-222222222226",
+        child_job_id="child-job",
+        child_options={
+            **contract.option_metadata(),
+            "parallel_action_partition_role": "global",
+        },
+        shard_label="global",
+        shard_index=0,
+        shard_count=2,
+    )
+
+    def reject(*_args, **_kwargs):
+        raise ScanBudgetAllocationError(
+            "passive.templates", {"tool_wall_seconds": 5},
+        )
+
+    monkeypatch.setattr(worker, "allocate_scan_action_plan", reject)
+
+    with pytest.raises(
+        worker.ExecutionScopeError,
+        match="canonical parallel child action plan rejected: required Scan action",
+    ):
+        worker._compile_parallel_child_action_plan(child, options)
+
+
 def test_local_continuation_compiles_discovery_receipts_into_appended_actions(monkeypatch):
     import hashlib
 

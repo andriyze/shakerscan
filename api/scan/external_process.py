@@ -227,6 +227,16 @@ def validate_enforcement_receipt(
 RESERVATION_SCALED_PROFILES: Mapping[
     str, tuple[Mapping[str, int], ...]
 ] = {
+    # The passive pack is a fixed seven-request GET-only allowlist. Shorter
+    # wall-time tiers do not widen traffic authority: the request ceiling,
+    # templates, methods, redirect policy, and concurrency stay identical.
+    # Parallel endpoint partitions need these reviewed tiers so a child can
+    # preserve the required passive baseline inside its exact sub-budget.
+    "templates.passive_scan": (
+        {"http_requests": 7, "tool_wall_seconds": 30},
+        {"http_requests": 7, "tool_wall_seconds": 20},
+        {"http_requests": 7, "tool_wall_seconds": 10},
+    ),
     "templates.scan": (
         {"http_requests": 4_000, "tool_wall_seconds": 300},
         {"http_requests": 1_001, "tool_wall_seconds": 100},
