@@ -19,6 +19,7 @@ import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -440,22 +441,6 @@ function renderFindingEvidence(finding: any) {
   return <p className="text-gray-300 text-sm mt-1 whitespace-pre-wrap break-words">{text}</p>
 }
 
-function findingTrackingKeys(finding: any): string[] {
-  const evidence = parseEvidenceRecord(finding?.evidence)
-  const values = [
-    finding?.id,
-    finding?.fingerprint,
-    finding?.source_finding_id,
-    evidence?.source_finding_id,
-    evidence?.fingerprint,
-  ]
-  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)))
-}
-
-function hasPersistedFindingRecord(finding: any, persistedKeys: Set<string>): boolean {
-  return findingTrackingKeys(finding).some(key => persistedKeys.has(key))
-}
-
 // Keep the engineer-facing AIBOM prominent; generic package-manager exports
 // remain available for downstream automation without dominating the UI.
 function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
@@ -572,8 +557,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const persistedFindings = Array.isArray(scan.findings) ? scan.findings : []
   const rawOnlyFindings = rawFindings.length > 0 && persistedFindings.length === 0
   const findings = sortBySeverity(rawFindings)
-  const persistedFindingKeys = new Set<string>(persistedFindings.flatMap((finding: any) => findingTrackingKeys(finding)))
-  const rawFindingsWithoutRecords = rawFindings.filter((finding: any) => !hasPersistedFindingRecord(finding, persistedFindingKeys))
+  const persistedFindingIndex = buildFindingLinkageIndex(persistedFindings)
+  const rawFindingsWithoutRecords = rawFindings.filter((finding: any) => !linkedPersistedFinding(finding, persistedFindingIndex))
   const partiallyPersistedFindings = rawFindings.length > 0 && persistedFindings.length > 0 && rawFindingsWithoutRecords.length > 0
   const result = scanData.result || {}
   const triage = scanData.triage || {}
@@ -3405,9 +3390,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <p className="text-gray-400 text-sm mb-4">Showing {filteredFindings.length} of {findings.length} finding(s)</p>
           <div className="space-y-4">
             {filteredFindings.slice(0, 50).map((finding: any, idx: number) => {
-              const findingId = finding.id || `finding-${idx}`
+              const persistedFinding = linkedPersistedFinding(finding, persistedFindingIndex)
+              const findingId = String(persistedFinding?.id || finding.id || `finding-${idx}`)
               const remediation = remediationData.find(r => r.finding_id === findingId)
-              const canTrackFinding = hasPersistedFindingRecord(finding, persistedFindingKeys)
+              const canTrackFinding = Boolean(persistedFinding)
               return (
                 <div key={idx}>
                   <FindingCard finding={finding} />
