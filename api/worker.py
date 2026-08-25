@@ -335,9 +335,9 @@ except ImportError:
     from api.action_scope import evaluate_runtime_destination_scope
 
 try:
-    from constants import resolve_scan_budget, resolve_or_consume_budget
+    from constants import resolve_scan_budget
 except ImportError:
-    from scanner.constants import resolve_scan_budget, resolve_or_consume_budget
+    from scanner.constants import resolve_scan_budget
 try:
     from findings import templated_finding_identity as _templated_finding_identity
 except ModuleNotFoundError as exc:
@@ -410,7 +410,6 @@ DEVICE_SSH_AUTH_DAILY_FAILURE_CAP = max(1, int(os.environ.get("DEVICE_SSH_AUTH_D
 
 LEGACY_DAST_SCAN_TYPE_LABELS = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
-LEGACY_ACTIVE_SCAN_TYPE_LABELS = {"smart", "full", "aggressive"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",
     "auth_cookies",
@@ -5696,73 +5695,26 @@ def _known_endpoint_count(options: dict[str, Any] | None) -> int:
 
 
 def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> int:
-    """Resolve domain-rate admission from canonical authority or legacy metadata.
+    """Resolve domain-rate admission from immutable canonical Scan authority.
 
-    Canonical Scan must never re-derive authority from a compatibility mode.
-    Its immutable plan is the only source for HTTP and endpoint ceilings.
+    The worker never re-derives authority from compatibility labels or mutable
+    scanner flags. Missing V2 authority is rejected by ``prepare_worker_dispatch``.
     """
     opts = options or {}
     if not is_deterministic_dast(opts):
         return 0
     request_budget_mode = _effective_request_budget_mode(opts)
     _normalized, admission = prepare_worker_dispatch(opts)
-    if admission.canonical:
-        if admission.plan is None:
-            return 0
-        if request_budget_mode == "enforce":
-            return max(0, int(admission.plan.budget.max_http_requests))
-        known = _known_endpoint_count(opts)
-        if known > 0:
-            return min(known, max(0, int(admission.plan.budget.max_endpoints)))
-        if not admission.plan.policy.active_testing:
-            return 0
-        return max(0, int(admission.plan.budget.max_endpoints))
-
-    # Isolated compatibility jobs retain their historical budget translation.
+    if admission.plan is None:
+        return 0
     if request_budget_mode == "enforce":
-        custom_budget = opts.get("custom_budget") if isinstance(opts.get("custom_budget"), dict) else {}
-        try:
-            resolved = resolve_or_consume_budget(
-                str(opts.get("scan_type") or "standard"),
-                options=opts,
-                budget_profile=opts.get("budget_profile"),
-                custom_budget=custom_budget,
-            )
-            return max(0, int(resolved.get("request_max") or 0))
-        except Exception:
-            return 0
+        return max(0, int(admission.plan.budget.max_http_requests))
     known = _known_endpoint_count(opts)
     if known > 0:
-        return known
-
-    scan_type = str(opts.get("scan_type") or "standard").strip().lower()
-    active_requested = bool(
-        opts.get("active")
-        or opts.get("sqli")
-        or opts.get("xss")
-        or opts.get("check_family")
-        or opts.get("asm_check_family")
-        or scan_type in LEGACY_ACTIVE_SCAN_TYPE_LABELS
-    )
-    if not active_requested:
+        return min(known, max(0, int(admission.plan.budget.max_endpoints)))
+    if not admission.plan.policy.active_testing:
         return 0
-
-    custom_budget = opts.get("custom_budget") if isinstance(opts.get("custom_budget"), dict) else {}
-    profile = opts.get("budget_profile")
-    if opts.get("thorough_params") and not profile and not custom_budget:
-        profile = "thorough"
-    try:
-        # Consume the stamped budget contract (docs §4) so the active-endpoint cap
-        # matches what the scan was planned with, not a re-derived value.
-        resolved = resolve_or_consume_budget(
-            scan_type, options=opts, budget_profile=profile, custom_budget=custom_budget
-        )
-    except Exception:
-        resolved = {}
-    try:
-        return max(0, int(resolved.get("active_max_endpoints") or 0))
-    except (TypeError, ValueError):
-        return 0
+    return max(0, int(admission.plan.budget.max_endpoints))
 
 
 async def _reserve_target_domain_endpoint_budget(
@@ -15091,6 +15043,8 @@ def _compile_parallel_child_action_plan(
     request_candidate_ref = child_options.get("request_candidate_manifest_ref")
     template_ref = child_options.get("template_manifest_ref")
     request_manifest_refs = child_options.get("request_manifest_refs")
+    raw_family = str(child_options.get("coverage_attempt_family") or "all").lower()
+    family_scope = () if raw_family in {"", "all"} else (raw_family,)
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=child_job.scan_id,
         execution_plan=child_job.execution_plan,
@@ -15120,6 +15074,7 @@ def _compile_parallel_child_action_plan(
         ),
         shard_authority=child_job.shard.payload(),
         action_scope=action_scope,
+        family_scope=family_scope,
         action_budgets={"finalize.report": {}},
     )
     return allocate_scan_action_plan(
@@ -15275,49 +15230,34 @@ def _enqueue_parallel_discovery_continuation(
     redis_client,
     *,
     parent_id: str,
-    parent_job_id: str,
     discovery_scan_id: str,
-    target: str,
-    options: dict[str, Any],
     parallel_worker_count: int = 0,
     parent_queue_payload: Mapping[str, Any] | None = None,
 ) -> bool:
     """Wake the local planner exactly once after placed discovery is durable."""
+    parent_job = _canonical_parent_scan_job(parent_queue_payload)
+    if parent_job is None:
+        raise CanonicalScanJobMaterializationError(
+            "parallel continuation requires canonical parent Scan authority"
+        )
     guard = parallel_scan.discovery_continue_guard_key(parent_id)
     claimed = redis_client.set(guard, "1", nx=True, ex=86400)
     if not claimed:
         return False
-    parent_job = _canonical_parent_scan_job(parent_queue_payload)
-    if parent_job is not None:
-        payload = parent_job.payload()
-        payload.update({
-            'type': parallel_scan.PLAN_JOB_TYPE,
-            'plan_stage': 'fanout',
-            'discovery_scan_id': discovery_scan_id,
-            'parallel_worker_count': min(
-                max(0, int(parallel_worker_count or 0)),
-                parent_job.execution_plan.budget.max_workers,
-            ),
-            'placement': {'node_scope': 'local'},
-            'attempt': 1,
-            'plan_version': parallel_scan.PLAN_VERSION,
-        })
-        CanonicalScanJob.from_queue_payload(payload)
-    else:
-        payload = {
-            'type': parallel_scan.PLAN_JOB_TYPE,
-            'job_id': parent_job_id,
-            'scan_id': parent_id,
-            'target': target,
-            'options': options,
-            'plan_stage': 'fanout',
-            'discovery_scan_id': discovery_scan_id,
-            'parallel_worker_count': int(parallel_worker_count or 0),
-            'placement': {'node_scope': 'local'},
-            'attempt': 1,
-            'plan_version': parallel_scan.PLAN_VERSION,
-            'submitted_at': utc_now_iso(),
-        }
+    payload = parent_job.payload()
+    payload.update({
+        'type': parallel_scan.PLAN_JOB_TYPE,
+        'plan_stage': 'fanout',
+        'discovery_scan_id': discovery_scan_id,
+        'parallel_worker_count': min(
+            max(0, int(parallel_worker_count or 0)),
+            parent_job.execution_plan.budget.max_workers,
+        ),
+        'placement': {'node_scope': 'local'},
+        'attempt': 1,
+        'plan_version': parallel_scan.PLAN_VERSION,
+    })
+    CanonicalScanJob.from_queue_payload(payload)
     try:
         enqueue_job(redis_client, QUEUE_NAME, payload)
     except Exception:
@@ -15336,16 +15276,10 @@ async def process_scan_plan_job(job_data: dict):
     canonical_parent_job = _canonical_parent_scan_job(
         job_data.get("_canonical_queue_payload")
     )
-    scan_type = (
-        "scan"
-        if canonical_parent_job is not None
-        else (options.get('scan_type') or 'standard').strip().lower() or 'standard'
-    )
-    active_testing = (
-        canonical_parent_job.execution_plan.policy.active_testing
-        if canonical_parent_job is not None
-        else None
-    )
+    if canonical_parent_job is None:
+        raise CanonicalScanJobMaterializationError(
+            "parallel planning requires a canonical Scan queue payload"
+        )
 
     r = get_redis()
     now = utc_now()
@@ -15370,37 +15304,36 @@ async def process_scan_plan_job(job_data: dict):
     target_url = (row['target_url'] if row else None) or target
     parent_action_plan: ScanActionPlan | None = None
     parent_authority_row: Mapping[str, Any] = row
-    if canonical_parent_job is not None:
-        async with db_pool.acquire() as conn:
-            authority_row = await conn.fetchrow(
-                """
-                SELECT budget_used_json, scan_action_plan_json,
-                       scan_action_plan_digest
-                FROM scans WHERE id=$1
-                """,
-                uuid.UUID(parent_id),
-            )
-        if authority_row is None:
-            raise ExecutionScopeError(
-                "canonical parallel parent authority row is unavailable"
-            )
-        parent_authority_row = authority_row
-        try:
-            parent_action_plan = ScanActionPlan.from_dict(
-                _as_report_dict(authority_row.get("scan_action_plan_json"))
-            )
-        except (ScanActionPlanError, TypeError, ValueError) as exc:
-            raise ExecutionScopeError(
-                "canonical parallel parent has no valid persisted action plan"
-            ) from exc
-        if (
-            parent_action_plan.scan_id != parent_id
-            or str(authority_row.get("scan_action_plan_digest") or "")
-            != parent_action_plan.plan_digest
-        ):
-            raise ExecutionScopeError(
-                "canonical parallel parent action-plan identity is inconsistent"
-            )
+    async with db_pool.acquire() as conn:
+        authority_row = await conn.fetchrow(
+            """
+            SELECT budget_used_json, scan_action_plan_json,
+                   scan_action_plan_digest
+            FROM scans WHERE id=$1
+            """,
+            uuid.UUID(parent_id),
+        )
+    if authority_row is None:
+        raise ExecutionScopeError(
+            "canonical parallel parent authority row is unavailable"
+        )
+    parent_authority_row = authority_row
+    try:
+        parent_action_plan = ScanActionPlan.from_dict(
+            _as_report_dict(authority_row.get("scan_action_plan_json"))
+        )
+    except (ScanActionPlanError, TypeError, ValueError) as exc:
+        raise ExecutionScopeError(
+            "canonical parallel parent has no valid persisted action plan"
+        ) from exc
+    if (
+        parent_action_plan.scan_id != parent_id
+        or str(authority_row.get("scan_action_plan_digest") or "")
+        != parent_action_plan.plan_digest
+    ):
+        raise ExecutionScopeError(
+            "canonical parallel parent action-plan identity is inconsistent"
+        )
 
     # Count the plan/discovery stage as a running job. This stage runs the discover-once
     # recon (coverage) and the fan-out planning before any shard exists; without marking
@@ -15418,30 +15351,19 @@ async def process_scan_plan_job(job_data: dict):
     )
     r.expire(f"job:{parent_job_id}", 86400)
 
-    requested_strategy = (
-        ParallelActionPlanCompiler.resolve_strategy(
-            canonical_parent_job.execution_plan,
-            requested=options.get('shard_strategy') or 'auto',
-            known_endpoint_count=len(parallel_scan._normalize_endpoint_list(
-                options.get("custom_endpoints")
-            )),
-        )
-        if canonical_parent_job is not None
-        else parallel_scan.resolve_auto_strategy(
-            options,
-            scan_type,
-            options.get('shard_strategy') or 'auto',
-            active_testing=active_testing,
-        )
+    requested_strategy = ParallelActionPlanCompiler.resolve_strategy(
+        canonical_parent_job.execution_plan,
+        requested=options.get('shard_strategy') or 'auto',
+        known_endpoint_count=len(parallel_scan._normalize_endpoint_list(
+            options.get("custom_endpoints")
+        )),
     )
     plan_stage = str(job_data.get('plan_stage') or 'start')
     canonical_subdomain_discovery = bool(
-        canonical_parent_job is not None
-        and canonical_parent_job.execution_plan.policy.subdomain_discovery
+        canonical_parent_job.execution_plan.policy.subdomain_discovery
     )
     canonical_network_discovery = bool(
-        canonical_parent_job is not None
-        and canonical_parent_job.execution_plan.policy.network_discovery
+        canonical_parent_job.execution_plan.policy.network_discovery
     )
     needs_placed_discovery = bool(
         (
@@ -15477,10 +15399,7 @@ async def process_scan_plan_job(job_data: dict):
                 _enqueue_parallel_discovery_continuation(
                     r,
                     parent_id=parent_id,
-                    parent_job_id=parent_job_id,
                     discovery_scan_id=str(existing_discovery['id']),
-                    target=target_url,
-                    options=options,
                     parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
                     parent_queue_payload=job_data.get("_canonical_queue_payload"),
                 )
@@ -15504,54 +15423,25 @@ async def process_scan_plan_job(job_data: dict):
         parallel_scan._merge_custom_budget(
             discovery_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET)
         )
-        if canonical_parent_job is not None:
-            discovery_job, discovery_opts, discovery_payload = _canonical_shard_job(
-                canonical_parent_job,
-                child_id=discovery_id,
-                child_job_id=discovery_job_id,
-                child_options=discovery_opts,
-                shard_label='discovery',
-                shard_index=-1,
-                shard_count=0,
-                parallel_discovery=True,
-                parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
-            )
-            discovery_action_plan = _compile_parallel_child_action_plan(
-                discovery_job, discovery_opts,
-            )
-            discovery_generation = 'v2'
-            discovery_policy = canonical_parent_job.execution_plan.canonical_dict()['policy']
-            discovery_budget = discovery_job.shard.sub_budget.payload()
-            discovery_job_payload = discovery_job.payload()
-            discovery_job_digest = discovery_job.payload_digest
-        else:
-            discovery_action_plan = None
-            discovery_opts['scan_type'] = 'smart'
-            discovery_opts['queue_handoff_confirmed'] = False
-            discovery_payload = {
-                'type': parallel_scan.SHARD_JOB_TYPE,
-                'job_id': discovery_job_id,
-                'scan_id': discovery_id,
-                'parent_scan_id': parent_id,
-                'target_id': target_id,
-                'target': target_url,
-                'options': discovery_opts,
-                'parallel_discovery': True,
-                'parent_job_id': parent_job_id,
-                'parent_options': options,
-                'parallel_worker_count': int(job_data.get('parallel_worker_count') or 0),
-                'shard_label': 'discovery',
-                'shard_index': -1,
-                'shard_count': 0,
-                'attempt': 1,
-                'plan_version': parallel_scan.PLAN_VERSION,
-                'submitted_at': utc_now_iso(),
-            }
-            discovery_generation = 'legacy'
-            discovery_policy = {}
-            discovery_budget = {}
-            discovery_job_payload = {}
-            discovery_job_digest = None
+        discovery_job, discovery_opts, discovery_payload = _canonical_shard_job(
+            canonical_parent_job,
+            child_id=discovery_id,
+            child_job_id=discovery_job_id,
+            child_options=discovery_opts,
+            shard_label='discovery',
+            shard_index=-1,
+            shard_count=0,
+            parallel_discovery=True,
+            parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+        )
+        discovery_action_plan = _compile_parallel_child_action_plan(
+            discovery_job, discovery_opts,
+        )
+        discovery_generation = 'v2'
+        discovery_policy = canonical_parent_job.execution_plan.canonical_dict()['policy']
+        discovery_budget = discovery_job.shard.sub_budget.payload()
+        discovery_job_payload = discovery_job.payload()
+        discovery_job_digest = discovery_job.payload_digest
         parent_options = dict(options)
         parent_options['parallel_strategy'] = requested_strategy
         parent_options['parallel_stage'] = 'discovery'
@@ -15583,7 +15473,7 @@ async def process_scan_plan_job(job_data: dict):
                     target_url,
                     discovery_job_id,
                     json.dumps(discovery_opts),
-                    scan_type,
+                    "scan",
                     uuid.UUID(parent_id),
                     parallel_scan.PARALLEL_DISCOVERY_ROLE,
                     discovery_generation,
@@ -15592,10 +15482,9 @@ async def process_scan_plan_job(job_data: dict):
                     json.dumps(discovery_job_payload),
                     discovery_job_digest,
                 )
-                if discovery_action_plan is not None:
-                    await PostgresScanActionStore().persist_plan(
-                        conn, plan=discovery_action_plan,
-                    )
+                await PostgresScanActionStore().persist_plan(
+                    conn, plan=discovery_action_plan,
+                )
         try:
             enqueue_job(r, QUEUE_NAME, discovery_payload)
         except Exception as exc:
@@ -15721,46 +15610,6 @@ async def process_scan_plan_job(job_data: dict):
         # endpoint shards on the control plane.
         if discovery_scan_id:
             discovery_status = str(discovery.get('status') or '')
-            if discovery_status == 'failed' and (
-                str(options.get('scan_generation') or 'legacy') != 'v2' or not target_url
-            ):
-                discovery_error = str(
-                    discovery.get('error_message')
-                    or 'Parallel endpoint discovery failed before producing a durable worklist'
-                )[:1000]
-                parent_error = f"Parallel discovery failed: {discovery_error}"[:1000]
-                failure_result = {
-                    'technical_outcome': 'INCOMPLETE',
-                    'error': parent_error,
-                    'parallel': {
-                        'strategy': requested_strategy,
-                        'stage': 'discovery',
-                        'degraded': True,
-                        'discovery_scan_id': discovery_scan_id,
-                    },
-                }
-                async with db_pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE scans SET status='failed', progress=100,
-                            current_phase='parallel_discovery_failed', completed_at=NOW(),
-                            error_message=$2, result=$3
-                        WHERE id=$1 AND status <> 'cancelled'
-                        """,
-                        uuid.UUID(parent_id), parent_error, json.dumps(failure_result),
-                    )
-                r.hset(
-                    f"job:{parent_job_id}",
-                    mapping={
-                        'status': 'failed',
-                        'progress': '100',
-                        'current_phase': 'parallel_discovery_failed',
-                        'error': parent_error,
-                    },
-                )
-                r.expire(f"job:{parent_job_id}", 86400)
-                print(f"[{parent_id[:8]}] {parent_error}", flush=True)
-                return
             if discovery_status == 'failed':
                 # A failed producer may still have durable, trustworthy partial output. Harvest it
                 # and continue; coverage truth is reported separately from the parent run status.
@@ -15841,8 +15690,6 @@ async def process_scan_plan_job(job_data: dict):
     else:
         plan = parallel_scan.plan_shards(
             options,
-            scan_type=scan_type,
-            active_testing=active_testing,
             requested_shards=options.get('shards', 'auto'),
             strategy=requested_strategy,
             worker_count=job_data.get('parallel_worker_count') or 0,
@@ -15858,10 +15705,13 @@ async def process_scan_plan_job(job_data: dict):
             plan.shards[0].options if plan.shards
             else parallel_scan._base_child_options(options)
         )
-        if canonical_parent_job is not None:
-            single_opts = _canonicalize_shard_options(
-                canonical_parent_job, single_opts,
-            )
+        single_opts = _canonicalize_shard_options(
+            canonical_parent_job, single_opts,
+        )
+        if discovery_degraded_reason:
+            single_opts["coverage_status"] = "partial"
+            single_opts["coverage_reasons"] = [discovery_degraded_reason]
+            single_opts["coverage_discovery_scan_id"] = discovery_scan_id
         if placed_subdomain_summary is not None:
             single_opts['canonical_subdomain_discovery'] = (
                 placed_subdomain_summary
@@ -15880,27 +15730,22 @@ async def process_scan_plan_job(job_data: dict):
                 json.dumps(single_opts), uuid.UUID(parent_id),
             )
         canonical_source = job_data.get("_canonical_queue_payload")
-        if isinstance(canonical_source, Mapping):
-            try:
-                parent_job = CanonicalScanJob.from_queue_payload(canonical_source)
-                standalone_payload = parent_job.queue_payload(
-                    placement=(
-                        single_opts.get("placement")
-                        if isinstance(single_opts.get("placement"), Mapping) else None
-                    ),
-                )
-            except CanonicalScanJobError as exc:
-                raise ExecutionScopeError(
-                    f"parallel fallback lost canonical Scan authority: {exc}"
-                ) from exc
-        else:
-            standalone_payload = {
-                'job_id': parent_job_id,
-                'scan_id': parent_id,
-                'target': target_url,
-                'options': single_opts,
-                'submitted_at': utc_now_iso(),
-            }
+        if not isinstance(canonical_source, Mapping):
+            raise ExecutionScopeError(
+                "parallel fallback lost canonical Scan authority"
+            )
+        try:
+            parent_job = CanonicalScanJob.from_queue_payload(canonical_source)
+            standalone_payload = parent_job.queue_payload(
+                placement=(
+                    single_opts.get("placement")
+                    if isinstance(single_opts.get("placement"), Mapping) else None
+                ),
+            )
+        except CanonicalScanJobError as exc:
+            raise ExecutionScopeError(
+                f"parallel fallback lost canonical Scan authority: {exc}"
+            ) from exc
         enqueue_job(r, QUEUE_NAME, standalone_payload)
         return
 
@@ -15981,11 +15826,8 @@ async def process_scan_plan_job(job_data: dict):
     for planned_shard in plan.shards:
         resolved = planned_shard.options.get('resolved_budget')
         if not isinstance(resolved, dict):
-            resolved = resolve_scan_budget(
-                planned_shard.options.get('scan_type') or scan_type,
-                planned_shard.options.get('budget_profile'),
-                planned_shard.options.get('custom_budget')
-                if isinstance(planned_shard.options.get('custom_budget'), dict) else None,
+            raise ExecutionScopeError(
+                "parallel shard is missing its canonical resolved budget"
             )
         try:
             request_budget = max(0, int(resolved.get('request_max') or 0))
@@ -16000,14 +15842,12 @@ async def process_scan_plan_job(job_data: dict):
         (str(uuid.uuid4()), str(uuid.uuid4()), shard.index)
         for shard in plan.shards
     )
-    parallel_action_partition = None
-    if canonical_parent_job is not None:
-        if parent_action_plan is None:
-            raise ExecutionScopeError(
-                "canonical parallel planning lost parent action authority"
-            )
-        try:
-            parallel_action_partition = ParallelActionPlanCompiler().compile(
+    if parent_action_plan is None:
+        raise ExecutionScopeError(
+            "canonical parallel planning lost parent action authority"
+        )
+    try:
+        parallel_action_partition = ParallelActionPlanCompiler().compile(
                 parent_execution_plan=canonical_parent_job.execution_plan,
                 parent_action_plan=parent_action_plan,
                 target_binding=canonical_parent_job.target,
@@ -16026,16 +15866,16 @@ async def process_scan_plan_job(job_data: dict):
                 available_worker_count=int(
                     job_data.get('parallel_worker_count') or 0
                 ),
-            )
-        except ParallelActionPlanError as exc:
-            raise ExecutionScopeError(
-                f"canonical parallel action partition rejected: {exc}"
-            ) from exc
-        for shard, child_partition in zip(
-            plan.shards, parallel_action_partition.children, strict=True,
-        ):
-            shard.options = dict(shard.options)
-            shard.options.update({
+        )
+    except ParallelActionPlanError as exc:
+        raise ExecutionScopeError(
+            f"canonical parallel action partition rejected: {exc}"
+        ) from exc
+    for shard, child_partition in zip(
+        plan.shards, parallel_action_partition.children, strict=True,
+    ):
+        shard.options = dict(shard.options)
+        shard.options.update({
                 "parallel_action_partition_schema": (
                     parallel_action_partition.schema_version
                 ),
@@ -16045,24 +15885,24 @@ async def process_scan_plan_job(job_data: dict):
                 "parallel_action_partition_role": child_partition.role,
                 "parallel_budget_partition": child_partition.budget.payload(),
                 "skip_global_checks": child_partition.role != "global",
-            })
-        parent_options["parallel_action_partition"] = (
-            parallel_action_partition.canonical_dict()
-        )
-        parent_options["parallel_action_partition_digest"] = (
-            parallel_action_partition.partition_digest
-        )
-        parent_options['parallel_planned_request_budget'] = sum(
-            child.budget.max_http_requests
-            for child in parallel_action_partition.children
-        )
-        parent_options['parallel_backbone_request_budget'] = next(
-            child.budget.max_http_requests
-            for child in parallel_action_partition.children
-            if child.role == "global"
-        )
+        })
+    parent_options["parallel_action_partition"] = (
+        parallel_action_partition.canonical_dict()
+    )
+    parent_options["parallel_action_partition_digest"] = (
+        parallel_action_partition.partition_digest
+    )
+    parent_options['parallel_planned_request_budget'] = sum(
+        child.budget.max_http_requests
+        for child in parallel_action_partition.children
+    )
+    parent_options['parallel_backbone_request_budget'] = next(
+        child.budget.max_http_requests
+        for child in parallel_action_partition.children
+        if child.role == "global"
+    )
     request_partitions: dict[int, Mapping[str, ScanWorkManifest]] = {}
-    if canonical_parent_job is not None and isinstance(
+    if isinstance(
         parent_options.get("request_manifest_refs"), Mapping,
     ):
         parent_request_manifests = await _load_scan_continuation_request_manifests(
@@ -16112,7 +15952,7 @@ async def process_scan_plan_job(job_data: dict):
     child_jobs: list[
         tuple[
             str, str, dict[str, Any], dict[str, Any],
-            CanonicalScanJob | None, ScanActionPlan | None,
+            CanonicalScanJob, ScanActionPlan,
             tuple[ScanWorkManifest, ...], int,
         ]
     ] = []
@@ -16124,59 +15964,37 @@ async def process_scan_plan_job(job_data: dict):
                 "parallel child identity differs from its planned shard"
             )
         child_options = dict(shard.options)
-        if canonical_parent_job is not None:
-            assigned_endpoints = list(
-                child_options.get("custom_endpoints") or ()
-            )
-            if child_options.get("parallel_backbone") is True:
-                assigned_endpoints = list(harvested)
-            child_options, child_work_manifests = (
-                _compile_parallel_child_work_manifests(
-                    child_scan_id=child_id,
-                    target_url=target_url,
-                    parent_job=canonical_parent_job,
-                    child_options=child_options,
-                    selected_shard=shard.index,
-                    endpoints=assigned_endpoints,
-                    request_manifests_by_selection=request_partitions.get(
-                        shard.index,
-                    ),
-                )
-            )
-            child_job, child_options, payload = _canonical_shard_job(
-                canonical_parent_job,
-                child_id=child_id,
-                child_job_id=child_job_id,
+        assigned_endpoints = list(
+            child_options.get("custom_endpoints") or ()
+        )
+        if child_options.get("parallel_backbone") is True:
+            assigned_endpoints = list(harvested)
+        child_options, child_work_manifests = (
+            _compile_parallel_child_work_manifests(
+                child_scan_id=child_id,
+                target_url=target_url,
+                parent_job=canonical_parent_job,
                 child_options=child_options,
-                shard_label=shard.label,
-                shard_index=shard.index,
-                shard_count=plan.shard_count,
-                parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+                selected_shard=shard.index,
+                endpoints=assigned_endpoints,
+                request_manifests_by_selection=request_partitions.get(
+                    shard.index,
+                ),
             )
-            child_action_plan = _compile_parallel_child_action_plan(
-                child_job, child_options,
-            )
-        else:
-            child_job = None
-            child_action_plan = None
-            child_work_manifests = ()
-            child_options['queue_handoff_confirmed'] = False
-            payload = {
-                'type': parallel_scan.SHARD_JOB_TYPE,
-                'job_id': child_job_id,
-                'scan_id': child_id,
-                'parent_scan_id': parent_id,
-                'campaign_id': None,
-                'target_id': target_id,
-                'target': target_url,
-                'options': child_options,
-                'shard_label': shard.label,
-                'shard_index': shard.index,
-                'shard_count': plan.shard_count,
-                'attempt': 1,
-                'plan_version': parallel_scan.PLAN_VERSION,
-                'submitted_at': utc_now_iso(),
-            }
+        )
+        child_job, child_options, payload = _canonical_shard_job(
+            canonical_parent_job,
+            child_id=child_id,
+            child_job_id=child_job_id,
+            child_options=child_options,
+            shard_label=shard.label,
+            shard_index=shard.index,
+            shard_count=plan.shard_count,
+            parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
+        )
+        child_action_plan = _compile_parallel_child_action_plan(
+            child_job, child_options,
+        )
         child_jobs.append((
             child_id, child_job_id, child_options, payload, child_job,
             child_action_plan, child_work_manifests, shard.index,
@@ -16192,7 +16010,6 @@ async def process_scan_plan_job(job_data: dict):
                         _child_job, child_action_plan, _child_work_manifests,
                         _shard_index,
                     ) in child_jobs
-                    if child_action_plan is not None
                 })
             )
         except ParallelActionPlanError as exc:
@@ -16223,7 +16040,7 @@ async def process_scan_plan_job(job_data: dict):
                 child_id, child_job_id, child_options, payload, child_job,
                 child_action_plan, child_work_manifests, shard_index,
             ) in child_jobs:
-                child_plan = child_job.execution_plan.canonical_dict() if child_job else None
+                child_plan = child_job.execution_plan.canonical_dict()
                 await conn.execute("""
                     INSERT INTO scans (id, target_id, target_url, job_id, status, options,
                                        scan_type, parent_scan_id, scan_role, shard_index, shard_count,
@@ -16232,16 +16049,16 @@ async def process_scan_plan_job(job_data: dict):
                     VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,'shard',$8,$9,$10,$11,$12,$13,$14)
                 """, uuid.UUID(child_id),
                      uuid.UUID(target_id) if target_id else None,
-                     target_url, child_job_id, json.dumps(child_options), scan_type,
+                     target_url, child_job_id, json.dumps(child_options), 'scan',
                      uuid.UUID(parent_id), shard_index, plan.shard_count,
-                     'v2' if child_job else 'legacy',
-                     json.dumps(child_plan['policy'] if child_plan else {}),
+                     'v2',
+                     json.dumps(child_plan['policy']),
                      json.dumps(
                          child_job.shard.sub_budget.payload()
-                         if child_job and child_job.shard else {}
+                         if child_job.shard else {}
                      ),
-                     json.dumps(child_job.payload() if child_job else {}),
-                     child_job.payload_digest if child_job else None)
+                     json.dumps(child_job.payload()),
+                     child_job.payload_digest)
                 for child_manifest in child_work_manifests:
                     await PostgresScanManifestStore().persist(
                         conn, manifest=child_manifest,
@@ -16571,40 +16388,28 @@ async def process_scan_shard_job(job_data: dict):
         # all-terminal barrier. Both paths are idempotent under redelivery.
         if parallel_discovery and parent_id:
             try:
-                parent_queue_payload = None
-                continuation_parent_job_id = str(
-                    job_data.get('parent_job_id') or parent_id
+                if not isinstance(job_data.get("_canonical_queue_payload"), Mapping):
+                    raise ExecutionScopeError(
+                        "parallel discovery requires canonical queue authority"
+                    )
+                async with db_pool.acquire() as conn:
+                    parent_row = await conn.fetchrow(
+                        """
+                        SELECT scan_job_payload FROM scans WHERE id=$1
+                        """,
+                        uuid.UUID(parent_id),
+                    )
+                if not parent_row:
+                    raise ExecutionScopeError(
+                        "canonical discovery parent disappeared before continuation"
+                    )
+                parent_queue_payload = _as_report_dict(
+                    parent_row.get('scan_job_payload')
                 )
-                continuation_target = target
-                continuation_options = dict(job_data.get('parent_options') or {})
-                if isinstance(job_data.get("_canonical_queue_payload"), Mapping):
-                    async with db_pool.acquire() as conn:
-                        parent_row = await conn.fetchrow(
-                            """
-                            SELECT job_id, target_url, options, scan_job_payload
-                            FROM scans WHERE id=$1
-                            """,
-                            uuid.UUID(parent_id),
-                        )
-                    if not parent_row:
-                        raise ExecutionScopeError(
-                            "canonical discovery parent disappeared before continuation"
-                        )
-                    parent_queue_payload = _as_report_dict(
-                        parent_row.get('scan_job_payload')
-                    )
-                    continuation_parent_job_id = str(
-                        parent_row.get('job_id') or parent_id
-                    )
-                    continuation_target = str(parent_row.get('target_url') or target)
-                    continuation_options = _as_report_dict(parent_row.get('options')) or {}
                 continued = _enqueue_parallel_discovery_continuation(
                     r,
                     parent_id=parent_id,
-                    parent_job_id=continuation_parent_job_id,
                     discovery_scan_id=scan_id,
-                    target=continuation_target,
-                    options=continuation_options,
                     parallel_worker_count=int(job_data.get('parallel_worker_count') or 0),
                     parent_queue_payload=parent_queue_payload,
                 )
@@ -17805,7 +17610,12 @@ async def process_exploit_batch_job(job_data: dict):
     if exploit_depth:
         scan_opts['no_early_stop'] = True
         lean.update({'sqli_extract_max': 8, 'oob_max_findings': 8, 'max_findings_per_family': None})
-    parallel_scan._merge_custom_budget(scan_opts, lean)
+    # ASM campaigns are an internal inventory workflow, not a parallel Scan
+    # child. Keep their bounded scanner adapter options local instead of routing
+    # them through the canonical parallel-plan budget normalizer.
+    asm_budget = dict(scan_opts.get("custom_budget") or {})
+    asm_budget.update(lean)
+    scan_opts["custom_budget"] = asm_budget
 
     async with db_pool.acquire() as conn:
         update_result = await conn.execute(

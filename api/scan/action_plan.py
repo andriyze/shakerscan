@@ -548,6 +548,7 @@ class ScanActionPlanCompiler:
         authority_refs: Mapping[str, Any] | None = None,
         shard_authority: Mapping[str, Any] | None = None,
         action_scope: str = "full",
+        family_scope: Sequence[str] | None = None,
         defer_manifest_actions: bool = False,
         include_finalizer: bool = True,
         available_placement_capabilities: Iterable[str] | None = None,
@@ -564,6 +565,16 @@ class ScanActionPlanCompiler:
         if defer_manifest_actions and scope != "full":
             raise ScanActionPlanError(
                 "manifest action deferral is only valid for a full admission phase"
+            )
+        narrowed_families = tuple(dict.fromkeys(
+            _token(item, name="family scope") for item in (family_scope or ())
+        ))
+        if any(
+            not self._family_enabled(execution_plan, family)
+            for family in narrowed_families
+        ):
+            raise ScanActionPlanError(
+                "family_scope cannot widen the immutable Scan policy"
             )
         credentials = _reference_list(
             credential_profile_refs,
@@ -650,6 +661,7 @@ class ScanActionPlanCompiler:
         authority = _canonical_value({
             "scope_receipt_id": execution_plan.policy.scope_receipt_id,
             "approval_receipt_id": execution_plan.policy.approval_receipt_id,
+            "parallel_family_scope": list(narrowed_families),
             **dict(authority_refs or {}),
         })
         shard = _canonical_value(shard_authority or {})
@@ -678,11 +690,18 @@ class ScanActionPlanCompiler:
 
         policy = execution_plan.policy
         active = policy.active_testing
-        passive_nuclei = self._family_enabled(execution_plan, "nuclei")
-        xss = active and self._family_enabled(execution_plan, "xss")
-        sqli = active and self._family_enabled(execution_plan, "sqli")
+        family_filter = set(narrowed_families)
+
+        def enabled(family: str) -> bool:
+            return self._family_enabled(execution_plan, family) and (
+                not family_filter or family in family_filter
+            )
+
+        passive_nuclei = enabled("nuclei")
+        xss = active and enabled("xss")
+        sqli = active and enabled("sqli")
         nuclei = active and passive_nuclei
-        bola = active and self._family_enabled(execution_plan, "bola")
+        bola = active and enabled("bola")
         template_actions_expected = (
             (scope == "full" and passive_nuclei)
             or (scope != "discovery" and nuclei and not defer_manifest_actions)

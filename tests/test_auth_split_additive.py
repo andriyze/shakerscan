@@ -12,14 +12,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 import parallel_scan as ps  # noqa: E402
 
 
+ACTIVE = {
+    "scan_policy": {"active_testing": True, "include_families": []},
+    "active": True,
+    "budget_profile": "balanced",
+    "resolved_scan_budget": {
+        "max_http_requests": 5000,
+        "max_endpoints": 500,
+        "max_browser_actions": 100,
+        "max_tool_wall_seconds": 900,
+    },
+    "resolved_budget": {
+        "request_max": 5000,
+        "max_urls": 500,
+        "browser_max_pages": 100,
+        "phase4_max_seconds": 900,
+        "active_max_endpoints": 500,
+        "active_max_seconds": 900,
+    },
+}
+
+
 def _states(plan):
     return sorted(str(s.options.get("auth_state")) for s in plan.shards)
 
 
 def test_auth_split_primary_only_is_two_way_additive():
     plan = ps.plan_shards(
-        {"scan_type": "smart", "parallel": True, "auth_header": "Bearer u1"},
-        scan_type="smart", strategy="auth_split")
+        {**ACTIVE, "parallel": True, "auth_header": "Bearer u1"}, strategy="auth_split")
     assert plan.is_parallel is True
     assert len(plan.shards) == 2
     assert _states(plan) == ["anonymous", "user1"]
@@ -35,9 +55,8 @@ def test_auth_split_keeps_user1_and_user2_together_for_bola():
     # BOTH user1 and user2 creds, silently killing cross-user BOLA. The two-way
     # split must keep them together in the full-context authed shard.
     plan = ps.plan_shards(
-        {"scan_type": "smart", "parallel": True,
-         "auth_header": "Bearer u1", "user2_header": "Bearer u2"},
-        scan_type="smart", strategy="auth_split")
+        {**ACTIVE, "parallel": True,
+         "auth_header": "Bearer u1", "user2_header": "Bearer u2"}, strategy="auth_split")
     assert len(plan.shards) == 2
     assert _states(plan) == ["anonymous", "user1"]
     authed = next(s for s in plan.shards if s.options.get("auth_state") == "user1")
@@ -51,8 +70,7 @@ def test_auth_split_keeps_user1_and_user2_together_for_bola():
 
 def test_auth_split_no_creds_degrades_to_single_scan():
     plan = ps.plan_shards(
-        {"scan_type": "smart", "parallel": True},
-        scan_type="smart", strategy="auth_split")
+        {**ACTIVE, "parallel": True}, strategy="auth_split")
     assert plan.is_parallel is False
     assert len(plan.shards) == 1
 
@@ -61,7 +79,7 @@ def test_auth_split_is_self_contained_not_shared_expansion():
     # auth_split does its OWN two-way split; the shared _expand_auth_states keeps
     # its intentional per-identity cross-product for coverage's per-principal
     # endpoint coverage (unchanged). Guards against accidentally coupling them.
-    base = [ps.ShardSpec(0, "base", {"scan_type": "smart",
+    base = [ps.ShardSpec(0, "base", {**ACTIVE,
                                      "auth_header": "u1", "user2_header": "u2"})]
     opts = {"auth_state_shards": True, "auth_header": "u1", "user2_header": "u2"}
     out = ps._expand_auth_states(base, opts, [])

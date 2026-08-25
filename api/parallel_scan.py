@@ -11,9 +11,9 @@ fleet (see docs/dast-asm-architecture.md). The flow is a scatter-gather:
         -> last shard to finish enqueues a scan_merge job
         -> scan_merge aggregates child results into the parent report
 
-This module is the *planner*: it is pure logic (no I/O) so it can be unit
-tested. Given the parent scan options it returns a ParallelPlan whose shards
-each carry a full child-options dict (parent options + a focused override).
+This module is the endpoint-partition planner: it is pure logic (no I/O) so it
+can be unit tested. Canonical policy and budget snapshots are its only
+behavior-bearing inputs; historical Scan names are never interpreted here.
 
 Strategies:
 
@@ -22,12 +22,10 @@ Strategies:
     real division of work (genuine speed-up) and is the best fit for API
     targets where the endpoints are known up front.
 
-  - ``family``: split active testing by capability using the scanner's focused
-    flags (``--sqli`` / ``--xss``). One broad shard covers full breadth at the
-    parent budget; additional shards run deeper, higher-budget SQLi- and
-    XSS-focused passes. This buys *depth* (more coverage / larger budget in the
-    same wall-clock), not raw speed, because discovery repeats per shard. The
-    raw-speed "discover once, slice endpoints" path is handled by ``coverage``.
+  - ``family``: split active testing by canonical capability family. One broad
+    shard covers the selected policy and additional shards narrow that same
+    immutable family authority. This buys depth, not raw speed, because
+    discovery repeats per shard.
 
   - ``coverage``: run a single recon pass, harvest the emitted active worklist,
     then partition that full endpoint list across coverage shards. This is the
@@ -38,11 +36,11 @@ Strategies:
     endpoint bucket. This spends more total budget on every endpoint when a
     large worker fleet is available.
 
-``auto`` resolves to ``scope`` when >=2 custom endpoints are present. In the
-plan worker, active scan types without explicit endpoints resolve to
-``coverage`` so the scanner discovers once and fans out endpoint batches instead
-of repeating recon in family shards. The pure ``plan_shards`` helper still
-degrades coverage to family because it cannot run the required recon harvest.
+``auto`` resolves to ``scope`` when >=2 custom endpoints are present. Active
+canonical policies without explicit endpoints resolve to ``coverage`` in the
+plan worker so discovery runs once before endpoint fan-out. The pure
+``plan_shards`` helper degrades coverage to family because it cannot run the
+required recon harvest.
 """
 
 from __future__ import annotations
@@ -53,16 +51,9 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from job_queue import ensure_consumer_group, stream_key
-
-try:
-    from constants import resolve_scan_budget
-except ModuleNotFoundError as exc:
-    if exc.name != "constants":
-        raise
-    from scanner.constants import resolve_scan_budget
 
 try:
     import check_registry
@@ -98,10 +89,6 @@ PARALLEL_OPTION_KEYS = (
     "auto_sharded",
     "auto_sharding_reason",
 )
-
-# Scan types that actually run active injection testing. ``family`` sharding is
-# only meaningful for these; for passive types it degrades to a single shard.
-ACTIVE_SCAN_TYPES = frozenset({"full", "aggressive", "smart"})
 
 VALID_STRATEGIES = frozenset({"auto", "scope", "family", "coverage", "coverage_family", "auth_split"})
 
@@ -224,13 +211,14 @@ FAMILY_SHARD_LABELS = ("broad",) + tuple(spec.name for spec in FAMILY_FOCUSED_SP
 
 
 def _requested_focused_family(parent_options: dict[str, Any]) -> str | None:
-    """Return an explicit focused family from parent options, if present."""
-    return check_registry.normalize_check_family(
-        (parent_options or {}).get("coverage_attempt_family")
-        or (parent_options or {}).get("asm_check_family")
-        or (parent_options or {}).get("check_family"),
-        allow_all=True,
-    )
+    """Return the one family selected by canonical policy, if it is focused."""
+    policy = _canonical_scan_policy(parent_options)
+    included = [
+        check_registry.normalize_check_family(item, allow_all=True)
+        for item in policy.get("include_families") or ()
+    ]
+    included = [item for item in included if item and item != "all"]
+    return included[0] if len(set(included)) == 1 else None
 
 
 def _coverage_family_lanes(parent_options: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
@@ -246,9 +234,9 @@ def _coverage_family_lanes(parent_options: dict[str, Any]) -> list[tuple[str, st
     if requested and requested != "all":
         spec = check_registry.get_check_family(requested)
         if spec and spec.runnable and spec.scanner_options:
-            return [(spec.name, spec.name, dict(spec.scanner_options))]
+            return [(spec.name, spec.name, {})]
     lanes: list[tuple[str, str, dict[str, Any]]] = [("broad", "all", {})]
-    lanes.extend((spec.name, spec.name, dict(spec.scanner_options)) for spec in FAMILY_FOCUSED_SPECS)
+    lanes.extend((spec.name, spec.name, {}) for spec in FAMILY_FOCUSED_SPECS)
 
     # D5 (hunter union): the broad/sqli/xss lanes above intentionally exclude the
     # high-risk, credential-gated authz families. But when the operator HAS
@@ -264,36 +252,37 @@ def _coverage_family_lanes(parent_options: dict[str, Any]) -> list[tuple[str, st
     if "bola" not in existing and bool(opts.get("exploit_depth")) and has_primary and has_second:
         bspec = check_registry.get_check_family("bola")
         if bspec and bspec.runnable and bspec.scanner_options:
-            lanes.append(("bola", "bola", {**dict(bspec.scanner_options), "exploit_depth": True}))
+            lanes.append(("bola", "bola", {"exploit_depth": True}))
     if "auth" not in existing and has_primary:
         aspec = check_registry.get_check_family("auth")
         if aspec and aspec.runnable and aspec.scanner_options:
-            lanes.append(("auth", "auth", dict(aspec.scanner_options)))
+            lanes.append(("auth", "auth", {}))
     return lanes
 
 
-def _active_testing(
-    parent_options: dict[str, Any],
-    scan_type: str | None = None,
-    *,
-    explicit: bool | None = None,
-) -> bool:
-    if explicit is not None:
-        return bool(explicit)
+def _canonical_scan_policy(parent_options: Mapping[str, Any]) -> dict[str, Any]:
+    """Load immutable parallel authority without interpreting compatibility fields."""
+    execution_plan = parent_options.get("scan_execution_plan")
+    if isinstance(execution_plan, Mapping):
+        policy = execution_plan.get("policy")
+        if isinstance(policy, Mapping):
+            return dict(policy)
     policy = parent_options.get("scan_policy")
-    if isinstance(policy, dict) and isinstance(policy.get("active_testing"), bool):
-        return bool(policy["active_testing"])
-    if isinstance(parent_options.get("active"), bool):
-        return bool(parent_options["active"])
-    return str(scan_type or "").strip().lower() in ACTIVE_SCAN_TYPES
+    if isinstance(policy, Mapping):
+        return dict(policy)
+    raise ValueError("parallel planning requires a canonical Scan policy snapshot")
+
+
+def _active_testing(parent_options: Mapping[str, Any]) -> bool:
+    value = _canonical_scan_policy(parent_options).get("active_testing")
+    if not isinstance(value, bool):
+        raise ValueError("canonical Scan policy active_testing must be boolean")
+    return value
 
 
 def resolve_auto_strategy(
     parent_options: dict[str, Any],
-    scan_type: str | None,
     strategy: str | None,
-    *,
-    active_testing: bool | None = None,
 ) -> str:
     """Resolve the user-facing ``auto`` strategy for the async plan worker.
 
@@ -310,7 +299,7 @@ def resolve_auto_strategy(
     endpoints = _normalize_endpoint_list((parent_options or {}).get("custom_endpoints"))
     if len(endpoints) >= 2:
         return "scope"
-    if _active_testing(parent_options, scan_type, explicit=active_testing):
+    if _active_testing(parent_options):
         return "coverage"
     return "family"
 
@@ -347,6 +336,7 @@ def _base_child_options(parent_options: dict[str, Any]) -> dict[str, Any]:
     child = copy.deepcopy(parent_options or {})
     for key in PARALLEL_OPTION_KEYS:
         child.pop(key, None)
+    _sync_resolved_budget(child)
     return child
 
 
@@ -377,16 +367,28 @@ def _sync_resolved_budget(options: dict[str, Any]) -> None:
     the full parent crawl/Nuclei budget.
     """
     custom_budget = options.get("custom_budget")
+    if custom_budget is None:
+        custom_budget = {}
     if not isinstance(custom_budget, dict):
-        return
-    budget_profile = options.get("budget_profile")
-    if options.get("thorough_params") and not budget_profile:
-        budget_profile = "exhaustive"
-    options["resolved_budget"] = resolve_scan_budget(
-        options.get("scan_type") or "standard",
-        budget_profile,
-        custom_budget,
-    )
+        raise ValueError("parallel child custom budget must be an object")
+    resolved = options.get("resolved_budget")
+    if not isinstance(resolved, dict):
+        canonical = options.get("resolved_scan_budget")
+        if not isinstance(canonical, dict):
+            raise ValueError("parallel child budget requires a canonical budget snapshot")
+        resolved = {
+            "request_max": canonical.get("max_http_requests"),
+            "max_urls": canonical.get("max_endpoints"),
+            "browser_max_pages": canonical.get("max_browser_actions"),
+            "phase4_max_seconds": canonical.get("max_tool_wall_seconds"),
+            "active_max_endpoints": canonical.get("max_endpoints"),
+            "active_max_seconds": canonical.get("max_tool_wall_seconds"),
+        }
+    resolved = dict(resolved)
+    resolved.update(custom_budget)
+    resolved["budget_profile"] = options.get("budget_profile")
+    resolved["budget_source"] = "canonical_parallel_partition"
+    options["resolved_budget"] = resolved
 
 
 def _coerce_shard_request(requested_shards: Any, worker_count: int) -> int:
@@ -597,19 +599,10 @@ def _coverage_active_seconds(parent_options: dict[str, Any], endpoint_count: int
 
 def _coverage_runs_active_mix(parent_options: dict[str, Any]) -> bool:
     """Return true when a coverage shard will run both primary active families."""
-    family = str(
-        parent_options.get("coverage_attempt_family")
-        or parent_options.get("asm_check_family")
-        or parent_options.get("check_family")
-        or ""
-    ).strip().lower()
-    if family in {"sqli", "xss"}:
+    included = set(_canonical_scan_policy(parent_options).get("include_families") or ())
+    if included and included.issubset({"sqli", "xss"}):
         return False
-    xss_flag = bool(parent_options.get("xss"))
-    sqli_flag = bool(parent_options.get("sqli"))
-    if xss_flag != sqli_flag:
-        return False
-    return _active_testing(parent_options, parent_options.get("scan_type"))
+    return _active_testing(parent_options)
 
 
 def _default_coverage_per_shard_cap(parent_options: dict[str, Any]) -> int:
@@ -1481,13 +1474,15 @@ def _plan_scope(
     # and can also deadlock the scatter/gather workflow against the domain-wide
     # hourly cap. Resolve it once, then partition that exact allowance across
     # the disjoint endpoint buckets below.
-    resolved_parent_budget = parent_options.get("resolved_budget")
+    normalized_parent_options = copy.deepcopy(parent_options)
+    _sync_resolved_budget(normalized_parent_options)
+    resolved_parent_budget = normalized_parent_options.get("resolved_budget")
     if not isinstance(resolved_parent_budget, dict):
-        resolved_parent_budget = resolve_scan_budget(
-            parent_options.get("scan_type") or "standard",
-            parent_options.get("budget_profile"),
-            parent_options.get("custom_budget") if isinstance(parent_options.get("custom_budget"), dict) else None,
-        )
+        raise ValueError("scope partitioning requires a canonical resolved budget")
+    resolved_parent_budget = dict(resolved_parent_budget)
+    custom_parent_budget = parent_options.get("custom_budget")
+    if isinstance(custom_parent_budget, dict):
+        resolved_parent_budget.update(custom_parent_budget)
     try:
         parent_request_max = max(1, int(resolved_parent_budget.get("request_max") or 1))
     except (TypeError, ValueError):
@@ -1578,13 +1573,10 @@ def _plan_scope(
 
 def _plan_family(
     parent_options: dict[str, Any],
-    scan_type: str | None,
     requested: int,
     notes: list[str],
-    *,
-    active_testing: bool | None = None,
 ) -> list[ShardSpec]:
-    if not _active_testing(parent_options, scan_type, explicit=active_testing):
+    if not _active_testing(parent_options):
         notes.append(
             "family strategy is only meaningful when active testing is enabled; "
             "this Scan is passive, so it will run one broad shard"
@@ -1595,13 +1587,14 @@ def _plan_family(
     # broad: full breadth at the parent budget (all active families).
     broad = _base_child_options(parent_options)
 
+    broad["coverage_attempt_family"] = "all"
     ordered = [ShardSpec(index=0, label="broad", options=broad)]
     for i, spec in enumerate(FAMILY_FOCUSED_SPECS, start=1):
         opts = _base_child_options(parent_options)
-        opts.update(spec.scanner_options)
-        opts.update({"no_early_stop": True, "thorough_params": True})
-        if (opts.get("budget_profile") or "balanced") in ("fast", "balanced"):
-            opts["budget_profile"] = "thorough"
+        opts.update({
+            "coverage_attempt_family": spec.name,
+            "no_early_stop": True,
+        })
         ordered.append(ShardSpec(index=i, label=spec.name, options=opts))
 
     n = min(requested, len(FAMILY_SHARD_LABELS))
@@ -1619,8 +1612,6 @@ def _plan_family(
 def plan_shards(
     parent_options: dict[str, Any],
     *,
-    scan_type: str | None = None,
-    active_testing: bool | None = None,
     requested_shards: Any = "auto",
     strategy: str = "auto",
     worker_count: int = 0,
@@ -1629,8 +1620,6 @@ def plan_shards(
 
     Args:
         parent_options: the parent scan's options dict (as submitted).
-        scan_type: legacy-only compatibility input.
-        active_testing: canonical policy value; takes precedence over scan_type.
         requested_shards: int, numeric string, or "auto".
         strategy: "auto" | "scope" | "family" | "coverage".
         worker_count: current worker fleet size (used to auto-scale shards).
@@ -1641,14 +1630,13 @@ def plan_shards(
         notes.append(f"unknown strategy '{strategy}', defaulting to auto")
         strategy = "auto"
 
-    scan_type = (scan_type or "").strip().lower() or None
     endpoints = _normalize_endpoint_list(parent_options.get("custom_endpoints"))
 
     resolved = strategy
     if strategy == "auto":
         resolved = "scope" if len(endpoints) >= 2 else "family"
 
-    # Additive auth split: run ONE full smart scan per auth state (anonymous +
+    # Additive auth split: run one complete Scan per auth state (anonymous +
     # full-context authed) so authenticating ADDS coverage instead of replacing
     # the anonymous pass. Each shard is a COMPLETE scan (no family/scope
     # fragmentation of the global+browser checks that detection depends on), and
@@ -1697,10 +1685,8 @@ def plan_shards(
     shards = _finalize_shards(
         _plan_family(
             parent_options,
-            scan_type,
             requested,
             notes,
-            active_testing=active_testing,
         ),
         parent_options,
         notes,

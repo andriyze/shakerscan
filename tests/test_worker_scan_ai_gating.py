@@ -2150,10 +2150,85 @@ class _FakePlanPool:
         return False
 
 
+def _canonical_parallel_fixture(
+    parent_id,
+    target_id,
+    *,
+    policy=None,
+    budget_profile="balanced",
+    strategy="coverage",
+    custom_endpoints=(),
+):
+    from runtime.models import TargetBinding
+    from scan.action_plan import ScanActionPlanCompiler
+    from scan.budget_allocator import allocate_scan_action_plan
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    effective_policy = {"exclude_families": ["nuclei"], **(policy or {})}
+    contract = resolve_scan_contract(
+        budget_profile=budget_profile,
+        policy=effective_policy,
+        approval_receipt_id=(
+            "approval-1" if effective_policy.get("active_testing") else None
+        ),
+    )
+    target = TargetBinding(
+        target_id=str(target_id),
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    parent_job = CanonicalScanJob.create(
+        job_id=f"job-{parent_id}",
+        scan_id=parent_id,
+        target=target,
+        execution_plan=contract.execution_plan,
+    )
+    parent_plan = allocate_scan_action_plan(
+        ScanActionPlanCompiler().compile(
+            scan_id=parent_id,
+            execution_plan=contract.execution_plan,
+            target_binding=target,
+        ),
+        contract.budget,
+    ).plan
+    options = contract.option_metadata()
+    options.update({
+        "parallel": True,
+        "shard_strategy": strategy,
+        "runtime_scope_guard": {
+            **parent_job.payload()["target"],
+            "requires_runtime_destination_check": True,
+            "requires_runtime_dns_check": True,
+            "address_binding_source": "submission_dns_snapshot",
+        },
+    })
+    if custom_endpoints:
+        options["custom_endpoints"] = list(custom_endpoints)
+    queue_payload = parent_job.payload()
+    queue_payload.update({
+        "type": worker.parallel_scan.PLAN_JOB_TYPE,
+        "placement": {"node_scope": "local"},
+        "attempt": 1,
+        "plan_version": worker.parallel_scan.PLAN_VERSION,
+        "parallel_worker_count": 3,
+    })
+    return parent_job, parent_plan, options, queue_payload
+
+
 def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locally(monkeypatch):
     parent_id = "51515151-5151-5151-5151-515151515151"
     target_id = uuid.UUID("31313131-3131-3131-3131-313131313131")
-    conn = _FakePlanConn(parent_id, target_id, uuid.uuid4())
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id,
+    )
+    options["placement"] = {
+        "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    }
+    conn = _FakePlanConn(parent_id, target_id, uuid.uuid4(), parent_plan)
     redis = _FakeJobRedis()
 
     async def forbidden_run(*args, **kwargs):
@@ -2164,30 +2239,26 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
     monkeypatch.setattr(worker, "run_scan", forbidden_run)
 
     asyncio.run(worker.process_scan_plan_job({
-        "job_id": "parent-discovery-job",
+        "job_id": parent_job.job_id,
         "scan_id": parent_id,
         "target": "https://example.test",
         "parallel_worker_count": 3,
-        "options": {
-            "scan_type": "smart",
-            "parallel": True,
-            "shard_strategy": "coverage",
-            "placement": {"node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
-        },
+        "options": options,
+        "_canonical_queue_payload": queue_payload,
     }))
 
     jobs = [json.loads(payload) for _, payload in redis.pushed]
     assert len(jobs) == 1
     discovery = jobs[0]
     assert discovery["type"] == worker.parallel_scan.SHARD_JOB_TYPE
-    assert discovery["parallel_discovery"] is True
-    assert discovery["options"]["placement"] == {
+    from scan.jobs import CanonicalScanJob
+    discovery_job = CanonicalScanJob.from_queue_payload(discovery)
+    assert discovery_job.shard.parallel_discovery is True
+    assert discovery["placement"] == {
         "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     }
-    budget = discovery["options"]["custom_budget"]
-    assert budget["active_max_seconds"] == 0
-    assert budget["phase4_max_seconds"] == 0
-    assert budget["browser_max_pages"] == 0
+    assert discovery_job.shard.sub_budget.max_state_changing_requests == 0
+    assert discovery_job.shard.sub_budget.max_browser_actions == 0
     assert any(
         worker.parallel_scan.PARALLEL_DISCOVERY_ROLE in args
         for query, args in conn.executions if "INSERT INTO scans" in query
@@ -2716,32 +2787,37 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
                 }
             return await super().fetchrow(query, *args)
 
-    conn = DiscoveryPlanConn(parent_id, target_id, uuid.uuid4())
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id,
+    )
+    options["coverage_per_shard_cap"] = 2
+    conn = DiscoveryPlanConn(
+        parent_id, target_id, uuid.uuid4(), parent_plan,
+    )
     redis = _FakeJobRedis()
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
 
     asyncio.run(worker.process_scan_plan_job({
-        "job_id": "parent-continuation-job",
+        "job_id": parent_job.job_id,
         "scan_id": parent_id,
         "target": "https://example.test",
         "plan_stage": "fanout",
         "discovery_scan_id": discovery_id,
-        "options": {
-            "scan_type": "smart",
-            "parallel": True,
-            "shard_strategy": "coverage",
-            "coverage_per_shard_cap": 2,
-        },
+        "options": options,
+        "_canonical_queue_payload": queue_payload,
     }))
 
     jobs = [json.loads(payload) for _, payload in redis.pushed]
     assert len(jobs) == 3
-    assert jobs[0]["shard_label"] == "global-backbone"
+    from scan.jobs import CanonicalScanJob
+    assert CanonicalScanJob.from_queue_payload(
+        jobs[0]
+    ).shard.shard_label == "global-backbone"
     assigned = [
         endpoint
-        for job in jobs[1:]
-        for endpoint in job["options"]["custom_endpoints"]
+        for args in conn.inserted_children[1:]
+        for endpoint in json.loads(args[4])["custom_endpoints"]
     ]
     assert sorted(assigned) == sorted([
         "GET /api/a?id=1", "GET /api/b?id=1",
@@ -2749,7 +2825,7 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
     ])
 
 
-def test_scan_plan_failed_discovery_fails_parent_without_empty_fanout(monkeypatch):
+def test_scan_plan_failed_discovery_runs_canonical_backbone_with_partial_coverage(monkeypatch):
     parent_id = "53535353-5353-4353-8353-535353535353"
     discovery_id = "63636363-6363-4363-8363-636363636363"
     target_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
@@ -2765,33 +2841,42 @@ def test_scan_plan_failed_discovery_fails_parent_without_empty_fanout(monkeypatc
                 }
             return await super().fetchrow(query, *args)
 
-    conn = FailedDiscoveryPlanConn(parent_id, target_id, uuid.uuid4())
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id,
+    )
+    conn = FailedDiscoveryPlanConn(
+        parent_id, target_id, uuid.uuid4(), parent_plan,
+    )
     redis = _FakeJobRedis()
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
 
     asyncio.run(worker.process_scan_plan_job({
-        "job_id": "parent-failed-discovery-job",
+        "job_id": parent_job.job_id,
         "scan_id": parent_id,
         "target": "https://example.test",
         "plan_stage": "fanout",
         "discovery_scan_id": discovery_id,
-        "options": {
-            "scan_type": "smart",
-            "parallel": True,
-            "shard_strategy": "coverage",
-        },
+        "options": options,
+        "_canonical_queue_payload": queue_payload,
     }))
 
-    assert redis.pushed == []
-    failure_updates = [
+    queued = [json.loads(payload) for _, payload in redis.pushed]
+    assert len(queued) == 2
+    from scan.jobs import CanonicalScanJob
+    assert all(
+        CanonicalScanJob.from_queue_payload(item).shard.parent_scan_id == parent_id
+        for item in queued
+    )
+    parent_update = next(
         args for query, args in conn.executions
-        if "current_phase='parallel_discovery_failed'" in query
+        if "UPDATE scans SET status='running'" in query and "shard_count" in query
+    )
+    parent_options = json.loads(parent_update[3])
+    assert parent_options["coverage_status"] == "partial"
+    assert parent_options["coverage_reasons"] == [
+        "Exceeded bounded discovery duration"
     ]
-    assert len(failure_updates) == 1
-    assert "Exceeded bounded discovery duration" in failure_updates[0][1]
-    assert redis.hashes[-1][2]["status"] == "failed"
-    assert redis.hashes[-1][2]["current_phase"] == "parallel_discovery_failed"
 
 
 def test_parallel_shard_slots_enforce_parent_concurrency(monkeypatch):
@@ -4131,28 +4216,37 @@ def test_device_http_request_is_pinned_bounded_and_rate_limited():
 
 
 
-def test_standalone_scan_rate_reservation_uses_resolved_active_budget():
-    assert worker._standalone_scan_rate_reservation_amount({"scan_type": "quick"}) == 0
-    assert worker._standalone_scan_rate_reservation_amount({
-        "scan_type": "smart",
-        "budget_profile": "thorough",
-    }) == 180  # §3 (safe): smart/thorough active_max_endpoints kept completable at 180
-    assert worker._standalone_scan_rate_reservation_amount({
-        "scan_type": "smart",
-        "custom_budget": {"active_max_endpoints": 1234},
-    }) == 1234
-    assert worker._standalone_scan_rate_reservation_amount({
-        "scan_type": "standard",
-        "custom_endpoints": ["GET /a", "POST /b json:{\"x\":1}"],
-    }) == 2
+def test_standalone_scan_rate_reservation_rejects_legacy_authority():
+    from scan.worker_contract import WorkerScanContractError
+
+    for legacy_options in (
+        {"scan_type": "quick"},
+        {"scan_type": "smart", "budget_profile": "thorough"},
+        {"scan_type": "smart", "custom_budget": {"active_max_endpoints": 1234}},
+        {
+            "scan_type": "standard",
+            "custom_endpoints": ["GET /a", "POST /b json:{\"x\":1}"],
+        },
+    ):
+        with pytest.raises(
+            WorkerScanContractError,
+            match="digest-less deterministic Scan execution has been removed",
+        ):
+            worker._standalone_scan_rate_reservation_amount(legacy_options)
 
 
-def test_standalone_enforcing_request_budget_reserves_request_tokens():
-    assert worker._standalone_scan_rate_reservation_amount({
-        "scan_type": "smart",
-        "request_budget_mode": "enforce",
-        "custom_budget": {"request_max": 77},
-    }) == 77
+def test_standalone_enforcing_request_budget_requires_canonical_plan():
+    from scan.worker_contract import WorkerScanContractError
+
+    with pytest.raises(
+        WorkerScanContractError,
+        match="digest-less deterministic Scan execution has been removed",
+    ):
+        worker._standalone_scan_rate_reservation_amount({
+            "scan_type": "smart",
+            "request_budget_mode": "enforce",
+            "custom_budget": {"request_max": 77},
+        })
 
 
 def test_canonical_rate_reservation_uses_immutable_plan_not_legacy_mode(monkeypatch):
@@ -4167,14 +4261,6 @@ def test_canonical_rate_reservation_uses_immutable_plan_not_legacy_mode(monkeypa
         "prepare_worker_dispatch",
         lambda options: (dict(options), admission),
     )
-    monkeypatch.setattr(
-        worker,
-        "resolve_or_consume_budget",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("canonical budget must not use a legacy scan-mode resolver")
-        ),
-    )
-
     assert worker._standalone_scan_rate_reservation_amount({
         "request_budget_mode": "enforce",
     }) == 77
@@ -4438,61 +4524,52 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     parent_id = "55555555-5555-5555-5555-555555555555"
     target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
     campaign_id = uuid.UUID("44444444-4444-4444-4444-444444444444")
-    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    endpoints = (
+        "GET /api/a?id=1", "GET /api/b?id=1",
+        "GET /api/c?id=1", "GET /api/d?id=1",
+    )
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id, custom_endpoints=endpoints,
+    )
+    options.update({
+        "coverage_allocation": "dynamic",
+        "coverage_dynamic_batch_size": 2,
+        "coverage_per_shard_cap": 2,
+    })
+    conn = _FakePlanConn(parent_id, target_id, campaign_id, parent_plan)
     redis = _FakeJobRedis()
-
-    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
-        return {
-            "target": target,
-            "findings": [],
-            "active_checks": {
-                "active_worklist": [
-                    "GET /api/a?id=1",
-                    "GET /api/b?id=1",
-                    "GET /api/c?id=1",
-                    "GET /api/d?id=1",
-                ]
-            },
-        }
 
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
             {
-                "job_id": "parent-job",
+                "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
-                "options": {
-                    "scan_type": "smart",
-                    "parallel": True,
-                    "shard_strategy": "coverage",
-                    "coverage_allocation": "dynamic",
-                    "coverage_dynamic_batch_size": 2,
-                    "coverage_per_shard_cap": 2,
-                    "custom_endpoints": [
-                        "GET /api/a?id=1", "GET /api/b?id=1",
-                        "GET /api/c?id=1", "GET /api/d?id=1",
-                    ],
-                },
+                "options": options,
+                "_canonical_queue_payload": queue_payload,
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    from scan.jobs import CanonicalScanJob
+    canonical_children = [
+        CanonicalScanJob.from_queue_payload(job) for job in child_jobs
+    ]
+    child_options = [json.loads(args[4]) for args in conn.inserted_children]
     assert len(child_jobs) == 3
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert child_jobs[0]["shard_label"] == "global-backbone"
-    assert child_jobs[0]["options"]["parallel_backbone"] is True
-    for job in child_jobs[1:]:
-        assert job["parent_scan_id"] == parent_id
-        assert job["campaign_id"] is None
-        assert job["target_id"] == str(target_id)
-        assert job["options"]["zero_rediscovery"] is True
-        assert job["options"]["custom_budget"]["phase4_max_seconds"] == 0
-        assert len(job["options"]["custom_endpoints"]) == 2
+    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert child_options[0]["parallel_backbone"] is True
+    for job, persisted in zip(canonical_children[1:], child_options[1:], strict=True):
+        assert job.shard.parent_scan_id == parent_id
+        assert job.target.target_id == str(target_id)
+        assert persisted["zero_rediscovery"] is True
+        assert persisted["custom_budget"]["phase4_max_seconds"] == 0
+        assert len(persisted["custom_endpoints"]) == 2
     assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
     assert redis.sets[0][1] == 3
     parent_update = [
@@ -4504,12 +4581,7 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     assert parent_options["coverage_allocation"] == "static"
     assert parent_options[worker.parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY] == 3
     request_budgets = [
-        int((job["options"].get("resolved_budget") or worker.resolve_scan_budget(
-            job["options"].get("scan_type") or "smart",
-            job["options"].get("budget_profile"),
-            job["options"].get("custom_budget"),
-        ))["request_max"])
-        for job in child_jobs
+        job.shard.sub_budget.max_http_requests for job in canonical_children
     ]
     assert parent_options["parallel_planned_request_budget"] == sum(request_budgets)
     assert parent_options["parallel_backbone_request_budget"] == request_budgets[0]
@@ -4519,46 +4591,33 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     parent_id = "56565656-5656-5656-5656-565656565656"
     target_id = uuid.UUID("34343434-3434-3434-3434-343434343434")
     campaign_id = uuid.UUID("45454545-4545-4545-4545-454545454545")
-    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    endpoints = (
+        "GET /api/a?id=1", "GET /api/b?id=1",
+        "GET /api/c?id=1", "GET /api/d?id=1",
+    )
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id, custom_endpoints=endpoints,
+    )
+    options.update({
+        "coverage_dynamic_batch_size": 2,
+        "coverage_per_shard_cap": 2,
+    })
+    conn = _FakePlanConn(parent_id, target_id, campaign_id, parent_plan)
     redis = _FakeJobRedis()
     monkeypatch.delenv("COVERAGE_ALLOCATION_DEFAULT", raising=False)
     monkeypatch.delenv("FULL_COVERAGE_ALLOCATION_DEFAULT", raising=False)
 
-    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
-        return {
-            "target": target,
-            "findings": [],
-            "active_checks": {
-                "active_worklist": [
-                    "GET /api/a?id=1",
-                    "GET /api/b?id=1",
-                    "GET /api/c?id=1",
-                    "GET /api/d?id=1",
-                ]
-            },
-        }
-
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
             {
-                "job_id": "parent-job-default-dynamic",
+                "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
-                "options": {
-                    "scan_type": "smart",
-                    "parallel": True,
-                    "shard_strategy": "coverage",
-                    "coverage_dynamic_batch_size": 2,
-                    "coverage_per_shard_cap": 2,
-                    "custom_endpoints": [
-                        "GET /api/a?id=1", "GET /api/b?id=1",
-                        "GET /api/c?id=1", "GET /api/d?id=1",
-                    ],
-                },
+                "options": options,
+                "_canonical_queue_payload": queue_payload,
             }
         )
     )
@@ -4566,7 +4625,7 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
     assert len(child_jobs) == 3
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert child_jobs[0]["options"]["parallel_backbone"] is True
+    assert json.loads(conn.inserted_children[0][4])["parallel_backbone"] is True
     parent_update = [
         args for query, args in conn.executions
         if "UPDATE scans SET status='running'" in query and "shard_count" in query
@@ -4579,55 +4638,53 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
     parent_id = "57575757-5757-5757-5757-575757575757"
     target_id = uuid.UUID("35353535-3535-3535-3535-353535353535")
     campaign_id = uuid.UUID("46464646-4646-4646-4646-464646464646")
-    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    endpoints = (
+        "GET /api/a?id=1", "GET /api/b?id=1",
+        "GET /api/c?id=1", "GET /api/d?id=1",
+    )
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id,
+        target_id,
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+        },
+        strategy="coverage_family",
+        custom_endpoints=endpoints,
+    )
+    options.update({
+        "coverage_allocation": "static",
+        "coverage_max_shards": 6,
+        "coverage_per_shard_cap": 2,
+    })
+    conn = _FakePlanConn(parent_id, target_id, campaign_id, parent_plan)
     redis = _FakeJobRedis()
-
-    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
-        return {
-            "target": target,
-            "findings": [],
-            "active_checks": {
-                "active_worklist": [
-                    "GET /api/a?id=1",
-                    "GET /api/b?id=1",
-                    "GET /api/c?id=1",
-                    "GET /api/d?id=1",
-                ]
-            },
-        }
 
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
             {
-                "job_id": "parent-job-coverage-family",
+                "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
-                "options": {
-                    "scan_type": "smart",
-                    "parallel": True,
-                    "shard_strategy": "coverage_family",
-                    "coverage_allocation": "static",
-                    "coverage_max_shards": 6,
-                    "coverage_per_shard_cap": 2,
-                    "custom_endpoints": [
-                        "GET /api/a?id=1", "GET /api/b?id=1",
-                        "GET /api/c?id=1", "GET /api/d?id=1",
-                    ],
-                },
+                "options": options,
+                "_canonical_queue_payload": queue_payload,
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    from scan.jobs import CanonicalScanJob
+    canonical_children = [
+        CanonicalScanJob.from_queue_payload(job) for job in child_jobs
+    ]
+    child_options = [json.loads(args[4]) for args in conn.inserted_children]
     assert len(child_jobs) == 7
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert {job["campaign_id"] for job in child_jobs} == {None}
-    assert child_jobs[0]["shard_label"] == "global-backbone"
-    assert [job["shard_label"] for job in child_jobs[1:]] == [
+    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert [job.shard.shard_label for job in canonical_children[1:]] == [
         "coverage[0]:broad",
         "coverage[0]:sqli",
         "coverage[0]:xss",
@@ -4635,9 +4692,10 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
         "coverage[1]:sqli",
         "coverage[1]:xss",
     ]
-    assert child_jobs[2]["options"]["asm_check_family"] == "sqli"
-    assert child_jobs[3]["options"]["asm_check_family"] == "xss"
-    assert all(job["options"]["zero_rediscovery"] is True for job in child_jobs[1:])
+    assert child_options[2]["coverage_attempt_family"] == "sqli"
+    assert child_options[3]["coverage_attempt_family"] == "xss"
+    assert all(item["zero_rediscovery"] is True for item in child_options[1:])
+    assert all("asm_check_family" not in item for item in child_options)
     parent_update = [
         args for query, args in conn.executions
         if "UPDATE scans SET status='running'" in query and "shard_count" in query
@@ -4652,62 +4710,61 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
     parent_id = "58585858-5858-5858-5858-585858585858"
     target_id = uuid.UUID("36363636-3636-3636-3636-363636363636")
     campaign_id = uuid.UUID("47474747-4747-4747-4747-474747474747")
-    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    endpoints = (
+        "GET /api/a?id=1", "GET /api/b?id=1",
+        "GET /api/c?id=1", "GET /api/d?id=1",
+    )
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id,
+        target_id,
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+        },
+        strategy="coverage_family",
+        custom_endpoints=endpoints,
+    )
+    options.update({
+        "coverage_allocation": "dynamic",
+        "coverage_dynamic_batch_size": 2,
+        "coverage_dynamic_max_batches": 6,
+        "coverage_per_shard_cap": 2,
+        "coverage_max_shards": 6,
+    })
+    conn = _FakePlanConn(parent_id, target_id, campaign_id, parent_plan)
     redis = _FakeJobRedis()
-
-    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
-        return {
-            "target": target,
-            "findings": [],
-            "active_checks": {
-                "active_worklist": [
-                    "GET /api/a?id=1",
-                    "GET /api/b?id=1",
-                    "GET /api/c?id=1",
-                    "GET /api/d?id=1",
-                ]
-            },
-        }
 
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
             {
-                "job_id": "parent-job-coverage-family-dynamic",
+                "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
-                "options": {
-                    "scan_type": "smart",
-                    "parallel": True,
-                    "shard_strategy": "coverage_family",
-                    "coverage_allocation": "dynamic",
-                    "coverage_dynamic_batch_size": 2,
-                    "coverage_dynamic_max_batches": 6,
-                    "coverage_per_shard_cap": 2,
-                    "coverage_max_shards": 6,
-                    "custom_endpoints": [
-                        "GET /api/a?id=1", "GET /api/b?id=1",
-                        "GET /api/c?id=1", "GET /api/d?id=1",
-                    ],
-                },
+                "options": options,
+                "_canonical_queue_payload": queue_payload,
             }
         )
     )
 
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    from scan.jobs import CanonicalScanJob
+    canonical_children = [
+        CanonicalScanJob.from_queue_payload(job) for job in child_jobs
+    ]
+    child_options = [json.loads(args[4]) for args in conn.inserted_children]
     assert len(child_jobs) == 7
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert {job["campaign_id"] for job in child_jobs} == {None}
-    assert child_jobs[0]["shard_label"] == "global-backbone"
-    assert [job["shard_label"] for job in child_jobs[1:]] == [
+    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert [job.shard.shard_label for job in canonical_children[1:]] == [
         "coverage[0]:broad", "coverage[0]:sqli", "coverage[0]:xss",
         "coverage[1]:broad", "coverage[1]:sqli", "coverage[1]:xss",
     ]
-    assert child_jobs[2]["options"]["asm_check_family"] == "sqli"
-    assert child_jobs[3]["options"]["asm_check_family"] == "xss"
+    assert child_options[2]["coverage_attempt_family"] == "sqli"
+    assert child_options[3]["coverage_attempt_family"] == "xss"
+    assert all("asm_check_family" not in item for item in child_options)
     parent_update = [
         args for query, args in conn.executions
         if "UPDATE scans SET status='running'" in query and "shard_count" in query
@@ -4723,71 +4780,68 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     parent_id = "59595959-5959-5959-5959-595959595959"
     target_id = uuid.UUID("37373737-3737-3737-3737-373737373737")
     campaign_id = uuid.UUID("48484848-4848-4848-4848-484848484848")
-    conn = _FakePlanConn(parent_id, target_id, campaign_id)
+    endpoints = (
+        "GET /api/a?id=1", "GET /api/b?id=1",
+        "GET /api/c?id=1", "GET /api/d?id=1",
+    )
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id,
+        target_id,
+        policy={
+            "active_testing": True,
+            "allow_state_changing_http": True,
+            "include_families": ["bola"],
+        },
+        strategy="coverage_family",
+        custom_endpoints=endpoints,
+    )
+    options.update({
+        "coverage_allocation": "dynamic",
+        "coverage_dynamic_batch_size": 2,
+        "coverage_dynamic_max_batches": 6,
+        "coverage_per_shard_cap": 2,
+        "exploit_depth": True,
+    })
+    conn = _FakePlanConn(parent_id, target_id, campaign_id, parent_plan)
     redis = _FakeJobRedis()
-    recon_calls = []
-
-    async def fake_run_scan(target, options, *, scan_id=None, job_id=None):
-        recon_calls.append(dict(options))
-        return {
-            "target": target,
-            "findings": [],
-            "active_checks": {
-                "active_worklist": [
-                    "GET /api/a?id=1",
-                    "GET /api/b?id=1",
-                    "GET /api/c?id=1",
-                    "GET /api/d?id=1",
-                ]
-            },
-        }
 
     monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
-    monkeypatch.setattr(worker, "run_scan", fake_run_scan)
 
     asyncio.run(
         worker.process_scan_plan_job(
             {
-                "job_id": "parent-job-coverage-family-dynamic-bola",
+                "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
-                "options": {
-                    "scan_type": "smart",
-                    "parallel": True,
-                    "shard_strategy": "coverage_family",
-                    "coverage_allocation": "dynamic",
-                    "coverage_dynamic_batch_size": 2,
-                    "coverage_dynamic_max_batches": 6,
-                    "check_family": "bola",
-                    "asm_check_family": "bola",
-                    "auth_header": "Bearer user1",
-                    "user2_header": "Bearer user2",
-                    "exploit_depth": True,
-                    "coverage_per_shard_cap": 2,
-                    "custom_endpoints": [
-                        "GET /api/a?id=1", "GET /api/b?id=1",
-                        "GET /api/c?id=1", "GET /api/d?id=1",
-                    ],
-                },
+                "options": options,
+                "_canonical_queue_payload": queue_payload,
             }
         )
     )
 
-    assert recon_calls == []
     child_jobs = [json.loads(payload) for _, payload in redis.pushed]
+    from scan.jobs import CanonicalScanJob
+    canonical_children = [
+        CanonicalScanJob.from_queue_payload(job) for job in child_jobs
+    ]
+    child_options = [json.loads(args[4]) for args in conn.inserted_children]
     assert len(child_jobs) == 3
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert child_jobs[0]["shard_label"] == "global-backbone"
-    assert [job["shard_label"] for job in child_jobs[1:]] == [
+    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert [job.shard.shard_label for job in canonical_children[1:]] == [
         "coverage[0]:bola", "coverage[1]:bola",
     ]
-    assert all(job["options"]["auth_header"] == "Bearer user1" for job in child_jobs[1:])
-    assert all(job["options"]["user2_header"] == "Bearer user2" for job in child_jobs[1:])
     assert all(
-        job["options"]["custom_budget"]["phase4_max_seconds"]
+        item["coverage_attempt_family"] == "bola"
+        for item in child_options[1:]
+    )
+    assert all("auth_header" not in item for item in child_options)
+    assert all("user2_header" not in item for item in child_options)
+    assert all(
+        item["custom_budget"]["phase4_max_seconds"]
         == worker.parallel_scan.BOLA_DYNAMIC_PHASE4_SECONDS
-        for job in child_jobs[1:]
+        for item in child_options[1:]
     )
     parent_update = [
         args for query, args in conn.executions

@@ -125,6 +125,64 @@ def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_autho
     )
 
 
+def test_parallel_family_scope_narrows_actions_and_is_digest_bound():
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000081",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="a" * 64,
+        entry_count=2,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000082",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="b" * 64,
+        entry_count=2,
+        status="complete",
+    ).canonical_dict()
+    compiler = ScanActionPlanCompiler()
+    execution = _execution(include=("xss", "sqli"), exclude=("recon",))
+
+    xss = compiler.compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        action_scope="endpoint",
+        family_scope=("xss",),
+    )
+    sqli = compiler.compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        action_scope="endpoint",
+        family_scope=("sqli",),
+    )
+
+    assert any(action.capability_name == "xss.verify" for action in xss.actions)
+    assert not any(action.capability_name == "sqli.verify" for action in xss.actions)
+    assert any(action.capability_name == "sqli.verify" for action in sqli.actions)
+    assert not any(action.capability_name == "xss.verify" for action in sqli.actions)
+    assert xss.plan_digest != sqli.plan_digest
+    assert xss.actions[0].input_binding_digest != sqli.actions[0].input_binding_digest
+
+
+def test_parallel_family_scope_cannot_widen_parent_policy():
+    with pytest.raises(ScanActionPlanError, match="cannot widen"):
+        ScanActionPlanCompiler().compile(
+            scan_id=SCAN_ID,
+            execution_plan=_execution(include=("xss",), exclude=("sqli",)),
+            target_binding=_target(),
+            action_scope="endpoint",
+            family_scope=("sqli",),
+        )
+
+
 def test_endpoint_request_verifiers_depend_on_collection_replay_inputs():
     collection = ({
         "collection_id": "collection-a",

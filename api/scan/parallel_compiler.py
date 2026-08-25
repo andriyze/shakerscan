@@ -95,8 +95,6 @@ def _work_partition_digest(options: Mapping[str, Any]) -> str:
         "auth_state": str(options.get("auth_state") or "anonymous"),
         "family": str(
             options.get("coverage_attempt_family")
-            or options.get("asm_check_family")
-            or options.get("check_family")
             or "all"
         ).lower(),
     })

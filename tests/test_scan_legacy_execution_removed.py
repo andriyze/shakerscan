@@ -26,6 +26,34 @@ def test_parallel_scan_documentation_names_the_canonical_action_graph():
     assert "each shard runs run_scan()" not in source
 
 
+def test_parallel_planner_has_no_legacy_mode_or_scanner_flag_authority():
+    planner = (ROOT / "api" / "parallel_scan.py").read_text(encoding="utf-8")
+    worker = (ROOT / "api" / "worker.py").read_text(encoding="utf-8")
+    handler = worker[
+        worker.index("async def process_scan_plan_job("):
+        worker.index("\n\nasync def process_scan_shard_job", worker.index(
+            "async def process_scan_plan_job("
+        ))
+    ]
+
+    for forbidden in (
+        "ACTIVE_SCAN_TYPES",
+        'get("scan_type")',
+        "get('scan_type')",
+        'get("check_family")',
+        'get("asm_check_family")',
+        'get("xss")',
+        'get("sqli")',
+        "resolve_scan_budget(",
+    ):
+        assert forbidden not in planner
+    assert "parallel planning requires a canonical Scan policy snapshot" in planner
+    assert "parallel planning requires a canonical Scan queue payload" in handler
+    assert "CanonicalScanJob.from_queue_payload(canonical_source)" in handler
+    assert "'scan_generation' or 'legacy'" not in handler
+    assert "'v2' if child_job else 'legacy'" not in handler
+
+
 def test_normal_scheduler_has_no_digestless_queue_fallback():
     source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
     scheduler = source[

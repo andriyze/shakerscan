@@ -9,11 +9,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 import parallel_scan as p  # noqa: E402
 
 
+ACTIVE = {
+    "scan_policy": {"active_testing": True, "include_families": []},
+    "active": True,
+    "budget_profile": "balanced",
+    "resolved_scan_budget": {
+        "max_http_requests": 5000,
+        "max_endpoints": 5000,
+        "max_browser_actions": 100,
+        "max_tool_wall_seconds": 5400,
+    },
+    "resolved_budget": {
+        "request_max": 5000,
+        "max_urls": 5000,
+        "browser_max_pages": 100,
+        "phase4_max_seconds": 5400,
+        "active_max_endpoints": 5000,
+        "active_max_seconds": 5400,
+    },
+}
+PASSIVE = {
+    **ACTIVE,
+    "scan_policy": {"active_testing": False, "include_families": []},
+    "active": False,
+}
+
+
 # --------------------------- exploit-depth ---------------------------
 
 def test_exploit_depth_applied_to_all_shards():
-    plan = p.plan_shards({"scan_type": "smart", "exploit_depth": True},
-                         scan_type="smart", strategy="family", requested_shards=3)
+    plan = p.plan_shards({**ACTIVE, "exploit_depth": True}, strategy="family", requested_shards=3)
     assert plan.shards
     for s in plan.shards:
         assert s.options.get("no_early_stop") is True
@@ -24,20 +49,18 @@ def test_exploit_depth_applied_to_all_shards():
 
 
 def test_exploit_depth_off_by_default():
-    plan = p.plan_shards({"scan_type": "smart"}, scan_type="smart", strategy="family", requested_shards=2)
+    plan = p.plan_shards({**ACTIVE}, strategy="family", requested_shards=2)
     assert all(not (s.options.get("custom_budget") or {}).get("sqli_extract_max") for s in plan.shards)
 
 
 def test_auto_strategy_resolves_active_scan_to_coverage_in_plan_worker():
-    assert p.resolve_auto_strategy({"scan_type": "smart"}, "smart", "auto") == "coverage"
-    assert p.resolve_auto_strategy({"scan_type": "full"}, "full", "auto") == "coverage"
+    assert p.resolve_auto_strategy({**ACTIVE}, "auto") == "coverage"
 
 
 def test_auto_strategy_resolves_explicit_endpoints_to_scope():
     assert (
         p.resolve_auto_strategy(
-            {"scan_type": "smart", "custom_endpoints": ["GET /a?id=1", "POST /b json:{\"id\":1}"]},
-            "smart",
+            {**ACTIVE, "custom_endpoints": ["GET /a?id=1", "POST /b json:{\"id\":1}"]},
             "auto",
         )
         == "scope"
@@ -45,7 +68,7 @@ def test_auto_strategy_resolves_explicit_endpoints_to_scope():
 
 
 def test_auto_strategy_honors_explicit_family():
-    assert p.resolve_auto_strategy({"scan_type": "smart"}, "smart", "family") == "family"
+    assert p.resolve_auto_strategy({**ACTIVE}, "family") == "family"
 
 
 def test_coverage_recon_budget_is_discovery_only_and_bounded():
@@ -64,11 +87,11 @@ def test_coverage_recon_budget_is_discovery_only_and_bounded():
 
 def test_coverage_backbone_preserves_smart_contract_concurrently():
     endpoint_plan = p.plan_coverage_shards(
-        {"scan_type": "smart", "active": True},
+        {**ACTIVE, "active": True},
         ["GET /a?id=1", "GET /b?id=1"],
         per_shard_cap=1,
     )
-    plan = p.with_coverage_backbone(endpoint_plan, {"scan_type": "smart", "active": True})
+    plan = p.with_coverage_backbone(endpoint_plan, {**ACTIVE, "active": True})
     assert plan.shard_count == 3
     assert plan.shards[0].label == "global-backbone"
     assert plan.shards[0].options["parallel_backbone"] is True
@@ -81,7 +104,7 @@ def test_coverage_backbone_preserves_smart_contract_concurrently():
 
 def test_coverage_partitions_all_endpoints_disjoint():
     eps = [f"GET /api/x{i}?id=1" for i in range(320)]
-    plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150)
+    plan = p.plan_coverage_shards({**ACTIVE}, eps, per_shard_cap=150)
     assert plan.strategy == "coverage"
     assert plan.shard_count == 3  # ceil(320/150)
     union = [e for s in plan.shards for e in s.options["custom_endpoints"]]
@@ -106,7 +129,7 @@ def test_coverage_partitions_all_endpoints_disjoint():
 
 def test_coverage_runs_global_checks_once_per_plan():
     eps = [f"GET /api/x{i}?id=1" for i in range(320)]
-    plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150)
+    plan = p.plan_coverage_shards({**ACTIVE}, eps, per_shard_cap=150)
 
     assert [s.options.get("skip_global_checks") for s in plan.shards] == [False, True, True]
     assert [s.options["custom_budget"].get("nuclei_max_targets") for s in plan.shards] == [0, 0, 0]
@@ -117,7 +140,7 @@ def test_coverage_runs_global_checks_once_per_plan():
 def test_coverage_endpoint_shards_do_not_repeat_parent_backbone_or_full_request_budget():
     eps = [f"GET /api/x{i}?id=1" for i in range(16)]
     parent = {
-        "scan_type": "smart",
+        **ACTIVE,
         "custom_budget": {
             "browser_max_pages": 8,
             "nuclei_max_targets": 30,
@@ -145,7 +168,7 @@ def test_coverage_endpoint_shards_do_not_repeat_parent_backbone_or_full_request_
 def test_exhaustive_coverage_shards_get_deeper_active_budget():
     eps = [f"GET /api/x{i}?id=1" for i in range(300)]
     plan = p.plan_coverage_shards(
-        {"scan_type": "smart", "budget_profile": "exhaustive", "exploit_depth": True},
+        {**ACTIVE, "budget_profile": "exhaustive", "exploit_depth": True},
         eps,
         per_shard_cap=150,
     )
@@ -179,7 +202,7 @@ def test_finding_merge_key_collapses_repeated_passive_shard_findings():
 
 def test_coverage_caps_shards_without_dropping_endpoints():
     eps = [f"GET /a{i}?x=1" for i in range(5000)]
-    plan = p.plan_coverage_shards({"scan_type": "smart"}, eps, per_shard_cap=150, max_shards=12)
+    plan = p.plan_coverage_shards({**ACTIVE}, eps, per_shard_cap=150, max_shards=12)
     assert plan.shard_count == 12
     union = [e for s in plan.shards for e in s.options["custom_endpoints"]]
     assert sorted(union) == sorted(eps)
@@ -187,7 +210,7 @@ def test_coverage_caps_shards_without_dropping_endpoints():
 
 
 def test_coverage_single_endpoint_falls_back_to_one_shard():
-    plan = p.plan_coverage_shards({"scan_type": "smart"}, ["GET /only?x=1"])
+    plan = p.plan_coverage_shards({**ACTIVE}, ["GET /only?x=1"])
     assert plan.shard_count == 1
     assert plan.is_parallel is False
     shard = plan.shards[0]
@@ -203,7 +226,7 @@ def test_coverage_single_endpoint_falls_back_to_one_shard():
 def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
     eps = [f"GET /api/x{i}?id=1" for i in range(10)]
     plan = p.plan_coverage_family_shards(
-        {"scan_type": "smart", "coverage_max_shards": 6},
+        {**ACTIVE, "coverage_max_shards": 6},
         eps,
         per_shard_cap=5,
     )
@@ -230,16 +253,12 @@ def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
             lane_counts["sqli"] += 1
             assert shard.options["coverage_attempt_family"] == "sqli"
             assert shard.options["coverage_family_aware"] is True
-            assert shard.options["asm_check_family"] == "sqli"
-            assert shard.options["sqli"] is True
-            assert shard.options["xss"] is False
+            assert not {"sqli", "xss", "check_family", "asm_check_family"}.intersection(shard.options)
         elif shard.label.endswith(":xss"):
             lane_counts["xss"] += 1
             assert shard.options["coverage_attempt_family"] == "xss"
             assert shard.options["coverage_family_aware"] is True
-            assert shard.options["asm_check_family"] == "xss"
-            assert shard.options["xss"] is True
-            assert shard.options["sqli"] is False
+            assert not {"sqli", "xss", "check_family", "asm_check_family"}.intersection(shard.options)
         else:
             lane_counts["broad"] += 1
             assert shard.options["coverage_attempt_family"] == "all"
@@ -254,7 +273,7 @@ def test_coverage_family_multiplies_endpoint_buckets_by_family_lanes():
 
 def test_coverage_family_total_shard_cap_limits_family_lanes():
     eps = [f"GET /api/x{i}?id=1" for i in range(10)]
-    plan = p.plan_coverage_family_shards({"scan_type": "smart", "shards": 2}, eps, per_shard_cap=5)
+    plan = p.plan_coverage_family_shards({**ACTIVE, "shards": 2}, eps, per_shard_cap=5)
 
     assert plan.shard_count == 2
     assert [s.label for s in plan.shards] == ["coverage[0]:broad", "coverage[0]:sqli"]
@@ -265,9 +284,8 @@ def test_coverage_family_respects_explicit_high_risk_focus():
     eps = [f"GET /api/orders/{i}" for i in range(12)]
     plan = p.plan_coverage_family_shards(
         {
-            "scan_type": "smart",
-            "check_family": "bola",
-            "asm_check_family": "bola",
+            **ACTIVE,
+            "scan_policy": {"active_testing": True, "include_families": ["bola"]},
             "exploit_depth": True,
             "coverage_max_shards": 6,
         },
@@ -282,8 +300,10 @@ def test_coverage_family_respects_explicit_high_risk_focus():
         "coverage[2]:bola",
     ]
     assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"bola"}
-    assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
-    assert all(s.options["sqli"] is False and s.options["xss"] is False for s in plan.shards)
+    assert all(
+        not {"sqli", "xss", "check_family", "asm_check_family"}.intersection(s.options)
+        for s in plan.shards
+    )
     endpoint_appearances = [e for shard in plan.shards for e in shard.options["custom_endpoints"]]
     assert sorted(endpoint_appearances) == sorted(eps)
 
@@ -382,9 +402,9 @@ def test_harvest_default_keeps_large_worklist():
 
 def test_coverage_per_shard_cap_option_controls_shard_count():
     eps = [f"GET /e{i}?id=1" for i in range(390)]
-    few = p.plan_coverage_shards({"scan_type": "smart"}, eps)  # active-mix default cap 40
-    many = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 50}, eps)
-    explicit_large = p.plan_coverage_shards({"scan_type": "smart", "coverage_per_shard_cap": 150}, eps)
+    few = p.plan_coverage_shards({**ACTIVE}, eps)  # active-mix default cap 40
+    many = p.plan_coverage_shards({**ACTIVE, "coverage_per_shard_cap": 50}, eps)
+    explicit_large = p.plan_coverage_shards({**ACTIVE, "coverage_per_shard_cap": 150}, eps)
     assert few.shard_count == 10   # ceil(390/40)
     assert many.shard_count == 8   # ceil(390/50)
     assert explicit_large.shard_count == 3
@@ -394,37 +414,40 @@ def test_coverage_per_shard_cap_option_controls_shard_count():
 
 
 def test_coverage_default_cap_is_smaller_for_broad_active_mix():
-    assert p._default_coverage_per_shard_cap({"scan_type": "smart"}) == 40
-    assert p._coverage_dynamic_batch_size({"scan_type": "smart"}) == 40
-    assert p._default_coverage_per_shard_cap({"scan_type": "smart", "exploit_depth": True}) == 28
-    assert p._coverage_dynamic_batch_size({"scan_type": "smart", "coverage_dynamic_batch_size": 90}) == 90
+    assert p._default_coverage_per_shard_cap({**ACTIVE}) == 40
+    assert p._coverage_dynamic_batch_size({**ACTIVE}) == 40
+    assert p._default_coverage_per_shard_cap({**ACTIVE, "exploit_depth": True}) == 28
+    assert p._coverage_dynamic_batch_size({**ACTIVE, "coverage_dynamic_batch_size": 90}) == 90
 
 
 def test_coverage_default_cap_keeps_focused_family_lanes_larger():
-    assert p._default_coverage_per_shard_cap({"scan_type": "smart", "asm_check_family": "sqli"}) == 150
+    assert p._default_coverage_per_shard_cap({
+        **ACTIVE,
+        "scan_policy": {"active_testing": True, "include_families": ["sqli"]},
+    }) == 150
 
 
 def test_coverage_honors_explicit_shards_cap():
     # 1800 endpoints auto-size to 45 broad active shards (cap 40); an explicit
     # shards=3 must cap the fan-out to 3 without dropping any endpoint.
     eps = [f"GET /e{i}?id=1" for i in range(1800)]
-    auto = p.plan_coverage_shards({"scan_type": "smart"}, eps)
-    capped = p.plan_coverage_shards({"scan_type": "smart", "shards": 3}, eps)
+    auto = p.plan_coverage_shards({**ACTIVE}, eps)
+    capped = p.plan_coverage_shards({**ACTIVE, "shards": 3}, eps)
     assert auto.shard_count == 45
     assert capped.shard_count == 3  # explicit request honored as a hard cap
     union = [e for s in capped.shards for e in s.options["custom_endpoints"]]
     assert sorted(union) == sorted(eps)  # every endpoint still covered
     # string form also honored
-    assert p.plan_coverage_shards({"scan_type": "smart", "shards": "4"}, eps).shard_count == 4
+    assert p.plan_coverage_shards({**ACTIVE, "shards": "4"}, eps).shard_count == 4
     # an explicit request LARGER than auto-size doesn't inflate beyond need
-    assert p.plan_coverage_shards({"scan_type": "smart", "shards": 50}, eps).shard_count == 45
+    assert p.plan_coverage_shards({**ACTIVE, "shards": 50}, eps).shard_count == 45
 
 
 def test_coverage_auth_state_expansion_preserves_all_endpoints_per_state():
     eps = [f"GET /e{i}?id=1" for i in range(1800)]
     plan = p.plan_coverage_shards(
         {
-            "scan_type": "smart",
+            **ACTIVE,
             "auth_state_shards": True,
             "auth_header": "Bearer u1",
             "user2_header": "Bearer u2",
@@ -587,8 +610,7 @@ def test_user2_does_not_inherit_primary_credentials():
 
 def test_auth_state_expansion_multiplies_shards():
     plan = p.plan_shards(
-        {"scan_type": "smart", "auth_state_shards": True, "auth_header": "x", "user2_header": "y"},
-        scan_type="smart", strategy="family", requested_shards=3,
+        {**ACTIVE, "auth_state_shards": True, "auth_header": "x", "user2_header": "y"}, strategy="family", requested_shards=3,
     )
     # 3 families x 3 auth states = 9 shards
     assert plan.shard_count == 9
@@ -597,8 +619,7 @@ def test_auth_state_expansion_multiplies_shards():
 
 
 def test_auth_state_noop_without_credentials():
-    plan = p.plan_shards({"scan_type": "smart", "auth_state_shards": True},
-                         scan_type="smart", strategy="family", requested_shards=3)
+    plan = p.plan_shards({**ACTIVE, "auth_state_shards": True}, strategy="family", requested_shards=3)
     assert plan.shard_count == 3  # no creds -> no expansion
     assert any("no credentials" in n for n in plan.notes)
 
@@ -629,7 +650,7 @@ def test_coverage_allocation_mode_env_can_restore_static_default(monkeypatch):
 def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
     notes: list[str] = []
     plan = p.plan_dynamic_coverage_shards(
-        {"scan_type": "smart", "coverage_dynamic_batch_size": 25},
+        {**ACTIVE, "coverage_dynamic_batch_size": 25},
         endpoint_count=100,
         auth_state_count=2,
         notes=notes,
@@ -654,7 +675,7 @@ def test_dynamic_coverage_plan_uses_pull_workers_without_static_slices():
 def test_dynamic_coverage_plan_auth_state_workers_are_scoped():
     plan = p.plan_dynamic_coverage_shards(
         {
-            "scan_type": "smart",
+            **ACTIVE,
             "coverage_dynamic_batch_size": 25,
             "auth_state_shards": True,
             "auth_header": "Bearer u1",
@@ -678,7 +699,7 @@ def test_dynamic_coverage_runs_global_checks_once_per_plan():
     # Exactly one pull worker runs host-wide posture/config checks; the rest skip
     # so the merged report isn't N copies of the same CSP/TLS/DNS finding.
     plan = p.plan_dynamic_coverage_shards(
-        {"scan_type": "smart", "coverage_dynamic_batch_size": 25},
+        {**ACTIVE, "coverage_dynamic_batch_size": 25},
         endpoint_count=400,
     )
     flags = [s.options["skip_global_checks"] for s in plan.shards]
@@ -690,7 +711,7 @@ def test_dynamic_coverage_runs_global_checks_once_per_plan():
 def test_dynamic_coverage_runs_global_checks_once_per_auth_state():
     plan = p.plan_dynamic_coverage_shards(
         {
-            "scan_type": "smart",
+            **ACTIVE,
             "coverage_dynamic_batch_size": 25,
             "auth_state_shards": True,
             "auth_header": "Bearer u1",
@@ -709,7 +730,7 @@ def test_dynamic_coverage_runs_global_checks_once_per_auth_state():
 
 def test_dynamic_coverage_family_runs_global_checks_once_per_auth_state():
     plan = p.plan_dynamic_coverage_family_shards(
-        {"scan_type": "smart", "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
+        {**ACTIVE, "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
         endpoint_count=400,
     )
     flags = [s.options["skip_global_checks"] for s in plan.shards]
@@ -720,7 +741,7 @@ def test_dynamic_coverage_family_runs_global_checks_once_per_auth_state():
 
 def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     plan = p.plan_dynamic_coverage_family_shards(
-        {"scan_type": "smart", "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
+        {**ACTIVE, "coverage_dynamic_batch_size": 25, "coverage_dynamic_max_batches": 12},
         endpoint_count=100,
         auth_state_count=1,
     )
@@ -741,15 +762,19 @@ def test_dynamic_coverage_family_plan_uses_family_pull_lanes():
     sqli = next(s for s in plan.shards if s.label.endswith(":sqli"))
     xss = next(s for s in plan.shards if s.label.endswith(":xss"))
     broad = next(s for s in plan.shards if s.label.endswith(":broad"))
-    assert sqli.options["asm_check_family"] == "sqli"
-    assert xss.options["asm_check_family"] == "xss"
-    assert "asm_check_family" not in broad.options
+    assert sqli.options["coverage_attempt_family"] == "sqli"
+    assert xss.options["coverage_attempt_family"] == "xss"
+    assert broad.options["coverage_attempt_family"] == "all"
+    assert all(
+        not {"sqli", "xss", "check_family", "asm_check_family"}.intersection(s.options)
+        for s in (sqli, xss, broad)
+    )
 
 
 def test_dynamic_coverage_family_auth_state_workers_are_scoped():
     plan = p.plan_dynamic_coverage_family_shards(
         {
-            "scan_type": "smart",
+            **ACTIVE,
             "coverage_dynamic_batch_size": 25,
             "coverage_dynamic_max_batches": 20,
             "auth_state_shards": True,
@@ -818,7 +843,7 @@ def test_managed_bola_lane_retains_distinct_profile_refs():
     ]
     plan = p.plan_dynamic_coverage_family_shards(
         {
-            "scan_type": "smart", "auth_state_shards": True,
+            **ACTIVE, "auth_state_shards": True,
             "managed_credential_profiles": refs, "exploit_depth": True,
         },
         endpoint_count=5,
@@ -836,9 +861,8 @@ def test_managed_bola_lane_retains_distinct_profile_refs():
 def test_dynamic_coverage_family_respects_explicit_focus():
     plan = p.plan_dynamic_coverage_family_shards(
         {
-            "scan_type": "smart",
-            "check_family": "bola",
-            "asm_check_family": "bola",
+            **ACTIVE,
+            "scan_policy": {"active_testing": True, "include_families": ["bola"]},
             "exploit_depth": True,
             "coverage_dynamic_batch_size": 25,
             "coverage_dynamic_max_batches": 12,
@@ -856,9 +880,11 @@ def test_dynamic_coverage_family_respects_explicit_focus():
         "coverage-dynamic[3]:anonymous:bola",
     ]
     assert {s.options["coverage_attempt_family"] for s in plan.shards} == {"bola"}
-    assert {s.options["asm_check_family"] for s in plan.shards} == {"bola"}
     assert all(s.options["coverage_family_aware"] is True for s in plan.shards)
-    assert all(s.options["sqli"] is False and s.options["xss"] is False for s in plan.shards)
+    assert all(
+        not {"sqli", "xss", "check_family", "asm_check_family"}.intersection(s.options)
+        for s in plan.shards
+    )
     assert all(
         s.options["custom_budget"]["phase4_max_seconds"] == p.BOLA_DYNAMIC_PHASE4_SECONDS
         for s in plan.shards
@@ -868,14 +894,14 @@ def test_dynamic_coverage_family_respects_explicit_focus():
 # --------------------------- D5: hunter union lanes ---------------------------
 
 def test_coverage_family_lanes_exclude_gated_families_without_creds():
-    lanes = [l[1] for l in p._coverage_family_lanes({})]
+    lanes = [l[1] for l in p._coverage_family_lanes({**ACTIVE})]
     assert "bola" not in lanes and "auth" not in lanes
     assert set(lanes) >= {"all", "sqli", "xss"}
 
 
 def test_coverage_family_lanes_add_bola_auth_when_preconditions_met():
     lanes = p._coverage_family_lanes(
-        {"auth_header": "Bearer u1", "user2_header": "Bearer u2", "exploit_depth": True}
+        {**ACTIVE, "auth_header": "Bearer u1", "user2_header": "Bearer u2", "exploit_depth": True}
     )
     names = [l[1] for l in lanes]
     assert "bola" in names and "auth" in names  # full union in one scan
@@ -885,14 +911,14 @@ def test_coverage_family_lanes_add_bola_auth_when_preconditions_met():
 
 def test_coverage_family_lanes_bola_needs_second_principal():
     # primary creds only -> auth lane allowed, bola still gated out (no user2)
-    lanes = [l[1] for l in p._coverage_family_lanes({"auth_header": "Bearer u1", "exploit_depth": True})]
+    lanes = [l[1] for l in p._coverage_family_lanes({**ACTIVE, "auth_header": "Bearer u1", "exploit_depth": True})]
     assert "auth" in lanes and "bola" not in lanes
 
 
 def test_dynamic_coverage_family_is_worker_aware_not_endpoint_count():
     # A rich app (1000 endpoints x 3 auth states) must NOT spawn ~100 pull-worker
     # shards on a 3-worker fleet; the count tracks the fleet, not the endpoint count.
-    opts = {"scan_type": "smart", "auth_header": "Bearer u1",
+    opts = {**ACTIVE, "auth_header": "Bearer u1",
             "user2_header": "Bearer u2", "exploit_depth": True}
     bounded = p.plan_dynamic_coverage_family_shards(opts, 1000, auth_state_count=3, worker_count=3)
     unbounded = p.plan_dynamic_coverage_family_shards(opts, 1000, auth_state_count=3, worker_count=0)
