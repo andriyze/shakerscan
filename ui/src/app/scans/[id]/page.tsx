@@ -389,7 +389,6 @@ function ScanFindingContextCard({
   if (!scan?.target_id) return null
   const rawCurrent = Array.isArray(scan?.result?.findings) ? scan.result.findings : []
   const persistedCurrent = targetFindings.filter((finding) => finding.scan_id === scan.id)
-  const existing = targetFindings.filter((finding) => finding.scan_id !== scan.id)
   const currentKeys = new Set(rawCurrent.map((finding: any) => [
     String(finding?.title || ''),
     String(finding?.url || ''),
@@ -414,23 +413,15 @@ function ScanFindingContextCard({
       _persisted: true,
     })),
   ]
-  const rows = [
-    ...current,
-    ...existing.map((finding) => ({
-      ...finding,
-      _rowKey: `existing-${finding.id}`,
-      _origin: 'already on target' as const,
-      _persisted: true,
-    })),
-  ]
+  const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrent.length)
 
   return (
     <Card className="mb-6 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-gray-200">Findings from this scan and earlier scans</h2>
+          <h2 className="text-sm font-semibold text-gray-200">Findings from this scan</h2>
           <p className="mt-1 text-xs text-gray-500">
-            New signals are separated from findings that were already tracked on this target.
+            This run's signals are kept separate from findings already tracked on the target.
           </p>
         </div>
         <Link href={`/findings?target_id=${scan.target_id}`} className="text-xs text-blue-300 hover:text-blue-200">
@@ -439,22 +430,19 @@ function ScanFindingContextCard({
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <span className="rounded bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} from this scan</span>
-        <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existing.length} already on target</span>
-        {targetFindingsTotal > targetFindings.length && (
-          <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-200">
-            showing {targetFindings.length} of {targetFindingsTotal} saved records
-          </span>
-        )}
+        <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} earlier on target</span>
       </div>
       {loading ? (
         <p className="mt-3 text-sm text-gray-500">Loading target finding history…</p>
       ) : error ? (
         <p role="alert" className="mt-3 text-sm text-amber-300">{error}</p>
-      ) : rows.length === 0 ? (
-        <p className="mt-3 text-sm text-gray-500">No findings were reported by this scan or earlier scans of the target.</p>
+      ) : current.length === 0 ? (
+        <p className="mt-3 text-sm text-gray-500">
+          No findings were reported by this scan.{existingTotal > 0 ? ` The target has ${existingTotal} earlier saved findings; use the link above to review them.` : ''}
+        </p>
       ) : (
         <ul className="mt-3 divide-y divide-gray-800 rounded-lg border border-gray-800">
-          {rows.map((finding: any) => (
+          {current.map((finding: any) => (
             <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
               <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
                 {String(finding.severity || 'info')}

@@ -14,9 +14,16 @@ test('scan result fetches durable finding history for its exact target', () => {
 })
 
 test('scan result separates current signals from earlier target findings', () => {
-  assert.match(detail, /Findings from this scan and earlier scans/)
+  assert.match(detail, /Findings from this scan/)
   assert.match(detail, /from this scan/)
-  assert.match(detail, /already on target/)
+  assert.match(detail, /earlier on target/)
   assert.match(detail, /Open all target findings/)
   assert.match(detail, /const rawCurrent = Array\.isArray\(scan\?\.result\?\.findings\)/)
+})
+
+test('scan result does not bury the current run under historical target rows', () => {
+  assert.match(detail, /const existingTotal = Math\.max/)
+  assert.match(detail, /current\.map\(\(finding: any\)/)
+  assert.doesNotMatch(detail, /rows\.map\(\(finding: any\)/)
+  assert.match(detail, /use the link above to review them/)
 })
