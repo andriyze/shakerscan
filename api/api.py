@@ -3599,6 +3599,36 @@ async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
                 conn, str(parent['id']), r, QUEUE_NAME
             )
             repaired += 1
+
+        # A worker can terminate a shard before entering the ordinary execution
+        # wrapper (for example, when a persisted V2 authority envelope fails
+        # closed after a deploy). Older workers did not reconcile the logical
+        # parent on that early return. Recover those already-terminal families on
+        # every orchestration sweep instead of displaying a permanently running
+        # parent until the much longer stale-parent reaper fires.
+        terminal_families = await conn.fetch(
+            """
+            SELECT p.id
+            FROM scans p
+            WHERE p.scan_role='parent' AND p.status='running'
+              AND p.options->>'parallel_fanout_complete'='true'
+              AND EXISTS (
+                  SELECT 1 FROM scans c
+                  WHERE c.parent_scan_id=p.id AND c.scan_role='shard'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM scans c
+                  WHERE c.parent_scan_id=p.id AND c.scan_role='shard'
+                    AND c.status NOT IN ('completed','failed','cancelled')
+              )
+            """
+        )
+        for parent in terminal_families:
+            enqueued = await parallel_scan.reconcile_parallel_parent(
+                conn, str(parent['id']), r, QUEUE_NAME
+            )
+            if enqueued:
+                repaired += 1
     return repaired
 
 
@@ -11392,6 +11422,33 @@ def _broker_release_slot(redis_client: Any, slot_id: str) -> None:
         pass
 
 
+async def _fail_broker_scan_and_reconcile_parent(
+    conn: Any,
+    *,
+    scan_id: uuid.UUID,
+    phase: str,
+    message: str,
+    redis_client: Any,
+) -> None:
+    failed_row = await conn.fetchrow(
+        """
+        UPDATE scans
+        SET status='failed', progress=100, current_phase=$2,
+            error_message=$3, completed_at=NOW()
+        WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+        RETURNING parent_scan_id
+        """,
+        scan_id,
+        phase,
+        message[:500],
+    )
+    parent_id = failed_row.get("parent_scan_id") if failed_row else None
+    if parent_id:
+        await parallel_scan.reconcile_parallel_parent(
+            conn, str(parent_id), redis_client, QUEUE_NAME
+        )
+
+
 @app.post("/fleet/broker/nodes/{node_id}/lease")
 async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Request):
     """Lease one executable scan to an outbound-only HTTPS worker."""
@@ -11475,15 +11532,12 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
         if exhausted_scan_id:
             message = f"HTTPS broker delivery exhausted after {lease.delivery_attempts} attempts"
             async with db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE scans
-                    SET status='failed', progress=100, current_phase='queue_delivery_failed',
-                        error_message=$2, completed_at=NOW()
-                    WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
-                    """,
-                    exhausted_scan_id,
-                    message,
+                await _fail_broker_scan_and_reconcile_parent(
+                    conn,
+                    scan_id=exhausted_scan_id,
+                    phase="queue_delivery_failed",
+                    message=message,
+                    redis_client=redis_client,
                 )
         await asyncio.to_thread(acknowledge_lease, redis_client, lease)
         return Response(status_code=204)
@@ -11510,15 +11564,12 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 canonical_materialized = await _materialize_control_plane_scan_job_v2(payload)
             except HTTPException as exc:
                 async with db_pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE scans
-                        SET status='failed', progress=100, current_phase='scope_revalidation_failed',
-                            error_message=$2, completed_at=NOW()
-                        WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
-                        """,
-                        candidate_scan_id,
-                        str(exc.detail)[:500],
+                    await _fail_broker_scan_and_reconcile_parent(
+                        conn,
+                        scan_id=candidate_scan_id,
+                        phase="scope_revalidation_failed",
+                        message=str(exc.detail),
+                        redis_client=redis_client,
                     )
                 await asyncio.to_thread(acknowledge_lease, redis_client, lease)
                 return Response(status_code=204)
@@ -11539,14 +11590,12 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             )
         if not target_matches:
             async with db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE scans
-                    SET status='failed', progress=100, current_phase='scope_revalidation_failed',
-                        error_message='queued target does not match the durable scan target', completed_at=NOW()
-                    WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
-                    """,
-                    candidate_scan_id,
+                await _fail_broker_scan_and_reconcile_parent(
+                    conn,
+                    scan_id=candidate_scan_id,
+                    phase="scope_revalidation_failed",
+                    message="queued target does not match the durable scan target",
+                    redis_client=redis_client,
                 )
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)

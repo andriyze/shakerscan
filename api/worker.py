@@ -18088,16 +18088,31 @@ async def _fail_execution_scope(job_data: dict[str, Any], message: str) -> None:
         scan_id = None
     if scan_id:
         async with db_pool.acquire() as conn:
-            await conn.execute(
+            failed_row = await conn.fetchrow(
                 """
                 UPDATE scans
                 SET status='failed', progress=100, current_phase='scope_revalidation_failed',
                     error_message=$2, completed_at=NOW()
                 WHERE id=$1 AND status NOT IN ('completed','failed','cancelled')
+                RETURNING parent_scan_id
                 """,
                 scan_id,
                 message[:500],
             )
+            parent_id = failed_row.get("parent_scan_id") if failed_row else None
+            if parent_id:
+                # Scope/materialization refusal happens before the ordinary shard
+                # execution wrapper, so its normal terminal-parent reconciliation
+                # cannot run. Open the merge barrier here as soon as the last
+                # sibling becomes terminal; otherwise the logical parent remains
+                # "running" until the stale-parent timeout even though no work is
+                # left to execute.
+                await parallel_scan.reconcile_parallel_parent(
+                    conn,
+                    str(parent_id),
+                    get_redis(),
+                    QUEUE_NAME,
+                )
     if job_id:
         try:
             get_redis().hset(

@@ -22,6 +22,45 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 import worker  # noqa: E402
 
 
+def test_scope_refusal_reconciles_terminal_shard_parent(monkeypatch):
+    parent_id = uuid.uuid4()
+    scan_id = uuid.uuid4()
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "RETURNING parent_scan_id" in query
+            assert args[0] == scan_id
+            return {"parent_scan_id": parent_id}
+
+    class Pool:
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    reconciled = []
+
+    async def reconcile(conn, candidate_parent_id, redis_client, queue_name):
+        reconciled.append((candidate_parent_id, redis_client, queue_name))
+        return True
+
+    redis_client = object()
+    monkeypatch.setattr(worker, "db_pool", Pool())
+    monkeypatch.setattr(worker, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", reconcile)
+
+    asyncio.run(worker._fail_execution_scope(
+        {"scan_id": str(scan_id), "job_id": ""},
+        "persisted authority mismatch",
+    ))
+
+    assert reconciled == [(str(parent_id), redis_client, worker.QUEUE_NAME)]
+
+
 class _ManagedCredentialConn:
     def __init__(self, rows):
         self.rows = rows

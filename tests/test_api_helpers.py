@@ -20396,6 +20396,8 @@ def test_parallel_recovery_opens_complete_fanout_after_marking_unconfirmed_hando
                         api_module.parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY: 2,
                     },
                 }]
+            if "AND NOT EXISTS" in query and "c.status NOT IN" in query:
+                return []
             return [
                 {"id": uuid.uuid4(), "status": "pending", "options": {"queue_handoff_confirmed": False}},
                 {"id": uuid.uuid4(), "status": "queued", "options": {"queue_handoff_confirmed": True}},
@@ -20428,6 +20430,68 @@ def test_parallel_recovery_opens_complete_fanout_after_marking_unconfirmed_hando
     assert recovered_options[api_module.parallel_scan.PARALLEL_FANOUT_COMPLETE_KEY] is True
     assert recovered_options["parallel_stage"] == "execution"
     assert reconciled == [(conn, str(parent_id), api_module.QUEUE_NAME)]
+
+
+def test_parallel_recovery_reconciles_running_parent_with_terminal_shards(monkeypatch):
+    parent_id = uuid.UUID("43434343-4343-4343-8343-434343434343")
+
+    class Conn:
+        async def fetch(self, query, *args):
+            if "JOIN LATERAL" in query:
+                return []
+            if "options->>'parallel_stage'='fanout'" in query:
+                return []
+            if "terminal_families" in query:
+                raise AssertionError("query implementation detail leaked into SQL")
+            if "AND NOT EXISTS" in query and "c.status NOT IN" in query:
+                return [{"id": parent_id}]
+            return []
+
+    reconciled = []
+
+    async def reconcile(conn, scan_id, _redis, queue_name):
+        reconciled.append((conn, scan_id, queue_name))
+        return True
+
+    conn = Conn()
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module.parallel_scan, "reconcile_parallel_parent", reconcile)
+
+    repaired = asyncio.run(api_module.recover_parallel_orchestration(_FakePool(conn)))
+
+    assert repaired == 1
+    assert reconciled == [(conn, str(parent_id), api_module.QUEUE_NAME)]
+
+
+def test_broker_early_failure_reconciles_terminal_shard_parent(monkeypatch):
+    parent_id = uuid.UUID("45454545-4545-4545-8545-454545454545")
+    scan_id = uuid.UUID("46464646-4646-4646-8646-464646464646")
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "RETURNING parent_scan_id" in query
+            assert args == (scan_id, "scope_revalidation_failed", "authority mismatch")
+            return {"parent_scan_id": parent_id}
+
+    reconciled = []
+
+    async def reconcile(conn, candidate_parent_id, redis_client, queue_name):
+        reconciled.append((conn, candidate_parent_id, redis_client, queue_name))
+        return True
+
+    conn = Conn()
+    redis_client = object()
+    monkeypatch.setattr(api_module.parallel_scan, "reconcile_parallel_parent", reconcile)
+
+    asyncio.run(api_module._fail_broker_scan_and_reconcile_parent(
+        conn,
+        scan_id=scan_id,
+        phase="scope_revalidation_failed",
+        message="authority mismatch",
+        redis_client=redis_client,
+    ))
+
+    assert reconciled == [(conn, str(parent_id), redis_client, api_module.QUEUE_NAME)]
 
 
 def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monkeypatch):
