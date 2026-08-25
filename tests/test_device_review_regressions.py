@@ -172,6 +172,17 @@ def test_device_views_expose_last_scan_reachability_without_assuming_online():
     assert "Reachability: not checked" in list_ui
 
 
+def test_device_list_uses_bounded_reachability_summary():
+    api = (ROOT / "api" / "api.py").read_text()
+    listing = api[api.index('@app.get("/devices")'):]
+    listing = listing[:listing.index('@app.post("/devices")')]
+    detail = api[api.index('@app.get("/devices/{device_id}")'):]
+    detail = detail[:detail.index('@app.patch("/devices/{device_id}")')]
+
+    assert "- 'attempts' - 'nmap_host_discovery'" in listing
+    assert "- 'attempts' - 'nmap_host_discovery'" not in detail
+
+
 def test_device_hunt_compatibility_routes_to_unified_hunt():
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()

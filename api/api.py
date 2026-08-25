@@ -21825,7 +21825,9 @@ async def list_devices(
         rows = await conn.fetch(
             f"""SELECT d.*, p.name AS policy_name,
                        (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id AND ds.state='open') AS services_count,
-                       (SELECT s.result->'device_posture'->'reachability' FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
+                       (SELECT (s.result->'device_posture'->'reachability')
+                                   - 'attempts' - 'nmap_host_discovery'
+                          FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
                 FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id
                 WHERE {where} ORDER BY d.updated_at DESC LIMIT ${len(params)+1} OFFSET ${len(params)+2}""",
             *params, limit, offset,
