@@ -230,7 +230,9 @@ jobs:
 
       - name: Reject public OpenAPI and generated-client drift
         run: |
-          PYTHONPATH=. python -m pytest -q -p no:cacheprovider \
+          # Match the package-native complete-suite import order: package
+          # modules first, followed by the flat API/scanner runtime layouts.
+          PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
             tests/test_public_api_contract_generation.py \
             tests/test_scan_openapi_contract.py \
             tests/test_scan_contract_generation.py

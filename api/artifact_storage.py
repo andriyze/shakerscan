@@ -18,7 +18,14 @@ from typing import Any
 import urllib.error
 import uuid
 
-from evidence_storage import _s3_config, _s3_request
+try:
+    # Runtime containers place ``api/`` on ``PYTHONPATH`` and import modules
+    # directly, while contract generation imports the package from the source
+    # root.  Support both layouts so the public OpenAPI gate exercises the same
+    # storage implementation as the deployed API.
+    from evidence_storage import _s3_config, _s3_request
+except ModuleNotFoundError:  # pragma: no cover - selected by package import layout
+    from api.evidence_storage import _s3_config, _s3_request
 
 
 LOCAL_PREFIX = "local:scan_artifacts/"
