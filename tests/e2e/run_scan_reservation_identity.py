@@ -15,7 +15,8 @@ import uuid
 import asyncpg
 
 
-ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_PATH = Path(__file__).resolve()
+ROOT = Path("/app") if Path("/app/scan").is_dir() else SCRIPT_PATH.parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

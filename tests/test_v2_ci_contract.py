@@ -122,7 +122,8 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert 'artifacts / "v2-full-python.xml"' in runner
     assert 'artifacts / "v2-coverage.xml"' in runner
     assert "partition_test_files(repo_root)" in runner
-    assert "docker compose build" in text
+    assert "./scanner.sh build" in text
+    assert "python -m playwright install --with-deps chromium" in text
     assert "scripts/docker_api_overlay_smoke.sh" in text
     assert "npm --prefix ui run build" in text
     assert "python tests/e2e/run_e2e.py" in text
@@ -149,21 +150,22 @@ def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     assert "if args.worker_container is None:" in wire_runner
 
 
-def test_package_native_and_legacy_scan_contracts_run_in_isolated_processes():
+def test_package_native_and_installed_runtime_scan_contracts_run_in_isolated_steps():
     workflow = yaml.safe_load(_workflow_text())
-    step = next(
+    package_step = next(
         item
         for item in workflow["jobs"]["contracts"]["steps"]
-        if item.get("name") == "Validate canonical Scan and worker contracts"
+        if item.get("name") == "Validate package-native Scan contracts"
+    )
+    installed_step = next(
+        item
+        for item in workflow["jobs"]["contracts"]["steps"]
+        if item.get("name") == "Validate installed-runtime Scan contracts"
     )
 
-    assert "env" not in step
-    commands = [
-        line.strip()
-        for line in step["run"].splitlines()
-        if line.strip().startswith("python -m pytest")
-    ]
-    assert len(commands) == 2
-    assert step["run"].index("tests/test_scan_action_plan.py") < step["run"].index(
-        "tests/test_scan_v2_contract.py"
-    )
+    assert "env" not in package_step
+    assert package_step["run"].count("python -m pytest") == 1
+    assert installed_step["env"]["PYTHONPATH"] == "api:scanner"
+    assert installed_step["run"].count("python -m pytest") == 1
+    assert "tests/test_scan_action_plan.py" in package_step["run"]
+    assert "tests/test_scan_v2_contract.py" in installed_step["run"]

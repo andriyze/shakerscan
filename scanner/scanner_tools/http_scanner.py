@@ -512,6 +512,8 @@ async def browser_fetch(
         if not status:
             status = "HTTP/? 0"
         return {
+            "browser_runtime": "curl_fallback",
+            "browser_fallback_reason": reason,
             "headers": headers,
             "status": status,
             "title": "Unknown (Browser not available)",
@@ -1313,6 +1315,7 @@ async def browser_fetch(
                 print(f"[browser_fetch] Network capture: {total_count} requests, no API/WebSocket endpoints detected", file=sys.stderr)
 
             return {
+                "browser_runtime": "playwright",
                 "headers": h_norm,
                 "status": status_line,
                 "title": body_title,

@@ -235,6 +235,7 @@ def test_browser_fetch_blocks_state_change_from_semantic_tab(tmp_path):
         cross_thread.join(timeout=5)
         cross_server.server_close()
 
+    assert result["browser_runtime"] == "playwright"
     assert Handler.post_count == 0
     assert CrossOriginHandler.get_count == 0
     safety = result["interaction_safety"]

@@ -167,11 +167,8 @@ jobs:
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_target_transport_gate.py
 
-      - name: Validate canonical Scan and worker contracts
+      - name: Validate package-native Scan contracts
         run: |
-          # Package-native contract tests must run in their own process. Legacy
-          # compatibility tests import api/api.py as the top-level `api` module;
-          # mixing both import worlds in one pytest collection masks `api.scan`.
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_action_plan.py \
             tests/test_scan_action_compiler.py \
@@ -192,7 +189,12 @@ jobs:
             tests/test_scan_work_manifests.py \
             tests/test_observation_manifests.py \
             tests/test_observation_store.py \
-            tests/test_scan_placement_transport.py \
+            tests/test_scan_placement_transport.py
+
+      - name: Validate installed-runtime Scan contracts
+        env:
+          PYTHONPATH: api:scanner
+        run: |
           python -m pytest -q -p no:cacheprovider \
             tests/test_scan_v2_contract.py \
             tests/test_scan_execution_plan.py \
@@ -364,6 +366,9 @@ jobs:
           python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
           python -m pip install --disable-pip-version-check coverage==7.10.7
 
+      - name: Install the Chromium browser runtime
+        run: python -m playwright install --with-deps chromium
+
       - name: Collect the complete suite
         run: python scripts/run_complete_python_suite.py --collect-only
 
@@ -392,8 +397,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build scanner, API, worker, and UI images
-        run: docker compose build
+      - name: Build scanner, API, worker, and UI images in product dependency order
+        run: ./scanner.sh build
 
       - name: Verify the scanner/API image overlay
         run: scripts/docker_api_overlay_smoke.sh shakerscan-worker:local shakerscan-api-v2-overlay-smoke
