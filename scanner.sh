@@ -1871,6 +1871,8 @@ print_help() {
     echo "                       worker aggregates all shakerscan-worker* containers"
     echo "  scan <target>      Submit the deterministic DAST Scan"
     echo "  hunt <cmd>         Start or drive one canonical Hunt"
+    echo "  credentials <cmd>  Create, rotate, or admission-test encrypted profiles"
+    echo "  collections <cmd>  Upload, bind, or select request collections"
     echo "  report-rebuild <bundle>  Rebuild a deterministic report fully offline"
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
@@ -3515,7 +3517,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|scan-full|scan-smart|hunt|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|scan-full|scan-smart|hunt|credentials|collections|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -3587,6 +3589,12 @@ case $COMMAND in
         ;;
     hunt)
         run_v2_product_cli "hunt" "${ARGS[@]}"
+        ;;
+    credentials)
+        run_v2_product_cli "credentials" "${ARGS[@]}"
+        ;;
+    collections)
+        run_v2_product_cli "collections" "${ARGS[@]}"
         ;;
     report-rebuild)
         if [ ! -f "$SCRIPT_DIR/scripts/rebuild_scan_report.py" ]; then

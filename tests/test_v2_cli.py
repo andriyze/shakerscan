@@ -77,3 +77,51 @@ def test_hunt_cli_help_is_first_class_and_non_mutating(capsys):
     assert "start" in output
     assert "call" in output
     assert "deep-hunt" not in output
+
+
+def test_credential_requests_are_checked_against_server_published_schema():
+    schema = {
+        "properties": {"target_id": {}, "secret": {}},
+        "required": ["target_id", "secret"],
+        "additionalProperties": False,
+    }
+    assert v2_cli._validate_schema_object(
+        {"target_id": "target-1", "secret": "worker-only"}, schema,
+        label="credential",
+    )["secret"] == "worker-only"
+    with pytest.raises(v2_cli.CliError, match="unsupported fields"):
+        v2_cli._validate_schema_object(
+            {"target_id": "target-1", "secret": "worker-only", "argv": []},
+            schema,
+            label="credential",
+        )
+
+
+def test_credentials_and_collections_are_first_class_commands():
+    parser = v2_cli.build_parser()
+    create = parser.parse_args([
+        "--api-url", "http://localhost:8080", "credentials", "create",
+        "--request", "-",
+    ])
+    assert create.credentials_command == "create"
+    rotate = parser.parse_args([
+        "--api-url", "http://localhost:8080", "credentials", "rotate",
+        "profile-1", "--request", "-",
+    ])
+    assert rotate.profile_id == "profile-1"
+    select = parser.parse_args([
+        "--api-url", "http://localhost:8080", "collections", "select",
+        "collection-1", "--method", "get", "--limit", "12",
+    ])
+    assert select.collections_command == "select"
+    assert select.method == ["get"]
+    assert select.limit == 12
+
+
+def test_collection_upload_document_accepts_json_or_openapi_yaml(tmp_path):
+    json_path = tmp_path / "postman.json"
+    json_path.write_text('{"info":{"name":"fixture"}}')
+    yaml_path = tmp_path / "openapi.yaml"
+    yaml_path.write_text("openapi: 3.0.0\npaths: {}\n")
+    assert v2_cli._read_document(str(json_path)) == {"info": {"name": "fixture"}}
+    assert v2_cli._read_document(str(yaml_path)).startswith("openapi:")

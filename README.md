@@ -75,13 +75,18 @@ expiring target-bound approval, and remains responsible for budgets, execution, 
 shakerscan scan https://app.example.test
 shakerscan scan https://app.example.test --budget-profile thorough
 shakerscan scan https://app.example.test --budget-profile thorough --active-testing --confirm-active
+shakerscan hunt start --target-id "$TARGET_ID" --target-kind web
+shakerscan credentials test "$PROFILE_ID"
+shakerscan collections select "$COLLECTION_ID" --method GET
 shakerscan status
 ```
 
 `scan` submits the one deterministic DAST pipeline. `fast`, `balanced`, and `thorough` are resource
 ceilings, while `--active-testing` is an explicit permission. Parallel placement and sharding are
 internal decisions. Old `--type` values remain deprecated compatibility aliases. Use the web UI or
-REST API for authentication values so secrets do not enter shell history.
+REST API for authentication values so secrets do not enter shell history. Credential create and
+rotation requests are read from a file or stdin, never secret-bearing command-line flags. Hunt,
+credential, and collection commands read their accepted fields from the running server contracts.
 
 ### Use the web UI
 
@@ -479,6 +484,9 @@ scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
 backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
 scan <target> [options]       Submit the deterministic DAST Scan
+hunt start|call               Start a Hunt or call one returned capability
+credentials create|rotate|test  Manage encrypted exact-target profiles
+collections upload|bind|select  Manage encrypted request collections
 scan-full <target>            Deprecated: thorough + active compatibility translation
 scan-smart <target>           Deprecated: thorough + active compatibility translation
 doctor | install-deps         Diagnose or install local prerequisites

@@ -15,6 +15,8 @@ import uuid
 
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
+MAX_REQUEST_BYTES = 52 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 
 
 class CliError(RuntimeError):
@@ -40,8 +42,8 @@ class ApiClient:
         headers = {"Accept": "application/json"}
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            if len(body) > MAX_JSON_BYTES:
-                raise CliError("request JSON exceeds the 4 MiB CLI limit")
+            if len(body) > MAX_REQUEST_BYTES:
+                raise CliError("request JSON exceeds the 52 MiB CLI limit")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             f"{self.base_url}{path}", data=body, headers=headers, method=method,
@@ -122,6 +124,50 @@ def _pairs(values: Sequence[str], *, label: str) -> dict[str, str]:
             raise CliError(f"duplicate {label} name: {name}")
         result[name] = value
     return result
+
+
+def _openapi_schema(client: ApiClient, name: str) -> Mapping[str, Any]:
+    contract = client.get("/openapi.json")
+    try:
+        schema = contract["components"]["schemas"][name]
+    except (KeyError, TypeError) as exc:
+        raise CliError(f"running server does not publish the {name} contract") from exc
+    if not isinstance(schema, Mapping):
+        raise CliError(f"running server returned an invalid {name} contract")
+    return schema
+
+
+def _validate_schema_object(
+    value: Any, schema: Mapping[str, Any], *, label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CliError(f"{label} must be one JSON object")
+    properties = set((schema.get("properties") or {}).keys())
+    unknown = sorted(set(value) - properties)
+    if unknown and schema.get("additionalProperties") is False:
+        raise CliError(f"{label} contains unsupported fields: {', '.join(unknown)}")
+    missing = sorted(set(schema.get("required") or ()) - set(value))
+    if missing:
+        raise CliError(f"{label} is missing required fields: {', '.join(missing)}")
+    return value
+
+
+def _read_document(path: str) -> Any:
+    file_path = Path(path).expanduser()
+    try:
+        if file_path.stat().st_size > MAX_DOCUMENT_BYTES:
+            raise CliError("request collection document exceeds 50 MiB")
+        raw = file_path.read_bytes()
+    except OSError as exc:
+        raise CliError(f"cannot read request collection document: {exc}") from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CliError("request collection document must be UTF-8") from exc
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -220,6 +266,127 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
     raise CliError("unknown Hunt command")
 
 
+def _run_credentials(args: argparse.Namespace, client: ApiClient) -> Any:
+    if args.credentials_command == "create":
+        schema = _openapi_schema(client, "CredentialProfileCreate")
+        payload = _validate_schema_object(
+            _read_json(args.request, default={}), schema,
+            label="credential create request",
+        )
+        return client.post("/credential-profiles", payload)
+    if args.credentials_command == "rotate":
+        schema = _openapi_schema(client, "CredentialProfileRotate")
+        payload = _validate_schema_object(
+            _read_json(args.request, default={}), schema,
+            label="credential rotation request",
+        )
+        profile_id = urllib.parse.quote(args.profile_id, safe="")
+        return client.post(f"/credential-profiles/{profile_id}/rotate", payload)
+    if args.credentials_command == "test":
+        profile_id = urllib.parse.quote(args.profile_id, safe="")
+        result = client.get(f"/credential-profiles/{profile_id}")
+        profile = result.get("profile") if isinstance(result, Mapping) else None
+        if not isinstance(profile, Mapping):
+            raise CliError("running server returned invalid credential metadata")
+        checks = {
+            "active": profile.get("status") == "active",
+            "execution_compatible": profile.get("execution_compatible") is True,
+            "storage_encrypted": profile.get("storage_encrypted") is True,
+            "encryption_available": profile.get("encryption_available") is True,
+            "target_bound": bool(profile.get("target_id") and profile.get("target_kind")),
+        }
+        if args.capability:
+            allowed = {str(item) for item in profile.get("allowed_capabilities") or ()}
+            checks["capability_allowed"] = not allowed or args.capability in allowed
+        return {
+            "schema_version": "credential-admission-test/v1",
+            "profile_id": str(profile.get("profile_id") or args.profile_id),
+            "test_mode": "metadata_admission",
+            "passed": all(checks.values()),
+            "checks": checks,
+            "profile": profile,
+            "note": (
+                "This content-free check validates storage, lifecycle, target binding, and "
+                "capability admission. Exercise the profile against its target through a "
+                "target-bound Hunt capability."
+            ),
+        }
+    raise CliError("unknown credentials command")
+
+
+def _collection_upload_payload(
+    args: argparse.Namespace, client: ApiClient,
+) -> dict[str, Any]:
+    schema = _openapi_schema(client, "RequestCollectionCreate")
+    if args.request:
+        return _validate_schema_object(
+            _read_json(args.request, default={}), schema,
+            label="request collection upload",
+        )
+    if not args.target_id or not args.document:
+        raise CliError("collections upload requires --target-id and a document")
+    payload: dict[str, Any] = {
+        "target_id": args.target_id,
+        "document": _read_document(args.document),
+        "format": args.format,
+        "import_limit": args.import_limit,
+        "max_document_bytes": MAX_DOCUMENT_BYTES,
+    }
+    for name in ("name", "environment_name", "base_url"):
+        value = getattr(args, name)
+        if value is not None:
+            payload[name] = value
+    if args.environment:
+        payload["environment"] = _read_document(args.environment)
+    return _validate_schema_object(payload, schema, label="request collection upload")
+
+
+def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
+    if args.collections_command == "upload":
+        return client.post(
+            "/request-collections", _collection_upload_payload(args, client),
+        )
+    collection_id = urllib.parse.quote(args.collection_id, safe="")
+    if args.collections_command == "bind":
+        schema = _openapi_schema(client, "RequestCollectionBindingUpsert")
+        if args.request:
+            payload = _read_json(args.request, default={})
+        else:
+            payload = {
+                "target_kind": args.target_kind,
+                "target_id": args.target_id,
+                "allowed_origins": list(dict.fromkeys(args.allowed_origin)),
+            }
+            if args.environment_id:
+                payload["environment_id"] = args.environment_id
+        payload = _validate_schema_object(
+            payload, schema, label="request collection binding",
+        )
+        return client.post(
+            f"/request-collections/{collection_id}/bindings", payload,
+        )
+    if args.collections_command == "select":
+        schema = _openapi_schema(client, "RequestCollectionSelect")
+        if args.request:
+            payload = _read_json(args.request, default={})
+        else:
+            payload = {
+                "request_ids": list(dict.fromkeys(args.request_id)),
+                "folders": list(dict.fromkeys(args.folder)),
+                "methods": list(dict.fromkeys(method.upper() for method in args.method)),
+                "tags": list(dict.fromkeys(args.tag)),
+                "safe_methods_only": not args.include_mutating,
+                "limit": args.limit,
+            }
+            if args.path_regex:
+                payload["path_regex"] = args.path_regex
+        payload = _validate_schema_object(
+            payload, schema, label="request collection selection",
+        )
+        return client.post(f"/request-collections/{collection_id}/select", payload)
+    raise CliError("unknown collections command")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="shakerscan",
@@ -253,6 +420,67 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_call.add_argument("capability_name")
     hunt_call.add_argument("--input", metavar="FILE", help="JSON object; use - for stdin")
     hunt_call.add_argument("--idempotency-key")
+
+    credentials = products.add_parser(
+        "credentials", help="Create, rotate, or admission-test an encrypted profile",
+    )
+    credential_commands = credentials.add_subparsers(
+        dest="credentials_command", required=True,
+    )
+    credential_create = credential_commands.add_parser(
+        "create", help="Create from server-contract JSON read from a file or stdin",
+    )
+    credential_create.add_argument("--request", required=True, metavar="FILE")
+    credential_rotate = credential_commands.add_parser(
+        "rotate", help="Rotate from server-contract JSON read from a file or stdin",
+    )
+    credential_rotate.add_argument("profile_id")
+    credential_rotate.add_argument("--request", required=True, metavar="FILE")
+    credential_test = credential_commands.add_parser(
+        "test", help="Run a content-free storage and execution-admission check",
+    )
+    credential_test.add_argument("profile_id")
+    credential_test.add_argument("--capability")
+
+    collections = products.add_parser(
+        "collections", help="Upload, bind, or select an encrypted request collection",
+    )
+    collection_commands = collections.add_subparsers(
+        dest="collections_command", required=True,
+    )
+    collection_upload = collection_commands.add_parser(
+        "upload", help="Import Postman, HAR, OpenAPI, or Swagger input",
+    )
+    collection_upload.add_argument("document", nargs="?")
+    collection_upload.add_argument("--request", metavar="FILE")
+    collection_upload.add_argument("--target-id")
+    collection_upload.add_argument("--name")
+    collection_upload.add_argument("--format", default="auto")
+    collection_upload.add_argument("--environment")
+    collection_upload.add_argument("--environment-name")
+    collection_upload.add_argument("--base-url")
+    collection_upload.add_argument("--import-limit", type=int, default=5_000)
+    collection_bind = collection_commands.add_parser(
+        "bind", help="Bind a collection to one exact target and origin set",
+    )
+    collection_bind.add_argument("collection_id")
+    collection_bind.add_argument("--request", metavar="FILE")
+    collection_bind.add_argument("--target-kind")
+    collection_bind.add_argument("--target-id")
+    collection_bind.add_argument("--allowed-origin", action="append", default=[])
+    collection_bind.add_argument("--environment-id")
+    collection_select = collection_commands.add_parser(
+        "select", help="Preview one redacted bounded request selection",
+    )
+    collection_select.add_argument("collection_id")
+    collection_select.add_argument("--request", metavar="FILE")
+    collection_select.add_argument("--request-id", action="append", default=[])
+    collection_select.add_argument("--folder", action="append", default=[])
+    collection_select.add_argument("--method", action="append", default=[])
+    collection_select.add_argument("--path-regex")
+    collection_select.add_argument("--tag", action="append", default=[])
+    collection_select.add_argument("--include-mutating", action="store_true")
+    collection_select.add_argument("--limit", type=int, default=500)
     return parser
 
 
@@ -263,6 +491,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         client = ApiClient(args.api_url)
         if args.product == "hunt":
             result = _run_hunt(args, client)
+        elif args.product == "credentials":
+            result = _run_credentials(args, client)
+        elif args.product == "collections":
+            result = _run_collections(args, client)
         else:
             raise CliError("unknown command")
         print(json.dumps(result, indent=2, sort_keys=True))
