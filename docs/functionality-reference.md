@@ -1131,11 +1131,15 @@ proof and promotion gates pass. Create-based mass-assignment workflows may leave
 test objects when the discovered target has no delete route; this bounded exception is limited to
 server-materialized create/read-back proof and is surfaced in the run outcome.
 
-**Read-only MCP**: `./scanner.sh mcp` starts a stdio MCP adapter over `POST /arsenal/execute`.
-It exposes targets, ASM gaps, findings, content-free evidence manifests, the mission timeline,
-saved dry-run plans, and tool status. The adapter revalidates the live Arsenal catalog on every
-listing/call and fails closed if a mapped command is no longer `read_only` / `GET` / read-only risk.
-State-changing commands are not exposed. See [`docs/read-only-mcp.md`](read-only-mcp.md).
+**MCP — read-only Arsenal inspection plus target-bound Hunt V2**: `./scanner.sh mcp` starts a stdio
+adapter. Arsenal inspection exposes targets, ASM gaps, findings, content-free evidence manifests,
+the mission timeline, saved dry-run plans, and tool status through `POST /arsenal/execute`; it
+revalidates the live catalog and never represents state-changing Arsenal commands. Hunt tools load
+`GET /hunts/contract`, generate the canonical start schema, and wrap start/get/query/capability/
+candidate/verify/finish/cancel. Capability calls require the live Hunt manifest, validate its
+published input schema, and use a caller-provided or returned generated idempotency key. Target
+binding, approvals, budgets, receipts, evidence, and deterministic proof remain server-enforced.
+See [`docs/read-only-mcp.md`](read-only-mcp.md).
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·
@@ -1343,7 +1347,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 
 Not every public operation should have a dedicated screen. The following remain intentionally available
 primarily to CI, agents, integrations, or advanced operators: raw result/result-folder reads; direct
-evidence-instance/tool-receipt recording; read-only MCP over Arsenal execute; generic Arsenal execution;
+evidence-instance/tool-receipt recording; MCP read-only Arsenal inspection and target-bound Hunt V2; generic Arsenal execution;
 local-agent output parsing; host-side Codex episode driving; and bulk finding retest/update/manual creation. §17 lists every operation so
 this boundary is visible rather than accidental.
 

@@ -45,7 +45,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`SMART_SCAN_POLICY.md`](SMART_SCAN_POLICY.md) | Smart-scan budget, proof, safety, and release policy |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
 | [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |
-| [`read-only-mcp.md`](read-only-mcp.md) | Read-only MCP adapter contract and boundaries |
+| [`read-only-mcp.md`](read-only-mcp.md) | MCP trust boundaries: read-only Arsenal inspection and target-bound Hunt V2 |
 
 ## Acceptance And Integrity Ledgers
 

@@ -1,6 +1,6 @@
 # ShakerScan MCP
 
-**Status:** shipped and contract-tested as of 2026-07-11.
+**Status:** shipped and contract-tested as of 2026-08-25.
 
 ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal and canonical
 Hunt V2. Arsenal tools remain read-only. Hunt tools wrap `/hunts` directly and inherit its exact
@@ -29,7 +29,9 @@ Example client configuration:
 }
 ```
 
-The adapter exposes:
+The adapter exposes two deliberately different trust levels:
+
+Read-only Arsenal inspection:
 
 - `shakerscan_targets`
 - `shakerscan_asm_gaps`
@@ -38,16 +40,30 @@ The adapter exposes:
 - `shakerscan_timeline`
 - `shakerscan_plans`
 - `shakerscan_tool_status`
+
+Target-bound Hunt V2 (including state-changing and target-facing operations):
+
 - `shakerscan_hunt_start`, `shakerscan_hunt_get`, and `shakerscan_hunt_query`
 - `shakerscan_hunt_capability` for capabilities returned by that Hunt's manifest
 - `shakerscan_hunt_candidate`, `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
 
 Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain `read_only` risk,
-and dispatch through the audited Arsenal endpoint. Hunt tools call the canonical `/hunts` API; the
-runtime revalidates target binding, the run's capability manifest, approval, budgets, evidence, and
-proof contracts. Catalog drift, redirects, oversized responses, unavailable APIs, and unexpected
-dispatch results fail closed.
+and dispatch through the audited Arsenal endpoint. Hunt discovery reads `GET /hunts/contract` and
+generates the start schema from the live authority contract. The MCP boundary uses only the
+canonical `goal` name and sends the complete V2 body: schema version, target kind, policy, budgets,
+credential references, capability allowlist, and request-collection references.
 
-Input schemas enforce UUIDs, enums, required fields, and per-tool numeric bounds before dispatch;
-the REST Arsenal validates the command contract again. The transport also caps request and response
-sizes and rejects redirects.
+Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an active or
+awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input
+against its published schema. The client may provide an `idempotency_key`; if omitted, the adapter
+generates one and returns it as `mcp_idempotency_key` so a retry can reuse the exact action identity.
+The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
+Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
+results fail closed.
+
+Tool annotations reflect these boundaries: Arsenal inspection and Hunt get/query are read-only;
+capability and verification operations are conservatively marked destructive and open-world;
+start, candidate, finish, and cancel are state-changing. Raw secrets, target-address overrides,
+planner argv, and arbitrary shell commands are not representable. Input schemas enforce UUIDs,
+enums, required/nested fields, patterns, uniqueness, and numeric bounds before dispatch. The
+transport also caps request and response sizes and rejects redirects.

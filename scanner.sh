@@ -1879,7 +1879,7 @@ print_help() {
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
     echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
-    echo "  mcp                Start the read-only Command Arsenal MCP stdio adapter"
+    echo "  mcp                Start MCP: read-only Arsenal inspection plus target-bound Hunt V2"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  devices <cmd>      Opt-in device worker: start, stop, restart, status, logs"
@@ -3155,7 +3155,7 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
             ;;
         mcp)
             echo "Usage: ./scanner.sh mcp"
-            echo "Starts the read-only Command Arsenal MCP stdio adapter."
+            echo "Starts MCP with read-only Arsenal inspection and target-bound Hunt V2 tools."
             exit 0
             ;;
         research)

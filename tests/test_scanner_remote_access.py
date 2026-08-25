@@ -92,7 +92,7 @@ def test_agent_launcher_has_non_mutating_help():
 
 def test_wrapper_subcommand_help_is_non_mutating_and_informative():
     for command, expected in (
-        ("mcp", "read-only Command Arsenal MCP"),
+        ("mcp", "read-only Arsenal inspection and target-bound Hunt V2"),
         ("research", "existing episode"),
         ("reset", "Usage: ./scanner.sh [command] [options]"),
     ):

@@ -64,7 +64,7 @@ after the candidate is frozen:
 - [x] Generated capability inventory is current.
 - [x] Frozen-source installer smoke passes without retired V1 command files.
 - [x] Clean, duplicate-dirty, verification, and rollback migration scenarios pass from v0.8.17.
-- [x] Manual MCP initialize/tool-list/read-only execution was exercised; target inventory is bounded.
+- [x] Manual MCP initialize/tool-list/read-only Arsenal execution was exercised; target inventory is bounded.
 - [ ] The latest exact V2 migration workflow completes successfully without cancellation by a later push.
 - [ ] Final live stack is rebuilt at the exact candidate SHA with uniform current fingerprints.
 - [ ] Final UI/API/CLI/MCP/Hunt/device/DAST submissions and navigation checks are recorded.
@@ -107,8 +107,9 @@ receipts.
   responses are target-bound, redacted, paginated/bounded, and agree with UI records.
 - [ ] Source and installed CLI paths exercise status/doctor/help plus Scan, Hunt, credential,
   collection, and evidence commands, including negative validation without queueing unintended work.
-- [ ] MCP initializes, exposes the fixed read-only catalog plus bounded Hunt tools, paginates large
-  inventories, rejects malformed/out-of-scope input, and can inspect an existing Hunt.
+- [ ] MCP initializes, exposes read-only Arsenal inspection plus contract-generated Hunt V2 tools,
+  paginates large inventories, rejects malformed/out-of-scope input, and completes a bounded Hunt
+  start/manifest capability/query/candidate/finish flow with retry-safe idempotency.
 - [ ] AI Ops preview reports missing inputs, safety, blast radius, and confirmations without executing
   an unconfirmed plan.
 
