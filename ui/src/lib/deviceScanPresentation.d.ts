@@ -7,3 +7,4 @@ export type DeviceScorePresentation = {
 }
 
 export function deviceScorePresentation(scan: unknown): DeviceScorePresentation
+export function deviceActivityLogLines(activity: unknown): string[]

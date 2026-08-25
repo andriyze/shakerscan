@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { deviceScorePresentation } from './deviceScanPresentation.mjs'
+import { deviceActivityLogLines, deviceScorePresentation } from './deviceScanPresentation.mjs'
 
 
 function deviceScan({ reachability = 'online', complete = true, decision = 'allow' } = {}) {
@@ -58,4 +58,21 @@ test('non-device score presentation is unchanged', () => {
     score: 88,
     note: null,
   })
+})
+
+
+test('device activity becomes readable content-free report logs', () => {
+  assert.deepEqual(deviceActivityLogLines({ events: [
+    {
+      phase: 'tcp_scope',
+      progress: 40,
+      message: 'Checking common and device-specific TCP ports',
+      details: { hidden_command: 'must not be copied' },
+    },
+    { phase: 'complete', progress: 100, message: 'Device scan completed' },
+    { phase: 'ignored', progress: 100, message: '' },
+  ] }), [
+    '[device] 40% · tcp scope · Checking common and device-specific TCP ports',
+    '[device] 100% · complete · Device scan completed',
+  ])
 })

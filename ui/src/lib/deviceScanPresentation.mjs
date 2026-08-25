@@ -60,3 +60,21 @@ export function deviceScorePresentation(scan) {
 
   return { isDevice: true, status: 'final', grade, score, note: null }
 }
+
+
+/** Convert the content-free device activity feed into readable report logs. */
+export function deviceActivityLogLines(activity) {
+  const events = Array.isArray(record(activity).events) ? activity.events : []
+  return events.flatMap((rawEvent) => {
+    const event = record(rawEvent)
+    const message = String(event.message || '').trim()
+    if (!message) return []
+    const progress = finiteScore(event.progress)
+    const phase = String(event.phase || '').trim().replace(/_/g, ' ')
+    const context = [
+      progress !== null ? `${progress}%` : '',
+      phase && phase.toLowerCase() !== message.toLowerCase() ? phase : '',
+    ].filter(Boolean).join(' · ')
+    return [`[device] ${context ? `${context} · ` : ''}${message}`]
+  })
+}

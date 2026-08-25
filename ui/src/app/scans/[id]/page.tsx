@@ -3,12 +3,12 @@
 import { useEffect, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { API_URL, getScan, getScanLogs, getHealth, getFindings, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
-import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 
 function formatScanTypeLabel(scan: any): string {
@@ -1520,7 +1520,19 @@ function ScanDetailContent() {
         }
         try {
           const logData = await getScanLogs(scanId, 200)
-          setLogs(logData?.lines || [])
+          let nextLogs = logData?.lines || []
+          const isDeviceScan = ['device_posture', 'device_probe'].includes(
+            String(data?.run_kind || data?.scan_type),
+          )
+          if (isDeviceScan && nextLogs.length === 0) {
+            try {
+              nextLogs = deviceActivityLogLines(await getDeviceScanActivity(scanId))
+            } catch {
+              // The ordinary log endpoint remains authoritative when the
+              // content-free device activity feed is unavailable.
+            }
+          }
+          setLogs(nextLogs)
           setLogsError(null)
         } catch {
           setLogsError('Failed to load logs')
