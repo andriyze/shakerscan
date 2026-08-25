@@ -18,6 +18,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
+      <head>
+        <script src="/api/runtime-config" />
+      </head>
       <body className="min-h-screen bg-gray-950 text-gray-100">
         <ToastProvider>
           <div className="flex min-h-screen flex-col md:flex-row">

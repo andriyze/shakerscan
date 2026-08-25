@@ -16,11 +16,9 @@ export type {
 } from './scanContract.generated'
 
 export function getApiUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL
-  }
-
   if (typeof window !== 'undefined') {
+    const runtimeUrl = window.__SHAKERSCAN_API_URL__
+    if (runtimeUrl) return runtimeUrl
     const host = window.location.hostname
     const pageProtocol = window.location.protocol // "http:" or "https:"
     if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) {
@@ -41,6 +39,12 @@ export function getApiUrl(): string {
   }
 
   return 'http://localhost:8080'
+}
+
+declare global {
+  interface Window {
+    __SHAKERSCAN_API_URL__?: string
+  }
 }
 
 export const API_URL = getApiUrl()
