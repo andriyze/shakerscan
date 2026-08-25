@@ -97,7 +97,7 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
         "test_canonical_shard_builder_emits_secret_free_v2_queue_authority",
         "test_primary_api_parses_typed_native_hunt_start",
         "test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitted",
-        "test_primary_api_documents_the_native_hunt_request_and_response_models",
+        "test_hunt_router_documents_the_native_request_and_response_models",
         "test_primary_api_rejects_legacy_hunt_start_without_migration_flag",
         "test_primary_api_rejects_legacy_hunt_start_even_with_old_override_env",
         "test_native_hunt_start_persists_exact_contract_and_capability_allowlist",

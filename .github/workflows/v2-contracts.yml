@@ -338,7 +338,7 @@ jobs:
           PYTHONPATH=api:scanner python -m pytest -q -p no:cacheprovider \
             tests/test_api_helpers.py::test_primary_api_parses_typed_native_hunt_start \
             tests/test_api_helpers.py::test_primary_api_preserves_policy_profile_alias_when_budget_profile_is_omitted \
-            tests/test_api_helpers.py::test_primary_api_documents_the_native_hunt_request_and_response_models \
+            tests/test_api_helpers.py::test_hunt_router_documents_the_native_request_and_response_models \
             tests/test_api_helpers.py::test_primary_api_rejects_legacy_hunt_start_without_migration_flag \
             tests/test_api_helpers.py::test_primary_api_rejects_legacy_hunt_start_even_with_old_override_env \
             tests/test_api_helpers.py::test_primary_api_rejects_oversized_hunt_body_before_json_parsing \
