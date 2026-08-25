@@ -20,3 +20,8 @@ test('New Scan exposes disclosure and validation state to assistive technology',
   assert.match(page, /id="advanced-scan-options"/)
   assert.match(page, /<p role="alert"/)
 })
+
+test('New Scan clears stale validation when the operator edits the form', () => {
+  assert.match(page, /onChange=\{\(\) => \{ if \(error\) setError\(null\) \}\}/)
+  assert.match(page, /setBudgetProfile\(budget\.value\); setError\(null\)/)
+})

@@ -351,7 +351,11 @@ export default function NewScanPage() {
         <p className="mt-1 text-sm text-gray-400">One deterministic scan pipeline. Choose its resource budget and testing permissions.</p>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-6">
+      <form
+        onSubmit={handleSubmit}
+        onChange={() => { if (error) setError(null) }}
+        className="space-y-6"
+      >
         <Card className="p-5 space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div>
@@ -400,7 +404,7 @@ export default function NewScanPage() {
             {BUDGETS.map((budget) => {
               const serverLimits = scanContract?.budget_profiles[budget.value]
               return (
-                <button key={budget.value} type="button" aria-pressed={budgetProfile === budget.value} onClick={() => setBudgetProfile(budget.value)} className={`rounded-lg border p-4 text-left transition-colors ${budgetProfile === budget.value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-950 hover:border-gray-600'}`}>
+                <button key={budget.value} type="button" aria-pressed={budgetProfile === budget.value} onClick={() => { setBudgetProfile(budget.value); setError(null) }} className={`rounded-lg border p-4 text-left transition-colors ${budgetProfile === budget.value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-950 hover:border-gray-600'}`}>
                   <span className="font-medium text-white">{budget.label}</span>
                   <span className="mt-1 block text-sm text-gray-400">{budget.description}</span>
                   <span className="mt-3 block text-xs text-gray-500">
