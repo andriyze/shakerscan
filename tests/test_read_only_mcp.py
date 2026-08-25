@@ -100,6 +100,45 @@ def test_mcp_tool_call_revalidates_catalog_and_dispatches_through_arsenal():
     )
 
 
+def test_mcp_target_list_defaults_to_bounded_compact_pagination():
+    class TargetClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if path == "/arsenal/execute":
+                self.calls.append((method, path, payload))
+                return {
+                    "command": "target.list",
+                    "dispatched": True,
+                    "result": {
+                        "total": 35,
+                        "targets": [{
+                            "id": "target-1",
+                            "url": "https://" + "a" * 4_000,
+                            "name": "n" * 1_000,
+                            "root_domain": "example.com",
+                            "is_active": True,
+                            "metadata_json": "secret-or-bulk-metadata",
+                            "canonical_key": "c" * 4_000,
+                            "origins": ["https://example.com"] * 20,
+                        }],
+                    },
+                    "action_state": {"catalog_status": "read_only", "risk_tier": "read_only"},
+                }
+            return super().request_json(method, path, payload)
+
+    client = TargetClient()
+    result = client.call_tool("shakerscan_targets", {})
+
+    assert client.calls[-1][2]["parameters"] == {"limit": 20, "offset": 0}
+    assert result["structuredContent"]["has_more"] is True
+    assert result["structuredContent"]["returned"] == 1
+    target = result["structuredContent"]["targets"][0]
+    assert len(target["url"]) == 512
+    assert len(target["name"]) == 160
+    assert "metadata_json" not in target
+    assert "canonical_key" not in target
+    assert len(target["origins"]) == 8
+
+
 def test_mcp_rejects_unknown_and_missing_arguments_before_dispatch():
     client = FakeClient()
 

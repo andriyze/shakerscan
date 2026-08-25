@@ -27,6 +27,48 @@ DEFAULT_API_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
+DEFAULT_TARGET_PAGE_SIZE = 20
+
+
+def _bounded_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _compact_target_list(payload: dict[str, Any], *, limit: int, offset: int) -> dict[str, Any]:
+    rows = payload.get("targets") if isinstance(payload.get("targets"), list) else []
+    compact = []
+    for raw in rows[:limit]:
+        if not isinstance(raw, dict):
+            continue
+        origins = raw.get("origins") if isinstance(raw.get("origins"), list) else []
+        compact.append({
+            "id": _bounded_text(raw.get("id"), 64),
+            "url": _bounded_text(raw.get("url"), 512),
+            "name": _bounded_text(raw.get("name"), 160),
+            "root_domain": _bounded_text(raw.get("root_domain"), 255),
+            "is_active": bool(raw.get("is_active")),
+            "last_scan_id": _bounded_text(raw.get("last_scan_id"), 64),
+            "last_scanned_at": _bounded_text(raw.get("last_scanned_at"), 64),
+            "last_score": raw.get("last_score"),
+            "last_grade": _bounded_text(raw.get("last_grade"), 16),
+            "total_scans": raw.get("total_scans"),
+            "active_findings_count": raw.get("active_findings_count"),
+            "origins": [_bounded_text(value, 512) for value in origins[:8]],
+        })
+    total = payload.get("total") if isinstance(payload.get("total"), int) else len(compact)
+    return {
+        "targets": compact,
+        "total": total,
+        "returned": len(compact),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(compact) < total,
+    }
 
 
 @dataclass(frozen=True)
@@ -96,8 +138,12 @@ TOOLS: tuple[MCPTool, ...] = (
     MCPTool(
         name="shakerscan_targets",
         command="target.list",
-        description="List configured ShakerScan targets.",
-        properties={},
+        description="List configured ShakerScan targets using bounded pagination.",
+        properties={
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 100_000},
+            "include_inactive": {"type": "boolean"},
+        },
     ),
     MCPTool(
         name="shakerscan_asm_gaps",
@@ -397,6 +443,10 @@ class ArsenalClient:
         tool = TOOL_BY_NAME.get(name)
         if not tool:
             raise MCPError(-32602, f"Unknown read-only ShakerScan tool: {name}")
+        arguments = dict(arguments)
+        if name == "shakerscan_targets":
+            arguments.setdefault("limit", DEFAULT_TARGET_PAGE_SIZE)
+            arguments.setdefault("offset", 0)
         self.validate_tool(tool, arguments)
         result = self.request_json("POST", "/arsenal/execute", {
             "command": tool.command,
@@ -410,9 +460,16 @@ class ArsenalClient:
         action_state = result.get("action_state") if isinstance(result.get("action_state"), dict) else {}
         if action_state.get("catalog_status") != "read_only" or action_state.get("risk_tier") != "read_only":
             raise MCPError(-32007, "Arsenal response did not preserve the read-only contract")
+        structured = result.get("result")
+        if name == "shakerscan_targets" and isinstance(structured, dict):
+            structured = _compact_target_list(
+                structured,
+                limit=int(arguments["limit"]),
+                offset=int(arguments["offset"]),
+            )
         return {
-            "content": [{"type": "text", "text": json.dumps(result.get("result"), sort_keys=True, default=str)}],
-            "structuredContent": result.get("result"),
+            "content": [{"type": "text", "text": json.dumps(structured, sort_keys=True, default=str)}],
+            "structuredContent": structured,
             "isError": False,
         }
 

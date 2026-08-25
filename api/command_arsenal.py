@@ -435,6 +435,11 @@ COMMANDS: tuple[ArsenalCommand, ...] = (
         risk_tier="read_only",
         method="GET",
         path="/targets",
+        parameters_schema={
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 100_000},
+            "include_inactive": {"type": "boolean"},
+        },
         evidence_contract=("target_rows",),
         timeout_seconds=15,
     ),

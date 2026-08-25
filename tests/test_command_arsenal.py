@@ -78,6 +78,12 @@ def test_server_parameter_validator_enforces_bounds_and_uuid_formats():
     commands = {item["name"]: item for item in arsenal.describe_commands()["commands"]}
 
     assert arsenal.validate_command_parameters(
+        commands["target.list"], {"limit": 20, "offset": 0, "include_inactive": False}
+    ) == []
+    assert arsenal.validate_command_parameters(
+        commands["target.list"], {"limit": 101}
+    ) == ["limit:maximum:100"]
+    assert arsenal.validate_command_parameters(
         commands["evidence_instance.list"], {"limit": 201}
     ) == ["limit:maximum:200"]
     assert arsenal.validate_command_parameters(
