@@ -1301,6 +1301,8 @@ export interface DeviceTarget {
   last_scan_id?: string | null
   last_score?: number | null
   last_grade?: string | null
+  last_posture_complete?: boolean | null
+  last_posture_decision?: string | null
   active_findings_count: number
   services_count?: number
   last_reachability?: DeviceReachability | null

@@ -62,6 +62,31 @@ export function deviceScorePresentation(scan) {
 }
 
 
+/** Preserve a stored score in device list/detail summaries without turning an
+ * explicitly incomplete latest posture into an apparent pass. */
+export function deviceTargetScorePresentation(target) {
+  const targetRecord = record(target)
+  const gradeValue = targetRecord.last_grade
+  const grade = gradeValue === null || gradeValue === undefined || gradeValue === ''
+    ? null
+    : String(gradeValue)
+  const score = finiteScore(targetRecord.last_score)
+  if (grade === null && score === null) {
+    return { status: 'unavailable', grade: null, score: null, note: 'No posture score is available.' }
+  }
+  const decision = String(targetRecord.last_posture_decision || '').toLowerCase()
+  if (targetRecord.last_posture_complete === false || decision === 'needs_review') {
+    return {
+      status: 'provisional',
+      grade,
+      score,
+      note: 'The latest device posture is incomplete; this score is provisional and is not a pass verdict.',
+    }
+  }
+  return { status: 'final', grade, score, note: null }
+}
+
+
 /** Convert the content-free device activity feed into readable report logs. */
 export function deviceActivityLogLines(activity) {
   const events = Array.isArray(record(activity).events) ? activity.events : []

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { deviceActivityLogLines, deviceReachabilityServiceSummary, deviceScorePresentation } from './deviceScanPresentation.mjs'
+import { deviceActivityLogLines, deviceReachabilityServiceSummary, deviceScorePresentation, deviceTargetScorePresentation } from './deviceScanPresentation.mjs'
 
 
 function deviceScan({ reachability = 'online', complete = true, decision = 'allow' } = {}) {
@@ -34,6 +34,20 @@ test('complete device posture retains its final score', () => {
 
 test('incomplete device posture is explicitly provisional', () => {
   const presentation = deviceScorePresentation(deviceScan({ complete: false, decision: 'needs_review' }))
+  assert.equal(presentation.status, 'provisional')
+  assert.equal(presentation.grade, 'A')
+  assert.equal(presentation.score, 100)
+  assert.match(presentation.note, /not a pass verdict/)
+})
+
+
+test('device summaries preserve the latest scan provisional state', () => {
+  const presentation = deviceTargetScorePresentation({
+    last_grade: 'A',
+    last_score: 100,
+    last_posture_complete: false,
+    last_posture_decision: 'needs_review',
+  })
   assert.equal(presentation.status, 'provisional')
   assert.equal(presentation.grade, 'A')
   assert.equal(presentation.score, 100)

@@ -174,6 +174,18 @@ def test_device_views_expose_last_scan_reachability_without_assuming_online():
     assert "Reachability: not checked" in list_ui
 
 
+def test_device_overviews_preserve_latest_posture_completeness():
+    api = (ROOT / "api" / "api.py").read_text()
+    detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
+    list_ui = (ROOT / "ui" / "src" / "app" / "devices" / "page.tsx").read_text()
+
+    assert api.count("AS last_posture_complete") >= 2
+    assert api.count("AS last_posture_decision") >= 2
+    assert "deviceTargetScorePresentation(device)" in detail_ui
+    assert "deviceTargetScorePresentation(device)" in list_ui
+    assert "Provisional ${posture.grade}" in list_ui
+
+
 def test_device_list_uses_bounded_reachability_summary():
     api = (ROOT / "api" / "api.py").read_text()
     listing = api[api.index('@app.get("/devices")'):]

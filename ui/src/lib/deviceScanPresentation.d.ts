@@ -7,6 +7,7 @@ export type DeviceScorePresentation = {
 }
 
 export function deviceScorePresentation(scan: unknown): DeviceScorePresentation
+export function deviceTargetScorePresentation(target: unknown): Omit<DeviceScorePresentation, 'isDevice'>
 export function deviceActivityLogLines(activity: unknown): string[]
 export function deviceReachabilityServiceSummary(options?: {
   serviceAccessible?: boolean | null

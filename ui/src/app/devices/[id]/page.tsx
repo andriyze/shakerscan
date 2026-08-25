@@ -6,7 +6,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
-import { deviceReachabilityServiceSummary, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { deviceReachabilityServiceSummary, deviceScorePresentation, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -309,6 +309,12 @@ function DeviceDetailContent() {
   if (loading) return <div className="mx-auto max-w-7xl"><TableSkeleton rows={6} /></div>
   if (failed || !data) return <div className="mx-auto max-w-7xl"><ErrorState message="Could not load connected device" onRetry={load} /></div>
   const { device, interfaces, services, scans, locator_history: locatorHistory } = data
+  const storedPosturePresentation = deviceTargetScorePresentation(device)
+  const storedPostureLabel = storedPosturePresentation.status === 'provisional'
+    ? `Provisional ${storedPosturePresentation.grade || 'score'}${storedPosturePresentation.score != null ? ` · ${storedPosturePresentation.score}` : ''}`
+    : storedPosturePresentation.grade
+      ? `${storedPosturePresentation.grade} · ${storedPosturePresentation.score ?? '—'}`
+      : 'Not scanned'
   const exactScanServices = selectedScanId ? scanServices(selectedScan, 'services', 'open') : []
   const visibleServices = selectedScanId ? exactScanServices : services
   const visibleServiceKeys = new Set(visibleServices.map(serviceKey))
@@ -464,7 +470,7 @@ function DeviceDetailContent() {
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
           ['Class', device.device_class], ['Manufacturer', device.manufacturer || 'Unknown'], ['Model', device.model || 'Unknown'],
-          ['Policy', device.policy_name || 'Default'], ['Posture', selectedScanId ? selectedPostureLabel : device.last_grade ? `${device.last_grade} · ${device.last_score ?? '—'}` : 'Not scanned'],
+          ['Policy', device.policy_name || 'Default'], ['Posture', selectedScanId ? selectedPostureLabel : storedPostureLabel],
         ].map(([label, value]) => <Card key={label} className="p-3"><p className="text-xs text-gray-500">{label}</p><p className="mt-1 truncate font-medium text-white">{value}</p></Card>)}
       </div>
 

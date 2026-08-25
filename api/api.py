@@ -22028,6 +22028,10 @@ async def list_devices(
         rows = await conn.fetch(
             f"""SELECT d.*, p.name AS policy_name,
                        (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id AND ds.state='open') AS services_count,
+                       (SELECT (s.result->'device_posture'->'completeness'->>'complete')::boolean
+                          FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_complete,
+                       (SELECT s.result->'device_posture'->'decision'->>'decision'
+                          FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_decision,
                        (SELECT (s.result->'device_posture'->'reachability')
                                    - 'attempts' - 'nmap_host_discovery'
                           FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
@@ -22546,6 +22550,10 @@ async def get_device(
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT d.*, p.name AS policy_name,
+                      (SELECT (s.result->'device_posture'->'completeness'->>'complete')::boolean
+                         FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_complete,
+                      (SELECT s.result->'device_posture'->'decision'->>'decision'
+                         FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_decision,
                       (SELECT s.result->'device_posture'->'reachability' FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
                FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id WHERE d.id=$1""",
             device_uuid,
