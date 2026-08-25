@@ -12,7 +12,7 @@
       "result_path": "results/honey.shakerscan.com/latest.json",
       "allow_missing_har": true,
       "scan_options": {
-        "scan_type": "smart",
+        "active_testing": true,
         "budget_profile": "fast"
       },
       "assertions": {

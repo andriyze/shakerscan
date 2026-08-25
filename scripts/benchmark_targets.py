@@ -15,6 +15,7 @@ Fixtures: tests/fixtures/benchmarks/<name>.yaml
 """
 import argparse
 import base64
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -230,6 +231,67 @@ def _post(url, body, timeout=30):
         return json.load(r)
 
 
+def _canonical_benchmark_authority(api, target_url, *, credential_risk):
+    """Create an exact-target scope/approval pair for one authorized benchmark."""
+    target = _post(f"{api}/targets", {
+        "url": target_url,
+        "name": "DAST benchmark target",
+    })
+    target_id = str(target.get("id") or "")
+    if not target_id:
+        raise RuntimeError("benchmark target registration returned no target id")
+    parsed = urllib.parse.urlsplit(target_url)
+    host = str(parsed.hostname or "").strip()
+    scope = _post(f"{api}/arsenal/scope/preview", {
+        "url": target_url,
+        "target_id": target_id,
+        "allowed_hosts": [host] if host else [],
+        "environment": "lab" if host in {"localhost", "127.0.0.1", "host.docker.internal"} else "production",
+    })
+    scope_receipt = scope.get("scope_receipt") or {}
+    scope_id = str(scope_receipt.get("receipt_id") or scope_receipt.get("id") or "")
+    if not scope_id:
+        raise RuntimeError("benchmark scope preview returned no receipt id")
+    if scope_receipt.get("verdict") == "blocked":
+        raise RuntimeError("benchmark target scope was blocked")
+    approval = _post(f"{api}/arsenal/approvals", {
+        "scope_receipt_id": scope_id,
+        "risk_tier": "credential" if credential_risk else "active",
+        "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+        "action_name": "scan.submit",
+        "approved_by": "benchmark_targets.py",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+    })
+    approval_id = str((approval.get("approval_receipt") or {}).get("id") or "")
+    if not approval_id:
+        raise RuntimeError("benchmark approval returned no receipt id")
+    return target_id, approval_id
+
+
+def _create_benchmark_bearer_profile(api, *, target_id, token, lane):
+    created = _post(f"{api}/credential-profiles", {
+        "target_kind": "web",
+        "target_id": target_id,
+        "name": f"Ephemeral benchmark {lane}",
+        "auth_kind": "bearer_token",
+        "principal_label": f"benchmark-{lane}",
+        "principal_slot": lane,
+        "secret": token,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+        "allowed_capabilities": [
+            "http.request", "web.probe", "web.crawl", "web.content_discover",
+            "templates.passive_scan", "templates.scan", "collections.replay_safe",
+            "collections.replay_active", "xss.verify", "sqli.verify",
+            "xss.request_verify", "sqli.request_verify", "authz.verify",
+        ],
+        "created_by": "benchmark_targets.py",
+    })
+    profile_id = str((created.get("profile") or {}).get("id") or "")
+    if not profile_id:
+        raise RuntimeError(f"benchmark {lane} credential profile returned no id")
+    return profile_id
+
+
 def parse_target_id_overrides(values):
     """Parse --hypothesis-target-id entries as benchmark=uuid mappings."""
     mapping = {}
@@ -353,7 +415,6 @@ def _benchmark_miss_followup(miss, fixture, auth_workflow):
     params = {
         "target": target_url,
         "check_family": check_family,
-        "scan_type": "smart",
         "budget_profile": "thorough",
         "no_early_stop": True,
     }
@@ -672,6 +733,8 @@ def submit_target(name, api, do_auth):
     """Submit one benchmark scan and return a content-free queue receipt."""
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     opts = dict(fx.get("scan_options") or {})
+    opts.pop("scan_type", None)
+    budget_profile = str(opts.pop("budget_profile", "thorough"))
     opts["require_current_workers"] = True
     two_user = False
     principal_validation = {
@@ -683,6 +746,7 @@ def submit_target(name, api, do_auth):
         "authenticated_responses_accepted": None,
     }
     auth_cfg = fx.get("auth") if isinstance(fx.get("auth"), dict) else {}
+    minted_tokens = []
     if do_auth and auth_cfg:
         principal_nonce = secrets.token_hex(6)
         auth_target_url = credential_bootstrap_url(fx["target_url"])
@@ -694,7 +758,7 @@ def submit_target(name, api, do_auth):
         )
         if not t1:
             raise RuntimeError("failed to mint required benchmark user1 credentials")
-        opts["auth_header"] = f"Bearer {t1}"
+        minted_tokens.append(("primary", t1))
         principal_validation["contexts_configured"].append("user1")
         requires_two_users = bool(auth_cfg.get("requires_two_users") or auth_cfg.get("user2_login"))
         if requires_two_users:
@@ -712,7 +776,7 @@ def submit_target(name, api, do_auth):
                 raise RuntimeError("cannot prove distinct benchmark principals from token identity claims")
             if identity1 == identity2:
                 raise RuntimeError("benchmark user1 and user2 resolved to the same principal identity")
-            opts["user2_header"] = f"Bearer {t2}"
+            minted_tokens.append(("secondary", t2))
             two_user = True
             principal_validation.update({
                 "contexts_configured": ["user1", "user2"],
@@ -724,12 +788,24 @@ def submit_target(name, api, do_auth):
                 "validation_method": "jwt_stable_claim",
             })
     opts["benchmark_principal_validation"] = principal_validation
-    # The benchmark harness mints disposable fixture users immediately before a
-    # run. Keep that legacy raw-token flow visibly isolated on the deprecated
-    # bridge until the fixture setup can mint target-bound profile approvals.
-    # Unauthenticated scorecards use the canonical secret-free route.
-    submission_path = "/scans/compat" if do_auth and auth_cfg else "/scans"
-    resp = _post(f"{api}{submission_path}", {"target": fx["target_url"], "options": opts})
+    target_id, approval_id = _canonical_benchmark_authority(
+        api, fx["target_url"], credential_risk=bool(minted_tokens),
+    )
+    credential_profile_ids = [
+        _create_benchmark_bearer_profile(
+            api, target_id=target_id, token=token, lane=lane,
+        )
+        for lane, token in minted_tokens
+    ]
+    resp = _post(f"{api}/scans", {
+        "target": fx["target_url"],
+        "target_kind": "web",
+        "budget_profile": budget_profile,
+        "policy": {"active_testing": True},
+        "options": opts,
+        "credential_profile_ids": credential_profile_ids,
+        "approval_receipt_id": approval_id,
+    })
     scan_id = resp.get("id") or resp.get("scan_id")
     if not scan_id:
         raise RuntimeError("benchmark scan submission returned no scan id")

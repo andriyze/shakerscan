@@ -541,8 +541,9 @@ curl -sS -X POST http://127.0.0.1:8080/scans \
   -H 'Content-Type: application/json' \
   -d '{
     "target":"https://authorized.example",
+    "budget_profile":"balanced",
+    "policy":{"active_testing":false},
     "options":{
-      "scan_type":"standard",
       "placement":{
         "region":"eu-west",
         "network":"customer-vpc",
@@ -560,7 +561,9 @@ curl -sS -X POST http://127.0.0.1:8080/scans \
   -H 'Content-Type: application/json' \
   -d '{
     "target":"https://authorized.example",
-    "options":{"scan_type":"standard","placement":{"node_id":"local"}}
+    "budget_profile":"balanced",
+    "policy":{"active_testing":false},
+    "options":{"placement":{"node_id":"local"}}
   }'
 ```
 
@@ -571,7 +574,9 @@ curl -sS -X POST http://127.0.0.1:8080/scans \
   -H 'Content-Type: application/json' \
   -d '{
     "target":"https://authorized.example",
-    "options":{"scan_type":"standard","placement":{"node_id":"<remote-node-uuid>"}}
+    "budget_profile":"balanced",
+    "policy":{"active_testing":false},
+    "options":{"placement":{"node_id":"<remote-node-uuid>"}}
   }'
 ```
 
@@ -623,7 +628,7 @@ so a fresh run cannot exhaust the default hourly reservation merely by leasing i
 Prior activity against the same root domain can still defer the run, as intended.
 
 Operational acceptance defaults to passive `standard`. A development smoke test may use
-`--scan-type quick`; the selected depth is recorded in the receipt.
+`--budget-profile fast`; the selected resource ceiling is recorded in the receipt.
 
 For a controlled failure-injection test, see `shakerscan fleet accept --help`; it can drain a chosen
 node and kill the exact worker executing a shard over non-interactive SSH.

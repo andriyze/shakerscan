@@ -51,7 +51,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -333,11 +333,10 @@ try:
 except ModuleNotFoundError:
     from api.ai_control_requirements import AI_CONTROL_REQUIREMENTS
 
-VALID_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
+HISTORICAL_DAST_SCAN_TYPES = {"quick", "standard", "deep", "full", "aggressive", "smart"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 DEVICE_FINDING_SOURCE = "device"
 DEVICE_WEB_ORIGIN_ROLE = "device_web_origin"
-ACTIVE_ENFORCED_SCAN_TYPES = {"smart", "full", "aggressive"}
 VALID_SCHEDULE_KINDS = {"normal_scan", "asm_improve", "evidence_retention_sweep"}
 
 
@@ -436,7 +435,6 @@ try:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
-        normalize_scan_authentication,
         resolve_scan_contract,
     )
     from scan.collection_replay import (
@@ -477,11 +475,8 @@ try:
         scan_operational_metrics,
     )
     from scan.compatibility import (
-        CompatibilitySunsetError,
-        RAW_SECRET_COMPATIBILITY_SUNSET_HTTP,
         compatibility_snapshot,
         record_compatibility_call,
-        require_raw_secret_compatibility,
     )
     from scan.authorization import (
         ActionAuthorityDecision,
@@ -559,7 +554,6 @@ except ModuleNotFoundError:
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
         bind_scan_scope_receipt,
-        normalize_scan_authentication,
         resolve_scan_contract,
     )
     from api.scan.collection_replay import (
@@ -600,11 +594,8 @@ except ModuleNotFoundError:
         scan_operational_metrics,
     )
     from api.scan.compatibility import (
-        CompatibilitySunsetError,
-        RAW_SECRET_COMPATIBILITY_SUNSET_HTTP,
         compatibility_snapshot,
         record_compatibility_call,
-        require_raw_secret_compatibility,
     )
     from api.scan.authorization import (
         ActionAuthorityDecision,
@@ -980,7 +971,6 @@ except ModuleNotFoundError as exc:
     from api.command_arsenal import test_local_agent_capability
     from api.command_arsenal import validate_command_parameters as _validate_command_parameters
 
-AUTO_SHARD_ACTIVE_SCAN_TYPES = ACTIVE_ENFORCED_SCAN_TYPES
 AUTO_SHARD_MAX_SHARDS = parallel_scan.MAX_SHARDS
 
 try:
@@ -2083,7 +2073,7 @@ def _sanitize_scan_execution_settings_response(settings: dict[str, Any]) -> dict
             1,
             _normalize_non_negative_int(settings.get("auto_sharding_min_workers"), default=2),
         ),
-        "eligible_scan_types": sorted(AUTO_SHARD_ACTIVE_SCAN_TYPES),
+        "eligibility": "active_testing_or_two_explicit_endpoints",
         "running_workers": worker_count,
     }
 
@@ -2213,33 +2203,6 @@ def _resolve_auto_parallel_strategy(
     if active_testing:
         return "coverage_family" if focused else "coverage"
     return "family"
-
-
-def _build_scan_options_payload(
-    options: Any,
-    scan_type: str,
-    *,
-    defer_family_preconditions: bool = False,
-) -> dict[str, Any]:
-    options_payload = options.model_dump() if hasattr(options, "model_dump") else options.dict()
-    effective_budget_profile = options_payload.get("budget_profile")
-    if options_payload.get("thorough_params") and not effective_budget_profile and not options_payload.get("custom_budget"):
-        effective_budget_profile = "thorough"
-    resolved_budget = resolve_scan_budget(
-        scan_type,
-        effective_budget_profile,
-        options_payload.get("custom_budget"),
-    )
-    # Stamp provenance: this is THE budget contract (docs §4); runtime paths must
-    # consume it via resolve_or_consume_budget, never re-resolve and re-clamp it.
-    resolved_budget["budget_source"] = "submission"
-    options_payload["budget_profile"] = resolved_budget["budget_profile"]
-    options_payload["resolved_budget"] = resolved_budget
-    options_payload, _family = _apply_scan_check_family_policy(
-        options_payload,
-        enforce_preconditions=not defer_family_preconditions,
-    )
-    return options_payload
 
 
 def _build_canonical_scan_options_payload(
@@ -3714,7 +3677,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
         schedule_id = schedule['id']
         target_id = schedule['target_id']
         target_url = schedule['target_url']
-        scan_type = schedule['scan_type'] or 'standard'
+        scan_type = str(schedule['scan_type'] or '')
         try:
             schedule_kind = _schedule_kind_from_row(schedule)
         except ValueError as exc:
@@ -3875,23 +3838,34 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         retry_at, schedule_id)
                 continue
 
-            # Normal schedules are canonical V2 admission inputs. Historical
-            # rows may still contain a legacy scan name; translate that name at
-            # this boundary and never create a digest-less legacy queue job.
+            # Normal schedules are canonical V2 admission inputs. Startup
+            # migration rewrites historical rows; execution never translates a
+            # legacy identity into fresh authority.
             canonical_schedule = True
+            legacy_schedule_fields = sorted(
+                LEGACY_SCAN_WRITE_FIELDS.intersection(scan_options)
+            )
+            if scan_type != "scan" or legacy_schedule_fields:
+                print(
+                    f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
+                    "legacy Scan authority was not migrated",
+                    flush=True,
+                )
+                await conn.execute(
+                    "UPDATE schedules SET is_active=false, updated_at=NOW() WHERE id=$1",
+                    schedule_id,
+                )
+                continue
             try:
                 scan_contract = resolve_scan_contract(
                     budget_profile=scan_options.get("budget_profile"),
                     policy=scan_options.pop("policy", None),
                     advanced=scan_options.pop("advanced", None),
                     approval_receipt_id=scan_options.get("approval_receipt_id"),
-                    legacy_scan_type=(scan_type if scan_type != "scan" else None),
                 )
             except ValueError as exc:
                 print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
                 continue
-            for key in ("scan_type", "quick", "thorough"):
-                scan_options.pop(key, None)
             scan_options["budget_profile"] = scan_contract.budget_profile
             scan_options["active"] = scan_contract.policy.active_testing
             scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
@@ -4721,15 +4695,11 @@ async def _value_error_handler(request: Request, exc: ValueError) -> JSONRespons
 # ============================================================
 
 class ScanOptions(BaseModel):
-    # Scan type preset (mutually exclusive)
-    # quick: DNS, TLS, headers (1-2 min)
-    # standard: + tech detection, basic nuclei (5-10 min)
-    # deep: + full nuclei, port scan, JS scanning (30-60 min)
-    # full: + active XSS/SQLi, WebSocket and auth/session checks (1-2 hours)
-    # aggressive: + aggressive exploit level, extended ports (2+ hours)
+    # Historical/internal fields remain readable for stored rows and migrations.
+    # Canonical ScanRequest and BatchRequest reject them as new authority.
     scan_type: Optional[str] = None  # quick, standard, deep, full, aggressive, smart
 
-    # Legacy fields (for backwards compatibility)
+    # Historical/internal compatibility fields.
     quick: bool = False
     public: bool = False
     active: bool = False
@@ -4997,6 +4967,17 @@ def _scan_authentication_value_present(value: Any) -> bool:
     return value not in (None, "", [], {})
 
 
+LEGACY_SCAN_WRITE_FIELDS = frozenset({
+    "scan_type", "quick", "thorough", "active", "xss", "sqli",
+    "check_family", "asm_check_family",
+})
+
+
+def _new_legacy_scan_fields(options: ScanOptions) -> list[str]:
+    """Return caller-supplied legacy identity fields, including explicit false."""
+    return sorted(LEGACY_SCAN_WRITE_FIELDS.intersection(options.model_fields_set))
+
+
 class _ScanRequestBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -5017,6 +4998,13 @@ class ScanRequest(_ScanRequestBase):
 
     @model_validator(mode="after")
     def reject_inline_authentication(self):
+        legacy_fields = _new_legacy_scan_fields(self.options)
+        if legacy_fields:
+            raise ValueError(
+                "canonical Scan rejects legacy option authority: "
+                + ", ".join(legacy_fields)
+                + "; use budget_profile, policy, and advanced family controls"
+            )
         if any(
             _scan_authentication_value_present(getattr(self.options, key, None))
             for key in SCAN_AUTHENTICATION_KEYS
@@ -5026,23 +5014,6 @@ class ScanRequest(_ScanRequestBase):
                 "credential profile and pass credential_profile_ids"
             )
         return self
-
-
-class LegacyScanRequest(_ScanRequestBase):
-    """Deprecated compatibility request that may carry inline authentication."""
-
-    authentication: Optional[dict[str, Any]] = None
-
-
-class CliV1ScanRequest(BaseModel):
-    """Installed CLI wire shape; translated into the canonical Scan request."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    target: str
-    scan_type: Optional[str] = None
-    options: dict[str, Any] = Field(default_factory=dict)
-    source_control: Optional[dict[str, Any]] = None
 
 
 class DeviceTargetCreate(BaseModel):
@@ -5271,6 +5242,13 @@ class BatchRequest(_BatchRequestBase):
 
     @model_validator(mode="after")
     def reject_inline_authentication(self):
+        legacy_fields = _new_legacy_scan_fields(self.options)
+        if legacy_fields:
+            raise ValueError(
+                "canonical Scan batch rejects legacy option authority: "
+                + ", ".join(legacy_fields)
+                + "; use budget_profile, policy, and advanced family controls"
+            )
         if any(
             _scan_authentication_value_present(getattr(self.options, key, None))
             for key in SCAN_AUTHENTICATION_KEYS
@@ -5280,12 +5258,6 @@ class BatchRequest(_BatchRequestBase):
                 "credential_profile_ids"
             )
         return self
-
-
-class LegacyBatchRequest(_BatchRequestBase):
-    """Deprecated batch compatibility request for inline authentication."""
-
-    authentication: Optional[dict[str, Any]] = None
 
 
 class RequestCollectionCreate(BaseModel):
@@ -6573,6 +6545,8 @@ class SessionFindingCreate(BaseModel):
 
 
 class ScheduleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_id: str
     name: Optional[str] = None
     frequency: str  # daily, weekly
@@ -6580,19 +6554,19 @@ class ScheduleCreate(BaseModel):
     time_of_day: str = '02:00'  # HH:MM
     timezone: str = 'UTC'
     schedule_kind: str = 'normal_scan'
-    scan_type: str = 'standard'
     scan_options: Optional[dict] = None
     jitter_minutes: int = 30
 
 
 class ScheduleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     frequency: Optional[str] = None
     day_of_week: Optional[int] = None
     time_of_day: Optional[str] = None
     timezone: Optional[str] = None
     schedule_kind: Optional[str] = None
-    scan_type: Optional[str] = None
     scan_options: Optional[dict] = None
     jitter_minutes: Optional[int] = None
     is_active: Optional[bool] = None
@@ -10561,7 +10535,7 @@ def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:
     if "tools" not in labels and "capabilities" not in labels:
         labels["tools"] = sorted(DEFAULT_WORKER_TOOL_COMMANDS)
     if "scan_tiers" not in labels:
-        labels["scan_tiers"] = sorted(VALID_DAST_SCAN_TYPES)
+        labels["scan_tiers"] = sorted(HISTORICAL_DAST_SCAN_TYPES)
     return labels
 
 
@@ -28934,7 +28908,7 @@ def _fleet_node_placement_labels(row: Any, _placement: dict[str, Any]) -> dict[s
     if "tools" not in labels and "capabilities" not in labels:
         labels["tools"] = sorted(DEFAULT_WORKER_TOOL_COMMANDS)
     if "scan_tiers" not in labels:
-        labels["scan_tiers"] = sorted(VALID_DAST_SCAN_TYPES)
+        labels["scan_tiers"] = sorted(HISTORICAL_DAST_SCAN_TYPES)
     return labels
 
 
@@ -28945,7 +28919,7 @@ def _local_worker_placement_labels() -> dict[str, Any]:
         "node_scope": "local",
         "transport": "local",
         "tools": sorted(DEFAULT_WORKER_TOOL_COMMANDS),
-        "scan_tiers": sorted(VALID_DAST_SCAN_TYPES),
+        "scan_tiers": sorted(HISTORICAL_DAST_SCAN_TYPES),
     }
 
 
@@ -30499,129 +30473,10 @@ def _compile_scan_template_work_manifest(
     )
 
 
-def normalize_dast_scan_options(options: ScanOptions) -> str:
-    """Resolve scan_type from explicit or legacy options and mutate options consistently.
-
-    When an explicit scan_type is provided, the legacy boolean flags
-    (thorough/active/quick) are rewritten to match it. This prevents downstream
-    consumers from seeing contradictory state such as scan_type='quick' with
-    active=True, which previously caused worker.py to add both --quick and
-    --active to the scanner CLI.
-    """
-    raw_scan_type = (options.scan_type or "").strip().lower()
-    if raw_scan_type:
-        if raw_scan_type not in VALID_DAST_SCAN_TYPES:
-            allowed = ", ".join(sorted(VALID_DAST_SCAN_TYPES))
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "invalid_scan_type",
-                    "message": f"scan_type must be one of: {allowed}",
-                    "scan_type": raw_scan_type,
-                },
-            )
-        options.scan_type = raw_scan_type
-        # Sync legacy flags to match the explicit scan_type so worker.py never
-        # sees a "scan_type=X plus contradictory boolean flag" combination.
-        options.quick = raw_scan_type == "quick"
-        options.thorough = raw_scan_type in {"deep", "full", "aggressive", "smart"}
-        options.active = raw_scan_type in {"full", "aggressive", "smart"}
-        return raw_scan_type
-
-    if options.thorough and options.active:
-        scan_type = "full"
-    elif options.thorough:
-        scan_type = "deep"
-    elif options.active:
-        scan_type = "full"
-    elif options.quick:
-        scan_type = "quick"
-    else:
-        scan_type = "quick"
-
-    options.scan_type = scan_type
-    return scan_type
-
-
-_CLI_V1_SCAN_TYPE_ALIASES = {
-    "preview": ("quick", False),
-    "sandbox": ("quick", True),
-    "complete": ("smart", False),
-}
-
-
-def _translate_cli_v1_scan_request(request: CliV1ScanRequest) -> ScanRequest:
-    """Map the installed CLI shape without accepting its inline-secret flags."""
-    if request.source_control:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "source-control binding is not supported by the local V2 Scan API; "
-                "submit the Scan without commit/repository flags"
-            ),
-        )
-    options = dict(request.options or {})
-    inline_keys = sorted(
-        key for key in options
-        if key in SCAN_AUTHENTICATION_KEYS
-        and _scan_authentication_value_present(options.get(key))
-    )
-    if inline_keys:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "the local V2 CLI bridge rejects inline authentication; create "
-                "an encrypted credential profile and submit through /scans"
-            ),
-        )
-    unknown = sorted(set(options) - set(ScanOptions.model_fields))
-    if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail=f"unsupported local V2 CLI Scan option(s): {', '.join(unknown)}",
-        )
-    requested_type = str(request.scan_type or "").strip().lower()
-    existing_type = str(options.get("scan_type") or "").strip().lower()
-    if requested_type and existing_type and requested_type != existing_type:
-        raise HTTPException(
-            status_code=422,
-            detail="CLI scan_type conflicts with options.scan_type",
-        )
-    scan_type = requested_type or existing_type
-    if scan_type:
-        translated_type, public_only = _CLI_V1_SCAN_TYPE_ALIASES.get(
-            scan_type, (scan_type, False),
-        )
-        if translated_type not in VALID_DAST_SCAN_TYPES:
-            raise HTTPException(status_code=422, detail="unsupported CLI scan_type")
-        options["scan_type"] = translated_type
-        if public_only:
-            options["public"] = True
-    try:
-        return ScanRequest(
-            target=request.target,
-            options=ScanOptions.model_validate(options),
-        )
-    except (ValueError, ValidationError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
 def _set_cli_v1_deprecation_headers(response: Response) -> None:
     response.headers["Deprecation"] = "true"
     response.headers["Sunset"] = "Thu, 31 Dec 2026 23:59:59 GMT"
     response.headers["Link"] = '</scans>; rel="successor-version"'
-
-
-@app.post("/api/v1/scan", deprecated=True)
-async def submit_cli_v1_scan(request: CliV1ScanRequest, response: Response):
-    """Compatibility bridge for the installed CLI's secret-free Scan flow."""
-    _set_cli_v1_deprecation_headers(response)
-    record_compatibility_call(get_redis(), "cli_v1_submit")
-    canonical = _translate_cli_v1_scan_request(request)
-    result = await _submit_scan(canonical, allow_inline_authentication=False)
-    result["requested_scan_type"] = request.scan_type
-    result["effective_scan_type"] = result.get("scan_type")
-    return result
 
 
 @app.get("/api/v1/scan", deprecated=True)
@@ -30641,37 +30496,9 @@ async def get_cli_v1_scan(
 
 
 @app.post("/scans")
-async def submit_scan(
-    request: ScanRequest,
-    x_shakerscan_cli_compatibility: Optional[str] = Header(default=None),
-):
+async def submit_scan(request: ScanRequest):
     """Submit one canonical secret-free Scan job."""
-    compatibility_command = str(x_shakerscan_cli_compatibility or "").strip().lower()
-    if compatibility_command in {
-        "scan-full", "scan-smart",
-        "scan --type quick", "scan --type standard", "scan --type deep",
-        "scan --type full", "scan --type aggressive", "scan --type smart",
-    }:
-        record_compatibility_call(get_redis(), "cli_alias")
-        logger.warning(
-            "Deprecated Scan CLI compatibility command used: %s (sunset 2026-12-31)",
-            compatibility_command,
-        )
-    return await _submit_scan(request, allow_inline_authentication=False)
-
-
-@app.post("/scans/compat", deprecated=True)
-async def submit_scan_compat(request: LegacyScanRequest, response: Response):
-    """Deprecated raw-auth bridge; new clients must use credential profiles."""
-    try:
-        require_raw_secret_compatibility()
-    except CompatibilitySunsetError as exc:
-        raise HTTPException(status_code=410, detail=str(exc)) from exc
-    record_compatibility_call(get_redis(), "raw_secret_scan")
-    response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = RAW_SECRET_COMPATIBILITY_SUNSET_HTTP
-    response.headers["Link"] = '</credential-profiles>; rel="successor-version"'
-    return await _submit_scan(request, allow_inline_authentication=True)
+    return await _submit_scan(request)
 
 
 def _scan_requires_durable_approval(
@@ -30690,10 +30517,8 @@ def _scan_requires_durable_approval(
 
 async def _submit_scan(
     request: _ScanRequestBase,
-    *,
-    allow_inline_authentication: bool,
 ):
-    """Shared admission with an explicit, route-owned compatibility boundary."""
+    """Canonical V2 admission; legacy identities and inline secrets are rejected."""
     scheme_inferred = "://" not in (request.target or "")
     try:
         normalized_target, target_note = normalize_target_url(request.target)
@@ -30711,15 +30536,6 @@ async def _submit_scan(
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
 
-    # Every new web DAST submission resolves to the V2 policy/budget contract. Explicit old
-    # scan-type/boolean inputs remain API-boundary aliases and are persisted only as
-    # deprecation metadata; they never select worker execution behavior.
-    legacy_requested = bool(
-        str(request.options.scan_type or "").strip()
-        or request.options.quick or request.options.thorough or request.options.active
-        or request.options.xss or request.options.sqli
-    )
-    legacy_scan_type = normalize_dast_scan_options(request.options) if legacy_requested else None
     approval_receipt_id = request.approval_receipt_id or request.options.approval_receipt_id
     try:
         scan_contract = resolve_scan_contract(
@@ -30730,17 +30546,10 @@ async def _submit_scan(
                 if request.advanced is not None else None
             ),
             approval_receipt_id=approval_receipt_id,
-            legacy_scan_type=legacy_scan_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    public_scan_type = legacy_scan_type or "scan"
-    request.options.scan_type = None
-    request.options.active = scan_contract.policy.active_testing
-    # quick/thorough are caller-era mode selectors, not execution flags. A V2
-    # worker derives behavior only from the immutable Scan plan.
-    request.options.quick = False
-    request.options.thorough = False
+    public_scan_type = "scan"
     request.options.approval_receipt_id = approval_receipt_id
     request.options.budget_profile = scan_contract.budget_profile
     request.options.subfinder = bool(scan_contract.policy.subdomain_discovery)
@@ -30765,16 +30574,12 @@ async def _submit_scan(
         scan_contract,
         defer_family_preconditions=True,
     )
-    raw_authentication = getattr(request, "authentication", None)
     inline_option_authentication = {
         key: options_payload.get(key)
         for key in SCAN_AUTHENTICATION_KEYS
         if _scan_authentication_value_present(options_payload.get(key))
     }
-    if not allow_inline_authentication and (
-        raw_authentication not in (None, "", [], {})
-        or inline_option_authentication
-    ):
+    if inline_option_authentication:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -30782,33 +30587,7 @@ async def _submit_scan(
                 "encrypted credential profile and pass credential_profile_ids"
             ),
         )
-    try:
-        authentication = normalize_scan_authentication(raw_authentication)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if request.credential_profile_ids and (
-        authentication
-        or any(
-            _scan_authentication_value_present(options_payload.get(key))
-            for key in SCAN_AUTHENTICATION_KEYS
-        )
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "credential_profile_ids cannot be combined with inline authentication; "
-                "use only encrypted generic profiles"
-            ),
-        )
-    if authentication:
-        options_payload["authentication"] = authentication
-    else:
-        options_payload.pop("authentication", None)
-    for key, value in authentication.items():
-        if value not in (None, "", [], {}):
-            options_payload[key] = value
-    if authentication or inline_option_authentication:
-        options_payload["inline_auth_compatibility"] = True
+    options_payload.pop("authentication", None)
     options_payload["network_discovery"] = bool(scan_contract.policy.network_discovery)
     options_payload["request_collections"] = [dict(item) for item in request.request_collections]
     options_payload["scan_policy"]["approval_receipt_id"] = approval_receipt_id
@@ -30868,7 +30647,7 @@ async def _submit_scan(
         await _require_approval_receipt_if_policy_enabled(
             conn,
             approval_receipt_id,
-            action_name=(f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"),
+            action_name="scan.submit",
         )
         await _require_reachable_fleet_placement(conn, options_payload.get("placement") or {})
         # Check if target exists
@@ -30947,9 +30726,7 @@ async def _submit_scan(
                         "allow authz.verify"
                     ),
                 )
-        credential_action_name = (
-            f"scan.submit:{legacy_scan_type}" if legacy_scan_type else "scan.submit"
-        )
+        credential_action_name = "scan.submit"
         durable_approval_required = _scan_requires_durable_approval(
             scan_contract,
             credential_refs=credential_refs,
@@ -31203,7 +30980,7 @@ async def _submit_scan(
                 scan_id=scan_id,
                 scope_receipt_id=options_payload.get("scope_receipt_id"),
                 approval_receipt_id=options_payload.get("approval_receipt_id"),
-                operator_message=f"Queued {'legacy ' + legacy_scan_type if legacy_scan_type else 'Scan'} for {normalized_target}",
+                operator_message=f"Queued Scan for {normalized_target}",
                 result_json={
                     "target": normalized_target,
                     "scan_type": public_scan_type,
@@ -31266,17 +31043,6 @@ async def _submit_scan(
         'budget': options_payload.get('resolved_scan_budget'),
         'budget_profile': scan_contract.budget_profile,
     }
-    if scan_contract.deprecations:
-        response['deprecations'] = [dict(item) for item in scan_contract.deprecations]
-    if allow_inline_authentication:
-        response.setdefault("deprecations", []).append({
-            "code": "inline_auth_compatibility_route",
-            "message": (
-                "Move authentication into /credential-profiles and submit only "
-                "credential_profile_ids to /scans."
-            ),
-            "sunset": "2026-12-31T23:59:59Z",
-        })
     if parallel_enabled:
         response['parallel'] = True
         if options_payload.get("auto_sharded"):
@@ -31297,45 +31063,22 @@ async def _submit_scan(
 @app.post("/scans/batch")
 async def submit_batch(request: BatchRequest):
     """Submit a bounded batch and report every accepted and rejected target."""
-    return await _submit_batch(request, allow_inline_authentication=False)
-
-
-@app.post("/scans/compat/batch", deprecated=True)
-async def submit_batch_compat(request: LegacyBatchRequest, response: Response):
-    """Deprecated batch bridge for raw inline authentication."""
-    try:
-        require_raw_secret_compatibility()
-    except CompatibilitySunsetError as exc:
-        raise HTTPException(status_code=410, detail=str(exc)) from exc
-    record_compatibility_call(get_redis(), "raw_secret_batch")
-    response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = RAW_SECRET_COMPATIBILITY_SUNSET_HTTP
-    response.headers["Link"] = '</credential-profiles>; rel="successor-version"'
-    return await _submit_batch(request, allow_inline_authentication=True)
+    return await _submit_batch(request)
 
 
 async def _submit_batch(
     request: _BatchRequestBase,
-    *,
-    allow_inline_authentication: bool,
 ):
-    """Submit a batch through the selected canonical or compatibility boundary."""
+    """Submit a bounded batch through canonical V2 admission."""
     jobs: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     targets = list(dict.fromkeys(str(target).strip() for target in request.targets if str(target).strip()))
     for target in targets:
-        request_type = LegacyScanRequest if allow_inline_authentication else ScanRequest
-        req = request_type(
+        req = ScanRequest(
             target=target,
             target_kind=request.target_kind,
             budget_profile=request.budget_profile,
             policy=dict(request.policy or {}),
-            **(
-                {"authentication": dict(
-                    getattr(request, "authentication", None) or {}
-                )}
-                if allow_inline_authentication else {}
-            ),
             request_collections=[dict(item) for item in request.request_collections],
             credential_profile_ids=list(request.credential_profile_ids),
             advanced=(
@@ -31346,11 +31089,10 @@ async def _submit_batch(
             options=request.options.model_copy(deep=True),
         )
         try:
-            jobs.append(
-                await _submit_scan(req, allow_inline_authentication=True)
-                if allow_inline_authentication
-                else await submit_scan(req)
-            )
+            # Keep batch admission on the exact same public path as a single Scan.
+            # This preserves route-level policy hooks and prevents the batch surface
+            # from quietly becoming a second admission implementation.
+            jobs.append(await submit_scan(req))
         except HTTPException as exc:
             errors.append({"target": target, "status_code": exc.status_code, "error": exc.detail})
         except Exception:
@@ -35059,12 +34801,24 @@ async def scan_target(target_id: str, options: ScanOptions = None):
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
 
-    # Merge target's default options with provided options
+    if options and _new_legacy_scan_fields(options):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "target Scan rejects legacy option authority: "
+                + ", ".join(_new_legacy_scan_fields(options))
+                + "; use budget_profile and policy controls"
+            ),
+        )
+    # Historical target defaults remain readable, but old mode fields are never
+    # allowed to authorize a new execution.
     stored_options = target['scan_options']
     if isinstance(stored_options, str):
         merged_options = json.loads(stored_options) if stored_options else {}
     else:
         merged_options = stored_options or {}
+    for key in LEGACY_SCAN_WRITE_FIELDS:
+        merged_options.pop(key, None)
     if options:
         merged_options.update(options.dict(exclude_unset=True))
 
@@ -51395,15 +51149,25 @@ async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_rece
             "zero_rediscovery": True,
             "skip_global_checks": True,
             "no_early_stop": True,
-            "thorough": True,
-            "budget_profile": "thorough",
             "parallel": False,
             "require_current_workers": True,
         })
-    option_payload["check_family"] = check_family
-    option_payload["approval_receipt_id"] = approval_receipt_id or p.get("approval_receipt_id")
-    option_payload.setdefault("scan_type", "smart")
-    body = ScanRequest(target=target, name=p.get("name"), options=ScanOptions(**option_payload))
+    for key in LEGACY_SCAN_WRITE_FIELDS:
+        option_payload.pop(key, None)
+    body = ScanRequest(
+        target=target,
+        name=p.get("name"),
+        budget_profile="thorough",
+        policy={
+            "active_testing": True,
+            "include_families": ([] if check_family == "all" else [check_family]),
+        },
+        advanced=ScanAdvancedLimits(
+            include_families=[] if check_family == "all" else [check_family],
+        ),
+        approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"),
+        options=ScanOptions(**option_payload),
+    )
     return await submit_scan(body)
 
 
@@ -59347,14 +59111,9 @@ def _research_preflight_scan_options(
 ) -> ScanOptions:
     endpoint_count = len(custom_endpoints)
     return ScanOptions(
-        scan_type="smart",
-        thorough=True,
-        active=True,
         no_early_stop=True,
-        budget_profile="thorough",
         parallel=False,
         auth_state_shards=False,
-        check_family=focus_family,
         custom_endpoints=custom_endpoints or None,
         focused_endpoints_only=bool(custom_endpoints),
         zero_rediscovery=bool(custom_endpoints),
@@ -59595,6 +59354,15 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
     try:
         queued = await submit_scan(ScanRequest(
             target=str(target["url"]),
+            budget_profile="thorough",
+            policy={
+                "active_testing": True,
+                "include_families": ([] if focus_family == "all" else [focus_family]),
+            },
+            advanced=ScanAdvancedLimits(
+                include_families=[] if focus_family == "all" else [focus_family],
+            ),
+            approval_receipt_id=config.get("approval_receipt_id"),
             options=_research_preflight_scan_options(
                 focus_family=focus_family,
                 custom_endpoints=custom_endpoints,
@@ -64548,6 +64316,21 @@ def _ai_ops_call(method: str, path: str, body: dict[str, Any] | None = None) -> 
     return call
 
 
+def _ai_ops_scan_body(
+    target: str,
+    *,
+    budget_profile: str,
+    active_testing: bool,
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "target": target,
+        "budget_profile": budget_profile,
+        "policy": {"active_testing": active_testing},
+        "options": dict(options or {}),
+    }
+
+
 def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
     text = _ai_ops_prompt_text(request)
     lowered = text.lower()
@@ -64584,16 +64367,16 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
         planned_call = _ai_ops_call(
             "POST",
             "/scans",
-            {
-                "target": request.target or "<target>",
-                "options": {
-                    "scan_type": "smart",
-                    "budget_profile": "thorough",
+            _ai_ops_scan_body(
+                request.target or "<target>",
+                budget_profile="thorough",
+                active_testing=True,
+                options={
                     "parallel": True,
                     "shard_strategy": "coverage",
                     "exploit_depth": False,
                 },
-            },
+            ),
         )
         explanation = "Plan a one-shot Full Coverage scan with discover-once dynamic fan-out."
     elif explicit_scan_match:
@@ -64613,10 +64396,21 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
             safety_preset = "safe"
         if not request.target:
             missing.append("target")
+        profile, active = {
+            "quick": ("fast", False),
+            "standard": ("balanced", False),
+            "deep": ("thorough", False),
+            "full": ("thorough", True),
+            "aggressive": ("thorough", True),
+            "smart": ("thorough", True),
+        }[scan_type]
         planned_call = _ai_ops_call(
-            "POST",
-            "/scans",
-            {"target": request.target or "<target>", "options": {"scan_type": scan_type}},
+            "POST", "/scans",
+            _ai_ops_scan_body(
+                request.target or "<target>",
+                budget_profile=profile,
+                active_testing=active,
+            ),
         )
         explanation = f"Plan the explicitly requested {scan_type} DAST scan."
     elif ("keep" in lowered and "covered" in lowered) or "enable asm" in lowered or "continuous asm" in lowered:
@@ -64719,7 +64513,11 @@ def _build_ai_ops_router_plan(request: AIOpsRouterRequest) -> dict[str, Any]:
             planned_call = _ai_ops_call(
                 "POST",
                 "/scans",
-                {"target": request.target or "<target>", "options": {"scan_type": "quick"}},
+                _ai_ops_scan_body(
+                    request.target or "<target>",
+                    budget_profile="fast",
+                    active_testing=False,
+                ),
             )
             explanation = "Plan the documented quick DAST default for an unqualified scan request."
 
@@ -67021,6 +66819,13 @@ async def ai_ops_route(request: AIOpsRouterRequest):
         result = await submit_scan(
             ScanRequest(
                 target=body["target"],
+                budget_profile=body.get("budget_profile"),
+                policy=body.get("policy"),
+                advanced=(
+                    ScanAdvancedLimits(**body["advanced"])
+                    if isinstance(body.get("advanced"), dict) else None
+                ),
+                approval_receipt_id=body.get("approval_receipt_id"),
                 options=ScanOptions(**(body.get("options") or {})),
             )
         )
@@ -73015,10 +72820,25 @@ async def create_schedule(request: ScheduleCreate):
         if not (0 <= request.day_of_week <= 6):
             raise HTTPException(status_code=400, detail="day_of_week must be 0-6 (Monday-Sunday)")
 
-    # Validate scan_type
-    valid_scan_types = ['scan', 'quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
-    if request.scan_type not in valid_scan_types:
-        raise HTTPException(status_code=400, detail=f"scan_type must be one of: {', '.join(valid_scan_types)}")
+    if schedule_kind == "normal_scan":
+        legacy_fields = sorted(LEGACY_SCAN_WRITE_FIELDS.intersection(scan_options))
+        if legacy_fields:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "canonical Scan schedules reject legacy option authority: "
+                    + ", ".join(legacy_fields)
+                ),
+            )
+        try:
+            resolve_scan_contract(
+                budget_profile=scan_options.get("budget_profile"),
+                policy=scan_options.get("policy"),
+                advanced=scan_options.get("advanced"),
+                approval_receipt_id=scan_options.get("approval_receipt_id"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Validate timezone
     try:
@@ -73056,7 +72876,7 @@ async def create_schedule(request: ScheduleCreate):
             request.timezone,
             request.jitter_minutes,
             schedule_kind,
-            request.scan_type,
+            "scan",
             json.dumps(scan_options),
             next_run
         )
@@ -73174,14 +72994,6 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
 
         effective_schedule_kind = normalized_schedule_kind or _schedule_kind_from_row(existing)
 
-        if request.scan_type is not None:
-            valid_scan_types = ['scan', 'quick', 'standard', 'deep', 'full', 'aggressive', 'smart']
-            if request.scan_type not in valid_scan_types:
-                raise HTTPException(status_code=400, detail=f"Invalid scan_type")
-            updates.append(f"scan_type = ${param_idx}")
-            params.append(request.scan_type)
-            param_idx += 1
-
         if request.scan_options is not None:
             scan_options = _schedule_options_dict(request.scan_options)
             scan_options.pop("kind", None)
@@ -73190,6 +73002,25 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
                     status_code=409,
                     detail="Legacy evidence retention schedules must be migrated to a scan or ASM schedule.",
                 )
+            if effective_schedule_kind == "normal_scan":
+                legacy_fields = sorted(LEGACY_SCAN_WRITE_FIELDS.intersection(scan_options))
+                if legacy_fields:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "canonical Scan schedules reject legacy option authority: "
+                            + ", ".join(legacy_fields)
+                        ),
+                    )
+                try:
+                    resolve_scan_contract(
+                        budget_profile=scan_options.get("budget_profile"),
+                        policy=scan_options.get("policy"),
+                        advanced=scan_options.get("advanced"),
+                        approval_receipt_id=scan_options.get("approval_receipt_id"),
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
             updates.append(f"scan_options = ${param_idx}")
             params.append(json.dumps(scan_options))
             param_idx += 1

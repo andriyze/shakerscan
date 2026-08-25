@@ -84,8 +84,8 @@ shakerscan status
 
 `scan` submits the one deterministic DAST pipeline. `fast`, `balanced`, and `thorough` are resource
 ceilings, while `--active-testing` is an explicit permission. Parallel placement and sharding are
-internal decisions. Old `--type` values remain deprecated compatibility aliases. Use the web UI or
-REST API for authentication values so secrets do not enter shell history. Credential create and
+internal decisions. Legacy `--type`, `scan-full`, and `scan-smart` writes have been removed. Use the
+web UI or REST API for authentication values so secrets do not enter shell history. Credential create and
 rotation requests are read from a file or stdin, never secret-bearing command-line flags. Hunt,
 credential, and collection commands read their accepted fields from the running server contracts.
 
@@ -181,8 +181,8 @@ curl -X POST http://localhost:8080/scans \
 ```
 
 Add a distinct `secondary` profile ID for differential BOLA/IDOR testing. The worker decrypts a
-profile only after target, capability, version, expiry, and approval validation. The deprecated
-`/scans/compat` route exists only for migration and sunsets on 31 December 2026.
+profile only after target, capability, version, expiry, and approval validation. New Scan writes are
+canonical and secret-free; historical compatibility records remain readable for audit purposes.
 
 ### Review and retest findings
 
@@ -489,8 +489,6 @@ hunt start|call               Start a Hunt or call one returned capability
 credentials create|rotate|test  Manage encrypted exact-target profiles
 collections upload|bind|select  Manage encrypted request collections
 evidence export                Export content-free evidence manifests or bundles
-scan-full <target>            Deprecated: thorough + active compatibility translation
-scan-smart <target>           Deprecated: thorough + active compatibility translation
 doctor | install-deps         Diagnose or install local prerequisites
 env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
@@ -505,9 +503,8 @@ shell                         Open a shell in the scanner container
 
 Run `shakerscan` or `./scanner.sh` without arguments for current options and examples. `reset` is
 destructive. Run `shakerscan scan --help` for the canonical `--budget-profile` and
-`--active-testing` controls. The old `--type`, `scan-full`, and `scan-smart` inputs emit structured
-deprecation warnings, translate at the request boundary, and sunset on 2026-12-31; they never select
-a second engine. Explicit execution/sharding flags remain advanced placement inputs.
+`--active-testing` controls. Legacy `--type`, `scan-full`, and `scan-smart` write paths have been
+removed. Explicit execution/sharding flags remain advanced placement inputs.
 
 ## REST API
 

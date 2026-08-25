@@ -1063,6 +1063,41 @@ async def run_schema_migrations(pool) -> None:
                 WHERE schedule_kind = 'evidence_retention_sweep'
                   AND is_active = true
             """)
+            # Retire legacy Scan identities as executable schedule authority.
+            # Passive historical presets are mapped once into canonical budget
+            # ceilings. Formerly active presets are disabled for human review;
+            # they are never silently re-authorized by the migration.
+            await conn.execute("""
+                UPDATE schedules
+                SET scan_options = (
+                        COALESCE(scan_options, '{}'::jsonb)
+                        - ARRAY['scan_type','quick','thorough','active','xss','sqli',
+                                'check_family','asm_check_family']::text[]
+                    ) || jsonb_build_object(
+                        'budget_profile', CASE
+                            WHEN scan_type = 'quick' THEN 'fast'
+                            WHEN scan_type IN ('deep','full','aggressive','smart') THEN 'thorough'
+                            ELSE 'balanced'
+                        END,
+                        'scan_generation', 'v2',
+                        'legacy_schedule_migrated', true
+                    ),
+                    is_active = CASE
+                        WHEN scan_type IN ('full','aggressive','smart')
+                          OR lower(COALESCE(scan_options->>'active', ''))
+                             IN ('1','true','yes','on')
+                        THEN false ELSE is_active END,
+                    scan_type = 'scan',
+                    updated_at = NOW()
+                WHERE schedule_kind = 'normal_scan'
+                  AND (
+                    COALESCE(scan_type, '') <> 'scan'
+                    OR scan_options ?| ARRAY[
+                        'scan_type','quick','thorough','active','xss','sqli',
+                        'check_family','asm_check_family'
+                    ]
+                  )
+            """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_schedules_kind_next_run
                 ON schedules(schedule_kind, next_run_at) WHERE is_active = true

@@ -1,4 +1,4 @@
-"""Canonical Scan V2 request resolution and legacy compatibility mapping."""
+"""Canonical Scan V2 request resolution."""
 
 from __future__ import annotations
 
@@ -19,24 +19,16 @@ try:
     from runtime.credentials import HTTP_CREDENTIAL_KINDS
     from runtime.request_collection_store import REPLAY_POLICIES
     from runtime.scan_credentials import (
-        SCAN_CREDENTIAL_CAPABILITY,
         SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.credentials import HTTP_CREDENTIAL_KINDS
     from ..runtime.request_collection_store import REPLAY_POLICIES
     from ..runtime.scan_credentials import (
-        SCAN_CREDENTIAL_CAPABILITY,
         SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES,
     )
 
 from .execution import ScanExecutionPlan
-from .legacy import (
-    LEGACY_SCAN_MAPPING,
-    translate_legacy_scan_type,
-)
-
-
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
     "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 20, 25),
     "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4, 100, 100),
@@ -44,8 +36,8 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
 }
 
 # These are the only family names with concrete canonical action-graph semantics.
-# The broader historical check registry remains available to ASM and compatibility
-# execution, but accepting those names here would create a successful no-op Scan.
+# The broader check registry remains available to ASM; accepting unimplemented
+# names here would create a successful no-op Scan.
 SCAN_V2_FAMILY_NAMES = ("recon", "nuclei", "xss", "sqli", "bola")
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": ("web.probe", "web.crawl", "web.content_discover"),
@@ -140,34 +132,12 @@ def public_scan_contract() -> dict[str, Any]:
             "interactive_auth_kinds": sorted(SCAN_V2_INTERACTIVE_AUTH_KINDS),
             "secondary_auth_kinds": sorted(SCAN_V2_SECONDARY_AUTH_KINDS),
             "semantic_capabilities": sorted(SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES),
-            "legacy_capability": SCAN_CREDENTIAL_CAPABILITY,
         },
         "request_collections": {
             "replay_policies": sorted(REPLAY_POLICIES),
             "active_policy": "confirmed_active",
         },
     }
-
-
-def normalize_scan_authentication(value: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Normalize the bounded V2 authentication contract without logging secret values."""
-    authentication = dict(value or {})
-    unknown = set(authentication) - set(SCAN_AUTHENTICATION_KEYS)
-    if unknown:
-        raise ValueError(f"unsupported authentication fields: {', '.join(sorted(unknown))}")
-    normalized: dict[str, Any] = {}
-    for key, item in authentication.items():
-        if item in (None, "", [], {}):
-            continue
-        if key == "auto_auth":
-            if not isinstance(item, bool):
-                raise ValueError("auto_auth must be a boolean")
-            normalized[key] = item
-            continue
-        if not isinstance(item, str) or len(item) > 131_072:
-            raise ValueError(f"{key} must be a string of at most 131072 characters")
-        normalized[key] = item
-    return normalized
 
 
 @dataclass(frozen=True)
@@ -177,16 +147,9 @@ class ResolvedScanContract:
     budget_profile: str
     budget: ScanBudget
     execution_plan: ScanExecutionPlan
-    legacy_scan_type: str | None = None
-    deprecations: tuple[Mapping[str, Any], ...] = ()
 
     def option_metadata(self) -> dict[str, Any]:
-        metadata = self.execution_plan.option_metadata()
-        metadata.update({
-            "legacy_scan_type": self.legacy_scan_type,
-            "deprecations": [dict(item) for item in self.deprecations],
-        })
-        return metadata
+        return self.execution_plan.option_metadata()
 
 
 def bind_scan_scope_receipt(
@@ -271,33 +234,9 @@ def resolve_scan_contract(
     policy: Mapping[str, Any] | None = None,
     advanced: Mapping[str, Any] | None = None,
     approval_receipt_id: str | None = None,
-    legacy_scan_type: str | None = None,
 ) -> ResolvedScanContract:
-    """Resolve one immutable V2 Scan plan from canonical or legacy API input.
-
-    Legacy ``scan_type`` is translated exactly once at this boundary. The canonical
-    execution plan and worker authority always have engine identity ``scan``; they
-    never embed ``quick``, ``deep``, ``full``, ``aggressive``, or ``smart``.
-    """
-    translation = translate_legacy_scan_type(legacy_scan_type)
-    compatibility_advanced: dict[str, Any] = {}
-    deprecation_items: list[Mapping[str, Any]] = []
-    if translation is not None:
-        profile = translation.budget_profile
-        active_testing = translation.active_testing
-        compatibility_advanced.update(translation.advanced)
-        deprecation_items.append(translation.deprecation())
-    else:
-        requested_profile = str(budget_profile or "balanced").strip().lower()
-        if requested_profile == "exhaustive":
-            profile = "thorough"
-            deprecation_items.append({
-                "field": "budget_profile", "value": "exhaustive",
-                "replacement": "thorough",
-            })
-        else:
-            profile = requested_profile
-        active_testing = bool((policy or {}).get("active_testing", False))
+    """Resolve one immutable V2 Scan plan from canonical policy and budget input."""
+    profile = str(budget_profile or "balanced").strip().lower()
 
     policy_data = policy if isinstance(policy, Mapping) else {}
     allowed_policy_keys = {
@@ -307,9 +246,7 @@ def resolve_scan_contract(
     unknown_policy = set(policy_data) - allowed_policy_keys
     if unknown_policy:
         raise ValueError(f"unsupported scan policy fields: {', '.join(sorted(unknown_policy))}")
-    active_testing = bool(
-        active_testing if translation is not None else policy_data.get("active_testing", False)
-    )
+    active_testing = bool(policy_data.get("active_testing", False))
     include = normalize_scan_policy_families(
         policy_data.get("include_families")
         or (advanced or {}).get("include_families")
@@ -358,7 +295,7 @@ def resolve_scan_contract(
         raise ValueError("network_discovery requires active_testing")
     if resolved_policy.network_discovery and not resolved_policy.approval_receipt_id:
         raise ValueError("network_discovery requires a target-bound approval receipt")
-    merged_advanced = {**compatibility_advanced, **dict(advanced or {})}
+    merged_advanced = dict(advanced or {})
     budget = _resolve_budget(
         profile,
         merged_advanced,
@@ -379,6 +316,4 @@ def resolve_scan_contract(
         budget_profile=profile,
         budget=budget,
         execution_plan=execution_plan,
-        legacy_scan_type=(translation.legacy_scan_type if translation is not None else None),
-        deprecations=tuple(deprecation_items),
     )

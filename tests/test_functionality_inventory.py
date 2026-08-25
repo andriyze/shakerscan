@@ -63,9 +63,7 @@ def test_inventory_extractors_cover_known_authoritative_surfaces():
     } <= paths
     assert {"scan", "help", "rebuild"} <= set(inventory.scanner_wrapper_commands())
     assert "scan-smart" not in inventory.scanner_wrapper_commands()
-    assert {"scan-full", "scan-smart"} == set(
-        inventory.scanner_wrapper_compatibility_commands()
-    )
+    assert inventory.scanner_wrapper_compatibility_commands() == []
     assert {"test", "release-gates", "e2e-model-intake"} <= set(inventory.make_targets())
     assert {"test:no-benchmark-fitting", "test:planner-scope"} <= set(inventory.release_gates())
     env_names = {row["name"] for row in inventory.environment_variables()}

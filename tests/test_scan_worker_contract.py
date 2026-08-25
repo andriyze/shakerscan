@@ -109,12 +109,12 @@ def test_flattened_snapshots_must_match_plan():
 def test_caller_cannot_reintroduce_smart_aggressive_or_quick_execution():
     active = _options(active=True)
     active["scan_type"] = "smart"
-    with pytest.raises(WorkerScanContractError, match="forbidden after canonical"):
+    with pytest.raises(WorkerScanContractError, match="legacy Scan authority"):
         resolve_worker_scan_admission(active)
 
     passive = _options()
     passive["quick"] = True
-    with pytest.raises(WorkerScanContractError, match="quick/thorough"):
+    with pytest.raises(WorkerScanContractError, match="legacy Scan authority"):
         resolve_worker_scan_admission(passive)
 
 
@@ -125,7 +125,7 @@ def test_caller_cannot_reintroduce_smart_aggressive_or_quick_execution():
 def test_canonical_worker_rejects_every_legacy_scan_identity(legacy_scan_type):
     options = _options(active=True)
     options["scan_type"] = legacy_scan_type
-    with pytest.raises(WorkerScanContractError, match="forbidden after canonical"):
+    with pytest.raises(WorkerScanContractError, match="legacy Scan authority"):
         resolve_worker_scan_admission(options)
 
 
@@ -172,25 +172,15 @@ def test_public_and_flattened_legacy_flags_cannot_conflict_with_plan():
         resolve_worker_scan_admission(options)
 
 
-def test_legacy_jobs_remain_isolated_and_do_not_claim_canonical_authority():
-    legacy = resolve_worker_scan_admission({"scan_type": "smart"})
-    assert legacy.canonical is False
-    assert legacy.legacy_source == "smart"
-    assert legacy.plan is None
-    assert legacy.canonical_overrides() == {}
-
-    default = resolve_worker_scan_admission({})
-    assert default.canonical is False
-    assert default.legacy_source == "standard"
+def test_digestless_and_legacy_jobs_are_rejected_at_first_worker_boundary():
+    for options in ({}, {"scan_type": "smart"}, {"quick": False}):
+        with pytest.raises(WorkerScanContractError, match="digest-less"):
+            resolve_worker_scan_admission(options)
 
 
-def test_legacy_source_metadata_must_agree_with_translated_plan():
-    contract = resolve_scan_contract(legacy_scan_type="smart")
-    options = contract.option_metadata()
-    admission = resolve_worker_scan_admission(options)
-    assert admission.legacy_source == "smart"
-
-    changed = copy.deepcopy(options)
-    changed["legacy_scan_type"] = "quick"
-    with pytest.raises(WorkerScanContractError, match="legacy_scan_type metadata conflicts"):
-        resolve_worker_scan_admission(changed)
+@pytest.mark.parametrize("field", ["scan_type", "legacy_scan_type", "quick", "thorough"])
+def test_canonical_worker_rejects_even_false_or_empty_legacy_fields(field):
+    options = _options()
+    options[field] = False if field in {"quick", "thorough"} else ""
+    with pytest.raises(WorkerScanContractError, match="legacy Scan authority"):
+        resolve_worker_scan_admission(options)

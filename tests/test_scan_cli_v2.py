@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from scripts import scan_cli
 
@@ -27,8 +28,8 @@ def _contract() -> dict:
 def _run(monkeypatch, argv):
     calls = []
 
-    def request(url, *, payload=None, compatibility_command=None):
-        calls.append((url, payload, compatibility_command))
+    def request(url, *, payload=None):
+        calls.append((url, payload))
         if payload is None:
             return _contract()
         return {"scan_id": "00000000-0000-0000-0000-000000000001", "status": "queued"}
@@ -80,27 +81,14 @@ def test_scan_cli_emits_v2_json_and_canonical_secret_free_request(monkeypatch, c
     assert "password" not in repr(payload).lower()
 
 
-def test_legacy_alias_warns_translates_and_never_enters_payload(monkeypatch, capsys):
-    result, calls = _run(monkeypatch, [
-        "https://example.com", "--compatibility-alias", "smart",
-        "--confirm-active", "--json",
-    ])
-
-    assert result == 0
-    captured = capsys.readouterr()
-    warning = json.loads(captured.err)
-    assert warning["schema_version"] == "scan-cli-deprecation/v1"
-    assert warning["sunset"] == "2026-12-31"
-    assert warning["canonical_translation"] == {
-        "active_testing": True,
-        "budget_profile": "thorough",
-        "engine": "scan",
-    }
-    payload = calls[-1][1]
-    assert payload["budget_profile"] == "thorough"
-    assert payload["policy"]["active_testing"] is True
-    assert "smart" not in json.dumps(payload)
-    assert calls[-1][2] == "scan-smart"
+def test_legacy_aliases_are_not_accepted_by_the_cli():
+    parser = scan_cli._parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["https://example.com", "--type", "smart"])
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "https://example.com", "--compatibility-alias", "smart",
+        ])
 
 
 def test_cli_network_error_has_stable_json_error_and_exit_code(monkeypatch, capsys):
@@ -132,3 +120,5 @@ def test_cli_help_exposes_v2_authority_without_raw_secret_flags():
     assert "--json" in help_text
     assert "--password" not in help_text
     assert "--auth-header" not in help_text
+    assert "--type" not in help_text
+    assert "--compatibility-alias" not in help_text

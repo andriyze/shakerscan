@@ -21,6 +21,7 @@ from lib.calibration import (  # noqa: E402
     try_request_json,
     wait_for_scans as _wait_for_scans,
 )
+from benchmark_targets import _canonical_benchmark_authority  # noqa: E402
 
 
 def docker_url(url: str, docker_base: str, run_id: str, scenario_id: str | None = None) -> str:
@@ -85,7 +86,6 @@ def queue_dast(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
             {
                 "id": "honey-dast-smoke",
                 "target_url": args.dast_target,
-                "scan_type": args.dast_scan_type,
                 "safe_fixture": False,
                 "expected_shakerscan_findings": [],
                 "options": {},
@@ -93,26 +93,13 @@ def queue_dast(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
         ]
 
     queued = []
-    active_scan_types = {"smart", "full", "aggressive"}
     for scenario in scenarios:
         scenario_id = scenario["id"]
         if args.scenario and args.scenario != scenario_id:
             continue
 
-        scan_type = str(scenario.get("scan_type") or args.dast_scan_type).strip().lower()
         expected = scenario.get("expected_shakerscan_findings", [])
         safe = scenario.get("safe_fixture") is True
-        if scan_type in active_scan_types and not args.allow_active_dast:
-            queued.append({
-                "kind": "dast",
-                "scenario_id": scenario_id,
-                "safe": safe,
-                "expected": expected,
-                "scan_id": None,
-                "ui_url": None,
-                "skipped": f"{scan_type} requires --allow-active-dast",
-            })
-            continue
 
         target_url = scanner_reachable_url(
             scenario["target_url"],
@@ -121,18 +108,40 @@ def queue_dast(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
             scenario_id,
         )
         options = dict(scenario.get("options") or {})
-        options.update({
-            "scan_type": scan_type,
-            "budget_profile": scenario.get("budget_profile") or args.dast_budget_profile,
-        })
-        if scan_type in {"quick", "standard", "deep"}:
-            options.setdefault("public", True)
+        forbidden = sorted({
+            "scan_type", "quick", "thorough", "active", "xss", "sqli",
+            "check_family", "asm_check_family",
+        }.intersection(options))
+        if forbidden:
+            queued.append(queue_error_item(
+                kind="dast",
+                scenario_id=scenario_id,
+                safe=safe,
+                expected=expected,
+                error=ValueError(
+                    "Honey scenario contains removed Scan authority: " + ", ".join(forbidden)
+                ),
+            ))
+            continue
+        budget_profile = scenario.get("budget_profile") or args.dast_budget_profile
+        active_testing = bool(args.dast_active_testing)
 
         try:
+            payload = {
+                "target": target_url,
+                "budget_profile": budget_profile,
+                "policy": {"active_testing": active_testing},
+                "options": options,
+            }
+            if active_testing:
+                _target_id, approval_id = _canonical_benchmark_authority(
+                    args.api.rstrip('/'), target_url, credential_risk=False,
+                )
+                payload["approval_receipt_id"] = approval_id
             scan = request_json(
                 f"{args.api}/scans",
                 method="POST",
-                payload={"target": target_url, "options": options},
+                payload=payload,
             )
             queued.append({
                 "kind": "dast",
@@ -142,7 +151,8 @@ def queue_dast(args: argparse.Namespace, run_id: str) -> list[dict[str, Any]]:
                 "scan_id": scan["scan_id"],
                 "ui_url": scan.get("ui_url") or f"/scans/{scan['scan_id']}",
                 "target_url": target_url,
-                "scan_type": scan_type,
+                "budget_profile": budget_profile,
+                "active_testing": active_testing,
             })
         except Exception as exc:  # noqa: BLE001
             print(f"dast queue error for {scenario_id}: {exc}", file=sys.stderr)
@@ -351,9 +361,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--dast-target", default="https://honey.shakerscan.com/")
-    parser.add_argument("--dast-scan-type", default="quick", choices=["quick", "standard", "deep", "full", "aggressive", "smart"])
-    parser.add_argument("--dast-budget-profile", default="fast", choices=["fast", "balanced", "thorough", "exhaustive"])
-    parser.add_argument("--allow-active-dast", action="store_true", help="Allow full/aggressive/smart Honey DAST scenarios.")
+    parser.add_argument("--dast-budget-profile", default="fast", choices=["fast", "balanced", "thorough"])
+    parser.add_argument("--dast-active-testing", action="store_true", help="Authorize active DAST for Honey scenarios.")
     parser.add_argument("--ai-profile", default="smoke", choices=["smoke", "trace", "standard", "deep"])
     parser.add_argument("--ai-request-budget", type=int, default=1)
     args = parser.parse_args()

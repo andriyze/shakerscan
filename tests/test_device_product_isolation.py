@@ -16,8 +16,8 @@ def test_device_children_are_hidden_from_the_default_scan_list():
 
 
 def test_device_run_kind_is_not_a_web_dast_scan_type():
-    assert "device_posture" not in api_module.VALID_DAST_SCAN_TYPES
-    assert api_module.VALID_DAST_SCAN_TYPES == {
+    assert "device_posture" not in api_module.HISTORICAL_DAST_SCAN_TYPES
+    assert api_module.HISTORICAL_DAST_SCAN_TYPES == {
         "quick", "standard", "deep", "full", "aggressive", "smart",
     }
 

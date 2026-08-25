@@ -18,8 +18,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.calibration import request_json, wait_for_scans  # noqa: E402
-
-ACTIVE_SCAN_TYPES = {"smart", "full", "aggressive"}
+from benchmark_targets import _canonical_benchmark_authority  # noqa: E402
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -67,23 +66,36 @@ def benchmark_entries(config: dict[str, Any], names: set[str] | None) -> list[di
     return entries
 
 
-def merged_options(bench: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+def merged_request(bench: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     options = dict(bench.get("scan_options") or {})
-    if args.scan_type:
-        options["scan_type"] = args.scan_type
-    if args.budget_profile:
-        options["budget_profile"] = args.budget_profile
+    forbidden = sorted({
+        "scan_type", "quick", "thorough", "active", "xss", "sqli",
+        "check_family", "asm_check_family",
+    }.intersection(options))
+    if forbidden:
+        raise RuntimeError(
+            "benchmark config contains removed Scan authority: " + ", ".join(forbidden)
+        )
+    budget_profile = args.budget_profile or str(options.pop("budget_profile", "balanced"))
+    active_testing = bool(args.active_testing or options.pop("active_testing", False))
     if args.public:
         options["public"] = True
     if args.custom_budget:
         options["custom_budget"] = json.loads(args.custom_budget)
-    options.setdefault("scan_type", "smart")
-    options.setdefault("budget_profile", "fast")
-    return options
+    return {
+        "budget_profile": budget_profile,
+        "policy": {"active_testing": active_testing},
+        "options": options,
+    }
 
 
-def queue_scan(api: str, bench: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
-    payload = {"target": bench["target_url"], "options": options}
+def queue_scan(api: str, bench: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    payload = {"target": bench["target_url"], **request}
+    if request["policy"]["active_testing"]:
+        _target_id, approval_id = _canonical_benchmark_authority(
+            api.rstrip('/'), bench["target_url"], credential_risk=False,
+        )
+        payload["approval_receipt_id"] = approval_id
     scan = request_json(f"{api.rstrip('/')}/scans", method="POST", payload=payload, timeout=60)
     scan_id = scan["scan_id"]
     return {
@@ -92,7 +104,7 @@ def queue_scan(api: str, bench: dict[str, Any], options: dict[str, Any]) -> dict
         "scan_id": scan_id,
         "ui_url": scan.get("ui_url") or f"/scans/{scan_id}",
         "result_path": bench.get("result_path"),
-        "options": options,
+        "request": request,
     }
 
 
@@ -120,11 +132,10 @@ def main() -> int:
     parser.add_argument("--benchmarks", default="tests/benchmark/honey_benchmarks.json")
     parser.add_argument("--benchmark", action="append", default=[], help="Benchmark name to run from config.")
     parser.add_argument("--target", action="append", default=[], help="Ad hoc benchmark target as name=url.")
-    parser.add_argument("--scan-type", choices=["quick", "standard", "deep", "full", "aggressive", "smart"])
-    parser.add_argument("--budget-profile", choices=["fast", "balanced", "thorough", "exhaustive"])
+    parser.add_argument("--budget-profile", choices=["fast", "balanced", "thorough"])
+    parser.add_argument("--active-testing", action="store_true", help="Authorize active DAST for selected targets.")
     parser.add_argument("--custom-budget", help="JSON custom_budget override.")
     parser.add_argument("--public", action="store_true", help="Force public-only option on queued scans.")
-    parser.add_argument("--allow-active", action="store_true", help="Allow smart/full/aggressive active DAST scans.")
     parser.add_argument("--wait", action="store_true", help="Wait for scans to complete.")
     parser.add_argument("--export-results", action="store_true", help="Write completed scan reports to result_path.")
     parser.add_argument("--timeout", type=int, default=7200)
@@ -150,15 +161,9 @@ def main() -> int:
     queued: list[dict[str, Any]] = []
     queue_errors: list[str] = []
     for bench in entries:
-        options = merged_options(bench, args)
-        scan_type = str(options.get("scan_type") or "").lower()
-        if scan_type in ACTIVE_SCAN_TYPES and not args.allow_active:
-            error = f"[{bench['name']}] skipped: {scan_type} requires --allow-active"
-            queue_errors.append(error)
-            print(error, file=sys.stderr)
-            continue
         try:
-            item = queue_scan(args.api, bench, options)
+            request = merged_request(bench, args)
+            item = queue_scan(args.api, bench, request)
             queued.append(item)
             print(f"[{item['name']}] queued scan_id={item['scan_id']} target={item['target_url']}")
         except Exception as exc:  # noqa: BLE001

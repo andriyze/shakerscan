@@ -9,8 +9,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from scan.contracts import (
-    BUDGET_PROFILES, LEGACY_SCAN_MAPPING, bind_scan_scope_receipt,
-    normalize_scan_authentication, public_scan_contract, resolve_scan_contract,
+    BUDGET_PROFILES, bind_scan_scope_receipt, public_scan_contract,
+    resolve_scan_contract,
 )
 
 
@@ -24,8 +24,8 @@ def test_canonical_scan_defaults_to_balanced_passive_v2():
     assert contract.execution_plan.engine == "scan"
     assert contract.execution_plan.generation == "v2"
     assert not hasattr(contract, "execution_scan_type")
-    assert contract.legacy_scan_type is None
-    assert contract.deprecations == ()
+    assert not hasattr(contract, "legacy_scan_type")
+    assert not hasattr(contract, "deprecations")
 
 
 def test_validated_scope_binding_rebuilds_plan_and_flattened_snapshots():
@@ -46,46 +46,9 @@ def test_validated_scope_binding_rebuilds_plan_and_flattened_snapshots():
     assert metadata["scan_execution_plan_digest"] != original_digest
 
 
-@pytest.mark.parametrize(
-    ("legacy", "profile", "active"),
-    [
-        ("quick", "fast", False),
-        ("standard", "balanced", False),
-        ("deep", "thorough", False),
-        ("full", "thorough", True),
-        ("aggressive", "thorough", True),
-        ("smart", "thorough", True),
-    ],
-)
-def test_every_legacy_type_translates_to_one_scan_plan_with_deprecation(
-    legacy, profile, active
-):
-    contract = resolve_scan_contract(legacy_scan_type=legacy)
-    assert contract.budget_profile == profile
-    assert contract.policy.active_testing is active
-    assert contract.execution_plan.engine == "scan"
-    assert contract.execution_plan.canonical_dict()["engine"] == "scan"
-    assert "scan_compatibility" not in contract.option_metadata()
-    assert contract.deprecations == ({
-        "field": "scan_type", "value": legacy,
-        "replacement": {"active_testing": active, "budget_profile": profile},
-    },)
-
-
-def test_legacy_names_never_create_a_worker_execution_identity():
-    for legacy in LEGACY_SCAN_MAPPING:
-        contract = resolve_scan_contract(legacy_scan_type=legacy)
-        assert not hasattr(contract, "execution_scan_type")
-        assert "scan_type" not in contract.execution_plan.canonical_dict()
-
-
-def test_smart_legacy_mapping_never_becomes_hunt_or_enters_canonical_plan():
-    contract = resolve_scan_contract(legacy_scan_type="smart")
-    public_plan = contract.execution_plan.canonical_dict()
-    assert contract.generation == "v2"
-    assert public_plan["engine"] == "scan"
-    assert "hunt" not in repr(public_plan).lower()
-    assert "smart" not in repr(public_plan).lower()
+def test_contract_resolver_has_no_legacy_translation_argument():
+    with pytest.raises(TypeError, match="legacy_scan_type"):
+        resolve_scan_contract(legacy_scan_type="smart")
 
 
 def test_budget_profile_changes_ceilings_not_engine_or_policy_semantics():
@@ -215,7 +178,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
         "recon", "nuclei", "xss", "sqli", "bola",
     ]
     assert contract["passive_coverage"]["default_families"] == ["recon", "nuclei"]
-    assert contract["credentials"]["legacy_capability"] == "scan.execute"
+    assert "legacy_capability" not in contract["credentials"]
     assert "http.request" in contract["credentials"]["semantic_capabilities"]
     assert contract["request_collections"]["replay_policies"] == [
         "confirmed_active", "discovery_only", "safe_reads",
@@ -228,7 +191,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
     assert state_limit["profile_ceilings"]["balanced"] == 100
 
 
-def test_network_discovery_is_explicitly_authorized_and_exhaustive_is_compat_alias():
+def test_network_discovery_is_explicitly_authorized_and_unknown_profiles_reject():
     network = resolve_scan_contract(
         policy={"active_testing": True, "network_discovery": True},
         approval_receipt_id="approval-1",
@@ -236,23 +199,8 @@ def test_network_discovery_is_explicitly_authorized_and_exhaustive_is_compat_ali
     assert network.policy.network_discovery is True
     assert network.execution_plan.engine == "scan"
 
-    exhaustive = resolve_scan_contract(budget_profile="exhaustive")
-    assert exhaustive.budget_profile == "thorough"
-    assert exhaustive.execution_plan.budget_profile == "thorough"
-    assert exhaustive.deprecations == ({
-        "field": "budget_profile", "value": "exhaustive", "replacement": "thorough",
-    },)
-
-
-def test_v2_authentication_keeps_both_bola_principals_and_rejects_unknown_fields():
-    assert normalize_scan_authentication({
-        "auth_header": "Bearer user-one", "user2_header": "Bearer user-two",
-    }) == {"auth_header": "Bearer user-one", "user2_header": "Bearer user-two"}
-    assert normalize_scan_authentication({"auto_auth": False}) == {"auto_auth": False}
-    with pytest.raises(ValueError, match="unsupported authentication fields"):
-        normalize_scan_authentication({"raw_command": "curl attacker"})
-    with pytest.raises(ValueError, match="auto_auth must be a boolean"):
-        normalize_scan_authentication({"auto_auth": "yes"})
+    with pytest.raises(ValueError, match="budget_profile must be"):
+        resolve_scan_contract(budget_profile="exhaustive")
 
 
 def test_resolved_metadata_contains_only_canonical_plan_and_deprecation_data():
@@ -272,6 +220,4 @@ def test_resolved_metadata_contains_only_canonical_plan_and_deprecation_data():
     assert metadata["scan_execution_plan"]["engine"] == "scan"
     assert metadata["scan_execution_plan_digest"] == contract.execution_plan.digest
     assert "scan_compatibility" not in metadata
-    assert set(LEGACY_SCAN_MAPPING) == {
-        "quick", "standard", "deep", "full", "aggressive", "smart"
-    }
+    assert "legacy_scan_type" not in metadata

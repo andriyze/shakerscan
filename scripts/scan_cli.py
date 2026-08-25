@@ -13,15 +13,6 @@ import urllib.request
 
 START_SCHEMA = "scan-start/v2"
 ERROR_SCHEMA = "scan-start-error/v1"
-SUNSET = "2026-12-31"
-LEGACY_TRANSLATIONS: dict[str, tuple[str, bool]] = {
-    "quick": ("fast", False),
-    "standard": ("balanced", False),
-    "deep": ("thorough", False),
-    "full": ("thorough", True),
-    "aggressive": ("thorough", True),
-    "smart": ("thorough", True),
-}
 ADVANCED_FLAGS = (
     "max_duration_seconds",
     "max_http_requests",
@@ -101,8 +92,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-single-worker", action="store_true")
     parser.add_argument("--json", action="store_true", help="Emit only scan-start/v2 JSON")
     parser.add_argument("--confirm-active", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--type", choices=tuple(LEGACY_TRANSLATIONS), help=argparse.SUPPRESS)
-    parser.add_argument("--compatibility-alias", choices=tuple(LEGACY_TRANSLATIONS), help=argparse.SUPPRESS)
     parser.add_argument("--api-url", required=True, help=argparse.SUPPRESS)
     parser.add_argument("--ui-url", required=True, help=argparse.SUPPRESS)
     return parser
@@ -122,7 +111,6 @@ def _request_json(
     url: str,
     *,
     payload: dict[str, Any] | None = None,
-    compatibility_command: str | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Accept": "application/json",
@@ -134,8 +122,6 @@ def _request_json(
         headers["Content-Type"] = "application/json"
         data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         method = "POST"
-    if compatibility_command:
-        headers["X-ShakerScan-CLI-Compatibility"] = compatibility_command
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -176,38 +162,6 @@ def _confirm_active(args: argparse.Namespace) -> None:
     )
     if input("Type 'yes' to continue: ").strip().lower() != "yes":
         raise ScanCliError("active Scan cancelled")
-
-
-def _apply_legacy_translation(args: argparse.Namespace) -> str | None:
-    legacy = args.compatibility_alias or args.type
-    if not legacy:
-        return None
-    profile, active = LEGACY_TRANSLATIONS[legacy]
-    if args.budget_profile is not None and args.budget_profile != profile:
-        raise ScanCliError(
-            f"legacy {legacy} translates to --budget-profile {profile}; remove the conflicting profile"
-        )
-    args.budget_profile = profile
-    args.active_testing = args.active_testing or active
-    replacement = f"scanner.sh scan <target> --budget-profile {profile}"
-    if active:
-        replacement += " --active-testing --confirm-active"
-    command = f"scan-{legacy}" if args.compatibility_alias else f"scan --type {legacy}"
-    print(
-        json.dumps({
-            "schema_version": "scan-cli-deprecation/v1",
-            "deprecated_command": command,
-            "canonical_translation": {
-                "engine": "scan",
-                "budget_profile": profile,
-                "active_testing": active,
-            },
-            "sunset": SUNSET,
-            "replacement": replacement,
-        }, sort_keys=True),
-        file=sys.stderr,
-    )
-    return command
 
 
 def _validate_against_contract(
@@ -334,9 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.include_family = _split_names(args.include_family)
     args.exclude_family = _split_names(args.exclude_family)
-    compatibility = None
     try:
-        compatibility = _apply_legacy_translation(args)
         args.budget_profile = args.budget_profile or "balanced"
         _confirm_active(args)
         payload = _payload(args)
@@ -346,7 +298,6 @@ def main(argv: list[str] | None = None) -> int:
         response = _request_json(
             f"{api_url}/scans",
             payload=payload,
-            compatibility_command=compatibility,
         )
         scan_id = str(response.get("scan_id") or "")
         status = str(response.get("status") or "")

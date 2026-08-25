@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+from pathlib import Path
 import sys
 import types
 import uuid
@@ -762,9 +763,9 @@ def test_ai_ops_router_full_coverage_is_dry_run_by_default():
         "path": "/scans",
         "body": {
             "target": "https://example.test",
+            "budget_profile": "thorough",
+            "policy": {"active_testing": True},
             "options": {
-                "scan_type": "smart",
-                "budget_profile": "thorough",
                 "parallel": True,
                 "shard_strategy": "coverage",
                 "exploit_depth": False,
@@ -775,8 +776,15 @@ def test_ai_ops_router_full_coverage_is_dry_run_by_default():
     assert plan["authorization_assumption"]
 
 
-@pytest.mark.parametrize("scan_type", ["quick", "standard", "deep", "full", "aggressive", "smart"])
-def test_ai_ops_router_preserves_explicit_dast_scan_type(scan_type):
+@pytest.mark.parametrize(("scan_type", "budget", "active"), [
+    ("quick", "fast", False),
+    ("standard", "balanced", False),
+    ("deep", "thorough", False),
+    ("full", "thorough", True),
+    ("aggressive", "thorough", True),
+    ("smart", "thorough", True),
+])
+def test_ai_ops_router_translates_natural_language_to_canonical_scan(scan_type, budget, active):
     target = "http://169.254.169.254/latest/meta-data/"
     plan = api_module._build_ai_ops_router_plan(
         api_module.AIOpsRouterRequest(
@@ -792,7 +800,12 @@ def test_ai_ops_router_preserves_explicit_dast_scan_type(scan_type):
     assert plan["planned_api_call"] == {
         "method": "POST",
         "path": "/scans",
-        "body": {"target": target, "options": {"scan_type": scan_type}},
+        "body": {
+            "target": target,
+            "budget_profile": budget,
+            "policy": {"active_testing": active},
+            "options": {},
+        },
     }
 
 
@@ -802,7 +815,8 @@ def test_ai_ops_router_unqualified_scan_defaults_to_quick_without_conflating_dee
         api_module.AIOpsRouterRequest(prompt="Scan this target", target=target)
     )
     assert default_plan["intent"] == "run_dast_quick"
-    assert default_plan["planned_api_call"]["body"]["options"]["scan_type"] == "quick"
+    assert default_plan["planned_api_call"]["body"]["budget_profile"] == "fast"
+    assert default_plan["planned_api_call"]["body"]["policy"]["active_testing"] is False
 
     hunt_plan = api_module._build_ai_ops_router_plan(
         api_module.AIOpsRouterRequest(prompt="Deep Hunt this target", target=target)
@@ -966,6 +980,8 @@ def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):
 
     async def fake_submit_scan(request):
         captured["target"] = request.target
+        captured["budget_profile"] = request.budget_profile
+        captured["policy"] = dict(request.policy)
         captured["options"] = request.options.model_dump()
         return {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"}
 
@@ -998,6 +1014,8 @@ def test_ai_ops_router_executes_exact_dast_type_when_confirmed(monkeypatch):
 
     async def fake_submit_scan(request):
         captured["target"] = request.target
+        captured["budget_profile"] = request.budget_profile
+        captured["policy"] = dict(request.policy)
         captured["options"] = request.options.model_dump()
         return {"scan_id": "scan-deep", "job_id": "job-deep", "status": "queued"}
 
@@ -1016,7 +1034,9 @@ def test_ai_ops_router_executes_exact_dast_type_when_confirmed(monkeypatch):
     )
 
     assert result["dry_run"] is False
-    assert captured["options"]["scan_type"] == "deep"
+    assert captured["budget_profile"] == "thorough"
+    assert captured["policy"]["active_testing"] is False
+    assert captured["options"]["scan_type"] is None
     assert result["executed"]["scan_id"] == "scan-deep"
 
 
@@ -1478,14 +1498,17 @@ def _auto_shard_settings(enabled=True, **overrides):
 
 
 def _resolve_auto_shard_policy(options):
-    scan_type = api_module.normalize_dast_scan_options(options)
-    payload = api_module._build_scan_options_payload(options, scan_type)
+    contract = api_module.resolve_scan_contract(
+        budget_profile=options.budget_profile or "thorough",
+        policy={"active_testing": True},
+    )
+    payload = api_module._build_canonical_scan_options_payload(options, contract)
     enabled, worker_count = api_module._apply_auto_sharding_policy(
         options,
         payload,
-        scan_type in api_module.ACTIVE_ENFORCED_SCAN_TYPES,
+        contract.policy.active_testing,
     )
-    return scan_type, payload, enabled, worker_count
+    return "scan", payload, enabled, worker_count
 
 
 def test_auto_sharding_defaults_enabled_for_fresh_installs(monkeypatch):
@@ -1742,7 +1765,7 @@ def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch)
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(False))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
 
-    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
     assert enabled is False
     assert worker_count is None
@@ -1754,7 +1777,7 @@ def test_auto_sharding_uses_coverage_for_active_scan_when_enabled(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
 
-    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
     assert enabled is True
     assert worker_count == 6
@@ -1773,7 +1796,7 @@ def test_auto_sharding_honors_explicit_family_strategy(monkeypatch):
     )
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
 
-    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
     assert enabled is True
     assert worker_count == 6
@@ -1802,7 +1825,7 @@ def test_explicit_parallel_false_overrides_global_auto_sharding(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
 
-    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart", parallel=False))
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough", parallel=False))
 
     assert enabled is False
     assert worker_count is None
@@ -1814,7 +1837,7 @@ def test_explicit_parallel_true_overrides_worker_minimum(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 1)
 
-    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart", parallel=True))
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough", parallel=True))
 
     assert enabled is True
     assert worker_count == 1
@@ -1825,7 +1848,7 @@ def test_explicit_parallel_true_overrides_worker_minimum(monkeypatch):
 
 def test_full_coverage_dynamic_allocation_options_survive_api_payload():
     options = api_module.ScanOptions(
-        scan_type="smart",
+        budget_profile="thorough",
         parallel=True,
         shard_strategy="coverage",
         coverage_allocation="dynamic",
@@ -1833,8 +1856,10 @@ def test_full_coverage_dynamic_allocation_options_survive_api_payload():
         coverage_dynamic_max_batches=40,
     )
 
-    scan_type = api_module.normalize_dast_scan_options(options)
-    payload = api_module._build_scan_options_payload(options, scan_type)
+    contract = api_module.resolve_scan_contract(
+        budget_profile="thorough", policy={"active_testing": True},
+    )
+    payload = api_module._build_canonical_scan_options_payload(options, contract)
 
     assert payload["shard_strategy"] == "coverage"
     assert payload["coverage_allocation"] == "dynamic"
@@ -1844,15 +1869,17 @@ def test_full_coverage_dynamic_allocation_options_survive_api_payload():
 
 def test_coverage_family_strategy_survives_api_payload():
     options = api_module.ScanOptions(
-        scan_type="smart",
+        budget_profile="thorough",
         parallel=True,
         shard_strategy="coverage_family",
         coverage_allocation="static",
         coverage_max_shards=12,
     )
 
-    scan_type = api_module.normalize_dast_scan_options(options)
-    payload = api_module._build_scan_options_payload(options, scan_type)
+    contract = api_module.resolve_scan_contract(
+        budget_profile="thorough", policy={"active_testing": True},
+    )
+    payload = api_module._build_canonical_scan_options_payload(options, contract)
 
     assert payload["shard_strategy"] == "coverage_family"
     assert payload["coverage_allocation"] == "static"
@@ -1867,7 +1894,7 @@ def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatc
     )
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 1)
 
-    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(scan_type="smart"))
+    _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
     assert enabled is False
     assert worker_count == 1
@@ -1875,36 +1902,22 @@ def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatc
     assert "minimum is 2" in payload["auto_sharding_reason"]
 
 
-def test_normalize_dast_scan_options_keeps_explicit_standard():
-    options = api_module.ScanOptions(scan_type="STANDARD", quick=False)
-
-    scan_type = api_module.normalize_dast_scan_options(options)
-
-    assert scan_type == "standard"
-    assert options.scan_type == "standard"
-
-
-def test_normalize_dast_scan_options_maps_legacy_thorough_to_deep():
-    options = api_module.ScanOptions(thorough=True)
-
-    scan_type = api_module.normalize_dast_scan_options(options)
-
-    assert scan_type == "deep"
-    assert options.scan_type == "deep"
-
-
-def test_normalize_dast_scan_options_explicit_type_syncs_legacy_flags():
-    # Caller sends scan_type='quick' but also passes legacy active=True; the
-    # explicit scan_type should win and the legacy flag should be rewritten
-    # so downstream worker.py never sees both --quick and --active.
-    options = api_module.ScanOptions(scan_type="quick", active=True, thorough=True)
-
-    scan_type = api_module.normalize_dast_scan_options(options)
-
-    assert scan_type == "quick"
-    assert options.quick is True
-    assert options.active is False
-    assert options.thorough is False
+@pytest.mark.parametrize("field,value", [
+    ("scan_type", "standard"),
+    ("quick", False),
+    ("thorough", False),
+    ("active", False),
+    ("xss", False),
+    ("sqli", False),
+    ("check_family", "xss"),
+    ("asm_check_family", "xss"),
+])
+def test_canonical_scan_request_rejects_every_legacy_authority_field(field, value):
+    with pytest.raises(ValidationError, match="rejects legacy option authority"):
+        api_module.ScanRequest(
+            target="https://example.test",
+            options=api_module.ScanOptions(**{field: value}),
+        )
 
 
 def test_canonical_scan_request_accepts_only_credential_profile_references():
@@ -1926,15 +1939,10 @@ def test_canonical_scan_request_accepts_only_credential_profile_references():
         )
 
 
-def test_legacy_scan_request_is_an_explicit_compatibility_boundary():
-    request = api_module.LegacyScanRequest(
-        target="https://api.example.test",
-        authentication={"auth_header": "Bearer compatibility-only"},
-        options=api_module.ScanOptions(user2_header="Bearer secondary"),
-    )
-
-    assert request.authentication == {"auth_header": "Bearer compatibility-only"}
-    assert request.options.user2_header == "Bearer secondary"
+def test_legacy_scan_request_models_are_removed():
+    assert not hasattr(api_module, "LegacyScanRequest")
+    assert not hasattr(api_module, "LegacyBatchRequest")
+    assert not hasattr(api_module, "CliV1ScanRequest")
 
 
 def test_canonical_batch_rejects_inline_authentication():
@@ -1945,15 +1953,15 @@ def test_canonical_batch_rejects_inline_authentication():
         )
 
 
-def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission():
+def test_canonical_submit_has_no_legacy_translation_before_worker_admission():
     with open(api_module.__file__, encoding="utf-8") as handle:
         source = handle.read()
     submit_start = source.index("async def submit_scan")
     submit_end = source.index('\n\n@app.get("/scans/{scan_id}")', submit_start)
     submit = source[submit_start:submit_end]
 
-    assert "request.options.quick = False" in submit
-    assert "request.options.thorough = False" in submit
+    assert "normalize_dast_scan_options" not in submit
+    assert "legacy_scan_type" not in submit
     assert "CanonicalScanJob.create(" in submit
     assert "scan_job_payload, scan_job_digest" in submit
     assert "job_data = canonical_job.queue_payload(" in submit
@@ -1964,12 +1972,11 @@ def test_canonical_submit_clears_legacy_mode_selectors_before_worker_admission()
 
 
 def test_canonical_options_builder_erases_legacy_identity_and_uses_plan_budget():
-    contract = api_module.resolve_scan_contract(legacy_scan_type="smart")
+    contract = api_module.resolve_scan_contract(
+        budget_profile="thorough", policy={"active_testing": True},
+    )
     options = api_module.ScanOptions(
-        scan_type="smart",
-        quick=True,
-        thorough=True,
-        active=True,
+        budget_profile="thorough",
         custom_budget={"request_max": 999_999},
     )
 
@@ -2330,38 +2337,11 @@ def test_broker_private_option_split_keeps_public_job_secret_free():
     assert "canary" not in json.dumps(public)
 
 
-def test_cli_v1_scan_bridge_translates_only_secret_free_canonical_inputs():
-    translated = api_module._translate_cli_v1_scan_request(
-        api_module.CliV1ScanRequest(
-            target="https://example.test",
-            scan_type="sandbox",
-            options={"no_browser": True},
-        )
-    )
-
-    assert translated.target == "https://example.test"
-    assert translated.options.scan_type == "quick"
-    assert translated.options.public is True
-    assert translated.options.no_browser is True
-
-
-def test_cli_v1_scan_bridge_rejects_inline_secrets_and_unknown_options():
-    with pytest.raises(api_module.HTTPException) as secret_error:
-        api_module._translate_cli_v1_scan_request(
-            api_module.CliV1ScanRequest(
-                target="https://example.test",
-                options={"auth_header": "Bearer canary-secret"},
-            )
-        )
-    assert secret_error.value.status_code == 422
-    assert "canary-secret" not in str(secret_error.value.detail)
-
-    with pytest.raises(api_module.HTTPException, match="unsupported"):
-        api_module._translate_cli_v1_scan_request(
-            api_module.CliV1ScanRequest(
-                target="https://example.test", options={"ai": False},
-            )
-        )
+def test_cli_v1_scan_is_historical_read_only():
+    source = Path(api_module.__file__).read_text(encoding="utf-8")
+    assert '@app.get("/api/v1/scan"' in source
+    assert '@app.post("/api/v1/scan"' not in source
+    assert "_translate_cli_v1_scan_request" not in source
 
 
 def test_legacy_broker_jobs_with_private_inputs_are_detected_for_local_routing():
@@ -2541,25 +2521,12 @@ def test_broker_budget_deferral_exposes_waiting_phase():
     assert str(calls[0][1][0]) == scan_id
 
 
-def test_normalize_dast_scan_options_explicit_smart_sets_legacy_active():
-    # An explicit smart/full/aggressive scan implies the legacy active flag.
-    options = api_module.ScanOptions(scan_type="smart")
-
-    api_module.normalize_dast_scan_options(options)
-
-    assert options.thorough is True
-    assert options.active is True
-    assert options.quick is False
-
-
-def test_normalize_dast_scan_options_rejects_invalid_explicit_type():
-    options = api_module.ScanOptions(scan_type="standard-ish")
-
-    with pytest.raises(api_module.HTTPException) as exc:
-        api_module.normalize_dast_scan_options(options)
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail["error"] == "invalid_scan_type"
+def test_canonical_batch_rejects_explicit_false_legacy_authority():
+    with pytest.raises(ValidationError, match="rejects legacy option authority"):
+        api_module.BatchRequest(
+            targets=["https://example.test"],
+            options=api_module.ScanOptions(active=False),
+        )
 
 
 def test_build_ai_worker_options_records_production_confirmation():

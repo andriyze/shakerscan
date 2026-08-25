@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import sys
 from pathlib import Path
 
@@ -11,10 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from scan.compatibility import (  # noqa: E402
     COMPATIBILITY_METRIC_KEY,
-    CompatibilitySunsetError,
     compatibility_snapshot,
     record_compatibility_call,
-    require_raw_secret_compatibility,
 )
 
 
@@ -32,16 +29,6 @@ class _Redis:
         return dict(self.values)
 
 
-def test_raw_secret_bridge_fails_closed_at_the_documented_sunset():
-    require_raw_secret_compatibility(
-        now=datetime(2026, 12, 31, 23, 59, 58, tzinfo=timezone.utc),
-    )
-    with pytest.raises(CompatibilitySunsetError):
-        require_raw_secret_compatibility(
-            now=datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
-        )
-
-
 def test_compatibility_telemetry_is_allowlisted_and_content_free():
     redis_client = _Redis()
     assert record_compatibility_call(redis_client, "raw_secret_scan") is True
@@ -50,12 +37,9 @@ def test_compatibility_telemetry_is_allowlisted_and_content_free():
     with pytest.raises(ValueError):
         record_compatibility_call(redis_client, "https://secret.example/path?token=x")
 
-    snapshot = compatibility_snapshot(
-        redis_client,
-        now=datetime(2026, 8, 24, tzinfo=timezone.utc),
-    )
+    snapshot = compatibility_snapshot(redis_client)
     assert snapshot["available"] is True
-    assert snapshot["sunset_reached"] is False
+    assert snapshot["write_surface"] == "removed"
     assert snapshot["total_calls"] == 3
     assert snapshot["calls"]["raw_secret_scan"] == 2
     assert snapshot["calls"]["cli_alias"] == 1
@@ -74,21 +58,17 @@ def test_compatibility_telemetry_failure_never_changes_admission():
     assert compatibility_snapshot(BrokenRedis())["available"] is False
 
 
-def test_raw_secret_routes_are_deadline_gated_and_canonical_clients_do_not_use_them():
+def test_legacy_scan_writes_are_removed_and_canonical_clients_do_not_use_them():
     root = Path(__file__).resolve().parents[1]
+    assert not (root / "api" / "scan" / "legacy.py").exists()
+    assert not (root / ".claude" / "commands" / "scan-full.md").exists()
+    assert not (root / ".claude" / "commands" / "scan-smart.md").exists()
+
     api_source = (root / "api" / "api.py").read_text()
-    scan_route = api_source[
-        api_source.index("async def submit_scan_compat"):
-        api_source.index("def _scan_requires_durable_approval")
-    ]
-    batch_route = api_source[
-        api_source.index("async def submit_batch_compat"):
-        api_source.index("async def _submit_batch")
-    ]
-    assert "require_raw_secret_compatibility()" in scan_route
-    assert "require_raw_secret_compatibility()" in batch_route
-    assert "status_code=410" in scan_route
-    assert "status_code=410" in batch_route
+    assert '@app.post("/scans/compat"' not in api_source
+    assert '@app.post("/scans/compat/batch"' not in api_source
+    assert '@app.post("/api/v1/scan"' not in api_source
+    assert '@app.get("/api/v1/scan"' in api_source
 
     cli_source = (root / "scripts" / "scan_cli.py").read_text()
     ui_source = "\n".join(
@@ -98,3 +78,12 @@ def test_raw_secret_routes_are_deadline_gated_and_canonical_clients_do_not_use_t
     )
     assert "/scans/compat" not in cli_source
     assert "/scans/compat" not in ui_source
+
+    scanner_source = (root / "scanner.sh").read_text()
+    assert "scan-full)" not in scanner_source
+    assert "scan-smart)" not in scanner_source
+
+    worker_contract = (root / "api" / "scan" / "worker_contract.py").read_text()
+    assert "digest-less deterministic Scan execution has been removed" in worker_contract
+    assert "translate_legacy" not in worker_contract
+    assert "canonical=False" not in worker_contract

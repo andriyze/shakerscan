@@ -784,7 +784,7 @@ function ExposureView() {
   // the user on a settings page.
   async function triggerScan(asset: ExposureAsset): Promise<string | undefined> {
     if (asset.kind === 'web') {
-      const res = await scanTarget(asset.id, { scan_type: 'quick' })
+      const res = await scanTarget(asset.id, { budget_profile: 'fast' })
       return res?.scan_id || res?.id
     }
     if (asset.kind === 'ai') {

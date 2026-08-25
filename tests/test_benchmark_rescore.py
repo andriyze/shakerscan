@@ -180,24 +180,40 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     user1_token = _jwt(email="user1@example.test")
     user2_token = _jwt(email="user2@example.test")
     tokens = iter([user1_token, user2_token])
-    captured = {}
+    calls = []
 
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
 
     def fake_post(url, body, timeout=30):
-        captured["url"] = url
-        captured["body"] = body
+        calls.append((url, body))
+        if url.endswith("/targets"):
+            return {"id": "target-1"}
+        if url.endswith("/arsenal/scope/preview"):
+            return {"scope_receipt": {"receipt_id": "scope-1", "verdict": "allowed"}}
+        if url.endswith("/arsenal/approvals"):
+            return {"approval_receipt": {"id": "approval-1"}}
+        if url.endswith("/credential-profiles"):
+            return {"profile": {"id": f"profile-{sum(u.endswith('/credential-profiles') for u, _ in calls)}"}}
+        assert url.endswith("/scans")
         return {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"}
 
     monkeypatch.setattr(b, "_post", fake_post)
 
     receipt = b.submit_target("crapi", "http://scanner.test", True)
 
-    options = captured["body"]["options"]
-    assert captured["url"] == "http://scanner.test/scans/compat"
+    scan_url, scan_body = calls[-1]
+    options = scan_body["options"]
+    assert scan_url == "http://scanner.test/scans"
     assert options["require_current_workers"] is True
-    assert options["auth_header"] == f"Bearer {user1_token}"
-    assert options["user2_header"] == f"Bearer {user2_token}"
+    assert scan_body["budget_profile"] == "thorough"
+    assert scan_body["policy"] == {"active_testing": True}
+    assert scan_body["approval_receipt_id"] == "approval-1"
+    assert scan_body["credential_profile_ids"] == ["profile-1", "profile-2"]
+    assert user1_token not in str(scan_body)
+    assert user2_token not in str(scan_body)
+    profile_calls = [body for url, body in calls if url.endswith("/credential-profiles")]
+    assert [body["principal_slot"] for body in profile_calls] == ["primary", "secondary"]
+    assert [body["secret"] for body in profile_calls] == [user1_token, user2_token]
     assert receipt == {
         "target": "crapi",
         "scan_id": "scan-1",
@@ -229,6 +245,14 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
         return _jwt(email=email)
 
     monkeypatch.setattr(b, "mint_token", fake_mint)
+    monkeypatch.setattr(
+        b, "_canonical_benchmark_authority",
+        lambda *_args, **_kwargs: ("target-1", "approval-1"),
+    )
+    monkeypatch.setattr(
+        b, "_create_benchmark_bearer_profile",
+        lambda *_args, lane, **_kwargs: f"profile-{lane}",
+    )
     monkeypatch.setattr(b, "_post", lambda *_args, **_kwargs: {
         "scan_id": "scan-unique", "job_id": "job-unique", "status": "queued",
     })

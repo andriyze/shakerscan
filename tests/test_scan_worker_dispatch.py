@@ -137,17 +137,14 @@ def test_passive_dispatch_uses_same_engine_without_a_backing_mode():
     assert "active_max_seconds" not in prepared["custom_budget"]
 
 
-def test_result_metadata_is_canonical_and_legacy_is_untouched():
+def test_result_metadata_is_canonical():
     plan = _plan()
-    admission = WorkerScanAdmission(True, plan=plan)
+    admission = WorkerScanAdmission(plan=plan)
     metadata = execution_result_metadata(admission)
     assert metadata["engine"] == "scan"
     assert metadata["plan_digest"] == plan.digest
     assert metadata["executor"]["name"] == "native_fixed_stage"
     assert "compatibility" not in metadata
-    assert execution_result_metadata(
-        WorkerScanAdmission(False, legacy_source="standard")
-    ) is None
 
 
 def test_non_dast_run_kinds_bypass_scan_admission():

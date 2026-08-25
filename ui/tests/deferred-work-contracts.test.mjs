@@ -58,11 +58,10 @@ test('ASM schedule create and edit share one bounded option contract', () => {
     dayOfWeek: 3,
     timeOfDay: '02:00',
     kind: 'asm_improve',
-    scanType: 'smart',
     scanOptions: options,
   })
   assert.equal(mutation.schedule_kind, 'asm_improve')
-  assert.equal(mutation.scan_type, 'quick')
+  assert.equal(mutation.scan_type, undefined)
   assert.equal(mutation.day_of_week, 3)
   assert.deepEqual(mutation.scan_options, options)
 })

@@ -46,7 +46,6 @@ export interface ScheduleMutation {
   day_of_week?: number
   time_of_day: string
   schedule_kind: SchedulableScheduleKind
-  scan_type: string
   scan_options?: Record<string, unknown>
 }
 
@@ -56,7 +55,6 @@ export function buildScheduleMutation(input: {
   dayOfWeek: number
   timeOfDay: string
   kind: SchedulableScheduleKind
-  scanType: string
   scanOptions?: Record<string, unknown>
 }): ScheduleMutation {
   return {
@@ -65,7 +63,6 @@ export function buildScheduleMutation(input: {
     day_of_week: input.frequency === 'weekly' ? input.dayOfWeek : undefined,
     time_of_day: input.timeOfDay,
     schedule_kind: input.kind,
-    scan_type: input.kind === 'normal_scan' ? input.scanType : 'quick',
     scan_options: input.scanOptions,
   }
 }

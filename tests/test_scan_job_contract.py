@@ -317,14 +317,19 @@ def test_shard_materialization_rejects_durable_option_or_parent_drift():
         )
 
 
-@pytest.mark.parametrize("legacy", ["quick", "standard", "deep", "full", "aggressive", "smart"])
-def test_legacy_alias_is_translated_before_queue_boundary(legacy):
+@pytest.mark.parametrize(("profile", "active"), [
+    ("fast", False), ("balanced", False), ("thorough", True),
+])
+def test_canonical_policy_and_budget_remain_mode_free_at_queue_boundary(profile, active):
     contract = bind_scan_scope_receipt(
-        resolve_scan_contract(legacy_scan_type=legacy), "scope-1",
+        resolve_scan_contract(
+            budget_profile=profile, policy={"active_testing": active},
+        ),
+        "scope-1",
     )
     job = CanonicalScanJob.create(
-        job_id=f"job-{legacy}",
-        scan_id=f"scan-{legacy}",
+        job_id=f"job-{profile}-{active}",
+        scan_id=f"scan-{profile}-{active}",
         target=_target(),
         execution_plan=contract.execution_plan,
         created_at="2026-08-20T12:00:00+00:00",

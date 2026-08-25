@@ -213,7 +213,7 @@ def cli_flags() -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: row["flag"])
 
 
-DEPRECATED_WRAPPER_COMMANDS = frozenset({"scan-full", "scan-smart"})
+DEPRECATED_WRAPPER_COMMANDS = frozenset()
 
 
 def _all_scanner_wrapper_commands() -> list[str]:
@@ -370,7 +370,7 @@ def render() -> str:
     pages = ui_pages()
     skill_rows = skills()
     slash = markdown_surfaces(ROOT / ".claude" / "commands", "command")
-    deprecated_slash_names = {"scan-full", "scan-smart"}
+    deprecated_slash_names: set[str] = set()
     canonical_slash = [row for row in slash if row["name"] not in deprecated_slash_names]
     compatibility_slash = [row for row in slash if row["name"] in deprecated_slash_names]
     subagents = markdown_surfaces(ROOT / ".claude" / "agents", "agent")
@@ -453,7 +453,6 @@ def render() -> str:
         "",
         *table(["Surface", "Names"], [
             ["Canonical `scanner.sh` commands", ", ".join(code(name) for name in wrapper_commands)],
-            ["Deprecated compatibility aliases (sunset 2026-12-31)", ", ".join(code(name) for name in compatibility_wrapper_commands)],
             ["Make targets", ", ".join(code(name) for name in make)],
             ["Release gates", ", ".join(code(name) for name in gates)],
         ]),
@@ -473,10 +472,6 @@ def render() -> str:
         *table(["Skill", "Purpose", "Source"], [[code(row["name"]), row["description"], code(row["source"])] for row in skill_rows]),
         "",
         *table(["Canonical slash command", "Title", "Purpose", "Source"], [[code('/' + row["name"]), row["title"], row["description"], code(row["source"])] for row in canonical_slash]),
-        "",
-        "Deprecated Scan-name shims (sunset 2026-12-31):",
-        "",
-        *table(["Compatibility slash command", "Title", "Purpose", "Source"], [[code('/' + row["name"]), row["title"], row["description"], code(row["source"])] for row in compatibility_slash]),
         "",
         *table(["Subagent", "Model", "Purpose", "Source"], [[code(row["name"]), row["model"] or "unspecified", row["description"], code(row["source"])] for row in subagents]),
         "",

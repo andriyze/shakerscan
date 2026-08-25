@@ -1198,7 +1198,7 @@ command_needs_jq() {
 
 command_needs_python() {
     case "$1" in
-        scan|scan-full|scan-smart|mcp|research|report-rebuild)
+        scan|mcp|research|report-rebuild)
             return 0
             ;;
         *)
@@ -1901,10 +1901,6 @@ print_help() {
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
-    echo "Deprecated compatibility aliases (sunset 2026-12-31):"
-    echo "  scan-full <target> Translates to 'scan --budget-profile thorough --active-testing'"
-    echo "  scan-smart <target> Translates to the same deterministic Scan contract"
-    echo ""
     echo "Options:"
     echo "  -w, --workers N    Number of workers (default: $WORKERS)"
     echo "  -f, --follow       Follow logs"
@@ -2269,17 +2265,12 @@ show_worker_logs() {
 }
 
 run_v2_scan_cli() {
-    local compatibility_alias="${1:-}"
-    shift || true
     local cli_args=(
         --api-url "$(api_base_url)"
         --ui-url "$(ui_base_url)"
     )
     if [ "$CONFIRM_ACTIVE" -eq 1 ]; then
         cli_args+=(--confirm-active)
-    fi
-    if [ -n "$compatibility_alias" ]; then
-        cli_args+=(--compatibility-alias "$compatibility_alias")
     fi
     if [ ! -f "$SCRIPT_DIR/scripts/scan_cli.py" ]; then
         echo -e "${RED}Error: the V2 Scan CLI is missing from this runtime.${NC}" >&2
@@ -2299,376 +2290,6 @@ run_v2_product_cli() {
         --api-url "$(api_base_url)" "$product" "$@"
 }
 
-
-print_scan_help() {
-    local command_name="${1:-scan}"
-    echo "Usage: ./scanner.sh $command_name <target> [scan options]"
-    echo ""
-    echo "Scan options:"
-    if [ "$command_name" = "scan" ]; then
-        echo "  --type TYPE              Deprecated compatibility alias"
-    fi
-    echo "  --budget-profile P       fast, balanced, or thorough"
-    echo "  --active-testing         Enable authorized active checks"
-    echo "  --execution MODE         auto, normal, parallel, or coverage"
-    echo "  --shards N|auto          Parallel shard count (2-20)"
-    echo "  --shard-strategy S       auto, scope, family, coverage, or coverage_family"
-    echo "  --endpoint SPEC          Known endpoint; repeat for scope sharding"
-    echo "  --coverage-depth D       standard or deep"
-    echo "  --auth-state-shards      Expand parallel work across configured auth states"
-    echo "  --approval-receipt ID    Stamp a target-bound approval receipt on submission"
-    echo "  --require-current-workers Reject active work on stale/unconfirmed workers"
-    echo "  --confirm-active         Confirm authorization for active testing"
-}
-
-scan_error_detail() {
-    local body="$1"
-    if jq -e . >/dev/null 2>&1 <<<"$body"; then
-        jq -r '
-            if (.detail | type) == "object" then
-                .detail.message // .detail.error // (.detail | tojson)
-            elif .detail != null then .detail
-            else .message // .error // (tojson)
-            end
-        ' <<<"$body"
-    else
-        printf '%s\n' "$body"
-    fi
-}
-
-submit_scan() {
-    local command_name="$1"
-    local scan_type="$2"
-    local allow_type_override="$3"
-    shift 3
-
-    local target=""
-    local budget_profile=""
-    local execution="auto"
-    local shards=""
-    local shard_strategy=""
-    local coverage_depth="standard"
-    local require_current_workers=0
-    local auth_state_shards=0
-    local approval_receipt=""
-    local endpoint_count=0
-    local endpoints='[]'
-    local coverage_mode=0
-    local active_testing=0
-    local legacy_type=0
-    local scan_label=""
-    local value
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --type|--scan-type)
-                if [ "$allow_type_override" -ne 1 ]; then
-                    echo -e "${RED}Error: $command_name has a fixed scan type; use 'scan --type ...' instead.${NC}"
-                    return 1
-                fi
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: $1 requires a value${NC}"; return 1; }
-                scan_type="$2"
-                legacy_type=1
-                shift 2
-                ;;
-            --type=*|--scan-type=*)
-                if [ "$allow_type_override" -ne 1 ]; then
-                    echo -e "${RED}Error: $command_name has a fixed scan type; use 'scan --type ...' instead.${NC}"
-                    return 1
-                fi
-                scan_type="${1#*=}"
-                legacy_type=1
-                shift
-                ;;
-            --active-testing)
-                active_testing=1
-                shift
-                ;;
-            --budget-profile)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --budget-profile requires a value${NC}"; return 1; }
-                budget_profile="$2"
-                shift 2
-                ;;
-            --budget-profile=*)
-                budget_profile="${1#*=}"
-                shift
-                ;;
-            --execution)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --execution requires a value${NC}"; return 1; }
-                execution="$2"
-                shift 2
-                ;;
-            --execution=*)
-                execution="${1#*=}"
-                shift
-                ;;
-            --shards)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --shards requires a value${NC}"; return 1; }
-                shards="$2"
-                shift 2
-                ;;
-            --shards=*)
-                shards="${1#*=}"
-                shift
-                ;;
-            --shard-strategy)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --shard-strategy requires a value${NC}"; return 1; }
-                shard_strategy="$2"
-                shift 2
-                ;;
-            --shard-strategy=*)
-                shard_strategy="${1#*=}"
-                shift
-                ;;
-            --endpoint)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --endpoint requires a value${NC}"; return 1; }
-                endpoints="$(jq -c --arg endpoint "$2" '. + [$endpoint]' <<<"$endpoints")"
-                endpoint_count=$((endpoint_count + 1))
-                shift 2
-                ;;
-            --endpoint=*)
-                value="${1#*=}"
-                [ -n "$value" ] || { echo -e "${RED}Error: --endpoint requires a value${NC}"; return 1; }
-                endpoints="$(jq -c --arg endpoint "$value" '. + [$endpoint]' <<<"$endpoints")"
-                endpoint_count=$((endpoint_count + 1))
-                shift
-                ;;
-            --coverage-depth)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --coverage-depth requires a value${NC}"; return 1; }
-                coverage_depth="$2"
-                shift 2
-                ;;
-            --coverage-depth=*)
-                coverage_depth="${1#*=}"
-                shift
-                ;;
-            --require-current-workers)
-                require_current_workers=1
-                shift
-                ;;
-            --auth-state-shards)
-                auth_state_shards=1
-                shift
-                ;;
-            --approval-receipt)
-                [ -n "${2:-}" ] || { echo -e "${RED}Error: --approval-receipt requires a value${NC}"; return 1; }
-                approval_receipt="$2"
-                shift 2
-                ;;
-            --approval-receipt=*)
-                approval_receipt="${1#*=}"
-                [ -n "$approval_receipt" ] || { echo -e "${RED}Error: --approval-receipt requires a value${NC}"; return 1; }
-                shift
-                ;;
-            --help|-h)
-                print_scan_help "$command_name"
-                return 0
-                ;;
-            --*)
-                echo -e "${RED}Error: unknown $command_name option: $1${NC}"
-                print_scan_help "$command_name"
-                return 1
-                ;;
-            *)
-                if [ -n "$target" ]; then
-                    echo -e "${RED}Error: unexpected argument: $1${NC}"
-                    print_scan_help "$command_name"
-                    return 1
-                fi
-                target="$1"
-                shift
-                ;;
-        esac
-    done
-
-    if [ "$legacy_type" -eq 1 ] || [ "$allow_type_override" -eq 0 ]; then
-        case "$scan_type" in
-            quick|standard|deep|full|aggressive|smart) ;;
-            *) echo -e "${RED}Error: invalid legacy scan type '$scan_type'${NC}"; return 1 ;;
-        esac
-        case "$scan_type" in full|aggressive|smart) active_testing=1 ;; esac
-    fi
-    case "$budget_profile" in
-        ""|fast|balanced|thorough) ;;
-        *) echo -e "${RED}Error: invalid budget profile '$budget_profile'${NC}"; return 1 ;;
-    esac
-    case "$execution" in
-        auto|normal|parallel|coverage) ;;
-        *) echo -e "${RED}Error: invalid execution mode '$execution'${NC}"; return 1 ;;
-    esac
-    case "$shard_strategy" in
-        ""|auto|scope|family|coverage|coverage_family) ;;
-        *) echo -e "${RED}Error: invalid shard strategy '$shard_strategy'${NC}"; return 1 ;;
-    esac
-    case "$coverage_depth" in
-        standard|deep) ;;
-        *) echo -e "${RED}Error: invalid coverage depth '$coverage_depth'${NC}"; return 1 ;;
-    esac
-    if [ "$execution" = "coverage" ] && [ -n "$shard_strategy" ] && [ "$shard_strategy" != "coverage" ]; then
-        echo -e "${RED}Error: --execution coverage fixes the shard strategy to coverage${NC}"
-        return 1
-    fi
-    if [ -n "$shards" ] && [ "$shards" != "auto" ]; then
-        if ! [[ "$shards" =~ ^[0-9]+$ ]] || [ "$shards" -lt 2 ] || [ "$shards" -gt 20 ]; then
-            echo -e "${RED}Error: shards must be auto or a number between 2 and 20${NC}"
-            return 1
-        fi
-    fi
-    if [ -z "$target" ]; then
-        echo -e "${RED}Error: please provide a target URL${NC}"
-        print_scan_help "$command_name"
-        return 1
-    fi
-    if [ "$execution" != "parallel" ] && [ "$execution" != "coverage" ]; then
-        if [ -n "$shards" ] || [ -n "$shard_strategy" ]; then
-            echo -e "${RED}Error: --shards and --shard-strategy require --execution parallel or coverage${NC}"
-            return 1
-        fi
-        if [ "$auth_state_shards" -eq 1 ]; then
-            echo -e "${RED}Error: --auth-state-shards requires --execution parallel or coverage${NC}"
-            return 1
-        fi
-    fi
-    if [ "$shard_strategy" = "scope" ] && [ "$endpoint_count" -lt 2 ]; then
-        echo -e "${RED}Error: scope sharding requires at least two --endpoint values${NC}"
-        return 1
-    fi
-    if [ "$execution" = "coverage" ] || [ "$shard_strategy" = "coverage" ] || [ "$shard_strategy" = "coverage_family" ]; then
-        coverage_mode=1
-    fi
-    if [ "$coverage_depth" = "deep" ] && [ "$coverage_mode" -ne 1 ]; then
-        echo -e "${RED}Error: --coverage-depth requires Full Coverage execution${NC}"
-        return 1
-    fi
-    if [ "$coverage_depth" = "deep" ]; then
-        case "$scan_type" in
-            full|aggressive|smart) ;;
-            *) echo -e "${RED}Error: deep Full Coverage requires full, aggressive, or smart scan type${NC}"; return 1 ;;
-        esac
-    fi
-    if [ "$shard_strategy" = "family" ] || [ "$shard_strategy" = "coverage_family" ]; then
-        case "$scan_type" in
-            full|aggressive|smart) ;;
-            *) echo -e "${RED}Error: $shard_strategy sharding requires full, aggressive, or smart scan type${NC}"; return 1 ;;
-        esac
-    fi
-    if { [ "$execution" = "parallel" ] || [ "$execution" = "coverage" ]; } \
-        && [ "$endpoint_count" -lt 2 ]; then
-        case "$scan_type" in
-            full|aggressive|smart) ;;
-            *)
-                echo -e "${RED}Error: parallel discovery/family execution requires full, aggressive, or smart; provide known --endpoint values for passive scope sharding.${NC}"
-                return 1
-                ;;
-        esac
-    fi
-
-    if [ "$active_testing" -eq 1 ]; then
-        scan_label="Active"
-        if ! confirm_active_testing "$scan_label scan" "$target"; then
-            echo "Cancelled"
-            return 1
-        fi
-    fi
-
-    local options
-    options='{}'
-    if [ "$legacy_type" -eq 1 ] || [ "$allow_type_override" -eq 0 ]; then
-        options="$(jq -cn --arg scan_type "$scan_type" '{scan_type: $scan_type}')"
-    fi
-    if [ "$require_current_workers" -eq 1 ]; then
-        options="$(jq -c '. + {require_current_workers: true}' <<<"$options")"
-    fi
-    if [ "$auth_state_shards" -eq 1 ]; then
-        options="$(jq -c '. + {auth_state_shards: true}' <<<"$options")"
-    fi
-    if [ -n "$approval_receipt" ]; then
-        options="$(jq -c --arg approval_receipt "$approval_receipt" '. + {approval_receipt_id: $approval_receipt}' <<<"$options")"
-    fi
-    if [ "$endpoint_count" -gt 0 ]; then
-        options="$(jq -c --argjson endpoints "$endpoints" '. + {custom_endpoints: $endpoints}' <<<"$options")"
-    fi
-
-    case "$execution" in
-        normal)
-            options="$(jq -c '. + {parallel: false}' <<<"$options")"
-            ;;
-        parallel|coverage)
-            local resolved_strategy="${shard_strategy:-auto}"
-            [ "$execution" = "coverage" ] && resolved_strategy="coverage"
-            options="$(jq -c --arg strategy "$resolved_strategy" '. + {parallel: true, shard_strategy: $strategy}' <<<"$options")"
-            if [ -n "$shards" ]; then
-                if [ "$shards" = "auto" ]; then
-                    options="$(jq -c '. + {shards: "auto"}' <<<"$options")"
-                else
-                    options="$(jq -c --argjson shards "$shards" '. + {shards: $shards}' <<<"$options")"
-                fi
-            fi
-            ;;
-    esac
-
-    if [ "$coverage_mode" -eq 1 ]; then
-        if [ "$coverage_depth" = "deep" ]; then
-            options="$(jq -c '
-                . + {
-                    budget_profile: "exhaustive",
-                    exploit_depth: true,
-                    custom_budget: {
-                        active_worklist_max: 50000,
-                        param_discovery_url_limit: 500,
-                        param_discovery_max_params: 100,
-                        active_params_per_endpoint: 20,
-                        max_findings_per_family: -1,
-                        sqli_extract_max: 25,
-                        oob_max_findings: 25
-                    }
-                }
-            ' <<<"$options")"
-        else
-            options="$(jq -c '
-                . + {
-                    budget_profile: "thorough",
-                    custom_budget: {
-                        active_worklist_max: 50000,
-                        param_discovery_url_limit: 500,
-                        param_discovery_max_params: 100
-                    }
-                }
-            ' <<<"$options")"
-        fi
-    fi
-
-    local payload response http_code body scan_id status
-    local resolved_budget="${budget_profile:-balanced}"
-    payload="$(jq -cn --arg target "$target" --arg budget "$resolved_budget" --argjson active "$active_testing" --argjson options "$options" --arg approval "$approval_receipt" '{target: $target, budget_profile: $budget, policy: {active_testing: ($active == 1)}, options: $options} + (if $approval == "" then {} else {approval_receipt_id: $approval} end)')"
-
-    echo -e "${GREEN}Submitting Scan ($resolved_budget budget, active testing: $([ "$active_testing" -eq 1 ] && echo on || echo off)): $target${NC}"
-    if ! response="$(curl -sS -w $'\n%{http_code}' -X POST "$(api_base_url)/scans" \
-        -H "Content-Type: application/json" \
-        --data-binary "$payload")"; then
-        echo -e "${RED}Error: could not reach the ShakerScan API at $(api_base_url)${NC}"
-        return 1
-    fi
-    http_code="${response##*$'\n'}"
-    body="${response%$'\n'*}"
-
-    if ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-        echo -e "${RED}Scan submission failed (HTTP $http_code): $(scan_error_detail "$body")${NC}"
-        return 1
-    fi
-    if ! jq -e '.scan_id and .status' >/dev/null 2>&1 <<<"$body"; then
-        echo -e "${RED}Scan submission returned an invalid response.${NC}"
-        scan_error_detail "$body"
-        return 1
-    fi
-
-    scan_id="$(jq -r '.scan_id' <<<"$body")"
-    status="$(jq -r '.status' <<<"$body")"
-    echo "Scan ID: $scan_id"
-    echo "Status: $status"
-    echo ""
-    echo "View progress at: $(ui_base_url)/scans/$scan_id"
-}
 
 docker_storage_free_kb() {
     local docker_root
@@ -3518,7 +3139,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|scan-full|scan-smart|hunt|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|hunt|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -3580,13 +3201,7 @@ case $COMMAND in
         show_logs "${ARGS[0]}" "$FOLLOW"
         ;;
     scan)
-        run_v2_scan_cli "" "${ARGS[@]}"
-        ;;
-    scan-full)
-        run_v2_scan_cli "full" "${ARGS[@]}"
-        ;;
-    scan-smart)
-        run_v2_scan_cli "smart" "${ARGS[@]}"
+        run_v2_scan_cli "${ARGS[@]}"
         ;;
     hunt)
         run_v2_product_cli "hunt" "${ARGS[@]}"

@@ -941,7 +941,7 @@ capacity. The receipt stores only node/scan/container identifiers, check
 counts, a target hash, and a receipt hash. A passing
 receipt proves the listed run, not every future network state, and may be regenerated for each
 candidate. `--preflight-only` checks topology/storage without submitting a scan.
-`--scan-type quick` is available for bounded development smoke tests and is recorded in the
+`--budget-profile fast` is available for bounded development smoke tests and is recorded in the
 receipt; full operational acceptance retains the default passive `standard` depth.
 
 ### Milestone A: Two-VPS Queue Proof

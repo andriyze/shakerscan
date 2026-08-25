@@ -525,8 +525,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "/scans",
             {
                 "target": args.target,
+                "budget_profile": args.budget_profile,
+                "policy": {"active_testing": False},
                 "options": {
-                    "scan_type": args.scan_type,
                     "parallel": True,
                     "shards": shard_count,
                     "shard_strategy": "scope",
@@ -579,7 +580,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "selected_node_ids": sorted(str(node.get("id") or "") for node in nodes),
         "scan_id": scan_id,
         "target_sha256": _target_hash(args.target) if args.target else None,
-        "scan_type": args.scan_type,
+        "budget_profile": args.budget_profile,
         "request_budget_mode": args.request_budget_mode,
         "request_budget_max": (
             _acceptance_request_max(max(4, min(12, len(healthy) * 3)))
@@ -611,10 +612,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", help="authorized passive web target for the cross-node scan")
     parser.add_argument("--authorized", action="store_true", help="confirm authorization to scan --target")
     parser.add_argument(
-        "--scan-type",
-        choices=["quick", "standard"],
-        default="standard",
-        help="passive acceptance scan depth (default: standard)",
+        "--budget-profile",
+        choices=["fast", "balanced", "thorough"],
+        default="balanced",
+        help="passive acceptance resource ceiling (default: balanced)",
     )
     parser.add_argument("--request-budget-mode", choices=["enforce", "off"], default="enforce")
     parser.add_argument("--fault-node-id", help="node UUID whose active worker will be killed during the scan")

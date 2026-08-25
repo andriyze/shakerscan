@@ -159,13 +159,11 @@ An unsupported registry family is rejected rather than accepted as a successful 
 XSS, SQLi, or BOLA inclusion requires active permission; BOLA additionally requires two distinct
 credential profiles whose scopes allow `authz.verify`.
 
-### Deprecated compatibility inputs
+### Historical compatibility records
 
-Historical `quick`, `standard`, `deep`, `full`, `aggressive`, and `smart` names are request-boundary
-translations only. They never become an execution identity, plan field, worker mode, or queue
-authority. The compatibility bridge translates them once to a V2 budget/policy request, emits a
-deprecation receipt, and sunsets on **2026-12-31**. New UI, API, CLI, skills, and agent flows must use
-`scan` with explicit policy and budget fields.
+Historical `quick`, `standard`, `deep`, `full`, `aggressive`, and `smart` names remain readable for
+audit and report continuity, but no public route or client accepts them as new authority. New UI,
+API, CLI, skills, schedules, and agent flows use `scan` with explicit policy and budget fields.
 
 ---
 
@@ -362,8 +360,8 @@ two configured or merely attempted lanes do not satisfy that gate.
 **Workflow:** create a test account → create an encrypted, target-bound profile → obtain a
 target-bound approval receipt → pass only `credential_profile_ids` to `/scans`. The worker validates
 the frozen profile version and resolves it in memory immediately before execution. Reusable secret
-values do not enter canonical Scan requests, rows, logs, or queue payloads. `/scans/compat` is the
-explicitly deprecated raw-auth migration bridge and sunsets on 31 December 2026.
+values do not enter canonical Scan requests, rows, logs, or queue payloads. Legacy Scan write paths
+are removed; historical compatibility records remain readable for audit purposes.
 
 ---
 
@@ -1362,9 +1360,9 @@ clear (`/`), and ASM inventory prune (`/asm`).
 `scanner.sh scan` is the canonical client. It submits `scan-start/v2`, loads the server contract,
 accepts budget/policy/family/credential/collection/placement/advanced-ceiling inputs, supports
 automation-safe `--json`, and never accepts raw reusable secrets. It prints the Scan ID and UI link
-and exits without polling. `scan-full`, `scan-smart`, and `scan --type ...` are warning-emitting
-translations only; they sunset on 2026-12-31 and their legacy name is sent only in a telemetry header,
-never in the payload or queue.
+and exits without polling. The old `scan-full`, `scan-smart`, and `scan --type ...` write paths are
+removed. Historical records remain readable through the audit
+surfaces; they cannot create plans or queue work.
 
 `scanner/scanner.py` and its large flag inventory are compatibility/internal detector implementation
 surface. They remain generated in §17 so maintainers can audit migration risk, but users and agents
@@ -1372,7 +1370,7 @@ must not treat those flags as separate V2 engines or trusted capability input.
 
 The remaining `scanner.sh` commands operate service lifecycle, status/doctor, scaling, logs, builds,
 offline report rebuild, agent/MCP launch, Fleet, Model Intake runner, Gungnir, environment inspection,
-backup, and containers. §17 separates canonical wrapper commands from deprecated aliases.
+backup, and containers. §17 inventories the canonical wrapper commands.
 
 ### Skills, slash commands, and specialized agents
 
@@ -1417,15 +1415,15 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 397 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 333 | `api/**/*.py` |
+| Public REST operations | 394 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 331 | `api/**/*.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 27 | `scanner.sh` |
-| Deprecated wrapper aliases | 2 | `scanner.sh` |
+| Canonical scanner wrapper commands | 31 | `scanner.sh` |
+| Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 17 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 353 | Python sources + Compose manifests |
@@ -1433,7 +1431,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 13 | `.claude/commands/` |
-| Deprecated Scan-name slash shims | 2 | `.claude/commands/` |
+| Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
 | Durable tables | 95 | `db/init.sql` + migrations |
 
@@ -1488,7 +1486,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/ai/test-scenarios` | `list_ai_test_scenarios` |
 | `GET` | `/api/v1/findings` | `list_cli_v1_findings` |
 | `GET` | `/api/v1/scan` | `get_cli_v1_scan` |
-| `POST` | `/api/v1/scan` | `submit_cli_v1_scan` |
 | `POST` | `/arsenal/approvals` | `arsenal_create_approval` |
 | `GET` | `/arsenal/campaign-actions` | `arsenal_campaign_actions` |
 | `POST` | `/arsenal/campaign-actions/{campaign_action_id}/authz-promote` | `arsenal_promote_authz_replay` |
@@ -1754,8 +1751,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/scans` | `list_scans` |
 | `POST` | `/scans` | `submit_scan` |
 | `POST` | `/scans/batch` | `submit_batch` |
-| `POST` | `/scans/compat` | `submit_scan_compat` |
-| `POST` | `/scans/compat/batch` | `submit_batch_compat` |
 | `GET` | `/scans/{scan_id}` | `get_scan` |
 | `GET` | `/scans/{scan_id}/actions` | `get_scan_actions` |
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
@@ -2132,8 +2127,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `devices`, `doctor`, `env`, `fleet`, `gungnir`, `help`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
-| Deprecated compatibility aliases (sunset 2026-12-31) | `scan-full`, `scan-smart` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `collections`, `credentials`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -2570,13 +2564,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/status` | Scanner Status | Check the status of ShakerScan. | `.claude/commands/status.md` |
 | `/subdomains` | Subdomain Discovery | Discover subdomains for a domain using CT logs and passive sources. | `.claude/commands/subdomains.md` |
 | `/workers` | Worker Management | View and scale scanner workers. | `.claude/commands/workers.md` |
-
-Deprecated Scan-name shims (sunset 2026-12-31):
-
-| Compatibility slash command | Title | Purpose | Source |
-|---|---|---|---|
-| `/scan-full` | Deprecated Full command compatibility | `/scan-full` is a temporary compatibility shim. It does not select a separate engine. It translates | `.claude/commands/scan-full.md` |
-| `/scan-smart` | Deprecated Smart command compatibility | `/scan-smart` is a temporary compatibility shim. It does not select an adaptive scanner engine. | `.claude/commands/scan-smart.md` |
 
 | Subagent | Model | Purpose | Source |
 |---|---|---|---|

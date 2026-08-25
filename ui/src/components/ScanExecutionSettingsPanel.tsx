@@ -121,7 +121,9 @@ export default function ScanExecutionSettingsPanel() {
   const safety = settings?.safety_boundaries
   const research = settings?.research_agent
   const asmConfig = asm?.config
-  const eligibleTypes = scan?.eligible_scan_types?.join(', ') || 'smart, full, aggressive'
+  const eligibility = scan?.eligibility === 'active_testing_or_two_explicit_endpoints'
+    ? 'active testing or 2+ explicit endpoints'
+    : 'server policy'
   const workerText = scan?.running_workers == null
     ? 'worker count unavailable'
     : `${scan.running_workers} worker${scan.running_workers === 1 ? '' : 's'} running`
@@ -143,7 +145,7 @@ export default function ScanExecutionSettingsPanel() {
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <ToggleField
           label="Auto-shard eligible scans"
-          description={`${eligibleTypes}; ${workerText}`}
+          description={`${eligibility}; ${workerText}`}
           checked={Boolean(scan?.auto_sharding_enabled)}
           disabled={loading || saving || !scan}
           onChange={(next) => save(

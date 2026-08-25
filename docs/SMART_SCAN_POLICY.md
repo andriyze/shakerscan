@@ -147,7 +147,7 @@ python3 tests/benchmark/run_benchmarks.py \
 python3 scripts/dast_calibration.py \
   --benchmarks tests/benchmark/honey_benchmarks.json \
   --benchmark honey-smart-fast \
-  --allow-active \
+  --active-testing \
   --wait \
   --export-results
 python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/honey_benchmarks.json
@@ -157,7 +157,7 @@ docker run -d --rm --name shakerscan-juice-shop -p 3001:3000 bkimminich/juice-sh
 python3 scripts/dast_calibration.py \
   --benchmarks tests/benchmark/benchmarks.json \
   --benchmark juice-shop \
-  --allow-active \
+  --active-testing \
   --wait \
   --export-results
 python3 tests/benchmark/run_benchmarks.py --benchmarks tests/benchmark/benchmarks.json
@@ -173,14 +173,13 @@ How to answer common buyer questions:
 - "How do you control scan cost?" -> "We resolve explicit time, endpoint, parameter, and request budgets. Request enforcement is adapter-dependent and reported in receipts."
 - "How do you limit false positives?" -> "High-impact promotion requires deterministic proof contracts; unproven findings remain suspected or require review."
 - "How do you prove quality over time?" -> "We retain fingerprinted benchmark scorecards and keep release acceptance open when the current build has not passed them."
-- "Can we run safely in production?" -> "Active smart scans require explicit authorization. Use bounded profiles and review adapter enforcement before targeting production."
+- "Can we run safely in production?" -> "Active testing requires explicit authorization. Use bounded profiles and review adapter enforcement before targeting production."
 
 ## Implementation Notes
 Recent policy-aligned hardening:
-- Smart budget defaults are centralized in `scanner/constants.py` as `SMART_SCAN_BUDGETS` and consumed by scanner CLI/API.
-- Scan depth/time defaults are centralized in `scanner/constants.py` as `SCAN_BUDGET_DEFAULTS` and resolved from `scan_type + budget_profile + custom_budget`.
+- Canonical resource ceilings are centralized in the Scan contract and resolved from `budget_profile + custom_budget`.
 - Scan reports include the resolved coverage budget under `scan_config.resolved_budget`.
 - Session startup cleanup avoids lock re-entry deadlock.
 - Synthetic BOLA generation excludes auth/session-style paths.
 - Synthetic query URLs preserve valid URL encoding.
-- Smart BOLA default budget is now consistent across scanner and docs.
+- BOLA budget and proof requirements are consistent across the canonical compiler and docs.

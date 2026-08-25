@@ -202,7 +202,6 @@ function SchedulesContent() {
         dayOfWeek: formDayOfWeek,
         timeOfDay: formTime,
         kind: formKind,
-        scanType: 'scan',
         scanOptions: scan_options,
       })
       if (editingSchedule) {
@@ -245,8 +244,7 @@ function SchedulesContent() {
     setFormFrequency(schedule.frequency)
     setFormDayOfWeek(schedule.day_of_week ?? 0)
     setFormTime((schedule.time_of_day || '02:00').slice(0, 5))
-    const legacyProfile = schedule.scan_type === 'quick' ? 'fast' : ['deep', 'full', 'smart', 'aggressive'].includes(schedule.scan_type) ? 'thorough' : 'balanced'
-    setFormBudgetProfile((options.budget_profile as 'fast' | 'balanced' | 'thorough') || legacyProfile)
+    setFormBudgetProfile((options.budget_profile as 'fast' | 'balanced' | 'thorough') || 'balanced')
     setFormKind(getScheduleKind(schedule))
     setFormAsmBatchSize(asmOptions.batchSize)
     setFormAsmStaleDays(asmOptions.staleDays)

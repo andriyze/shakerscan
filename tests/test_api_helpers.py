@@ -646,9 +646,13 @@ def test_device_control_context_merge_preserves_concurrent_evidence_and_remaps_r
     after = copy.deepcopy(before)
     after["device_state"]["evidence"]["devref_1"] = {"kind": "inventory"}
     after["device_state"]["next_evidence_ref"] = 2
-    persisted = copy.deepcopy(before)
-    persisted["device_state"]["evidence"]["devref_1"] = {"kind": "capabilities"}
-    persisted["device_state"]["next_evidence_ref"] = 2
+    persisted = {
+        "device_runtime": {
+            "evidence": {"devref_1": {"kind": "capabilities"}},
+            "next_evidence_ref": 2,
+        },
+        "device_policy_state": {},
+    }
 
     merged, remapped = api_module._merge_hunt_device_control_context(
         persisted,
@@ -657,12 +661,13 @@ def test_device_control_context_merge_preserves_concurrent_evidence_and_remaps_r
     )
 
     assert remapped == {"devref_1": "devref_2"}
-    assert merged["device_state"]["evidence"] == {
+    assert merged["device_runtime"]["evidence"] == {
         "devref_1": {"kind": "capabilities"},
         "devref_2": {"kind": "inventory"},
     }
-    assert merged["device_state"]["next_evidence_ref"] == 3
-    assert merged["device_state"]["traffic_frozen"] is False
+    assert merged["device_runtime"]["next_evidence_ref"] == 3
+    assert merged["device_policy_state"]["traffic_frozen"] is False
+    assert "device_state" not in merged
 
 
 def test_device_http_context_merge_persists_failed_transport_attempt_without_lost_state():
@@ -677,9 +682,10 @@ def test_device_http_context_merge_persists_failed_transport_attempt_without_los
     after = copy.deepcopy(before)
     after["device_state"]["device_http_requests_used"] = 3
     after["device_state"]["last_device_http_request_monotonic"] = 20.0
-    persisted = copy.deepcopy(before)
-    persisted["device_state"]["device_http_requests_used"] = 4
-    persisted["device_state"]["last_device_http_request_monotonic"] = 15.0
+    persisted = {
+        "device_runtime": {"next_evidence_ref": 1, "evidence": {}},
+        "device_policy_state": {"requests_used": 4},
+    }
 
     merged, remapped = api_module._merge_hunt_device_http_context(
         persisted,
@@ -688,8 +694,9 @@ def test_device_http_context_merge_persists_failed_transport_attempt_without_los
     )
 
     assert remapped == {}
-    assert merged["device_state"]["device_http_requests_used"] == 5
-    assert merged["device_state"]["last_device_http_request_monotonic"] == 20.0
+    assert merged["device_policy_state"]["requests_used"] == 5
+    assert merged["device_policy_state"]["last_request_at"]
+    assert "device_state" not in merged
 
 
 def test_device_queue_context_merge_adds_only_the_execution_delta():
@@ -702,8 +709,10 @@ def test_device_queue_context_merge_adds_only_the_execution_delta():
     }
     after = copy.deepcopy(before)
     after["device_state"]["scans_queued"] = 2
-    persisted = copy.deepcopy(before)
-    persisted["device_state"]["scans_queued"] = 2
+    persisted = {
+        "device_runtime": {"next_evidence_ref": 1, "evidence": {}},
+        "device_policy_state": {"scans_queued": 2},
+    }
 
     merged, remapped = api_module._merge_hunt_device_queue_context(
         persisted,
@@ -712,7 +721,8 @@ def test_device_queue_context_merge_adds_only_the_execution_delta():
     )
 
     assert remapped == {}
-    assert merged["device_state"]["scans_queued"] == 3
+    assert merged["device_policy_state"]["scans_queued"] == 3
+    assert "device_state" not in merged
 
 
 def test_device_ssh_proposal_context_merge_appends_plan_without_losing_peer_state():
@@ -740,8 +750,14 @@ def test_device_ssh_proposal_context_merge_appends_plan_without_losing_peer_stat
     }
     after = copy.deepcopy(before)
     after["device_state"]["shell_plans"].append(proposed)
-    persisted = copy.deepcopy(before)
-    persisted["device_state"]["shell_plans"].append(concurrent)
+    persisted = {
+        "device_runtime": {
+            "shell_plans": [existing, concurrent],
+            "next_evidence_ref": 1,
+            "evidence": {},
+        },
+        "device_policy_state": {},
+    }
 
     merged, remapped = api_module._merge_hunt_device_ssh_proposal_context(
         persisted,
@@ -751,7 +767,7 @@ def test_device_ssh_proposal_context_merge_appends_plan_without_losing_peer_stat
 
     assert remapped == {}
     assert [
-        item["plan_id"] for item in merged["device_state"]["shell_plans"]
+        item["plan_id"] for item in merged["device_runtime"]["shell_plans"]
     ] == ["plan-existing", "plan-concurrent", "plan-proposed"]
 
 
@@ -762,11 +778,14 @@ def test_device_ssh_proposal_context_merge_rejects_equivalent_peer_plan():
         "proposal_signature": "same-signature",
         "status": "proposed",
     }], "evidence": {}}}
-    persisted = {"device_state": {"shell_plans": [{
-        "plan_id": "plan-peer",
-        "proposal_signature": "same-signature",
-        "status": "proposed",
-    }], "evidence": {}}}
+    persisted = {
+        "device_runtime": {"shell_plans": [{
+            "plan_id": "plan-peer",
+            "proposal_signature": "same-signature",
+            "status": "proposed",
+        }], "evidence": {}},
+        "device_policy_state": {},
+    }
 
     with pytest.raises(ValueError, match="Equivalent SSH proposal"):
         api_module._merge_hunt_device_ssh_proposal_context(
@@ -1600,7 +1619,7 @@ def test_default_fleet_scan_tiers_are_all_supported_but_tools_are_bounded():
         {"id": uuid.uuid4(), "region": "us-east", "labels": {}},
         {"requires": ["invented-tool"]},
     )
-    assert set(labels["scan_tiers"]) == api_module.VALID_DAST_SCAN_TYPES
+    assert set(labels["scan_tiers"]) == api_module.HISTORICAL_DAST_SCAN_TYPES
     assert "nuclei" in labels["tools"]
     assert "invented-tool" not in labels["tools"]
 
@@ -3290,7 +3309,7 @@ def _due_schedule():
         "target_id": uuid.uuid4(),
         "target_url": "https://example.test",
         "schedule_kind": "normal_scan",
-        "scan_type": "smart",
+        "scan_type": "scan",
         "scan_options": {"budget_profile": "fast"},
         "frequency": "daily",
         "day_of_week": None,
@@ -3388,7 +3407,7 @@ def test_canonical_schedule_queues_scan_job_v2_without_legacy_identity(monkeypat
     assert not {"scan_type", "quick", "thorough"} & set(persisted_options)
 
 
-def test_legacy_named_schedule_translates_to_canonical_job_without_fallback(monkeypatch):
+def test_legacy_named_schedule_is_disabled_without_execution_fallback(monkeypatch):
     schedule = _due_schedule()
     schedule["scan_type"] = "smart"
     schedule["scan_options"] = {}
@@ -3399,20 +3418,10 @@ def test_legacy_named_schedule_translates_to_canonical_job_without_fallback(monk
 
     asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
 
-    queued = json.loads(redis_client.rpush_calls[0][1])
-    insert = next(item for item in conn.executes if "INSERT INTO scans" in item[0])
-    persisted_options = json.loads(insert[1][4])
-    persisted_job = json.loads(insert[1][12])
-    assert queued["schema_version"] == api_module.SCAN_JOB_SCHEMA
-    assert queued["execution_plan"]["engine"] == "scan"
-    assert "options" not in queued
-    assert insert[1][5] == "scan"
-    assert insert[1][7] == "v2"
-    assert persisted_job["schema_version"] == api_module.SCAN_JOB_SCHEMA
-    assert insert[1][13]
-    assert persisted_options["budget_profile"] == "thorough"
-    assert persisted_options["scan_policy"]["active_testing"] is True
-    assert not {"scan_type", "quick", "thorough"} & set(persisted_options)
+    assert redis_client.rpush_calls == []
+    assert not any("INSERT INTO scans" in query for query, _args in conn.executes)
+    disabled = next(item for item in conn.executes if "UPDATE schedules" in item[0])
+    assert disabled[1] == (schedule["id"],)
 
 
 def test_public_scan_schema_exposes_independent_host_and_mutation_ceilings():
@@ -9418,9 +9427,15 @@ def test_arsenal_execute_gated_scan_focused_family_dispatches_when_allowed(monke
     assert result["operation_id"] == "op-scan"
     body = captured["body"]
     assert body.target == "https://app.example.com"
-    assert body.options.check_family == "sqli"
-    assert body.options.scan_type == "smart"
-    assert body.options.approval_receipt_id == "r"
+    assert body.budget_profile == "thorough"
+    assert body.policy == {
+        "active_testing": True,
+        "include_families": ["sqli"],
+    }
+    assert body.advanced.include_families == ["sqli"]
+    assert body.approval_receipt_id == "r"
+    assert body.options.check_family is None
+    assert body.options.scan_type is None
     assert body.options.custom_endpoints == ["POST /api/search q"]
     assert body.options.custom_sqli_payloads == ["' OR '1'='1"]
     assert body.options.focused_endpoints_only is True
@@ -11099,13 +11114,8 @@ def test_target_credential_profile_resolution_maps_primary_and_second_user(monke
     assert "primary-token" not in json.dumps(options)
 
 
-def test_focused_scan_defers_auth_preconditions_until_managed_profiles_resolve():
-    """Target-managed auth must satisfy POST /scans focused-family policy.
-
-    The target id is not available while the initial public payload is built, so
-    BOLA preconditions must run after the server attaches target-bound profile
-    references. This is also the submission path used by research preflights.
-    """
+def test_canonical_family_policy_does_not_resurrect_legacy_focus_fields():
+    """Historical target-profile reads cannot become legacy write authority."""
     class FakeConn:
         async def fetch(self, *_args):
             return [
@@ -11122,13 +11132,16 @@ def test_focused_scan_defers_auth_preconditions_until_managed_profiles_resolve()
             ]
 
     model = api_module.ScanOptions(
-        scan_type="smart",
-        check_family="bola",
+        budget_profile="thorough",
         exploit_depth=True,
     )
-    payload = api_module._build_scan_options_payload(
+    contract = api_module.resolve_scan_contract(
+        budget_profile="thorough",
+        policy={"active_testing": True, "include_families": ["bola"]},
+    )
+    payload = api_module._build_canonical_scan_options_payload(
         model,
-        "smart",
+        contract,
         defer_family_preconditions=True,
     )
     payload = asyncio.run(api_module._resolve_target_credential_profiles(
@@ -11138,7 +11151,10 @@ def test_focused_scan_defers_auth_preconditions_until_managed_profiles_resolve()
     ))
     payload, family = api_module._apply_scan_check_family_policy(payload)
 
-    assert family == "bola"
+    assert family is None
+    assert payload["scan_policy"]["include_families"] == ["bola"]
+    assert "check_family" not in payload
+    assert "asm_check_family" not in payload
     assert [ref["auth_state"] for ref in payload["managed_credential_profiles"]] == ["user1", "user2"]
 
 
@@ -11538,7 +11554,7 @@ def test_list_finding_exceptions_adds_hygiene_filters(monkeypatch):
 
 
 def _resolve_sharding(monkeypatch, *, worker_count=4, auto_enabled=False, **opt_kwargs):
-    """Run _build_scan_options_payload + _apply_auto_sharding_policy like submit_scan."""
+    """Run canonical option compilation + sharding policy like submit_scan."""
     monkeypatch.setattr(
         api_module, "_running_scan_worker_count_best_effort", lambda: worker_count
     )
@@ -11547,20 +11563,25 @@ def _resolve_sharding(monkeypatch, *, worker_count=4, auto_enabled=False, **opt_
         "_load_effective_scan_execution_settings",
         lambda: {"auto_sharding_enabled": auto_enabled, "auto_sharding_min_workers": 2},
     )
-    scan_type = opt_kwargs.get("scan_type", "smart")
+    active_testing = bool(opt_kwargs.pop("active_testing", True))
+    budget_profile = str(opt_kwargs.pop("budget_profile", "thorough"))
     options = api_module.ScanOptions(**opt_kwargs)
-    payload = api_module._build_scan_options_payload(options, scan_type)
+    contract = api_module.resolve_scan_contract(
+        budget_profile=budget_profile,
+        policy={"active_testing": active_testing},
+    )
+    payload = api_module._build_canonical_scan_options_payload(options, contract)
     enabled, _count = api_module._apply_auto_sharding_policy(
         options,
         payload,
-        scan_type in api_module.ACTIVE_ENFORCED_SCAN_TYPES,
+        active_testing,
     )
     return enabled, payload
 
 
 def test_explicit_parallel_true_forces_parent(monkeypatch):
     enabled, payload = _resolve_sharding(
-        monkeypatch, scan_type="smart", parallel=True, shard_strategy="family"
+        monkeypatch, active_testing=True, parallel=True, shard_strategy="family"
     )
     assert enabled is True
     assert payload["parallel"] is True
@@ -11570,7 +11591,7 @@ def test_explicit_parallel_true_forces_parent(monkeypatch):
 def test_explicit_parallel_true_defaults_shards_and_strategy(monkeypatch):
     # parallel=true with no shards/strategy still becomes a parent. Active scans
     # resolve to coverage so discovery is harvested once and workers pull batches.
-    enabled, payload = _resolve_sharding(monkeypatch, scan_type="smart", parallel=True)
+    enabled, payload = _resolve_sharding(monkeypatch, active_testing=True, parallel=True)
     assert enabled is True
     assert payload["parallel"] is True
     assert payload.get("shards") == "auto"
@@ -11579,7 +11600,7 @@ def test_explicit_parallel_true_defaults_shards_and_strategy(monkeypatch):
 
 def test_explicit_parallel_false_stays_standalone(monkeypatch):
     enabled, payload = _resolve_sharding(
-        monkeypatch, scan_type="smart", parallel=False, auto_enabled=True
+        monkeypatch, active_testing=True, parallel=False, auto_enabled=True
     )
     assert enabled is False
     # Key is always set explicitly, never left unset.
@@ -11589,7 +11610,7 @@ def test_explicit_parallel_false_stays_standalone(monkeypatch):
 def test_omitted_parallel_with_auto_sharding_off_sets_false_key(monkeypatch):
     # parallel omitted entirely + global auto-sharding disabled -> standalone,
     # but the resolved payload still carries an explicit parallel=False key.
-    enabled, payload = _resolve_sharding(monkeypatch, scan_type="standard", auto_enabled=False)
+    enabled, payload = _resolve_sharding(monkeypatch, active_testing=False, auto_enabled=False)
     assert enabled is False
     assert "parallel" in payload
     assert payload["parallel"] is False
@@ -18019,10 +18040,10 @@ def test_research_preflight_is_one_principal_coherent_focused_scan():
         approval_receipt_id="approval-1",
     )
 
-    assert options.scan_type == "smart"
+    assert options.scan_type is None
     assert options.parallel is False
     assert options.auth_state_shards is False
-    assert options.check_family == "bola"
+    assert options.check_family is None
     assert options.focused_endpoints_only is True
     assert options.zero_rediscovery is True
     assert options.custom_endpoints == endpoints

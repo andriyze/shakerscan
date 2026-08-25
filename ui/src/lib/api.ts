@@ -2729,7 +2729,7 @@ export interface ScanExecutionSettings {
   auto_sharding_strategy: 'auto' | 'scope' | 'family' | 'coverage' | 'coverage_family'
   auto_sharding_max_shards: number
   auto_sharding_min_workers: number
-  eligible_scan_types: string[]
+  eligibility: 'active_testing_or_two_explicit_endpoints'
   running_workers?: number | null
 }
 
@@ -7057,7 +7057,6 @@ export interface ScheduleCreate {
   time_of_day: string
   timezone?: string
   schedule_kind?: 'normal_scan' | 'asm_improve'
-  scan_type: string
   scan_options?: Record<string, unknown>
   jitter_minutes?: number
 }

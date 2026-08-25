@@ -35,13 +35,9 @@ def prepare_worker_dispatch(
 ) -> tuple[dict[str, Any], WorkerScanAdmission]:
     """Validate admission and derive bounded scanner-process options.
 
-    Legacy calls remain readable during migration. A call containing any V2 marker
-    is fail-closed and cannot silently downgrade to legacy execution.
+    Missing or incomplete V2 authority is fail-closed and cannot downgrade.
     """
     admission = resolve_worker_scan_admission(options)
-    if not admission.canonical or admission.plan is None:
-        return dict(options), admission
-
     normalized = admission.normalize_options(options)
     policy, parent_budget = admission.plan.policy, admission.plan.budget
     budget = parent_budget
@@ -109,9 +105,7 @@ def prepare_worker_dispatch(
     return normalized, admission
 
 
-def execution_result_metadata(admission: WorkerScanAdmission) -> dict[str, Any] | None:
-    if not admission.canonical or admission.plan is None:
-        return None
+def execution_result_metadata(admission: WorkerScanAdmission) -> dict[str, Any]:
     return {
         **admission.plan.canonical_dict(),
         "plan_digest": admission.plan.digest,

@@ -12,10 +12,7 @@ def _canonical_scan_sections() -> str:
     start = text.index("## 2. System architecture")
     end = text.index("## 10. Attack-surface management")
     canonical = text[start:end]
-    compatibility = canonical.index("### Deprecated compatibility inputs")
-    next_section = canonical.index("## 4. DAST", compatibility)
-    without_compatibility = canonical[:compatibility] + canonical[next_section:]
-    return " ".join(without_compatibility.split())
+    return " ".join(canonical.split())
 
 
 def test_canonical_architecture_sections_do_not_advertise_legacy_scan_engines():
@@ -49,21 +46,15 @@ def test_public_scan_commands_are_v2_and_secret_free():
     assert "auth_cookies" not in combined
 
 
-def test_legacy_slash_commands_are_dated_translation_only():
+def test_legacy_slash_commands_are_removed():
     for name in ("scan-full.md", "scan-smart.md"):
-        text = (ROOT / ".claude" / "commands" / name).read_text(encoding="utf-8")
-        assert "2026-12-31" in text
-        assert "compatibility" in text.lower()
-        assert '"scan_type"' not in text
-        assert '"budget_profile": "thorough"' in text
-        assert '"active_testing": true' in text
-        assert "must never enter the queued job" in text
+        assert not (ROOT / ".claude" / "commands" / name).exists()
 
 
-def test_inventory_separates_canonical_compatibility_and_internal_surfaces():
+def test_inventory_separates_canonical_and_internal_surfaces():
     text = REFERENCE.read_text(encoding="utf-8")
     assert "Canonical `scanner.sh` commands" in text
-    assert "Deprecated compatibility aliases (sunset 2026-12-31)" in text
+    assert "Deprecated compatibility aliases" not in text
     assert "### Internal Compatibility Scanner Flags" in text
     assert "### Internal Compatibility Scanner Module Inventory" in text
-    assert "Deprecated Scan-name shims (sunset 2026-12-31)" in text
+    assert "Deprecated Scan-name shims" not in text
