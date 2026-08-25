@@ -149,8 +149,12 @@ function GraphContent() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <Link href="/targets" className="text-gray-400 hover:text-white">
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <Link
+          href="/targets"
+          aria-label="Back to targets"
+          className="rounded text-gray-400 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <svg aria-hidden="true" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
         </Link>
