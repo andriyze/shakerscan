@@ -167,6 +167,10 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
+from worker_handlers.non_dast import (
+    NonDastWorkerHandler,
+    NonDastWorkerServices,
+)
 from scan.authorization import (
     ActionAuthorityDecision,
     revalidate_scan_action_authority,
@@ -2757,143 +2761,6 @@ def _effective_request_budget_mode(options: dict[str, Any] | None) -> str:
     if raw == "compatibility" and _fleet_limits_required():
         return "enforce"
     return raw
-
-
-async def run_scan(
-    target: str,
-    options: dict,
-    scan_id: str | None = None,
-    job_id: str | None = None,
-) -> dict:
-    """Execute an explicitly non-DAST worker job.
-
-    Deterministic Scan is executed exclusively through the persisted action
-    graph. Keeping that boundary here prevents a caller from accidentally
-    restoring the retired monolithic scanner path.
-    """
-    if is_deterministic_dast(options):
-        raise ValueError(
-            "monolithic deterministic Scan execution has been removed; "
-            "execute the persisted canonical action graph"
-        )
-
-    if options.get("run_kind") == "device_probe":
-        if scan_id:
-            await update_scan_progress(scan_id, "device_service_probe", 20, job_id=job_id)
-        try:
-            from scanner_tools.device_probe import run_device_service_probe
-        except ImportError:
-            from scanner.scanner_tools.device_probe import run_device_service_probe
-        if str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() in {"0", "false", "no", "off"}:
-            raise ValueError("connected-device posture is disabled on this worker")
-        probe_options = dict(options or {})
-        probe_options["_cancel_check"] = lambda: asyncio.to_thread(_scan_cancel_requested, scan_id)
-        result = await run_device_service_probe(target, probe_options)
-        if scan_id:
-            await update_scan_progress(scan_id, "device_service_verdict", 90, job_id=job_id)
-        return _strip_null_bytes(result) if isinstance(result, dict) else result
-
-    if options.get("run_kind") == "device_posture":
-        if scan_id:
-            await update_scan_progress(scan_id, "device_inventory", 10, job_id=job_id)
-        try:
-            from scanner_tools.device_posture import run_device_posture_scan
-        except ImportError:
-            from scanner.scanner_tools.device_posture import run_device_posture_scan
-        if str(os.environ.get("DEVICE_POSTURE_ENABLED", "true")).strip().lower() in {"0", "false", "no", "off"}:
-            raise ValueError("connected-device posture is disabled on this worker")
-        device_options = dict(options or {})
-        device_options["_cancel_check"] = lambda: asyncio.to_thread(_scan_cancel_requested, scan_id)
-
-        async def _device_progress(event: dict[str, Any]) -> None:
-            if not scan_id:
-                return
-            phase = str(event.get("phase") or "device_inventory")
-            try:
-                progress = max(10, min(89, int(event.get("progress") or 10)))
-            except (TypeError, ValueError):
-                progress = 10
-            await update_scan_progress(scan_id, phase, progress, job_id=job_id)
-            _append_device_activity(
-                scan_id, kind="phase", phase=phase, progress=progress,
-                details=event.get("details") if isinstance(event.get("details"), dict) else None,
-            )
-
-        device_options["_progress_callback"] = _device_progress
-        result = await run_device_posture_scan(target, device_options)
-        if scan_id:
-            await update_scan_progress(scan_id, "device_policy", 90, job_id=job_id)
-        # Device protocol metadata is untrusted binary-adjacent input too. SSDP
-        # banners and mDNS TXT records commonly contain padding NULs, which
-        # PostgreSQL JSONB cannot store. Keep the same persistence boundary used
-        # by ordinary DAST results instead of returning before it.
-        return _strip_null_bytes(result) if isinstance(result, dict) else result
-
-    if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS:
-        if scan_id:
-            await update_scan_progress(scan_id, "model_intake", 15, job_id=job_id)
-        try:
-            from scanner_tools.model_intake import run_model_intake_scan
-        except ImportError:
-            from scanner.scanner_tools.model_intake import run_model_intake_scan
-
-        intake_options = dict(options or {})
-        if scan_id:
-            intake_options.setdefault("scan_id", scan_id)
-            intake_options.setdefault("quarantine_dir", str(RESULTS_DIR / "model-intake-quarantine"))
-
-        async def _record_model_intake_event(event: dict[str, Any]) -> None:
-            if not scan_id or not isinstance(event, dict):
-                return
-            line = str(event.get("line") or "").strip()
-            if not line.startswith("[model-intake]") or len(line) > 1000:
-                return
-
-            def _write_log_line() -> None:
-                redis_client = get_redis()
-                log_key = f"scan:{scan_id}:logs"
-                redis_client.rpush(log_key, line)
-                redis_client.ltrim(log_key, -SCAN_LOG_TAIL, -1)
-                redis_client.expire(log_key, SCAN_LOG_TTL_SECONDS)
-
-            try:
-                await asyncio.to_thread(_write_log_line)
-            except Exception as exc:
-                print(f"[model-intake] live log write failed: {type(exc).__name__}", flush=True)
-            print(f"[{(job_id or scan_id)[:8]}] {line}", flush=True)
-            try:
-                progress = max(15, min(95, int(event.get("progress") or 15)))
-            except (TypeError, ValueError):
-                progress = 15
-            phase = re.sub(r"[^a-z0-9_]+", "_", str(event.get("phase") or "model_intake").lower())[:64]
-            await update_scan_progress(scan_id, phase or "model_intake", progress, job_id=job_id)
-
-        result = await run_model_intake_scan(
-            target,
-            intake_options,
-            event_callback=_record_model_intake_event,
-        )
-        if scan_id:
-            await update_scan_progress(scan_id, "model_intake_finalize", 95, job_id=job_id)
-        return result
-
-    if options.get("run_kind") in AI_GATE_RUN_KINDS:
-        if scan_id:
-            await update_scan_progress(scan_id, "ai_gate", 15, job_id=job_id)
-        from ai_gate_scan import run_ai_target_scan
-
-        if not scan_id:
-            raise CredentialResolutionError("AI Gate scan identity is unavailable")
-        async with _hydrate_ai_gate_options(options, scan_id) as hydrated_options:
-            result = await run_ai_target_scan(target, hydrated_options)
-        if scan_id:
-            await update_scan_progress(scan_id, "ai_gate_finalize", 95, job_id=job_id)
-        return result
-
-    raise ValueError(
-        "unsupported non-DAST worker run kind; expected Device, Model Intake, "
-        "or AI Gate dispatch"
-    )
 
 
 async def run_discovery(root_domain: str) -> dict:
@@ -7969,6 +7836,28 @@ def _append_device_activity(
         redis_client.expire(key, SCAN_LOG_TTL_SECONDS)
     except Exception:
         pass
+
+
+# Bind process infrastructure once. The product behavior lives in the extracted
+# handler and this module does not duplicate or wrap its dispatch implementation.
+_NON_DAST_WORKER_HANDLER = NonDastWorkerHandler(NonDastWorkerServices(
+    update_scan_progress=lambda *args, **kwargs: update_scan_progress(
+        *args, **kwargs,
+    ),
+    scan_cancel_requested=lambda scan_id: _scan_cancel_requested(scan_id),
+    append_device_activity=lambda *args, **kwargs: _append_device_activity(
+        *args, **kwargs,
+    ),
+    strip_null_bytes=lambda value: _strip_null_bytes(value),
+    get_redis=lambda: get_redis(),
+    hydrate_ai_gate_options=lambda options, scan_id: _hydrate_ai_gate_options(
+        options, scan_id,
+    ),
+    results_dir=RESULTS_DIR,
+    scan_log_tail=SCAN_LOG_TAIL,
+    scan_log_ttl_seconds=SCAN_LOG_TTL_SECONDS,
+))
+run_scan = _NON_DAST_WORKER_HANDLER.run
 
 
 def _runtime_scope_guard_applies(options: dict[str, Any]) -> bool:

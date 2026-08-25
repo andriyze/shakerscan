@@ -156,13 +156,17 @@ def test_non_dast_run_kinds_bypass_scan_admission():
 def test_primary_worker_rejects_monolithic_dast_dispatch():
     root = Path(__file__).resolve().parents[1]
     source = (root / "api" / "worker.py").read_text()
-    start = source.index("async def run_scan(")
-    end = source.index("\n\nasync def run_discovery", start)
-    run_scan = source[start:end]
+    handler = (
+        root / "api" / "worker_handlers" / "non_dast.py"
+    ).read_text()
 
-    assert "monolithic deterministic Scan execution has been removed" in run_scan
-    assert "prepare_worker_dispatch(options)" not in run_scan
-    assert "SCANNER_PATH" not in run_scan
+    assert "run_scan = _NON_DAST_WORKER_HANDLER.run" in source
+    assert "async def run_scan(" not in source
+    assert "monolithic deterministic Scan execution has been removed" in handler
+    assert "prepare_worker_dispatch(options)" not in handler
+    assert "SCANNER_PATH" not in handler
+    assert "import worker" not in handler
+    assert "import api" not in handler
     assert not (root / "api" / "worker_v2.py").exists()
     entrypoint = (root / "scanner" / "entrypoint.sh").read_text()
     assert "/app/worker_v2.py" not in entrypoint

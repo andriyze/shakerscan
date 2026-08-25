@@ -12,10 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_device_result_uses_the_shared_nul_sanitizer_before_returning():
-    source = (ROOT / "api" / "worker.py").read_text()
-    branch = source[source.index('if options.get("run_kind") == "device_posture"'):]
-    branch = branch[:branch.index('if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS')]
-    assert "_strip_null_bytes(result)" in branch
+    source = (ROOT / "api" / "worker_handlers" / "non_dast.py").read_text()
+    branch = source[source.index("async def _run_device_posture("):]
+    branch = branch[:branch.index("async def _run_model_intake(")]
+    assert "self.services.strip_null_bytes(result)" in branch
 
 
 def test_device_scan_enforces_the_state_change_approval_policy():
@@ -244,10 +244,11 @@ def test_device_children_have_redis_identity_and_dedicated_heartbeats():
 
 
 def test_device_worker_rechecks_feature_flag_and_injects_cancel_guard():
-    source = (ROOT / "api" / "worker.py").read_text()
-    branch = source[source.index('if options.get("run_kind") == "device_posture"'):]
-    branch = branch[:branch.index('if options.get("run_kind") in MODEL_INTAKE_RUN_KINDS')]
-    assert "DEVICE_POSTURE_ENABLED" in branch
+    source = (ROOT / "api" / "worker_handlers" / "non_dast.py").read_text()
+    branch = source[source.index("async def _run_device_posture("):]
+    branch = branch[:branch.index("async def _run_model_intake(")]
+    assert "self._device_enabled()" in branch
+    assert "DEVICE_POSTURE_ENABLED" in source
     assert 'device_options["_cancel_check"]' in branch
 
 
