@@ -1,4 +1,6 @@
 from dataclasses import replace
+import hashlib
+import json
 
 import pytest
 
@@ -10,6 +12,7 @@ from api.scan.jobs import derive_scan_shard_budget
 from api.scan.parallel_compiler import (
     ParallelActionPlanCompiler,
     ParallelActionPlanError,
+    build_parallel_work_assignment,
     validate_parallel_partition_record,
 )
 
@@ -53,12 +56,13 @@ def _authority():
 def _children(*, reordered=False):
     result = []
     for index, child_id in enumerate(CHILD_IDS):
-        options = {
-            "custom_endpoints": [f"GET /v1/items/{index}?secret=redacted-at-source"],
-            "auth_state": "anonymous",
-        }
+        options = {"auth_state": "anonymous"}
         if index == 0:
             options["parallel_backbone"] = True
+        else:
+            options["custom_endpoints"] = [
+                f"GET /v1/items/{index}?secret=redacted-at-source"
+            ]
         item = {
             "scan_id": child_id,
             "index": index,
@@ -72,6 +76,63 @@ def _children(*, reordered=False):
             }
         result.append(item)
     return tuple(result)
+
+
+def _projected_plans(partition, parent):
+    result = {}
+    global_ids = set(partition.globally_assigned_action_ids)
+    for child in partition.children:
+        selected = [
+            action for action in parent.actions
+            if action.action_id != "finalize.report"
+            and ((action.action_id in global_ids) == (child.role == "global"))
+        ]
+        selected_ids = {action.action_id for action in selected}
+        actions = tuple(
+            replace(
+                action,
+                ordinal=index,
+                dependencies=tuple(
+                    dependency for dependency in action.dependencies
+                    if dependency in selected_ids
+                ),
+                action_digest=None,
+            )
+            for index, action in enumerate(selected)
+        )
+        result[child.scan_id] = replace(
+            parent, scan_id=child.scan_id, actions=actions, plan_digest=None,
+        )
+    return result
+
+
+def _assignments(children):
+    return {
+        child["scan_id"]: build_parallel_work_assignment(
+            endpoints=child["options"].get("custom_endpoints") or (),
+        )
+        for child in children
+    }
+
+
+def _parent_assignment(assignments):
+    endpoint_ids = sorted({
+        item
+        for assignment in assignments.values()
+        for item in assignment["endpoint_work_ids"]
+    })
+    material = {
+        "endpoint_work_ids": endpoint_ids,
+        "request_work_ids": [],
+        "work_manifest_refs": [],
+        "allowed_family_scope": [],
+    }
+    return {
+        **material,
+        "work_partition_digest": hashlib.sha256(json.dumps(
+            material, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode()).hexdigest(),
+    }
 
 
 def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():
@@ -150,16 +211,20 @@ def test_parallel_partition_record_rejects_unplanned_child_plan():
         child_specs=_children(),
         strategy="scope",
     )
-    plans = {
-        child.scan_id: replace(parent, scan_id=child.scan_id, plan_digest=None)
-        for child in partition.children
-    }
-    record = partition.record(plans)
+    children = _children()
+    plans = _projected_plans(partition, parent)
+    assignments = _assignments(children)
+    record = partition.record(
+        plans,
+        child_work_assignments=assignments,
+        parent_work_assignment=_parent_assignment(assignments),
+    )
     digests = {scan_id: str(plan.plan_digest) for scan_id, plan in plans.items()}
     validate_parallel_partition_record(
         record,
         parent_scan_id=PARENT_ID,
         child_plan_digests=digests,
+        child_action_plans=plans,
     )
     with pytest.raises(ParallelActionPlanError, match="differ"):
         validate_parallel_partition_record(
@@ -167,6 +232,154 @@ def test_parallel_partition_record_rejects_unplanned_child_plan():
             parent_scan_id=PARENT_ID,
             child_plan_digests={**digests, CHILD_IDS[2]: "f" * 64},
         )
+
+
+def test_parallel_partition_rejects_a_cloned_full_parent_plan_on_every_child():
+    execution, parent = _authority()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=_children(),
+        strategy="scope",
+    )
+    clones = {
+        child.scan_id: replace(parent, scan_id=child.scan_id, plan_digest=None)
+        for child in partition.children
+    }
+    with pytest.raises(ParallelActionPlanError, match="parent-owned finalization"):
+        partition.record(clones)
+
+
+def test_parallel_partition_rejects_missing_and_duplicate_endpoint_work():
+    execution, parent = _authority()
+    children = _children()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=children,
+        strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    assignments = _assignments(children)
+    missing_parent = build_parallel_work_assignment(
+        endpoints=("GET /v1/items/1", "GET /v1/items/2", "GET /missing"),
+    )
+    with pytest.raises(ParallelActionPlanError, match="union differs"):
+        partition.record(
+            plans,
+            child_work_assignments=assignments,
+            parent_work_assignment=missing_parent,
+        )
+
+    duplicated = dict(assignments)
+    duplicated[CHILD_IDS[2]] = duplicated[CHILD_IDS[1]]
+    with pytest.raises(ParallelActionPlanError, match="duplicate endpoint"):
+        partition.record(plans, child_work_assignments=duplicated)
+
+
+def test_parallel_partition_rejects_duplicate_global_and_extra_capability_family():
+    execution, parent = _authority()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=_children(),
+        strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    endpoint_id = CHILD_IDS[1]
+    duplicate = parent.actions[0]
+    endpoint_actions = (replace(
+        duplicate, ordinal=0, dependencies=(), action_digest=None,
+    ),)
+    duplicate_plans = {
+        **plans,
+        endpoint_id: replace(
+            plans[endpoint_id], actions=endpoint_actions, plan_digest=None,
+        ),
+    }
+    with pytest.raises(ParallelActionPlanError, match="duplicates a global"):
+        partition.record(duplicate_plans)
+
+    global_id = CHILD_IDS[0]
+    first = plans[global_id].actions[0]
+    rogue = replace(first, capability_name="rogue.execute", action_digest=None)
+    rogue_plan = replace(
+        plans[global_id],
+        actions=(rogue, *plans[global_id].actions[1:]),
+        plan_digest=None,
+    )
+    with pytest.raises(ParallelActionPlanError, match="capability family"):
+        partition.record({**plans, global_id: rogue_plan})
+
+
+def test_parallel_partition_rejects_wrong_work_digest_and_unassigned_required_action():
+    execution, parent = _authority()
+    children = _children()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=children,
+        strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    assignments = _assignments(children)
+    record = partition.record(plans, child_work_assignments=assignments)
+    record["children"][1]["work_partition_digest"] = "f" * 64
+    raw = {key: value for key, value in record.items() if key != "record_digest"}
+    record["record_digest"] = hashlib.sha256(json.dumps(
+        raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    with pytest.raises(ParallelActionPlanError, match="work partition digest"):
+        validate_parallel_partition_record(
+            record,
+            parent_scan_id=PARENT_ID,
+            child_plan_digests={
+                scan_id: str(plan.plan_digest) for scan_id, plan in plans.items()
+            },
+        )
+
+    active_contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={
+            "active_testing": True,
+            "include_families": ["xss"],
+            "exclude_families": ["recon", "nuclei", "sqli", "bola"],
+        },
+    )
+    active_parent = allocate_scan_action_plan(
+        ScanActionPlanCompiler().compile(
+            scan_id=PARENT_ID,
+            execution_plan=active_contract.execution_plan,
+            target_binding=_target(),
+        ),
+        active_contract.budget,
+    ).plan
+    active_partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=active_contract.execution_plan,
+        parent_action_plan=active_parent,
+        target_binding=_target(),
+        child_specs=children,
+        strategy="scope",
+    )
+    incomplete = _projected_plans(active_partition, active_parent)
+    for child in active_partition.children:
+        plan = incomplete[child.scan_id]
+        kept = tuple(
+            action for action in plan.actions if action.action_id != "verify.xss"
+        )
+        incomplete[child.scan_id] = replace(
+            plan,
+            actions=tuple(replace(
+                action, ordinal=index, action_digest=None,
+            ) for index, action in enumerate(kept)),
+            plan_digest=None,
+        )
+    with pytest.raises(ParallelActionPlanError, match="required parent work"):
+        active_partition.record(incomplete)
 
 
 def test_canonical_strategy_uses_policy_and_known_work_not_scan_mode():

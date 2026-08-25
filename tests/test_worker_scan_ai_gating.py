@@ -2436,6 +2436,7 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
     )
     plan = worker._compile_parallel_child_action_plan(child, options)
 
+    assert "finalize.report" not in {action.action_id for action in plan.actions}
     collection = next(
         action for action in plan.actions
         if action.capability_name == "collections.replay_safe"
@@ -2764,6 +2765,12 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
     assert [
         child["role"] for child in record["children"]
     ] == ["global", "endpoint"]
+    assert all(
+        "finalize.report" not in child["expected_action_ids"]
+        for child in record["children"]
+    )
+    assert all(child["work_partition_digest"] for child in record["children"])
+    assert all(child["input_binding_digest"] for child in record["children"])
 
 
 def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypatch):

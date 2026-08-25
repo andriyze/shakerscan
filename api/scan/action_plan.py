@@ -556,7 +556,7 @@ class ScanActionPlanCompiler:
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
     ) -> ScanActionPlan:
         scope = str(action_scope or "").strip().lower()
-        if scope not in {"full", "discovery", "endpoint"}:
+        if scope not in {"full", "global", "discovery", "endpoint"}:
             raise ScanActionPlanError("action_scope is invalid")
         if not isinstance(defer_manifest_actions, bool):
             raise ScanActionPlanError("defer_manifest_actions must be a boolean")
@@ -703,8 +703,8 @@ class ScanActionPlanCompiler:
         nuclei = active and passive_nuclei
         bola = active and enabled("bola")
         template_actions_expected = (
-            (scope == "full" and passive_nuclei)
-            or (scope != "discovery" and nuclei and not defer_manifest_actions)
+            (scope in {"full", "endpoint"} and passive_nuclei)
+            or (scope in {"full", "endpoint"} and nuclei and not defer_manifest_actions)
         )
         if template_actions_expected and (
             not template_ref
@@ -768,7 +768,7 @@ class ScanActionPlanCompiler:
             if any(row.action_id == "inputs.auth_primary" for row in blueprints)
             else ()
         )
-        if scope == "full":
+        if scope in {"full", "global"}:
             add(
                 "baseline.http",
                 "deterministic_baseline",
@@ -823,7 +823,7 @@ class ScanActionPlanCompiler:
                     },
                     required=True,
                 )
-        if scope in {"full", "discovery"}:
+        if scope in {"full", "global", "discovery"}:
             add(
                 "discover.web_probe",
                 "discover_surface",
@@ -836,7 +836,7 @@ class ScanActionPlanCompiler:
 
         crawl_required = bool(explicitly_requested) and needs_candidates and not endpoint_ref and not candidate_ref
         if (
-            scope in {"full", "discovery"}
+            scope in {"full", "global", "discovery"}
             and (self._family_enabled(execution_plan, "recon") or needs_candidates)
         ):
             add(
@@ -856,7 +856,7 @@ class ScanActionPlanCompiler:
                     {"target_manifest_ref": endpoint_ref or None},
                     dependencies=("discover.web_probe",),
                 )
-        if scope in {"full", "discovery"} and policy.subdomain_discovery:
+        if scope in {"full", "global", "discovery"} and policy.subdomain_discovery:
             add(
                 "discover.subdomains",
                 "discover_surface",
@@ -865,7 +865,7 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
-        if scope in {"full", "discovery"} and policy.network_discovery:
+        if scope in {"full", "global", "discovery"} and policy.network_discovery:
             add(
                 "discover.ports",
                 "discover_network",
@@ -1069,11 +1069,11 @@ class ScanActionPlanCompiler:
             )
 
         authz_will_run = (
-            scope != "discovery"
+            scope in {"full", "endpoint"}
             and bola
             and {"primary", "secondary"} <= set(lane_refs)
         )
-        if scope == "full" and passive_nuclei:
+        if scope in {"full", "endpoint"} and passive_nuclei:
             add_manifest_breadth(
                 "passive.templates",
                 "deterministic_baseline",
@@ -1100,7 +1100,7 @@ class ScanActionPlanCompiler:
                     + int(authz_will_run)
                 ),
             )
-        if scope != "discovery" and nuclei and not defer_manifest_actions:
+        if scope in {"full", "endpoint"} and nuclei and not defer_manifest_actions:
             add_manifest_breadth(
                 "active.templates",
                 "deterministic_active",
@@ -1119,7 +1119,7 @@ class ScanActionPlanCompiler:
                     + int(authz_will_run)
                 ),
             )
-        if scope != "discovery" and xss and not defer_manifest_actions:
+        if scope in {"full", "endpoint"} and xss and not defer_manifest_actions:
             add_manifest_breadth(
                 "verify.xss",
                 "verify_candidates",
@@ -1137,7 +1137,7 @@ class ScanActionPlanCompiler:
                     + int(authz_will_run)
                 ),
             )
-        if scope != "discovery" and sqli and not defer_manifest_actions:
+        if scope in {"full", "endpoint"} and sqli and not defer_manifest_actions:
             add_manifest_breadth(
                 "verify.sqli",
                 "verify_candidates",
@@ -1157,7 +1157,7 @@ class ScanActionPlanCompiler:
             if row.action_id.startswith("inputs.collection_")
         )
         if (
-            scope != "discovery"
+            scope in {"full", "endpoint"}
             and policy.allow_state_changing_http
             and not defer_manifest_actions
             and request_candidate_ref

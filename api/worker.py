@@ -205,6 +205,8 @@ from scan.parallel_inputs import (
 from scan.parallel_compiler import (
     ParallelActionPlanCompiler,
     ParallelActionPlanError,
+    build_parallel_work_assignment,
+    parallel_capability_family_scope,
     validate_parallel_partition_record,
 )
 from scan.external_process import fit_reservation_scaled_profile
@@ -14914,7 +14916,7 @@ def _compile_parallel_child_action_plan(
     if child_job.shard.parallel_discovery:
         action_scope = "discovery"
     elif child_options.get("parallel_action_partition_role") == "global":
-        action_scope = "full"
+        action_scope = "global"
     else:
         action_scope = "endpoint"
     credential_refs = [
@@ -14964,12 +14966,14 @@ def _compile_parallel_child_action_plan(
         shard_authority=child_job.shard.payload(),
         action_scope=action_scope,
         family_scope=family_scope,
-        action_budgets={"finalize.report": {}},
+        include_finalizer=False,
+        action_budgets={},
     )
     return allocate_scan_action_plan(
         raw_plan,
         child_job.shard.sub_budget,
         assign_residual_to_finalizer=False,
+        require_finalizer=False,
     ).plan
 
 
@@ -15791,6 +15795,7 @@ async def process_scan_plan_job(job_data: dict):
         if child.role == "global"
     )
     request_partitions: dict[int, Mapping[str, ScanWorkManifest]] = {}
+    parent_request_manifests: tuple[ScanWorkManifest, ...] = ()
     if isinstance(
         parent_options.get("request_manifest_refs"), Mapping,
     ):
@@ -15845,6 +15850,11 @@ async def process_scan_plan_job(job_data: dict):
             tuple[ScanWorkManifest, ...], int,
         ]
     ] = []
+    child_work_assignments: dict[str, dict[str, Any]] = {}
+    parent_allowed_family_scope = parallel_capability_family_scope(
+        parallel_action_partition.allowed_parent_capabilities
+    )
+    parent_endpoint_assignments: list[Any] = []
     for shard, (child_id, child_job_id, identity_shard_index) in zip(
         plan.shards, child_identities, strict=True,
     ):
@@ -15857,7 +15867,11 @@ async def process_scan_plan_job(job_data: dict):
             child_options.get("custom_endpoints") or ()
         )
         if child_options.get("parallel_backbone") is True:
-            assigned_endpoints = list(harvested)
+            # The global child owns baseline and discovery only. Endpoint and
+            # request work belongs exclusively to endpoint children.
+            assigned_endpoints = []
+        else:
+            parent_endpoint_assignments.extend(assigned_endpoints)
         child_options, child_work_manifests = (
             _compile_parallel_child_work_manifests(
                 child_scan_id=child_id,
@@ -15870,6 +15884,25 @@ async def process_scan_plan_job(job_data: dict):
                     shard.index,
                 ),
             )
+        )
+        request_entries = [
+            dict(entry)
+            for manifest in child_work_manifests
+            if manifest.kind is ScanWorkManifestKind.REQUEST
+            for entry in manifest.entries
+        ]
+        child_work_assignment = build_parallel_work_assignment(
+            endpoints=assigned_endpoints,
+            request_entries=request_entries,
+            work_manifest_refs=tuple(
+                manifest.reference().canonical_dict()
+                for manifest in child_work_manifests
+            ),
+            allowed_family_scope=parent_allowed_family_scope,
+        )
+        child_work_assignments[child_id] = child_work_assignment
+        child_options["parallel_work_partition_digest"] = (
+            child_work_assignment["work_partition_digest"]
         )
         child_job, child_options, payload = _canonical_shard_job(
             canonical_parent_job,
@@ -15891,6 +15924,14 @@ async def process_scan_plan_job(job_data: dict):
 
     if parallel_action_partition is not None:
         try:
+            parent_work_assignment = build_parallel_work_assignment(
+                endpoints=parent_endpoint_assignments,
+                request_entries=tuple(
+                    dict(entry)
+                    for manifest in parent_request_manifests
+                    for entry in manifest.entries
+                ),
+            )
             parent_options["parallel_action_partition_record"] = (
                 parallel_action_partition.record({
                     child_id: child_action_plan
@@ -15899,7 +15940,10 @@ async def process_scan_plan_job(job_data: dict):
                         _child_job, child_action_plan, _child_work_manifests,
                         _shard_index,
                     ) in child_jobs
-                })
+                },
+                child_work_assignments=child_work_assignments,
+                parent_work_assignment=parent_work_assignment,
+                )
             )
         except ParallelActionPlanError as exc:
             raise ExecutionScopeError(
@@ -16358,7 +16402,7 @@ async def process_scan_merge_job(job_data: dict):
             SELECT id, status, result, score, grade, findings_count, shard_index,
                    options, started_at, completed_at, campaign_id, error_message,
                    current_phase, executing_node_id, worker_id,
-                   scan_action_plan_digest
+                   scan_action_plan_digest, scan_action_plan_json
             FROM scans
             WHERE parent_scan_id = $1 AND scan_role='shard'
             ORDER BY shard_index
@@ -16378,6 +16422,12 @@ async def process_scan_merge_job(job_data: dict):
                 child_plan_digests={
                     str(child["id"]): str(
                         child.get("scan_action_plan_digest") or ""
+                    )
+                    for child in children
+                },
+                child_action_plans={
+                    str(child["id"]): _as_report_dict(
+                        child.get("scan_action_plan_json")
                     )
                     for child in children
                 },

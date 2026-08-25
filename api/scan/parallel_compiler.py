@@ -100,6 +100,123 @@ def _work_partition_digest(options: Mapping[str, Any]) -> str:
     })
 
 
+def _work_item_id(kind: str, value: Any) -> str:
+    return _digest({"kind": kind, "value": value})
+
+
+def build_parallel_work_assignment(
+    *,
+    endpoints: Sequence[Any] = (),
+    request_entries: Sequence[Mapping[str, Any]] = (),
+    work_manifest_refs: Sequence[Mapping[str, Any]] = (),
+    allowed_family_scope: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Create a content-free exact work binding for one parallel child."""
+    endpoint_work_ids = sorted({
+        _work_item_id("endpoint", str(item).strip())
+        for item in endpoints
+        if str(item).strip()
+    })
+    request_work_ids = sorted({
+        _work_item_id("request", {
+            key: nested
+            for key, nested in dict(item).items()
+            if key != "selected_shard"
+        })
+        for item in request_entries
+        if isinstance(item, Mapping)
+    })
+    refs = [dict(item) for item in work_manifest_refs if isinstance(item, Mapping)]
+    refs.sort(key=lambda item: json.dumps(
+        item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ))
+    families = sorted({
+        str(item).strip().lower()
+        for item in allowed_family_scope
+        if str(item).strip()
+    })
+    material = {
+        "endpoint_work_ids": endpoint_work_ids,
+        "request_work_ids": request_work_ids,
+        "work_manifest_refs": refs,
+        "allowed_family_scope": families,
+    }
+    return {**material, "work_partition_digest": _digest(material)}
+
+
+def _canonical_work_assignment(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ParallelActionPlanError("parallel child work assignment is invalid")
+    endpoint_ids = value.get("endpoint_work_ids")
+    request_ids = value.get("request_work_ids")
+    refs = value.get("work_manifest_refs")
+    families = value.get("allowed_family_scope")
+    if not all(isinstance(item, list) for item in (
+        endpoint_ids, request_ids, refs, families,
+    )):
+        raise ParallelActionPlanError("parallel child work assignment fields are invalid")
+    if (
+        len(endpoint_ids) != len(set(endpoint_ids))
+        or len(request_ids) != len(set(request_ids))
+        or any(
+            not isinstance(item, str)
+            or len(item) != 64
+            or any(char not in "0123456789abcdef" for char in item)
+            for item in (*endpoint_ids, *request_ids)
+        )
+        or any(not isinstance(item, Mapping) for item in refs)
+        or any(not isinstance(item, str) or not item for item in families)
+    ):
+        raise ParallelActionPlanError("parallel child work assignment content is invalid")
+    material = {
+        "endpoint_work_ids": sorted(endpoint_ids),
+        "request_work_ids": sorted(request_ids),
+        "work_manifest_refs": sorted(
+            (dict(item) for item in refs),
+            key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            ),
+        ),
+        "allowed_family_scope": sorted(set(families)),
+    }
+    if str(value.get("work_partition_digest") or "") != _digest(material):
+        raise ParallelActionPlanError("parallel child work partition digest is invalid")
+    return {**material, "work_partition_digest": _digest(material)}
+
+
+def _projection_id(action_id: str) -> str:
+    head, dot, tail = action_id.rpartition(".")
+    return head if dot and len(tail) == 5 and tail.isdigit() else action_id
+
+
+def _capability_family(capability_name: str) -> str:
+    if capability_name.startswith("xss."):
+        return "xss"
+    if capability_name.startswith("sqli."):
+        return "sqli"
+    if capability_name.startswith("templates."):
+        return "nuclei"
+    if capability_name.startswith("authz."):
+        return "bola"
+    if capability_name.startswith(("web.", "http.", "dns.", "tls.", "ports.", "service.", "subdomains.")):
+        return "recon"
+    if capability_name.startswith(("auth.", "collections.")):
+        return "inputs"
+    if capability_name == "scan.finalize":
+        return "finalizer"
+    return capability_name.split(".", 1)[0]
+
+
+def parallel_capability_family_scope(
+    capability_names: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(sorted({_capability_family(item) for item in capability_names}))
+
+
+def _is_global_action(action_id: str) -> bool:
+    return action_id.startswith(("baseline.", "discover."))
+
+
 @dataclass(frozen=True)
 class ParallelChildPartition:
     scan_id: str
@@ -131,6 +248,9 @@ class ParallelActionPartition:
     children: tuple[ParallelChildPartition, ...]
     parent_owned_action_ids: tuple[str, ...]
     globally_assigned_action_ids: tuple[str, ...]
+    assigned_parent_action_ids: tuple[str, ...]
+    required_parent_action_ids: tuple[str, ...]
+    allowed_parent_capabilities: tuple[str, ...]
     schema_version: str = PARALLEL_ACTION_PARTITION_SCHEMA
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -145,37 +265,193 @@ class ParallelActionPartition:
             "children": [item.canonical_dict() for item in self.children],
             "parent_owned_action_ids": list(self.parent_owned_action_ids),
             "globally_assigned_action_ids": list(self.globally_assigned_action_ids),
+            "assigned_parent_action_ids": list(self.assigned_parent_action_ids),
+            "required_parent_action_ids": list(self.required_parent_action_ids),
+            "allowed_parent_capabilities": list(self.allowed_parent_capabilities),
         }
 
     @property
     def partition_digest(self) -> str:
         return _digest(self.canonical_dict())
 
-    def record(self, child_action_plans: Mapping[str, ScanActionPlan]) -> dict[str, Any]:
+    def record(
+        self,
+        child_action_plans: Mapping[str, ScanActionPlan],
+        *,
+        child_work_assignments: Mapping[str, Mapping[str, Any]] | None = None,
+        parent_work_assignment: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         expected = {child.scan_id for child in self.children}
         if set(child_action_plans) != expected:
             raise ParallelActionPlanError(
                 "child action plans do not exactly cover the parallel partition"
             )
+        supplied_assignments = dict(child_work_assignments or {})
+        if supplied_assignments and set(supplied_assignments) != expected:
+            raise ParallelActionPlanError(
+                "child work assignments do not exactly cover the parallel partition"
+            )
+        # Parent plans are not children. Use the immutable parent plan authority
+        # captured by compile() below rather than accepting caller-supplied data.
+        parent_projection_ids = set(self.assigned_parent_action_ids)
+        required_parent_ids = set(self.required_parent_action_ids)
+        parent_capabilities = set(self.allowed_parent_capabilities)
+        global_action_ids = set(self.globally_assigned_action_ids)
+        parent_owned_ids = set(self.parent_owned_action_ids)
         child_records = []
+        endpoint_owners: dict[str, str] = {}
+        request_owners: dict[str, str] = {}
+        assigned_projection_ids: set[str] = set()
+        global_occurrences: dict[str, int] = {
+            action_id: 0 for action_id in global_action_ids
+        }
         for child in self.children:
             plan = child_action_plans[child.scan_id]
             if plan.scan_id != child.scan_id:
                 raise ParallelActionPlanError(
                     "child action plan owner differs from its partition"
                 )
+            if any(action.action_id in parent_owned_ids for action in plan.actions):
+                raise ParallelActionPlanError(
+                    "parent-owned finalization cannot execute on a parallel child"
+                )
+            action_projection_ids = {
+                _projection_id(action.action_id) for action in plan.actions
+            }
+            if not action_projection_ids <= parent_projection_ids:
+                raise ParallelActionPlanError(
+                    "parallel child introduced an action outside parent authority"
+                )
+            if any(
+                action.capability_name not in parent_capabilities
+                for action in plan.actions
+            ):
+                raise ParallelActionPlanError(
+                    "parallel child introduced an unauthorized capability family"
+                )
+            child_global = {
+                action.action_id for action in plan.actions
+                if action.action_id in global_action_ids
+            }
+            if child.role == "global":
+                if child_global != global_action_ids:
+                    raise ParallelActionPlanError(
+                        "global child does not exactly own the global action set"
+                    )
+            elif child_global:
+                raise ParallelActionPlanError(
+                    "endpoint child duplicates a global action"
+                )
+            for action_id in child_global:
+                global_occurrences[action_id] += 1
+            assigned_projection_ids.update(action_projection_ids)
+
+            if supplied_assignments:
+                assignment = _canonical_work_assignment(
+                    supplied_assignments[child.scan_id]
+                )
+            else:
+                assignment = build_parallel_work_assignment()
+            for kind, owners, ids in (
+                ("endpoint", endpoint_owners, assignment["endpoint_work_ids"]),
+                ("request", request_owners, assignment["request_work_ids"]),
+            ):
+                for work_id in ids:
+                    previous = owners.setdefault(work_id, child.scan_id)
+                    if previous != child.scan_id:
+                        raise ParallelActionPlanError(
+                            f"duplicate {kind} work across parallel children"
+                        )
+            actual_families = sorted({
+                _capability_family(action.capability_name)
+                for action in plan.actions
+            })
+            declared_families = set(assignment["allowed_family_scope"])
+            if declared_families and not set(actual_families) <= declared_families:
+                raise ParallelActionPlanError(
+                    "parallel child action family exceeds its allowed family scope"
+                )
+            effective_families = (
+                assignment["allowed_family_scope"] or actual_families
+            )
+            assignment_material = {
+                "endpoint_work_ids": assignment["endpoint_work_ids"],
+                "request_work_ids": assignment["request_work_ids"],
+                "work_manifest_refs": assignment["work_manifest_refs"],
+                "allowed_family_scope": effective_families,
+            }
+            effective_work_digest = _digest(assignment_material)
+            aggregate_input_digest = _digest({
+                "work_partition_digest": effective_work_digest,
+                "action_input_binding_digests": [
+                    action.input_binding_digest for action in plan.actions
+                ],
+            })
             child_records.append({
                 "scan_id": child.scan_id,
                 "index": child.index,
                 "role": child.role,
                 "action_plan_digest": plan.plan_digest,
-                "action_ids": [action.action_id for action in plan.actions],
+                "expected_action_ids": [
+                    action.action_id for action in plan.actions
+                ],
+                "expected_global_action_ids": sorted(child_global),
+                "work_manifest_refs": assignment["work_manifest_refs"],
+                "work_partition_digest": effective_work_digest,
+                "endpoint_work_ids": assignment["endpoint_work_ids"],
+                "request_work_ids": assignment["request_work_ids"],
+                "allowed_family_scope": effective_families,
+                "input_binding_digest": aggregate_input_digest,
             })
+        if any(count != 1 for count in global_occurrences.values()):
+            raise ParallelActionPlanError(
+                "global actions must occur exactly once across parallel children"
+            )
+        if not required_parent_ids <= assigned_projection_ids:
+            raise ParallelActionPlanError(
+                "parallel children left required parent work unassigned"
+            )
+        observed_parent_work = build_parallel_work_assignment(
+            endpoints=(),
+            request_entries=(),
+        )
+        observed_parent_work.update({
+            "endpoint_work_ids": sorted(endpoint_owners),
+            "request_work_ids": sorted(request_owners),
+        })
+        observed_material = {
+            key: observed_parent_work[key]
+            for key in (
+                "endpoint_work_ids", "request_work_ids",
+                "work_manifest_refs", "allowed_family_scope",
+            )
+        }
+        observed_parent_work["work_partition_digest"] = _digest(observed_material)
+        if parent_work_assignment is not None:
+            expected_parent_work = _canonical_work_assignment(
+                parent_work_assignment
+            )
+            if (
+                expected_parent_work["endpoint_work_ids"]
+                != observed_parent_work["endpoint_work_ids"]
+                or expected_parent_work["request_work_ids"]
+                != observed_parent_work["request_work_ids"]
+            ):
+                raise ParallelActionPlanError(
+                    "parallel child work union differs from parent-assigned work"
+                )
+        else:
+            expected_parent_work = observed_parent_work
         payload = {
             "schema_version": PARALLEL_ACTION_PARTITION_RECORD_SCHEMA,
             "partition_digest": self.partition_digest,
             "parent_scan_id": self.parent_scan_id,
             "parent_action_plan_digest": self.parent_action_plan_digest,
+            "parent_owned_action_ids": list(self.parent_owned_action_ids),
+            "required_parent_action_ids": list(self.required_parent_action_ids),
+            "expected_global_action_ids": list(self.globally_assigned_action_ids),
+            "parent_endpoint_work_ids": expected_parent_work["endpoint_work_ids"],
+            "parent_request_work_ids": expected_parent_work["request_work_ids"],
             "children": child_records,
         }
         return {**payload, "record_digest": _digest(payload)}
@@ -297,8 +573,18 @@ class ParallelActionPlanCompiler:
         )
         global_actions = tuple(
             action.action_id for action in parent_action_plan.actions
-            if action.action_id not in parent_owned
+            if _is_global_action(action.action_id)
         )
+        assigned_parent = tuple(dict.fromkeys(
+            _projection_id(action.action_id)
+            for action in parent_action_plan.actions
+            if action.action_id not in parent_owned
+        ))
+        required_parent = tuple(dict.fromkeys(
+            _projection_id(action.action_id)
+            for action in parent_action_plan.actions
+            if action.required and action.action_id not in parent_owned
+        ))
         return ParallelActionPartition(
             parent_scan_id=parent_action_plan.scan_id,
             parent_execution_plan_digest=parent_execution_plan.digest,
@@ -309,6 +595,12 @@ class ParallelActionPlanCompiler:
             children=tuple(children),
             parent_owned_action_ids=parent_owned,
             globally_assigned_action_ids=global_actions,
+            assigned_parent_action_ids=assigned_parent,
+            required_parent_action_ids=required_parent,
+            allowed_parent_capabilities=tuple(sorted({
+                action.capability_name for action in parent_action_plan.actions
+                if action.action_id not in parent_owned
+            })),
         )
 
 
@@ -317,6 +609,7 @@ def validate_parallel_partition_record(
     *,
     parent_scan_id: str,
     child_plan_digests: Mapping[str, str],
+    child_action_plans: Mapping[str, ScanActionPlan | Mapping[str, Any]] | None = None,
 ) -> None:
     raw = dict(record)
     supplied_record_digest = str(raw.pop("record_digest", ""))
@@ -337,3 +630,114 @@ def validate_parallel_partition_record(
         raise ParallelActionPlanError(
             "persisted child action plans differ from the parent partition"
         )
+    parent_owned = set(raw.get("parent_owned_action_ids") or ())
+    required_parent = set(raw.get("required_parent_action_ids") or ())
+    expected_global = set(raw.get("expected_global_action_ids") or ())
+    parent_endpoints = list(raw.get("parent_endpoint_work_ids") or ())
+    parent_requests = list(raw.get("parent_request_work_ids") or ())
+    if any(
+        not isinstance(value, list)
+        for value in (
+            raw.get("parent_owned_action_ids"),
+            raw.get("required_parent_action_ids"),
+            raw.get("expected_global_action_ids"),
+            raw.get("parent_endpoint_work_ids"),
+            raw.get("parent_request_work_ids"),
+        )
+    ):
+        raise ParallelActionPlanError("parallel action partition authority is invalid")
+    global_occurrences = {action_id: 0 for action_id in expected_global}
+    observed_endpoints: list[str] = []
+    observed_requests: list[str] = []
+    observed_projection_ids: set[str] = set()
+    plans = dict(child_action_plans or {})
+    if plans and set(plans) != set(expected):
+        raise ParallelActionPlanError(
+            "persisted child action plan bodies do not cover the partition"
+        )
+    for item in children:
+        if not isinstance(item, Mapping):
+            raise ParallelActionPlanError("parallel action partition child is invalid")
+        scan_id = str(item.get("scan_id") or "")
+        role = str(item.get("role") or "")
+        action_ids = item.get("expected_action_ids")
+        child_global = item.get("expected_global_action_ids")
+        endpoint_ids = item.get("endpoint_work_ids")
+        request_ids = item.get("request_work_ids")
+        refs = item.get("work_manifest_refs")
+        families = item.get("allowed_family_scope")
+        if not all(isinstance(value, list) for value in (
+            action_ids, child_global, endpoint_ids, request_ids, refs, families,
+        )):
+            raise ParallelActionPlanError("parallel action partition child fields are invalid")
+        if parent_owned.intersection(action_ids):
+            raise ParallelActionPlanError(
+                "parent-owned action appears in a child action plan"
+            )
+        if role == "global":
+            if set(child_global) != expected_global:
+                raise ParallelActionPlanError(
+                    "global child action ownership differs from the partition"
+                )
+        elif child_global:
+            raise ParallelActionPlanError("endpoint child duplicates a global action")
+        for action_id in child_global:
+            if action_id not in global_occurrences:
+                raise ParallelActionPlanError(
+                    "child introduced an unassigned global action"
+                )
+            global_occurrences[action_id] += 1
+        observed_projection_ids.update(_projection_id(item) for item in action_ids)
+        assignment = _canonical_work_assignment({
+            "endpoint_work_ids": endpoint_ids,
+            "request_work_ids": request_ids,
+            "work_manifest_refs": refs,
+            "allowed_family_scope": families,
+            "work_partition_digest": item.get("work_partition_digest"),
+        })
+        observed_endpoints.extend(assignment["endpoint_work_ids"])
+        observed_requests.extend(assignment["request_work_ids"])
+        if plans:
+            plan_value = plans[scan_id]
+            try:
+                plan = (
+                    plan_value
+                    if isinstance(plan_value, ScanActionPlan)
+                    else ScanActionPlan.from_dict(plan_value)
+                )
+            except (TypeError, ValueError) as exc:
+                raise ParallelActionPlanError(
+                    "persisted child action plan body is invalid"
+                ) from exc
+            if (
+                plan.scan_id != scan_id
+                or plan.plan_digest != item.get("action_plan_digest")
+                or [action.action_id for action in plan.actions] != action_ids
+                or not set({
+                    _capability_family(action.capability_name)
+                    for action in plan.actions
+                }) <= set(families)
+                or _digest({
+                    "work_partition_digest": assignment["work_partition_digest"],
+                    "action_input_binding_digests": [
+                        action.input_binding_digest for action in plan.actions
+                    ],
+                }) != item.get("input_binding_digest")
+            ):
+                raise ParallelActionPlanError(
+                    "persisted child action authority differs from the semantic partition"
+                )
+    if any(count != 1 for count in global_occurrences.values()):
+        raise ParallelActionPlanError(
+            "global actions do not occur exactly once in the partition"
+        )
+    if len(observed_endpoints) != len(set(observed_endpoints)):
+        raise ParallelActionPlanError("parallel endpoint work is duplicated")
+    if len(observed_requests) != len(set(observed_requests)):
+        raise ParallelActionPlanError("parallel request work is duplicated")
+    if sorted(observed_endpoints) != sorted(parent_endpoints):
+        raise ParallelActionPlanError("parallel endpoint work is incomplete")
+    if sorted(observed_requests) != sorted(parent_requests):
+        raise ParallelActionPlanError("parallel request work is incomplete")
+    if not required_parent <= observed_projection_ids:
+        raise ParallelActionPlanError("required parent action work is unassigned")
