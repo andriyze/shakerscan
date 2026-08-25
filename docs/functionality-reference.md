@@ -1415,8 +1415,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 394 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 331 | `api/**/*.py` |
+| Public REST operations | 395 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 332 | `api/**/*.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1577,6 +1577,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/evidence/export-manifest` | `evidence_export_manifest` |
 | `GET` | `/evidence/instances` | `list_evidence_instances` |
 | `POST` | `/evidence/instances` | `record_evidence_instance` |
+| `GET` | `/evidence/instances/{instance_id}` | `get_evidence_instance` |
 | `GET` | `/evidence/retention/executions` | `list_evidence_retention_executions` |
 | `POST` | `/evidence/retention/sweep` | `evidence_retention_sweep` |
 | `GET` | `/evidence/{evidence_id}` | `get_evidence_object` |
