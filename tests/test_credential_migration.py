@@ -561,3 +561,39 @@ def test_legacy_ai_migration_marker_is_idempotent(monkeypatch):
     )
     assert first == 1
     assert second == 0
+
+
+def test_scan_execute_only_binding_is_migrated_to_semantic_capabilities():
+    class CapabilityMigrationConn:
+        def __init__(self):
+            self.applied = False
+            self.calls = []
+
+        async def fetchval(self, query, *args):
+            assert "app_schema_migrations" in query
+            assert args == (migration.SCAN_EXECUTE_CAPABILITY_MIGRATION,)
+            return 1 if self.applied else None
+
+        async def execute(self, query, *args):
+            self.calls.append((query, args))
+            if query.lstrip().startswith("UPDATE credential_profile_bindings"):
+                return "UPDATE 1"
+            if query.lstrip().startswith("INSERT INTO app_schema_migrations"):
+                self.applied = True
+                return "INSERT 0 1"
+            raise AssertionError(query)
+
+    conn = CapabilityMigrationConn()
+    first = asyncio.run(migration.migrate_scan_execute_capabilities(conn))
+    second = asyncio.run(migration.migrate_scan_execute_capabilities(conn))
+
+    assert first == 1
+    assert second == 0
+    update_query, update_args = conn.calls[0]
+    assert "item <> 'scan.execute'" in update_query
+    replacement = set(update_args[0])
+    assert "scan.execute" not in replacement
+    assert replacement >= {
+        "auth.session.establish", "http.request", "web.probe", "authz.verify",
+    }
+    assert "scan.execute" not in migration.LEGACY_WEB_CAPABILITIES

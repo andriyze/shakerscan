@@ -22,6 +22,7 @@ from runtime.credential_migration import (
     migrate_legacy_ai_credentials,
     migrate_legacy_device_credentials,
     migrate_legacy_web_credentials,
+    migrate_scan_execute_capabilities,
 )
 from runtime.reservation_store import PostgresBudgetReservationStore
 from runtime.observation_store import PostgresObservationManifestStore
@@ -4542,6 +4543,7 @@ async def run_schema_migrations(pool) -> None:
             # the old tables and callers are deleted later in the V2 migration.
             async with conn.transaction():
                 await migrate_legacy_web_credentials(conn)
+                await migrate_scan_execute_capabilities(conn)
                 await migrate_legacy_device_credentials(conn)
                 await migrate_legacy_ai_credentials(conn)
 

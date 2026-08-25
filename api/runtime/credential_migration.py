@@ -22,6 +22,7 @@ from .credentials import (
     parse_credential_secret,
     public_credential_configuration,
 )
+from .scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
 
 try:
     from secret_store import SecretStoreUnavailable, decrypt_secret, encrypt_secret
@@ -30,17 +31,13 @@ except ModuleNotFoundError:
 
 
 LEGACY_WEB_MIGRATION = "v2_target_credentials_to_generic_v1"
+SCAN_EXECUTE_CAPABILITY_MIGRATION = "v2_scan_execute_to_semantic_capabilities_v1"
 LEGACY_DEVICE_MIGRATION = "v2_device_credentials_to_generic_v1"
 LEGACY_AI_MIGRATION = "v2_ai_credentials_to_generic_v1"
-LEGACY_WEB_CAPABILITIES = (
-    "auth.session.establish",
-    "auth.session.refresh",
-    "auth.session.revoke",
-    "authz.verify",
-    "http.request",
-    "request.replay",
-    "scan.execute",
-)
+LEGACY_WEB_CAPABILITIES = tuple(sorted(
+    set(SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES)
+    | {"auth.session.refresh", "auth.session.revoke"}
+))
 LEGACY_DEVICE_WEB_CAPABILITIES = ("request.replay", "device.http.probe")
 LEGACY_DEVICE_SSH_CAPABILITIES = ("device.ssh.propose",)
 LEGACY_AI_CAPABILITIES = (
@@ -522,6 +519,50 @@ async def migrate_legacy_web_credentials(
         LEGACY_WEB_MIGRATION,
     )
     return migrated
+
+
+async def migrate_scan_execute_capabilities(conn: Any) -> int:
+    """Replace the V1 umbrella permission with explicit semantic capabilities once.
+
+    Worker history may still interpret ``scan.execute`` on an old immutable receipt. Current
+    profile bindings do not publish or depend on that private compatibility identity.
+    """
+    marker = await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1",
+        SCAN_EXECUTE_CAPABILITY_MIGRATION,
+    )
+    if marker:
+        return 0
+    status = await conn.execute(
+        """UPDATE credential_profile_bindings AS binding
+           SET allowed_capabilities = (
+                   SELECT COALESCE(jsonb_agg(item ORDER BY item), '[]'::jsonb)
+                   FROM (
+                       SELECT DISTINCT item
+                       FROM (
+                           SELECT jsonb_array_elements_text(binding.allowed_capabilities) AS item
+                           UNION ALL
+                           SELECT unnest($1::text[]) AS item
+                       ) AS merged
+                       WHERE item <> 'scan.execute'
+                   ) AS normalized
+               ),
+               updated_at=NOW()
+           FROM credential_profiles AS profile
+           WHERE profile.id=binding.profile_id
+             AND profile.target_kind='web'
+             AND binding.binding_kind='target'
+             AND binding.allowed_capabilities ? 'scan.execute'""",
+        list(LEGACY_WEB_CAPABILITIES),
+    )
+    await conn.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        SCAN_EXECUTE_CAPABILITY_MIGRATION,
+    )
+    try:
+        return int(str(status).rsplit(" ", 1)[-1])
+    except (TypeError, ValueError):
+        return 0
 
 
 async def sync_legacy_device_credential(
