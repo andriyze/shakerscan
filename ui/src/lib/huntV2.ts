@@ -1,4 +1,5 @@
-import { API_URL, type DeviceAgentShellPlan } from './api'
+import type { DeviceAgentShellPlan } from './api'
+import { API_URL, getApiErrorMessage } from './apiConfig'
 import {
   HUNT_START_CONTRACT,
   type HuntBudgetProfile,
@@ -53,21 +54,6 @@ export interface HuntStartV2Request {
   requestCollectionIds?: string[]
 }
 
-async function apiError(response: Response, fallback: string): Promise<string> {
-  try {
-    const data = await response.json()
-    const detail = data?.detail
-    if (typeof detail === 'string') return detail
-    if (detail && typeof detail === 'object') {
-      if (typeof detail.message === 'string') return detail.message
-      if (typeof detail.error === 'string') return detail.error
-    }
-  } catch {
-    // Use the stable fallback below when an intermediary did not return JSON.
-  }
-  return `${fallback} (${response.status})`
-}
-
 export async function startHuntV2Native(request: HuntStartV2Request): Promise<HuntV2> {
   const payload: StartHuntHuntsPostRequest = {
     schema_version: HUNT_START_CONTRACT.schema_version,
@@ -94,7 +80,7 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error(await apiError(response, 'Hunt start failed'))
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Hunt start failed (${response.status})`))
   const contract = response.headers.get('x-shakerscan-hunt-contract')
   if (contract !== 'v2') {
     throw new Error(`Server did not admit the Hunt through the V2 contract (${contract || 'missing'})`)
@@ -104,7 +90,7 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
 
 export async function getHuntV2(huntId: string): Promise<HuntV2> {
   const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}`)
-  if (!response.ok) throw new Error(await apiError(response, 'Failed to load Hunt'))
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load Hunt (${response.status})`))
   return response.json()
 }
 
@@ -119,13 +105,13 @@ export async function listHuntsV2(params: {
   if (params.limit) search.set('limit', String(params.limit))
   const suffix = search.size ? `?${search.toString()}` : ''
   const response = await fetch(`${API_URL}/hunts${suffix}`, { cache: 'no-store' })
-  if (!response.ok) throw new Error(await apiError(response, 'Failed to list Hunts'))
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to list Hunts (${response.status})`))
   return response.json()
 }
 
 export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
   const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/cancel`, { method: 'POST' })
-  if (!response.ok) throw new Error(await apiError(response, 'Failed to cancel Hunt'))
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to cancel Hunt (${response.status})`))
   return response.json()
 }
 
@@ -143,6 +129,8 @@ export async function confirmHuntShellPlan(huntId: string, plan: DeviceAgentShel
       }),
     },
   )
-  if (!response.ok) throw new Error(await apiError(response, 'Failed to confirm Hunt SSH shell plan'))
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to confirm Hunt SSH shell plan (${response.status})`))
+  }
   return response.json()
 }
