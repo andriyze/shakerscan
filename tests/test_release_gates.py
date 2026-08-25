@@ -49,3 +49,20 @@ def test_release_gate_selector_resolution_is_ordered_and_rejects_unknown():
         assert "unknown release gate" in str(exc)
     else:
         raise AssertionError("unknown gate should raise")
+
+
+def test_release_gate_runner_loads_canonical_api_packages(monkeypatch):
+    calls = []
+
+    def fake_call(command, *, cwd, env):
+        calls.append((command, cwd, env))
+        return 0
+
+    monkeypatch.setattr(release_gates.subprocess, "call", fake_call)
+
+    assert release_gates.run_gates(["test:v2-fault-injection"]) == 0
+    assert len(calls) == 1
+    command, cwd, env = calls[0]
+    assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
+    assert cwd == release_gates.REPO_ROOT
+    assert env["PYTHONPATH"].split(release_gates.os.pathsep)[0] == str(release_gates.REPO_ROOT / "api")

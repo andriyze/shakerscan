@@ -9,6 +9,7 @@ entry point CI, agents, and operators can call without remembering selectors.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -193,7 +194,13 @@ def run_gates(requested: list[str], *, extra_pytest_args: list[str] | None = Non
         selectors = list(GATES[gate])
         cmd = [sys.executable, "-m", "pytest", "-q", *selectors, *(extra_pytest_args or [])]
         print(f"\n== {gate} ==")
-        status = subprocess.call(cmd, cwd=REPO_ROOT)
+        env = os.environ.copy()
+        api_path = str(REPO_ROOT / "api")
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (api_path, existing_pythonpath) if part
+        )
+        status = subprocess.call(cmd, cwd=REPO_ROOT, env=env)
         if status != 0:
             return status
     return 0
