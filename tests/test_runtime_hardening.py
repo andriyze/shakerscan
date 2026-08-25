@@ -123,6 +123,8 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
         "scripts/planner_evals.py",
         "scripts/fleet_cli.py",
         "scripts/fleet_acceptance.py",
+        "scripts/scan_cli.py",
+        "scripts/rebuild_scan_report.py",
         "scripts/model_intake_runner_cli.py",
         "scripts/build-model-intake-guest-rootfs.sh",
         "scripts/provision-model-intake-firecracker.sh",
@@ -148,7 +150,12 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
     hosted = (ROOT / "install" / "index.html").read_text()
 
     assert installer == hosted
-    assert 'mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" "$INSTALL_DIR/scripts" "$INSTALL_DIR/api"' in installer
+    assert (
+        'mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" '
+        '"$INSTALL_DIR/scripts" "$INSTALL_DIR/api/scan" '
+        '"$INSTALL_DIR/api/runtime"'
+    ) in installer
+    assert 'mkdir -p "$INSTALL_DIR/scanner/scanner_tools"' in installer
     assert 'mkdir -p "$INSTALL_DIR/runner/guest" "$INSTALL_DIR/runner/host"' in installer
     for relative_path in expected_downloads:
         assert f'download "$REPO_RAW_BASE/{relative_path}" "$INSTALL_DIR/{relative_path}"' in installer
