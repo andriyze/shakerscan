@@ -1,0 +1,315 @@
+name: V2 candidate acceptance (non-publishing)
+
+# This is the pre-merge release-proof lane. It deliberately has no registry,
+# package, attestation, tag, or release write permission and never logs in to a
+# registry. A passing receipt is acceptance evidence, not publication authority.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Full exact commit SHA reachable from v2"
+        required: true
+      parity_api_url:
+        description: "API URL of the exact-SHA V2 parity environment"
+        required: true
+      parity_target_url:
+        description: "Authorized deterministic parity target URL"
+        required: true
+      parity_broker_node_id:
+        description: "Ready outbound-only broker node in the parity environment"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-candidate-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    name: Accept exact V2 images without publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
+      REDIS_PASSWORD: ci-redis-credential-000000000000000001
+      MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
+      MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
+      MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
+      SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
+    steps:
+      - name: Checkout the requested commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Prove exact candidate and workflow identity
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.candidate_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$REQUESTED_SHA"
+          git fetch --no-tags origin +refs/heads/v2:refs/remotes/origin/v2
+          git merge-base --is-ancestor "$REQUESTED_SHA" origin/v2 || {
+            echo "Candidate is not reachable from origin/v2" >&2
+            exit 1
+          }
+          version="$(tr -d '[:space:]' < VERSION)"
+          test -n "$version"
+          echo "CANDIDATE_SHA=$REQUESTED_SHA" >> "$GITHUB_ENV"
+          echo "CANDIDATE_WORKFLOW_SHA=$WORKFLOW_SHA" >> "$GITHUB_ENV"
+          echo "CANDIDATE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Set up supported Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Test contracts and build the production UI
+        run: |
+          npm --prefix ui ci
+          npm --prefix ui audit --omit=dev --audit-level=high
+          python3 scripts/generate_scan_contract.py --check
+          python3 scripts/generate_hunt_contract.py --check
+          python3 scripts/generate_capability_inventory.py --check
+          npm --prefix ui run test:unit
+          npm --prefix ui run build
+          npx --prefix ui playwright install --with-deps chromium
+
+      - name: Build every local product image exactly once
+        shell: bash
+        run: |
+          GIT_COMMIT="$CANDIDATE_SHA" SCANNER_VERSION="$CANDIDATE_VERSION" \
+            ./scanner.sh build
+          mkdir -p artifacts/candidate
+          scanner_id="$(docker image inspect --format '{{.Id}}' shakerscan-worker:local)"
+          api_id="$(docker image inspect --format '{{.Id}}' shakerscan-api)"
+          ui_id="$(docker image inspect --format '{{.Id}}' shakerscan-ui)"
+          signer_id="$(docker image inspect --format '{{.Id}}' shakerscan-model-intake-signer)"
+          for image_id in "$scanner_id" "$api_id" "$ui_id" "$signer_id"; do
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+          docker image tag "$scanner_id" "shakerscan-scanner:$CANDIDATE_VERSION"
+          docker image tag "$api_id" "shakerscan-api:$CANDIDATE_VERSION"
+          docker image tag "$ui_id" "shakerscan-ui:$CANDIDATE_VERSION"
+          docker image tag "$signer_id" "shakerscan-model-intake-signer:$CANDIDATE_VERSION"
+          jq -n \
+            --arg scanner "$scanner_id" --arg api "$api_id" \
+            --arg ui "$ui_id" --arg signer "$signer_id" \
+            '{scanner:$scanner,api:$api,ui:$ui,signer:$signer}' \
+            > artifacts/candidate/images.json
+
+      - name: Verify exact image composition and baked identity
+        shell: bash
+        run: |
+          SHAKERSCAN_API_OVERLAY_PREBUILT=1 \
+            scripts/docker_api_overlay_smoke.sh \
+            shakerscan-worker:local shakerscan-api
+          for image in \
+            "shakerscan-scanner:$CANDIDATE_VERSION" \
+            "shakerscan-api:$CANDIDATE_VERSION"; do
+            docker run --rm \
+              -e SCANNER_EXPECTED_VERSION="$CANDIDATE_VERSION" \
+              -e SCANNER_EXPECTED_REVISION="$CANDIDATE_SHA" \
+              --entrypoint python3 "$image" /app/release_identity.py --verify
+          done
+          docker run --rm --entrypoint sh \
+            "shakerscan-scanner:$CANDIDATE_VERSION" -ceu \
+            'if command -v docker >/dev/null 2>&1; then exit 1; fi'
+          docker run --rm --entrypoint docker \
+            "shakerscan-api:$CANDIDATE_VERSION" --version
+
+      - name: Run the complete Python and release contract suite in the exact scanner image
+        shell: bash
+        run: |
+          docker run --rm --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            -v "$PWD/artifacts:/artifacts" \
+            "shakerscan-scanner:$CANDIDATE_VERSION" \
+            scripts/run_complete_python_suite.py --artifacts-dir /artifacts
+          docker run --rm --entrypoint python \
+            -e PYTHONPATH=/src/api:/src/scanner:/src \
+            -v "$PWD:/src:ro" -w /src \
+            "shakerscan-scanner:$CANDIDATE_VERSION" scripts/release_gates.py
+
+      - name: Export the canonical template manifest
+        shell: bash
+        run: |
+          docker run --rm --entrypoint python \
+            -e PYTHONPATH=/src \
+            -v "$PWD:/src:ro" -w /src \
+            "shakerscan-scanner:$CANDIDATE_VERSION" -c \
+            'import json; from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest as build; print(json.dumps(build(scan_id="00000000-0000-4000-8000-000000000001", target_binding_digest="0"*64, include_active=True).canonical_dict(), sort_keys=True, separators=(",", ":")))' \
+            > artifacts/candidate/template-manifest.json
+          test "$(jq -r '.schema_version' artifacts/candidate/template-manifest.json)" = template-manifest/v1
+
+      - name: Enforce all nine external adapter wire ceilings
+        shell: bash
+        run: |
+          worker_name="shakerscan-v2-wire-${GITHUB_RUN_ID}"
+          cleanup_wire() { docker rm -f "$worker_name" >/dev/null 2>&1 || true; }
+          trap cleanup_wire EXIT
+          docker run -d --name "$worker_name" \
+            --add-host host.docker.internal:host-gateway \
+            --entrypoint sleep "shakerscan-scanner:$CANDIDATE_VERSION" infinity
+          python3 tests/e2e/run_external_wire_acceptance.py \
+            --worker-container "$worker_name" --json \
+            > artifacts/candidate/external-wire-raw.json
+          jq --arg source_sha "$CANDIDATE_SHA" \
+            --arg worker_image_id "$(jq -r '.scanner' artifacts/candidate/images.json)" \
+            '. + {source_sha:$source_sha,worker_image_id:$worker_image_id}' \
+            artifacts/candidate/external-wire-raw.json \
+            > artifacts/candidate/external-wire.json
+          test "$(jq -r '.status' artifacts/candidate/external-wire.json)" = passed
+          test "$(jq -r '.tool_count' artifacts/candidate/external-wire.json)" = 9
+
+      - name: Start the exact local product stack without rebuilding
+        shell: bash
+        run: |
+          GIT_COMMIT="$CANDIDATE_SHA" SCANNER_VERSION="$CANDIDATE_VERSION" \
+            docker compose up -d --no-build
+          for attempt in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then break; fi
+            sleep 5
+          done
+          curl -sf http://127.0.0.1:8080/health \
+            | jq -e '.source_revision == env.CANDIDATE_SHA and .worker_build.fleet_uniform == true'
+          test "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q api)")" \
+            = "$(jq -r '.api' artifacts/candidate/images.json)"
+          test "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q worker)")" \
+            = "$(jq -r '.scanner' artifacts/candidate/images.json)"
+          test "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q ui)")" \
+            = "$(jq -r '.ui' artifacts/candidate/images.json)"
+          test "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q model-intake-signer)")" \
+            = "$(jq -r '.signer' artifacts/candidate/images.json)"
+
+      - name: Prove PostgreSQL cancellation, reservation, and resume invariants
+        shell: bash
+        run: |
+          docker compose cp tests/e2e/run_scan_cancellation_race.py \
+            api:/tmp/run_scan_cancellation_race.py
+          docker compose exec -T -w /app api \
+            python /tmp/run_scan_cancellation_race.py --json \
+            > artifacts/candidate/scan-cancellation-race.json
+          docker compose cp tests/e2e/run_scan_reservation_identity.py \
+            api:/tmp/run_scan_reservation_identity.py
+          docker compose exec -T -w /app api \
+            python /tmp/run_scan_reservation_identity.py --json \
+            > artifacts/candidate/scan-reservation-identity.json
+          docker compose cp tests/e2e/run_scan_action_resume.py \
+            api:/tmp/run_scan_action_resume.py
+          docker compose exec -T -w /app api \
+            python /tmp/run_scan_action_resume.py --json \
+            > artifacts/candidate/scan-action-resume.json
+          test "$(jq -r '.passed' artifacts/candidate/scan-action-resume.json)" = true
+          test "$(jq -r '.repeated_target_requests' artifacts/candidate/scan-action-resume.json)" = 0
+
+      - name: Stop the local fault stack
+        if: always()
+        run: docker compose down -v
+
+      - name: Prove previous-stable upgrade, restart, and rollback
+        shell: bash
+        run: |
+          SCANNER_IMAGE="shakerscan-scanner:$CANDIDATE_VERSION" \
+            CANDIDATE_SHA="$CANDIDATE_SHA" \
+            CANDIDATE_IMAGE_DIGEST="$(jq -r '.scanner' artifacts/candidate/images.json)" \
+            UPGRADE_RECEIPT_PATH="$PWD/artifacts/candidate/upgrade-receipt.json" \
+            scripts/upgrade_smoke.sh
+
+      - name: Run full installed-stack E2E and production browser acceptance
+        env:
+          INSTALLED_STACK_SMOKE_E2E: "1"
+          INSTALLED_STACK_SMOKE_E2E_SCORECARD: ${{ github.workspace }}/artifacts/candidate/e2e-scorecard.json
+          INSTALLED_STACK_SMOKE_BROWSER_JSON: ${{ github.workspace }}/artifacts/candidate/playwright.json
+        run: make installed-stack-smoke
+
+      - name: Prove real local, broker, and parallel semantic parity
+        shell: bash
+        env:
+          PARITY_API_URL: ${{ inputs.parity_api_url }}
+          PARITY_TARGET_URL: ${{ inputs.parity_target_url }}
+          PARITY_BROKER_NODE_ID: ${{ inputs.parity_broker_node_id }}
+        run: |
+          docker run --rm --network host --entrypoint python \
+            -e SHAKERSCAN_API="$PARITY_API_URL" \
+            -v "$PWD:/src:ro" -w /src \
+            "shakerscan-scanner:$CANDIDATE_VERSION" \
+            tests/e2e/run_scan_parity.py \
+            --expected-source-sha "$CANDIDATE_SHA" \
+            --target-url "$PARITY_TARGET_URL" \
+            --broker-node-id "$PARITY_BROKER_NODE_ID" \
+            --json > artifacts/candidate/scan-parity.json
+          test "$(jq -r '.consistent' artifacts/candidate/scan-parity.json)" = true
+          test "$(jq -r '.all_artifacts_truthful' artifacts/candidate/scan-parity.json)" = true
+          test "$(jq -r '.scan_ids | keys | sort | join(",")' artifacts/candidate/scan-parity.json)" = broker,local,parallel
+
+      - name: Build fail-closed preservation receipt
+        shell: bash
+        run: |
+          python3 scripts/release_preservation.py \
+            --matrix tests/release_preservation_matrix.json \
+            --junit artifacts/v2-full-python.xml \
+            --e2e-scorecard artifacts/candidate/e2e-scorecard.json \
+            --playwright-json artifacts/candidate/playwright.json \
+            --source-sha "$CANDIDATE_SHA" \
+            --image "scanner=$(jq -r '.scanner' artifacts/candidate/images.json)" \
+            --image "api=$(jq -r '.api' artifacts/candidate/images.json)" \
+            --image "ui=$(jq -r '.ui' artifacts/candidate/images.json)" \
+            --image "signer=$(jq -r '.signer' artifacts/candidate/images.json)" \
+            --output artifacts/candidate/preservation-receipt.json
+          test "$(jq -r '.status' artifacts/candidate/preservation-receipt.json)" = pass
+
+      - name: Seal the explicitly non-publishing V2 acceptance receipt
+        shell: bash
+        run: |
+          python3 scripts/write_v2_candidate_acceptance.py \
+            --source-sha "$CANDIDATE_SHA" \
+            --workflow-sha "$CANDIDATE_WORKFLOW_SHA" \
+            --image "scanner=$(jq -r '.scanner' artifacts/candidate/images.json)" \
+            --image "api=$(jq -r '.api' artifacts/candidate/images.json)" \
+            --image "ui=$(jq -r '.ui' artifacts/candidate/images.json)" \
+            --image "signer=$(jq -r '.signer' artifacts/candidate/images.json)" \
+            --tool-version "docker=$(docker version --format '{{.Client.Version}}')" \
+            --tool-version "node=$(node --version)" \
+            --tool-version "npm=$(npm --version)" \
+            --tool-version "python=$(python3 --version)" \
+            --template-manifest artifacts/candidate/template-manifest.json \
+            --evidence "full_python=artifacts/v2-full-python.xml" \
+            --evidence "full_e2e=artifacts/candidate/e2e-scorecard.json" \
+            --evidence "browser=artifacts/candidate/playwright.json" \
+            --evidence "external_wire=artifacts/candidate/external-wire.json" \
+            --evidence "cancellation=artifacts/candidate/scan-cancellation-race.json" \
+            --evidence "reservation_identity=artifacts/candidate/scan-reservation-identity.json" \
+            --evidence "action_resume=artifacts/candidate/scan-action-resume.json" \
+            --evidence "parity=artifacts/candidate/scan-parity.json" \
+            --evidence "upgrade=artifacts/candidate/upgrade-receipt.json" \
+            --evidence "preservation=artifacts/candidate/preservation-receipt.json" \
+            --output artifacts/v2-candidate-acceptance.json
+          test "$(jq -r '.publication' artifacts/v2-candidate-acceptance.json)" = none
+          test "$(jq -r '.promotion_authorized' artifacts/v2-candidate-acceptance.json)" = false
+          test "$(jq -r '.candidate_sha' artifacts/v2-candidate-acceptance.json)" = "$CANDIDATE_SHA"
+
+      - name: Upload exact-SHA non-publishing evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-candidate-acceptance-${{ inputs.candidate_sha }}
+          path: |
+            artifacts/candidate/
+            artifacts/v2-full-python.xml
+            artifacts/v2-candidate-acceptance.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Final cleanup
+        if: always()
+        run: docker compose down -v || true

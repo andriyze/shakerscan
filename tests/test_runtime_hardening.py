@@ -590,6 +590,8 @@ def test_api_overlay_smoke_proves_shared_layers_identity_and_role_isolation():
     makefile = (ROOT / "Makefile").read_text()
 
     assert 'SCANNER_RUNTIME_IMAGE=$WORKER_IMAGE' in smoke
+    assert 'SHAKERSCAN_API_OVERLAY_PREBUILT' in smoke
+    assert 'docker image inspect "$API_IMAGE"' in smoke
     assert '($api | length) == (($worker | length) + 1)' in smoke
     assert '$api[0:($worker | length)] == $worker' in smoke
     assert 'worker image must not contain Docker' in smoke

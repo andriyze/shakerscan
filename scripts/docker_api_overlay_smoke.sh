@@ -8,20 +8,27 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKER_IMAGE="${1:-${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}}"
 API_IMAGE="${2:-shakerscan-api-overlay-smoke:$$}"
 KEEP_IMAGE="${SHAKERSCAN_KEEP_SMOKE_IMAGE:-0}"
+PREBUILT_API="${SHAKERSCAN_API_OVERLAY_PREBUILT:-0}"
 
 cleanup() {
-    if [ "$KEEP_IMAGE" != "1" ]; then
+    if [ "$PREBUILT_API" != "1" ] && [ "$KEEP_IMAGE" != "1" ]; then
         docker image rm -f "$API_IMAGE" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
 
 docker image inspect "$WORKER_IMAGE" >/dev/null
-docker build \
-    --build-arg "SCANNER_RUNTIME_IMAGE=$WORKER_IMAGE" \
-    -f "$ROOT_DIR/scanner/Dockerfile.api" \
-    -t "$API_IMAGE" \
-    "$ROOT_DIR"
+if [ "$PREBUILT_API" = "1" ]; then
+    # Candidate acceptance must inspect the exact already-built product image;
+    # rebuilding a throwaway overlay would not prove the accepted API digest.
+    docker image inspect "$API_IMAGE" >/dev/null
+else
+    docker build \
+        --build-arg "SCANNER_RUNTIME_IMAGE=$WORKER_IMAGE" \
+        -f "$ROOT_DIR/scanner/Dockerfile.api" \
+        -t "$API_IMAGE" \
+        "$ROOT_DIR"
+fi
 
 worker_layers="$(docker image inspect "$WORKER_IMAGE" --format '{{json .RootFS.Layers}}')"
 api_layers="$(docker image inspect "$API_IMAGE" --format '{{json .RootFS.Layers}}')"
