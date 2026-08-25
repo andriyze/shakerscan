@@ -470,5 +470,7 @@ def test_scan_api_allows_canonical_parallel_replay_and_freezes_binding():
     assert "require_expiry=durable_approval_required" in submit
     assert "_freeze_scan_collection_target_binding" in submit
     assert "request_collection_exact_replay_requires_single_scan_owner" not in submit
-    assert "partition_request_manifests(" in worker
+    assert "ParallelRequestWork(" in worker
+    assert "typed parallel request selection was assigned twice" in worker
+    assert "request_partitions[child.index] = selected" in worker
     assert "narrow_replay_plan_to_request_manifest(" in worker

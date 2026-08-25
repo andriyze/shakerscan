@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 try:
@@ -20,6 +21,8 @@ from .jobs import ScanShardBudget
 
 PARALLEL_ACTION_PARTITION_SCHEMA = "parallel-action-partition/v2"
 PARALLEL_ACTION_PARTITION_RECORD_SCHEMA = "parallel-action-partition-record/v2"
+PARALLEL_PARENT_PLAN_SCHEMA = "parallel-parent-action-plan/v1"
+PARALLEL_ACTION_EXECUTION_MERGE_SCHEMA = "parallel-action-execution-merge/v1"
 _LEGACY_PARALLEL_ACTION_PARTITION_RECORD_SCHEMA = (
     "parallel-action-partition-record/v1"
 )
@@ -38,6 +41,234 @@ _LEDGER_TO_BUDGET = {
 
 class ParallelActionPlanError(ValueError):
     """A parent plan cannot be partitioned without widening its authority."""
+
+
+def _canonical_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    raw = dict(value or {})
+    encoded = json.dumps(
+        raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+    return MappingProxyType(json.loads(encoded))
+
+
+@dataclass(frozen=True)
+class ParallelPrincipalLane:
+    """One explicit principal context; it contains opaque profile IDs only."""
+
+    name: str
+    credential_profile_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        name = str(self.name or "").strip().lower()
+        if name not in {"anonymous", "primary", "secondary", "comparison", "service"}:
+            raise ParallelActionPlanError("parallel principal lane is invalid")
+        profiles = tuple(dict.fromkeys(
+            str(item or "").strip() for item in self.credential_profile_ids
+            if str(item or "").strip()
+        ))
+        if name == "anonymous" and profiles:
+            raise ParallelActionPlanError(
+                "anonymous parallel principal lane cannot carry credentials"
+            )
+        if name in {"primary", "secondary", "service"} and len(profiles) != 1:
+            raise ParallelActionPlanError(
+                f"{name} parallel principal lane requires exactly one profile"
+            )
+        if name == "comparison" and len(profiles) < 1:
+            raise ParallelActionPlanError(
+                "comparison parallel principal lane requires a profile"
+            )
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "credential_profile_ids", profiles)
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "credential_profile_ids": list(self.credential_profile_ids),
+        }
+
+
+@dataclass(frozen=True)
+class ParallelPlacementCapacity:
+    """A routable execution lane and the number of concurrent slots it exposes."""
+
+    name: str
+    capacity: int
+    routing: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        name = str(self.name or "").strip().lower()
+        if not name or isinstance(self.capacity, bool) or int(self.capacity) < 1:
+            raise ParallelActionPlanError("parallel placement capacity is invalid")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "capacity", int(self.capacity))
+        object.__setattr__(self, "routing", _canonical_mapping(self.routing))
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "capacity": self.capacity,
+            "routing": dict(self.routing),
+        }
+
+
+@dataclass(frozen=True)
+class ParallelRequestWork:
+    """A content-free saved-request selection bound to one principal lane."""
+
+    selection_digest: str
+    principal_lane: str = "comparison"
+
+    def __post_init__(self) -> None:
+        digest = str(self.selection_digest or "").strip().lower()
+        lane = str(self.principal_lane or "").strip().lower()
+        if (
+            len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            or lane not in {"anonymous", "primary", "secondary", "comparison", "service"}
+        ):
+            raise ParallelActionPlanError("parallel request work is invalid")
+        object.__setattr__(self, "selection_digest", digest)
+        object.__setattr__(self, "principal_lane", lane)
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "selection_digest": self.selection_digest,
+            "principal_lane": self.principal_lane,
+        }
+
+
+@dataclass(frozen=True)
+class ParallelPlannedChild:
+    """Immutable scheduling result before a durable child Scan ID is minted."""
+
+    index: int
+    label: str
+    role: str
+    endpoints: tuple[str, ...]
+    request_selection_digests: tuple[str, ...]
+    candidate_manifest_refs: tuple[Mapping[str, Any], ...]
+    principal_lane: ParallelPrincipalLane
+    family_scope: tuple[str, ...]
+    placement: ParallelPlacementCapacity
+
+    def __post_init__(self) -> None:
+        if isinstance(self.index, bool) or self.index < 0:
+            raise ParallelActionPlanError("parallel planned child index is invalid")
+        role = str(self.role or "").strip().lower()
+        if role not in {"global", "endpoint"}:
+            raise ParallelActionPlanError("parallel planned child role is invalid")
+        endpoints = tuple(sorted({
+            str(item).strip() for item in self.endpoints if str(item).strip()
+        }))
+        requests = tuple(sorted(set(self.request_selection_digests)))
+        refs = tuple(
+            _canonical_mapping(item) for item in sorted(
+                (dict(item) for item in self.candidate_manifest_refs),
+                key=lambda item: json.dumps(
+                    item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                ),
+            )
+        )
+        families = tuple(sorted({
+            str(item).strip().lower() for item in self.family_scope
+            if str(item).strip()
+        }))
+        if role == "global" and (endpoints or requests or refs or families):
+            raise ParallelActionPlanError(
+                "global parallel child cannot own endpoint-scoped work"
+            )
+        object.__setattr__(self, "role", role)
+        object.__setattr__(self, "endpoints", endpoints)
+        object.__setattr__(self, "request_selection_digests", requests)
+        object.__setattr__(self, "candidate_manifest_refs", refs)
+        object.__setattr__(self, "family_scope", families)
+
+    @property
+    def work_weight(self) -> int:
+        return max(
+            1,
+            len(self.endpoints)
+            + len(self.request_selection_digests)
+            + len(self.candidate_manifest_refs),
+        )
+
+    def canonical_dict(self) -> dict[str, Any]:
+        endpoint_ids = sorted(
+            _work_item_id("endpoint", item) for item in self.endpoints
+        )
+        return {
+            "index": self.index,
+            "label": self.label,
+            "role": self.role,
+            "endpoint_work_ids": endpoint_ids,
+            "request_selection_digests": list(self.request_selection_digests),
+            "candidate_manifest_refs": [dict(item) for item in self.candidate_manifest_refs],
+            "principal_lane": self.principal_lane.canonical_dict(),
+            "family_scope": list(self.family_scope),
+            "placement": self.placement.canonical_dict(),
+        }
+
+    def compiler_spec(self, *, scan_id: str) -> dict[str, Any]:
+        return {
+            "scan_id": scan_id,
+            "index": self.index,
+            "label": self.label,
+            "role": self.role,
+            "work_weight": self.work_weight,
+            "principal_lane": self.principal_lane.name,
+            "placement_name": self.placement.name,
+            "family_scope": list(self.family_scope),
+            "work_partition_digest": _digest({
+                "endpoint_work_ids": sorted(
+                    _work_item_id("endpoint", item) for item in self.endpoints
+                ),
+                "request_selection_digests": list(self.request_selection_digests),
+                "candidate_manifest_refs": [
+                    dict(item) for item in self.candidate_manifest_refs
+                ],
+                "principal_lane": self.principal_lane.canonical_dict(),
+                "family_scope": list(self.family_scope),
+            }),
+        }
+
+
+@dataclass(frozen=True)
+class ParallelParentPlan:
+    parent_scan_id: str
+    parent_execution_plan_digest: str
+    parent_action_plan_digest: str
+    target_binding_digest: str
+    scheduling_hint: str
+    children: tuple[ParallelPlannedChild, ...]
+    notes: tuple[str, ...] = ()
+    schema_version: str = PARALLEL_PARENT_PLAN_SCHEMA
+
+    def __post_init__(self) -> None:
+        if [child.index for child in self.children] != list(range(len(self.children))):
+            raise ParallelActionPlanError("parallel planned child indices must be contiguous")
+        if sum(child.role == "global" for child in self.children) != 1:
+            raise ParallelActionPlanError("parallel parent plan requires one global child")
+
+    @property
+    def is_parallel(self) -> bool:
+        return len(self.children) >= 2
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "parent_scan_id": self.parent_scan_id,
+            "parent_execution_plan_digest": self.parent_execution_plan_digest,
+            "parent_action_plan_digest": self.parent_action_plan_digest,
+            "target_binding_digest": self.target_binding_digest,
+            "scheduling_hint": self.scheduling_hint,
+            "children": [child.canonical_dict() for child in self.children],
+            "notes": list(self.notes),
+        }
+
+    @property
+    def plan_digest(self) -> str:
+        return _digest(self.canonical_dict())
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -276,6 +507,27 @@ class ParallelChildPartition:
     role: str
     budget: ScanShardBudget
     work_partition_digest: str
+    principal_lane: str = "comparison"
+    placement_name: str = "local"
+    family_scope: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            len(self.work_partition_digest) != 64
+            or any(
+                char not in "0123456789abcdef"
+                for char in self.work_partition_digest
+            )
+        ):
+            raise ParallelActionPlanError(
+                "parallel child work partition digest is invalid"
+            )
+        if self.role not in {"global", "endpoint"}:
+            raise ParallelActionPlanError("parallel child role is invalid")
+        if not self.principal_lane or not self.placement_name:
+            raise ParallelActionPlanError(
+                "parallel child principal or placement lane is invalid"
+            )
 
     def canonical_dict(self) -> dict[str, Any]:
         return {
@@ -285,6 +537,9 @@ class ParallelChildPartition:
             "role": self.role,
             "budget": self.budget.payload(),
             "work_partition_digest": self.work_partition_digest,
+            "principal_lane": self.principal_lane,
+            "placement_name": self.placement_name,
+            "family_scope": list(self.family_scope),
         }
 
 
@@ -592,6 +847,282 @@ class ParallelActionPlanCompiler:
             return "scope"
         return "coverage" if execution_plan.policy.active_testing else "family"
 
+    @staticmethod
+    def discovery_budget(
+        execution_plan: ScanExecutionPlan,
+        *,
+        include_network: bool,
+    ) -> ScanShardBudget:
+        """Reserve a small typed producer budget before endpoint fan-out."""
+        parent = execution_plan.budget
+        endpoints = min(parent.max_endpoints, 500)
+        return ScanShardBudget(
+            max_duration_seconds=min(parent.max_duration_seconds, 180),
+            max_http_requests=min(parent.max_http_requests, 1_000),
+            max_endpoints=endpoints,
+            max_browser_actions=0,
+            max_tcp_ports=parent.max_tcp_ports if include_network else 0,
+            max_tool_wall_seconds=min(parent.max_tool_wall_seconds, 180),
+            max_workers=1,
+            max_state_changing_requests=0,
+            max_hosts=min(int(parent.max_hosts or endpoints), endpoints),
+        )
+
+    def plan_parent(
+        self,
+        *,
+        parent_execution_plan: ScanExecutionPlan,
+        parent_action_plan: ScanActionPlan,
+        target_binding: TargetBinding,
+        continuation_allocation: ScanContinuationAllocation | None = None,
+        endpoint_manifest_entries: Sequence[str] = (),
+        request_work: Sequence[ParallelRequestWork] = (),
+        candidate_manifest_refs: Sequence[Mapping[str, Any]] = (),
+        principal_lanes: Sequence[ParallelPrincipalLane] = (),
+        placements: Sequence[ParallelPlacementCapacity] = (),
+        scheduling_hint: str | None = None,
+    ) -> ParallelParentPlan:
+        """Plan immutable work slices without consulting compatibility options.
+
+        The hint changes grouping only. Policy, capabilities, principals, target
+        scope, and every budget dimension come from typed canonical authority.
+        """
+        if (
+            parent_action_plan.scan_id == ""
+            or parent_action_plan.execution_plan_digest
+            != parent_execution_plan.digest
+            or parent_action_plan.target_binding_digest != target_binding.digest
+        ):
+            raise ParallelActionPlanError(
+                "parallel parent planning authority is inconsistent"
+            )
+        if continuation_allocation is not None and (
+            continuation_allocation.scan_id != parent_action_plan.scan_id
+            or continuation_allocation.parent_plan_digest
+            != parent_action_plan.plan_digest
+            or continuation_allocation.execution_plan_digest
+            != parent_execution_plan.digest
+            or continuation_allocation.target_binding_digest
+            != target_binding.digest
+        ):
+            raise ParallelActionPlanError(
+                "parallel parent planning continuation is inconsistent"
+            )
+
+        endpoints = tuple(sorted({
+            str(item).strip() for item in endpoint_manifest_entries
+            if str(item).strip()
+        }))
+        requests = tuple(sorted(
+            (
+                item if isinstance(item, ParallelRequestWork)
+                else ParallelRequestWork(**dict(item))
+                for item in request_work
+            ),
+            key=lambda item: (item.principal_lane, item.selection_digest),
+        ))
+        if len({item.selection_digest for item in requests}) != len(requests):
+            raise ParallelActionPlanError(
+                "parallel request work selection is duplicated"
+            )
+        candidate_refs = tuple(
+            _canonical_mapping(item) for item in sorted(
+                (dict(item) for item in candidate_manifest_refs),
+                key=lambda item: json.dumps(
+                    item, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                ),
+            )
+        )
+        lanes = tuple(
+            item if isinstance(item, ParallelPrincipalLane)
+            else ParallelPrincipalLane(**dict(item))
+            for item in principal_lanes
+        ) or (ParallelPrincipalLane("anonymous"),)
+        if len({item.name for item in lanes}) != len(lanes):
+            raise ParallelActionPlanError("parallel principal lanes are duplicated")
+        placement_lanes = tuple(
+            item if isinstance(item, ParallelPlacementCapacity)
+            else ParallelPlacementCapacity(**dict(item))
+            for item in placements
+        ) or (ParallelPlacementCapacity(
+            "local",
+            parent_execution_plan.budget.max_workers,
+            {"node_scope": "local"},
+        ),)
+        if len({item.name for item in placement_lanes}) != len(placement_lanes):
+            raise ParallelActionPlanError("parallel placement lanes are duplicated")
+
+        hint = self.resolve_strategy(
+            parent_execution_plan,
+            requested=scheduling_hint,
+            known_endpoint_count=len(endpoints),
+        )
+        notes: list[str] = []
+        if scheduling_hint and str(scheduling_hint).strip().lower() != hint:
+            notes.append("unknown scheduling hint normalized to canonical auto planning")
+
+        comparison = next(
+            (lane for lane in lanes if lane.name == "comparison"), None,
+        )
+        global_lane = comparison or next(
+            (lane for lane in lanes if lane.name != "anonymous"), lanes[0],
+        )
+        global_placement = next(
+            (item for item in placement_lanes if item.name == "local"),
+            placement_lanes[0],
+        )
+        children: list[ParallelPlannedChild] = [ParallelPlannedChild(
+            index=0,
+            label="global",
+            role="global",
+            endpoints=(),
+            request_selection_digests=(),
+            candidate_manifest_refs=(),
+            principal_lane=global_lane,
+            family_scope=(),
+            placement=global_placement,
+        )]
+
+        has_endpoint_authority = any(
+            action.action_id not in {"finalize.report"}
+            and not _is_global_action(action.action_id)
+            for action in parent_action_plan.actions
+        ) or bool(
+            continuation_allocation
+            and continuation_allocation.allowed_capabilities
+        )
+        if not has_endpoint_authority or not (
+            endpoints or requests or candidate_refs
+        ):
+            notes.append("no immutable endpoint-scoped work requires fan-out")
+            return ParallelParentPlan(
+                parent_scan_id=parent_action_plan.scan_id,
+                parent_execution_plan_digest=parent_execution_plan.digest,
+                parent_action_plan_digest=str(parent_action_plan.plan_digest),
+                target_binding_digest=target_binding.digest,
+                scheduling_hint=hint,
+                children=tuple(children),
+                notes=tuple(notes),
+            )
+
+        family_candidates = tuple(sorted({
+            _capability_family(action.capability_name)
+            for action in parent_action_plan.actions
+            if _capability_family(action.capability_name)
+            in {"xss", "sqli", "nuclei", "bola", "auth"}
+        }))
+        family_groups: tuple[tuple[str, ...], ...] = ((),)
+        if hint in {"family", "coverage_family"} and family_candidates:
+            family_groups = tuple((item,) for item in family_candidates)
+
+        endpoint_lanes = tuple(lanes)
+        max_children = min(
+            parent_execution_plan.budget.max_workers,
+            sum(item.capacity for item in placement_lanes),
+        )
+        available_endpoint_slots = max(0, max_children - 1)
+        if available_endpoint_slots < len(endpoint_lanes):
+            raise ParallelActionPlanError(
+                "parallel capacity cannot preserve explicit principal isolation"
+            )
+        if len(endpoint_lanes) * len(family_groups) > available_endpoint_slots:
+            family_groups = (family_candidates,) if family_candidates else ((),)
+            notes.append(
+                "family scheduling lanes coalesced to preserve principal isolation"
+            )
+        axis_count = len(endpoint_lanes) * len(family_groups)
+        if axis_count > available_endpoint_slots:
+            raise ParallelActionPlanError(
+                "parallel capacity cannot preserve typed work axes"
+            )
+
+        work_count = max(1, len(endpoints), len(requests), len(candidate_refs))
+        per_axis_slots = max(1, min(
+            max(1, available_endpoint_slots // max(1, axis_count)),
+            work_count,
+        ))
+        expanded_placements: list[ParallelPlacementCapacity] = []
+        for placement in placement_lanes:
+            expanded_placements.extend([placement] * placement.capacity)
+        placement_cursor = 0
+        lane_children: dict[str, list[int]] = {}
+        for lane in endpoint_lanes:
+            for family_scope in family_groups:
+                endpoint_buckets = [list() for _ in range(per_axis_slots)]
+                for offset, endpoint in enumerate(endpoints):
+                    endpoint_buckets[offset % per_axis_slots].append(endpoint)
+                for bucket_index in range(per_axis_slots):
+                    placement = expanded_placements[
+                        placement_cursor % len(expanded_placements)
+                    ]
+                    placement_cursor += 1
+                    child_index = len(children)
+                    lane_children.setdefault(lane.name, []).append(child_index)
+                    suffix = ":" + "+".join(family_scope) if family_scope else ""
+                    children.append(ParallelPlannedChild(
+                        index=child_index,
+                        label=f"work:{lane.name}[{bucket_index}]{suffix}",
+                        role="endpoint",
+                        endpoints=tuple(endpoint_buckets[bucket_index]),
+                        request_selection_digests=(),
+                        candidate_manifest_refs=(),
+                        principal_lane=lane,
+                        family_scope=family_scope,
+                        placement=placement,
+                    ))
+
+        mutable = [
+            {
+                "requests": list(child.request_selection_digests),
+                "candidates": list(child.candidate_manifest_refs),
+            }
+            for child in children
+        ]
+        all_endpoint_indices = [
+            child.index for child in children if child.role == "endpoint"
+        ]
+        for request in requests:
+            eligible = lane_children.get(request.principal_lane)
+            if not eligible and request.principal_lane == "comparison":
+                eligible = lane_children.get(global_lane.name)
+            if not eligible:
+                raise ParallelActionPlanError(
+                    "parallel request work has no matching principal lane"
+                )
+            selected = eligible[
+                int(request.selection_digest[:16], 16) % len(eligible)
+            ]
+            mutable[selected]["requests"].append(request.selection_digest)
+        for reference in candidate_refs:
+            reference_digest = _digest(dict(reference))
+            selected = all_endpoint_indices[
+                int(reference_digest[:16], 16) % len(all_endpoint_indices)
+            ]
+            mutable[selected]["candidates"].append(reference)
+        children = [
+            ParallelPlannedChild(
+                index=child.index,
+                label=child.label,
+                role=child.role,
+                endpoints=child.endpoints,
+                request_selection_digests=tuple(mutable[child.index]["requests"]),
+                candidate_manifest_refs=tuple(mutable[child.index]["candidates"]),
+                principal_lane=child.principal_lane,
+                family_scope=child.family_scope,
+                placement=child.placement,
+            )
+            for child in children
+        ]
+        return ParallelParentPlan(
+            parent_scan_id=parent_action_plan.scan_id,
+            parent_execution_plan_digest=parent_execution_plan.digest,
+            parent_action_plan_digest=str(parent_action_plan.plan_digest),
+            target_binding_digest=target_binding.digest,
+            scheduling_hint=hint,
+            children=tuple(children),
+            notes=tuple(notes),
+        )
+
     def compile(
         self,
         *,
@@ -637,13 +1168,19 @@ class ParallelActionPlanCompiler:
 
         backbone = [
             index for index, item in enumerate(child_specs)
-            if bool((item.get("options") or {}).get("parallel_backbone"))
+            if (
+                str(item.get("role") or "").strip().lower() == "global"
+                or bool((item.get("options") or {}).get("parallel_backbone"))
+            )
         ]
         if len(backbone) > 1:
             raise ParallelActionPlanError("parallel partition has multiple global backbones")
         global_index = backbone[0] if backbone else 0
         base_weights = [
-            _entry_weight(item.get("options") or {}) for item in child_specs
+            max(1, int(item.get("work_weight") or 0))
+            if item.get("work_weight") is not None
+            else _entry_weight(item.get("options") or {})
+            for item in child_specs
         ]
         weights = list(base_weights)
         weights[global_index] += max(1, sum(base_weights) - base_weights[global_index])
@@ -689,9 +1226,33 @@ class ParallelActionPlanCompiler:
                 label=str(item.get("label") or f"shard[{index}]"),
                 role="global" if index == global_index else "endpoint",
                 budget=budget,
-                work_partition_digest=_work_partition_digest(
-                    item.get("options") or {},
+                work_partition_digest=(
+                    str(item.get("work_partition_digest") or "")
+                    or _work_partition_digest(item.get("options") or {})
                 ),
+                principal_lane=str(
+                    item.get("principal_lane")
+                    or (item.get("options") or {}).get("parallel_principal_lane")
+                    or (item.get("options") or {}).get("auth_state")
+                    or "comparison"
+                ),
+                placement_name=str(
+                    item.get("placement_name")
+                    or (item.get("options") or {}).get("parallel_placement_name")
+                    or "local"
+                ),
+                family_scope=tuple(sorted({
+                    str(value).strip().lower()
+                    for value in (
+                        item.get("family_scope")
+                        or (() if not (item.get("options") or {}).get(
+                            "coverage_attempt_family"
+                        ) else ((item.get("options") or {}).get(
+                            "coverage_attempt_family"
+                        ),))
+                    )
+                    if str(value).strip() and str(value).strip().lower() != "all"
+                })),
             ))
 
         for ledger_name, budget_name in _LEDGER_TO_BUDGET.items():
@@ -953,3 +1514,122 @@ def validate_parallel_partition_record(
         raise ParallelActionPlanError(
             "required continuation capability work is unassigned"
         )
+
+
+def merge_parallel_action_executions(
+    record: Mapping[str, Any],
+    *,
+    child_results: Mapping[str, Mapping[str, Any] | None],
+    child_statuses: Mapping[str, str],
+) -> dict[str, Any]:
+    """Validate and merge content-free child action/observation provenance.
+
+    Human-facing reports remain a projection. This is the authoritative merge
+    seam: an action row or observation reference not frozen in the partition is
+    rejected before findings or report fragments are considered.
+    """
+    raw_children = record.get("children")
+    if not isinstance(raw_children, list):
+        raise ParallelActionPlanError(
+            "parallel action execution merge requires a partition record"
+        )
+    expected = {
+        str(item.get("scan_id") or ""): item
+        for item in raw_children if isinstance(item, Mapping)
+    }
+    if (
+        not expected
+        or set(child_results) != set(expected)
+        or set(child_statuses) != set(expected)
+    ):
+        raise ParallelActionPlanError(
+            "parallel action execution children differ from the partition"
+        )
+    merged_actions: list[dict[str, Any]] = []
+    observation_refs: list[dict[str, Any]] = []
+    children: list[dict[str, Any]] = []
+    incomplete_children: list[str] = []
+    for scan_id in sorted(expected, key=lambda key: int(expected[key].get("index", 0))):
+        partition_child = expected[scan_id]
+        status = str(child_statuses[scan_id] or "unknown").strip().lower()
+        report = child_results[scan_id]
+        if not isinstance(report, Mapping):
+            if status == "completed":
+                raise ParallelActionPlanError(
+                    "completed parallel child has no canonical action report"
+                )
+            incomplete_children.append(scan_id)
+            children.append({
+                "scan_id": scan_id,
+                "status": status,
+                "action_plan_digest": partition_child.get("action_plan_digest"),
+                "action_count": 0,
+                "observation_manifest_count": 0,
+            })
+            continue
+        execution = report.get("canonical_action_execution")
+        if not isinstance(execution, Mapping):
+            raise ParallelActionPlanError(
+                "parallel child report has no canonical action execution"
+            )
+        action_rows = execution.get("actions")
+        finalizer = execution.get("finalization_action")
+        if not isinstance(action_rows, list) or not isinstance(finalizer, Mapping):
+            raise ParallelActionPlanError(
+                "parallel child canonical action execution is malformed"
+            )
+        expected_ids = list(partition_child.get("expected_action_ids") or ())
+        actual_ids = [
+            str(item.get("action_id") or "")
+            for item in action_rows if isinstance(item, Mapping)
+        ]
+        actual_ids.append(str(finalizer.get("action_id") or ""))
+        if (
+            len(action_rows) != sum(isinstance(item, Mapping) for item in action_rows)
+            or execution.get("plan_digest")
+            != partition_child.get("action_plan_digest")
+            or actual_ids != expected_ids
+            or finalizer.get("status") != "success"
+        ):
+            raise ParallelActionPlanError(
+                "parallel child result is outside its exact action partition"
+            )
+        child_observation_count = 0
+        for row in action_rows:
+            normalized = dict(row)
+            normalized["scan_id"] = scan_id
+            merged_actions.append(normalized)
+            reference = row.get("observation_manifest")
+            if reference is not None:
+                if not isinstance(reference, Mapping):
+                    raise ParallelActionPlanError(
+                        "parallel child observation manifest reference is invalid"
+                    )
+                observation_refs.append({
+                    "scan_id": scan_id,
+                    "action_id": row.get("action_id"),
+                    "reference": dict(reference),
+                })
+                child_observation_count += 1
+        if status != "completed" or bool(
+            (report.get("scan_metadata") or {}).get("partial")
+            if isinstance(report.get("scan_metadata"), Mapping) else False
+        ):
+            incomplete_children.append(scan_id)
+        children.append({
+            "scan_id": scan_id,
+            "status": status,
+            "action_plan_digest": partition_child.get("action_plan_digest"),
+            "action_count": len(action_rows) + 1,
+            "observation_manifest_count": child_observation_count,
+        })
+    payload = {
+        "schema_version": PARALLEL_ACTION_EXECUTION_MERGE_SCHEMA,
+        "partition_record_digest": record.get("record_digest"),
+        "children": children,
+        "actions": merged_actions,
+        "observation_manifests": observation_refs,
+        "incomplete_child_scan_ids": incomplete_children,
+        "partial": bool(incomplete_children),
+    }
+    return {**payload, "merge_digest": _digest(payload)}

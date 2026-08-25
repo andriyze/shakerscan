@@ -247,6 +247,56 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
     assert "worker-only-secret" not in json.dumps(queued)
 
 
+def test_parallel_executor_projection_isolates_opaque_principal_refs():
+    from scan.parallel_compiler import (
+        ParallelPlacementCapacity,
+        ParallelPlannedChild,
+        ParallelPrincipalLane,
+    )
+
+    primary_id = str(uuid.uuid4())
+    secondary_id = str(uuid.uuid4())
+    refs = {
+        primary_id: {"profile_id": primary_id, "scan_lane": "primary"},
+        secondary_id: {"profile_id": secondary_id, "scan_lane": "secondary"},
+    }
+    child = ParallelPlannedChild(
+        index=1,
+        label="secondary",
+        role="endpoint",
+        endpoints=("GET /v1/items",),
+        request_selection_digests=(),
+        candidate_manifest_refs=(),
+        principal_lane=ParallelPrincipalLane("secondary", (secondary_id,)),
+        family_scope=("xss",),
+        placement=ParallelPlacementCapacity(
+            "broker", 1, {"node_scope": "remote"},
+        ),
+    )
+    projected = worker._parallel_executor_projection(
+        {
+            "credential_profile_refs": list(refs.values()),
+            "auth_header": "Bearer must-not-persist",
+            "user2_header": "Bearer must-not-persist-either",
+            "budget_profile": "exhaustive",
+            "custom_budget": {"smart_bola_max_endpoints": 999},
+            "exploit_depth": True,
+        },
+        child=child,
+        credential_refs_by_id=refs,
+    )
+
+    assert projected["credential_profile_refs"] == [refs[secondary_id]]
+    assert projected["parallel_principal_lane"] == "secondary"
+    assert projected["auth_state"] == "user2"
+    assert projected["placement"] == {"node_scope": "remote"}
+    assert not {
+        "auth_header", "user2_header", "custom_budget", "exploit_depth",
+    }.intersection(projected)
+    assert "smart_bola" not in json.dumps(projected)
+    assert "exhaustive" not in json.dumps(projected)
+
+
 @pytest.mark.parametrize("conflict", [
     {"auth_header": "Bearer smuggled"},
     {"authentication": {"auth_header": "Bearer smuggled"}},
@@ -2275,6 +2325,7 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
     target_id = uuid.UUID("31313131-3131-3131-3131-313131313131")
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
+        policy={"active_testing": True, "include_families": ["xss"]},
     )
     options["placement"] = {
         "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -2805,7 +2856,8 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
 
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"exclude_families": ["nuclei"]},
+        policy={"active_testing": True, "include_families": ["xss"]},
+        approval_receipt_id="approval-1",
     )
     target = TargetBinding(
         target_id=str(target_id),
@@ -2881,6 +2933,17 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
     assert all(args[9] == "v2" for args in conn.inserted_children)
     assert all(json.loads(args[12])["schema_version"] == "scan-job/v2" for args in conn.inserted_children)
     assert all(len(args[13]) == 64 for args in conn.inserted_children)
+    persisted_child_options = [
+        json.loads(args[4]) for args in conn.inserted_children
+    ]
+    assert all(
+        not {
+            "exhaustive", "exploit_depth", "no_early_stop",
+            "auth_header", "auth_cookies", "user2_header", "user2_cookies",
+            "custom_budget", "resolved_budget", "smart_bola_max_endpoints",
+        }.intersection(item)
+        for item in persisted_child_options
+    )
     queued_by_scan = {
         item["scan_id"]: CanonicalScanJob.from_queue_payload(item)
         for item in queued
@@ -2941,6 +3004,7 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
 
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
+        policy={"active_testing": True, "include_families": ["xss"]},
     )
     options["coverage_per_shard_cap"] = 2
     conn = DiscoveryPlanConn(
@@ -2965,7 +3029,7 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
     from scan.jobs import CanonicalScanJob
     assert CanonicalScanJob.from_queue_payload(
         jobs[0]
-    ).shard.shard_label == "global-backbone"
+    ).shard.shard_label == "global"
     assigned = [
         endpoint
         for args in conn.inserted_children[1:]
@@ -3014,17 +3078,14 @@ def test_scan_plan_failed_discovery_runs_canonical_backbone_with_partial_coverag
     }))
 
     queued = [json.loads(payload) for _, payload in redis.pushed]
-    assert len(queued) == 2
+    assert len(queued) == 1
     from scan.jobs import CanonicalScanJob
-    assert all(
-        CanonicalScanJob.from_queue_payload(item).shard.parent_scan_id == parent_id
-        for item in queued
-    )
+    assert CanonicalScanJob.from_queue_payload(queued[0]).shard is None
     parent_update = next(
         args for query, args in conn.executions
-        if "UPDATE scans SET status='running'" in query and "shard_count" in query
+        if "UPDATE scans SET scan_role = 'standalone'" in query
     )
-    parent_options = json.loads(parent_update[3])
+    parent_options = json.loads(parent_update[0])
     assert parent_options["coverage_status"] == "partial"
     assert parent_options["coverage_reasons"] == [
         "Exceeded bounded discovery duration"
@@ -4681,7 +4742,9 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
         "GET /api/c?id=1", "GET /api/d?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
-        parent_id, target_id, custom_endpoints=endpoints,
+        parent_id, target_id,
+        policy={"active_testing": True, "include_families": ["xss"]},
+        custom_endpoints=endpoints,
     )
     options.update({
         "coverage_allocation": "dynamic",
@@ -4714,13 +4777,14 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     child_options = [json.loads(args[4]) for args in conn.inserted_children]
     assert len(child_jobs) == 3
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert canonical_children[0].shard.shard_label == "global"
     assert child_options[0]["parallel_backbone"] is True
     for job, persisted in zip(canonical_children[1:], child_options[1:], strict=True):
         assert job.shard.parent_scan_id == parent_id
         assert job.target.target_id == str(target_id)
         assert persisted["zero_rediscovery"] is True
-        assert persisted["custom_budget"]["phase4_max_seconds"] == 0
+        assert "custom_budget" not in persisted
+        assert persisted["parallel_budget_partition"] == job.shard.sub_budget.payload()
         assert len(persisted["custom_endpoints"]) == 2
     assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
     assert redis.sets[0][1] == 3
@@ -4748,7 +4812,9 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
         "GET /api/c?id=1", "GET /api/d?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
-        parent_id, target_id, custom_endpoints=endpoints,
+        parent_id, target_id,
+        policy={"active_testing": True, "include_families": ["xss"]},
+        custom_endpoints=endpoints,
     )
     options.update({
         "coverage_dynamic_batch_size": 2,
@@ -4833,19 +4899,15 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
         CanonicalScanJob.from_queue_payload(job) for job in child_jobs
     ]
     child_options = [json.loads(args[4]) for args in conn.inserted_children]
-    assert len(child_jobs) == 7
+    assert len(child_jobs) == 3
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert canonical_children[0].shard.shard_label == "global"
     assert [job.shard.shard_label for job in canonical_children[1:]] == [
-        "coverage[0]:broad",
-        "coverage[0]:sqli",
-        "coverage[0]:xss",
-        "coverage[1]:broad",
-        "coverage[1]:sqli",
-        "coverage[1]:xss",
+        "work:anonymous[0]:sqli",
+        "work:anonymous[0]:xss",
     ]
-    assert child_options[2]["coverage_attempt_family"] == "sqli"
-    assert child_options[3]["coverage_attempt_family"] == "xss"
+    assert child_options[1]["coverage_attempt_family"] == "sqli"
+    assert child_options[2]["coverage_attempt_family"] == "xss"
     assert all(item["zero_rediscovery"] is True for item in child_options[1:])
     assert all("asm_check_family" not in item for item in child_options)
     parent_update = [
@@ -4907,15 +4969,14 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
         CanonicalScanJob.from_queue_payload(job) for job in child_jobs
     ]
     child_options = [json.loads(args[4]) for args in conn.inserted_children]
-    assert len(child_jobs) == 7
+    assert len(child_jobs) == 3
     assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert canonical_children[0].shard.shard_label == "global-backbone"
+    assert canonical_children[0].shard.shard_label == "global"
     assert [job.shard.shard_label for job in canonical_children[1:]] == [
-        "coverage[0]:broad", "coverage[0]:sqli", "coverage[0]:xss",
-        "coverage[1]:broad", "coverage[1]:sqli", "coverage[1]:xss",
+        "work:anonymous[0]:sqli", "work:anonymous[0]:xss",
     ]
-    assert child_options[2]["coverage_attempt_family"] == "sqli"
-    assert child_options[3]["coverage_attempt_family"] == "xss"
+    assert child_options[1]["coverage_attempt_family"] == "sqli"
+    assert child_options[2]["coverage_attempt_family"] == "xss"
     assert all("asm_check_family" not in item for item in child_options)
     parent_update = [
         args for query, args in conn.executions
@@ -4924,8 +4985,8 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
     parent_options = json.loads(parent_update[3])
     assert parent_options["parallel_strategy"] == "coverage_family"
     assert parent_options["coverage_allocation"] == "static"
-    assert parent_options["coverage_check_families"] == ["all", "sqli", "xss"]
-    assert parent_options["coverage_expected_attempts"] == 12
+    assert parent_options["coverage_check_families"] == ["sqli", "xss"]
+    assert parent_options["coverage_expected_attempts"] == 8
 
 
 def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypatch):
@@ -4978,32 +5039,16 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
         CanonicalScanJob.from_queue_payload(job) for job in child_jobs
     ]
     child_options = [json.loads(args[4]) for args in conn.inserted_children]
-    assert len(child_jobs) == 3
-    assert {job["type"] for job in child_jobs} == {worker.parallel_scan.SHARD_JOB_TYPE}
-    assert canonical_children[0].shard.shard_label == "global-backbone"
-    assert [job.shard.shard_label for job in canonical_children[1:]] == [
-        "coverage[0]:bola", "coverage[1]:bola",
-    ]
-    assert all(
-        item["coverage_attempt_family"] == "bola"
-        for item in child_options[1:]
-    )
-    assert all("auth_header" not in item for item in child_options)
-    assert all("user2_header" not in item for item in child_options)
-    assert all(
-        item["custom_budget"]["phase4_max_seconds"]
-        == worker.parallel_scan.BOLA_DYNAMIC_PHASE4_SECONDS
-        for item in child_options[1:]
-    )
-    parent_update = [
+    assert len(child_jobs) == 1
+    assert canonical_children[0].shard is None
+    assert not child_options
+    parent_update = next(
         args for query, args in conn.executions
-        if "UPDATE scans SET status='running'" in query and "shard_count" in query
-    ][0]
-    parent_options = json.loads(parent_update[3])
-    assert parent_options["parallel_strategy"] == "coverage_family"
-    assert parent_options["coverage_allocation"] == "static"
-    assert parent_options["coverage_check_families"] == ["bola"]
-    assert parent_options["coverage_expected_attempts"] == 4
+        if "UPDATE scans SET scan_role = 'standalone'" in query
+    )
+    standalone_options = json.loads(parent_update[0])
+    assert "exploit_depth" not in standalone_options
+    assert "smart_bola_max_endpoints" not in standalone_options
 
 
 def test_exploit_batch_without_endpoint_telemetry_marks_partial_not_tested(monkeypatch):

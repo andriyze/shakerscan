@@ -1,4 +1,4 @@
-"""Parallel scan orchestration: plan a parent scan into independent shards.
+"""Parallel Scan compatibility helpers and scatter/gather persistence utilities.
 
 A parallel scan splits one logical scan of a single target across the worker
 fleet (see docs/dast-asm-architecture.md). The flow is a scatter-gather:
@@ -11,9 +11,11 @@ fleet (see docs/dast-asm-architecture.md). The flow is a scatter-gather:
         -> last shard to finish enqueues a scan_merge job
         -> scan_merge aggregates child results into the parent report
 
-This module is the endpoint-partition planner: it is pure logic (no I/O) so it
-can be unit tested. Canonical policy and budget snapshots are its only
-behavior-bearing inputs; historical Scan names are never interpreted here.
+Production V2 parent planning is owned by ``scan.parallel_compiler`` and consumes
+typed action/manifests/principal/placement authority. The ``plan_*`` functions in
+this module are retained only for historical read/upgrade fixtures; the worker
+must not call them when creating new V2 children. Queue keys, endpoint harvesting,
+coverage projection, and merge reconciliation remain shared compatibility seams.
 
 Strategies:
 

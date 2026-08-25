@@ -200,12 +200,15 @@ from scan.continuation import (
 from scan.manifest_store import PostgresScanManifestStore
 from scan.parallel_inputs import (
     ParallelScanInputError,
-    partition_request_manifests,
 )
 from scan.parallel_compiler import (
     ParallelActionPlanCompiler,
     ParallelActionPlanError,
+    ParallelPlacementCapacity,
+    ParallelPrincipalLane,
+    ParallelRequestWork,
     build_parallel_work_assignment,
+    merge_parallel_action_executions,
     merge_parallel_work_assignments,
     parallel_capability_family_scope,
     validate_parallel_partition_record,
@@ -1870,6 +1873,19 @@ async def _hydrate_generic_scan_credentials(
         raise ScanCredentialError("generic Scan credential references are ambiguous")
     if any(lane not in {"primary", "secondary"} for lane in lanes):
         raise ScanCredentialError("generic Scan credential lane is invalid")
+    planned_principal_lane = str(
+        hydrated.get("parallel_principal_lane") or "comparison"
+    ).strip().lower()
+    expected_lanes = {
+        "primary": {"primary"},
+        "secondary": {"secondary"},
+        "comparison": set(lanes),
+        "service": set(lanes),
+    }.get(planned_principal_lane)
+    if expected_lanes is None or set(lanes) != expected_lanes:
+        raise ScanCredentialError(
+            "generic Scan credential references differ from the planned principal lane"
+        )
     try:
         scan_uuid = uuid.UUID(str(scan_id))
         for profile_id in profile_ids:
@@ -1967,12 +1983,24 @@ async def _hydrate_generic_scan_credentials(
                     raise ScanCredentialError(
                         "generic Scan credential changed after admission"
                     )
+                admitted_lane = str(ref["scan_lane"])
+                # A principal-isolated secondary partition runs that exact
+                # profile as the child scanner's primary session. This
+                # worker-private adapter never changes the persisted reference
+                # or exposes the resolved secret in the canonical queue job.
+                executor_lane = (
+                    "primary"
+                    if planned_principal_lane == "secondary"
+                    and admitted_lane == "secondary"
+                    else admitted_lane
+                )
                 hydrated = bind_resolved_scan_credential(
-                    hydrated, resolved, scan_lane=str(ref["scan_lane"]),
+                    hydrated, resolved, scan_lane=executor_lane,
                 )
                 resolved_refs.append({
                     **resolved.receipt_metadata(),
-                    "scan_lane": str(ref["scan_lane"]),
+                    "scan_lane": admitted_lane,
+                    "planned_principal_lane": planned_principal_lane,
                     "allowed_capabilities": list(expected_allowed),
                     "credential_resolution_capability": resolution_capability,
                 })
@@ -14860,6 +14888,145 @@ def _canonicalize_shard_options(
     return child_options
 
 
+_PARALLEL_PRIVATE_AUTH_KEYS = frozenset({
+    "auth_header", "auth_cookies", "auth_headers_json", "login_username",
+    "login_password", "login_url", "login_extra_fields", "auto_auth",
+    "auth_scenario_json", "user2_header", "user2_cookies",
+})
+_PARALLEL_LEGACY_BEHAVIOR_KEYS = frozenset({
+    "auth_state_shards", "coverage_allocation", "dynamic_coverage_allocation",
+    "coverage_dynamic_batch_size", "coverage_dynamic_max_batches",
+    "coverage_dynamic_worker", "coverage_dynamic_campaign_only",
+    "coverage_max_shards", "coverage_per_shard_cap", "coverage_family_aware",
+    "thorough_params", "sqli", "xss",
+})
+
+
+def _canonical_parallel_principal_lanes(
+    options: Mapping[str, Any],
+    *,
+    scheduling_hint: str,
+    parent_action_plan: ScanActionPlan,
+) -> tuple[ParallelPrincipalLane, ...]:
+    """Translate admitted opaque profile refs once at the compatibility edge."""
+    refs = [
+        dict(item) for item in options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping)
+    ]
+    by_lane = {
+        str(item.get("scan_lane") or "").strip().lower(): str(
+            item.get("profile_id") or ""
+        ).strip()
+        for item in refs
+        if str(item.get("scan_lane") or "").strip().lower()
+        in {"primary", "secondary"}
+        and str(item.get("profile_id") or "").strip()
+    }
+    comparison = ParallelPrincipalLane(
+        "comparison", tuple(by_lane[name] for name in ("primary", "secondary") if name in by_lane),
+    ) if by_lane else ParallelPrincipalLane("anonymous")
+    split_states = bool(options.get("auth_state_shards"))
+    if scheduling_hint == "auth_split":
+        return (
+            ParallelPrincipalLane("anonymous"),
+            comparison,
+        ) if comparison.name == "comparison" else (comparison,)
+    if not split_states:
+        return (comparison,)
+    lanes: list[ParallelPrincipalLane] = [ParallelPrincipalLane("anonymous")]
+    for name in ("primary", "secondary"):
+        if name in by_lane:
+            lanes.append(ParallelPrincipalLane(name, (by_lane[name],)))
+    needs_comparison = any(
+        action.capability_name.startswith("authz.")
+        for action in parent_action_plan.actions
+    )
+    if needs_comparison and comparison.name == "comparison":
+        lanes.append(comparison)
+    return tuple(lanes)
+
+
+def _canonical_parallel_placements(
+    options: Mapping[str, Any], *, worker_count: int,
+) -> tuple[ParallelPlacementCapacity, ...]:
+    routing = (
+        dict(options.get("placement"))
+        if isinstance(options.get("placement"), Mapping) else {"node_scope": "local"}
+    )
+    node_scope = str(routing.get("node_scope") or "").strip().lower()
+    name = "local" if node_scope in {"", "local"} else "broker"
+    capacity = max(2, int(worker_count or 0) or 3)
+    return (ParallelPlacementCapacity(name, capacity, routing),)
+
+
+def _parallel_executor_projection(
+    parent_options: Mapping[str, Any],
+    *,
+    child: Any,
+    credential_refs_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project a typed child into non-authoritative legacy executor switches."""
+    projected = copy.deepcopy(dict(parent_options))
+    partitioned_input_keys = {
+        "endpoint_manifest_id", "endpoint_manifest_ref",
+        "candidate_manifest_ref", "request_candidate_manifest_ref",
+        "request_manifest_refs", "request_collections",
+    }
+    for key in tuple(projected):
+        lowered = str(key).strip().lower()
+        if (
+            key in parallel_scan.PARALLEL_OPTION_KEYS
+            or key in _PARALLEL_PRIVATE_AUTH_KEYS
+            or lowered == "custom_budget"
+            or lowered == "resolved_budget"
+            or lowered == "exploit_depth"
+            or lowered == "no_early_stop"
+            or lowered == "exhaustive"
+            or (
+                lowered == "budget_profile"
+                and str(projected.get(key) or "").strip().lower() == "exhaustive"
+            )
+            or lowered.startswith("smart_")
+            or key in partitioned_input_keys
+            or lowered in _PARALLEL_LEGACY_BEHAVIOR_KEYS
+        ):
+            projected.pop(key, None)
+    profile_ids = set(child.principal_lane.credential_profile_ids)
+    projected["credential_profile_refs"] = [
+        dict(credential_refs_by_id[profile_id])
+        for profile_id in child.principal_lane.credential_profile_ids
+        if profile_id in credential_refs_by_id
+    ]
+    projected["parallel_principal_lane"] = child.principal_lane.name
+    projected["auth_state"] = {
+        "primary": "user1",
+        "secondary": "user2",
+        "comparison": "user1",
+        "service": "user1",
+    }.get(child.principal_lane.name, "anonymous")
+    projected["parallel_placement_name"] = child.placement.name
+    projected["placement"] = dict(child.placement.routing)
+    projected["parallel_backbone"] = child.role == "global"
+    projected["parallel_stage"] = (
+        "global_backbone" if child.role == "global" else "endpoint_partition"
+    )
+    projected["skip_global_checks"] = child.role != "global"
+    projected["focused_endpoints_only"] = child.role != "global"
+    projected["zero_rediscovery"] = child.role != "global"
+    if child.role == "endpoint":
+        projected["custom_endpoints"] = list(child.endpoints)
+    else:
+        projected.pop("custom_endpoints", None)
+    if len(child.family_scope) == 1:
+        projected["coverage_attempt_family"] = child.family_scope[0]
+    else:
+        projected.pop("coverage_attempt_family", None)
+    projected["parallel_family_scope"] = list(child.family_scope)
+    if not profile_ids:
+        projected.pop("credential_profile_refs", None)
+    return projected
+
+
 def _canonical_shard_job(
     parent_job: CanonicalScanJob,
     *,
@@ -14955,8 +15122,17 @@ def _compile_parallel_child_action_plan(
     request_candidate_ref = child_options.get("request_candidate_manifest_ref")
     template_ref = child_options.get("template_manifest_ref")
     request_manifest_refs = child_options.get("request_manifest_refs")
-    raw_family = str(child_options.get("coverage_attempt_family") or "all").lower()
-    family_scope = () if raw_family in {"", "all"} else (raw_family,)
+    raw_family_scope = child_options.get("parallel_family_scope")
+    if isinstance(raw_family_scope, list):
+        family_scope = tuple(
+            str(item).strip().lower() for item in raw_family_scope
+            if str(item).strip() and str(item).strip().lower() != "all"
+        )
+    else:
+        raw_family = str(
+            child_options.get("coverage_attempt_family") or "all"
+        ).lower()
+        family_scope = () if raw_family in {"", "all"} else (raw_family,)
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=child_job.scan_id,
         execution_plan=child_job.execution_plan,
@@ -15299,12 +15475,16 @@ async def process_scan_plan_job(job_data: dict):
     )
     r.expire(f"job:{parent_job_id}", 86400)
 
-    requested_strategy = ParallelActionPlanCompiler.resolve_strategy(
+    submitted_endpoints = tuple(sorted({
+        str(item).strip()
+        for item in options.get("custom_endpoints") or ()
+        if isinstance(item, str) and str(item).strip()
+    }))
+    parallel_compiler = ParallelActionPlanCompiler()
+    requested_strategy = parallel_compiler.resolve_strategy(
         canonical_parent_job.execution_plan,
         requested=options.get('shard_strategy') or 'auto',
-        known_endpoint_count=len(parallel_scan._normalize_endpoint_list(
-            options.get("custom_endpoints")
-        )),
+        known_endpoint_count=len(submitted_endpoints),
     )
     plan_stage = str(job_data.get('plan_stage') or 'start')
     canonical_subdomain_discovery = bool(
@@ -15315,8 +15495,8 @@ async def process_scan_plan_job(job_data: dict):
     )
     needs_placed_discovery = bool(
         (
-            requested_strategy in {'coverage', 'coverage_family'}
-            and not options.get('custom_endpoints')
+            canonical_parent_job.execution_plan.policy.active_testing
+            and not submitted_endpoints
         )
         or canonical_subdomain_discovery
         or canonical_network_discovery
@@ -15358,7 +15538,19 @@ async def process_scan_plan_job(job_data: dict):
             return
         discovery_id = str(uuid.uuid4())
         discovery_job_id = str(uuid.uuid4())
-        discovery_opts = parallel_scan._base_child_options(options)
+        discovery_opts = copy.deepcopy(dict(options))
+        for key in tuple(discovery_opts):
+            lowered = str(key).strip().lower()
+            if (
+                key in parallel_scan.PARALLEL_OPTION_KEYS
+                or key in _PARALLEL_PRIVATE_AUTH_KEYS
+                or lowered in {
+                    "custom_budget", "resolved_budget", "exploit_depth",
+                    "no_early_stop", "exhaustive",
+                }
+                or lowered.startswith("smart_")
+            ):
+                discovery_opts.pop(key, None)
         discovery_opts['parallel_discovery'] = True
         discovery_opts['parallel_stage'] = 'discovery'
         discovery_opts['skip_global_checks'] = True
@@ -15368,8 +15560,11 @@ async def process_scan_plan_job(job_data: dict):
             'coverage_family_aware', 'sqli', 'xss',
         ):
             discovery_opts.pop(key, None)
-        parallel_scan._merge_custom_budget(
-            discovery_opts, dict(parallel_scan.RECON_DISCOVERY_BUDGET)
+        discovery_opts["parallel_budget_partition"] = (
+            parallel_compiler.discovery_budget(
+                canonical_parent_job.execution_plan,
+                include_network=canonical_network_discovery,
+            ).payload()
         )
         discovery_job, discovery_opts, discovery_payload = _canonical_shard_job(
             canonical_parent_job,
@@ -15486,7 +15681,7 @@ async def process_scan_plan_job(job_data: dict):
         async with db_pool.acquire() as conn:
             discovery = await conn.fetchrow(
                 """
-                SELECT id, status, result, error_message
+                SELECT id, status, result, error_message, budget_used_json
                 FROM scans
                 WHERE id=$1 AND parent_scan_id=$2 AND scan_role=$3
                 """,
@@ -15552,33 +15747,22 @@ async def process_scan_plan_job(job_data: dict):
                 "durable_budget_settled": False,
                 "network_binding": "exact_address_subset",
             }
-    if requested_strategy in {'coverage', 'coverage_family'}:
+    harvested = list(submitted_endpoints)
+    if discovery_scan_id:
         # The placed discovery shard already executed target traffic. This
         # continuation only reads its durable result and plans self-contained
         # endpoint shards on the control plane.
-        if discovery_scan_id:
-            discovery_status = str(discovery.get('status') or '')
-            if discovery_status == 'failed':
-                # A failed producer may still have durable, trustworthy partial output. Harvest it
-                # and continue; coverage truth is reported separately from the parent run status.
-                discovery_degraded_reason = str(
-                    discovery.get('error_message') or recon_result.get('error')
-                    or 'parallel discovery producer failed after partial output'
-                )[:1000]
-        else:
-            # Explicit endpoint scope can fan out immediately without target
-            # discovery. This is the lowest-latency parallel path.
-            recon_result = {}
-        recon_opts = parallel_scan._base_child_options(options)
-        try:
-            harvest_limit = int(
-                ((options.get('custom_budget') or {}).get('active_worklist_max'))
-                or parallel_scan.COVERAGE_WORKLIST_MAX
-            )
-        except (TypeError, ValueError):
-            harvest_limit = parallel_scan.COVERAGE_WORKLIST_MAX
-        harvested, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
-            recon_result, max_endpoints=harvest_limit
+        discovery_status = str(discovery.get('status') or '')
+        if discovery_status == 'failed':
+            # A failed producer may still have durable, trustworthy partial output. Harvest it
+            # and continue; coverage truth is reported separately from the parent run status.
+            discovery_degraded_reason = str(
+                discovery.get('error_message') or recon_result.get('error')
+                or 'parallel discovery producer failed after partial output'
+            )[:1000]
+        discovered, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
+            recon_result,
+            max_endpoints=canonical_parent_job.execution_plan.budget.max_endpoints,
         )
         # Surface the worklist cap so "Full Coverage" never reports ~100% over a
         # silently truncated surface: endpoints beyond the cap were discovered but
@@ -15588,60 +15772,103 @@ async def process_scan_plan_job(job_data: dict):
                   f"{harvest_meta['raw_discovered']} endpoints, testing only "
                   f"{harvest_meta['cap']} (cap). Raise custom_budget.active_worklist_max "
                   f"for full coverage.", flush=True)
-        _raw_harvested = len(harvested)
-        harvested = parallel_scan._normalize_endpoint_list(
-            list(options.get('custom_endpoints') or []) + harvested
-        )
+        _raw_harvested = len(discovered)
+        harvested = sorted({*harvested, *discovered})
         print(f"[{parent_id[:8]}] coverage: harvested {len(harvested)} endpoints from recon "
               f"({_raw_harvested} discovered)", flush=True)
-        requested_allocation = parallel_scan.coverage_allocation_mode(options)
-        if requested_allocation == 'dynamic':
+    principal_lanes = _canonical_parallel_principal_lanes(
+        options,
+        scheduling_hint=requested_strategy,
+        parent_action_plan=parent_action_plan,
+    )
+    coverage_auth_states = sorted({
+        {
+            "primary": "user1", "secondary": "user2",
+            "comparison": "user1", "service": "user1",
+        }.get(lane.name, "anonymous")
+        for lane in principal_lanes
+    })
+    # Continuous ASM: the typed producer worklist is the richest endpoint
+    # source. Persist it per explicit principal lane before scheduling.
+    if target_id and harvested:
+        try:
+            async with db_pool.acquire() as conn:
+                n = 0
+                for auth_state in coverage_auth_states:
+                    n += await asm_inventory.upsert_endpoints(
+                        conn,
+                        target_id,
+                        harvested,
+                        source='coverage_discovery',
+                        auth_state=auth_state,
+                        campaign_id=None,
+                        scan_id=parent_id,
+                    )
             print(
-                f"[{parent_id[:8]}] coverage: database-pull allocation replaced by "
-                "self-contained shards for broker/fleet correctness",
+                f"[{parent_id[:8]}] ASM inventory: upserted {n} endpoint/auth rows from recon",
                 flush=True,
             )
-        coverage_allocation = 'static'
-        coverage_auth_states = (
-            parallel_scan.available_auth_states(options)
-            if options.get('auth_state_shards')
-            else [asm_inventory.auth_state_from_options(options)]
+        except Exception as e:
+            print(f"[{parent_id[:8]}] ASM inventory error: {e}", flush=True)
+
+    default_request_lane = next(
+        (
+            lane.name for preferred in ("comparison", "primary", "service")
+            for lane in principal_lanes if lane.name == preferred
+        ),
+        principal_lanes[0].name,
+    )
+    request_work = tuple(
+        ParallelRequestWork(str(selection_digest), default_request_lane)
+        for selection_digest in (
+            options.get("request_manifest_refs") or {}
         )
-        # Continuous ASM: the recon worklist is the richest endpoint source —
-        # persist the whole thing into the per-target inventory (docs §16).
-        if target_id and harvested:
-            try:
-                async with db_pool.acquire() as conn:
-                    upsert_states = coverage_auth_states
-                    n = 0
-                    for auth_state in upsert_states:
-                        n += await asm_inventory.upsert_endpoints(
-                            conn,
-                            target_id,
-                            harvested,
-                            source='coverage_discovery',
-                            auth_state=auth_state,
-                            campaign_id=None,
-                            scan_id=parent_id,
-                        )
-                print(
-                    f"[{parent_id[:8]}] ASM inventory: upserted {n} endpoint/auth rows from recon",
-                    flush=True,
-                )
-            except Exception as e:
-                print(f"[{parent_id[:8]}] ASM inventory error: {e}", flush=True)
-        if requested_strategy == 'coverage_family':
-            plan = parallel_scan.plan_coverage_family_shards(options, harvested)
-        else:
-            plan = parallel_scan.plan_coverage_shards(options, harvested)
-        plan = parallel_scan.with_coverage_backbone(plan, options)
-    else:
-        plan = parallel_scan.plan_shards(
+        if isinstance(selection_digest, str)
+    ) if isinstance(options.get("request_manifest_refs"), Mapping) else ()
+    candidate_refs = tuple(
+        dict(value)
+        for key in (
+            "candidate_manifest_ref", "request_candidate_manifest_ref",
+        )
+        for value in (options.get(key),)
+        if isinstance(value, Mapping)
+    )
+    parent_parallel_plan = parallel_compiler.plan_parent(
+        parent_execution_plan=canonical_parent_job.execution_plan,
+        parent_action_plan=parent_action_plan,
+        target_binding=canonical_parent_job.target,
+        continuation_allocation=continuation_allocation,
+        endpoint_manifest_entries=harvested,
+        request_work=request_work,
+        candidate_manifest_refs=candidate_refs,
+        principal_lanes=principal_lanes,
+        placements=_canonical_parallel_placements(
             options,
-            requested_shards=options.get('shards', 'auto'),
-            strategy=requested_strategy,
-            worker_count=job_data.get('parallel_worker_count') or 0,
-        )
+            worker_count=int(job_data.get('parallel_worker_count') or 0),
+        ),
+        scheduling_hint=requested_strategy,
+    )
+    credential_refs_by_id = {
+        str(item.get("profile_id") or ""): dict(item)
+        for item in options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping) and str(item.get("profile_id") or "")
+    }
+    plan = parallel_scan.ParallelPlan(
+        strategy=parent_parallel_plan.scheduling_hint,
+        shards=[
+            parallel_scan.ShardSpec(
+                index=child.index,
+                label=child.label,
+                options=_parallel_executor_projection(
+                    options,
+                    child=child,
+                    credential_refs_by_id=credential_refs_by_id,
+                ),
+            )
+            for child in parent_parallel_plan.children
+        ],
+        notes=list(parent_parallel_plan.notes),
+    )
     for note in plan.notes:
         print(f"[{parent_id[:8]}] plan note: {note}", flush=True)
 
@@ -15758,9 +15985,11 @@ async def process_scan_plan_job(job_data: dict):
             parent_options['coverage_worklist_truncated'] = harvest_meta['truncated']
         if harvested and coverage_auth_states:
             planned_families = {
-                asm_inventory.normalize_check_family(s.options.get('coverage_attempt_family') or 'all')
-                for s in plan.shards if not s.options.get('parallel_backbone')
-            } if plan.strategy == 'coverage_family' else {'all'}
+                family
+                for child in parent_parallel_plan.children
+                if child.role == "endpoint"
+                for family in (child.family_scope or ("all",))
+            }
             parent_options['coverage_check_families'] = sorted(planned_families)
             family_multiplier = max(1, len(planned_families))
             parent_options['coverage_expected_attempts'] = len(harvested) * max(1, len(coverage_auth_states)) * family_multiplier
@@ -15771,19 +16000,6 @@ async def process_scan_plan_job(job_data: dict):
     parent_options[parallel_scan.PARALLEL_EXPECTED_SHARDS_KEY] = plan.shard_count
     planned_request_budget = 0
     backbone_request_budget = 0
-    for planned_shard in plan.shards:
-        resolved = planned_shard.options.get('resolved_budget')
-        if not isinstance(resolved, dict):
-            raise ExecutionScopeError(
-                "parallel shard is missing its canonical resolved budget"
-            )
-        try:
-            request_budget = max(0, int(resolved.get('request_max') or 0))
-        except (TypeError, ValueError):
-            request_budget = 0
-        planned_request_budget += request_budget
-        if planned_shard.options.get('parallel_backbone'):
-            backbone_request_budget += request_budget
     parent_options['parallel_planned_request_budget'] = planned_request_budget
     parent_options['parallel_backbone_request_budget'] = backbone_request_budget
     child_identities = tuple(
@@ -15794,26 +16010,39 @@ async def process_scan_plan_job(job_data: dict):
         raise ExecutionScopeError(
             "canonical parallel planning lost parent action authority"
         )
+    consumed_parent_budget = dict(
+        _as_report_dict(parent_authority_row.get("budget_used_json")) or {}
+    )
+    if discovery is not None:
+        for name, amount in dict(
+            _as_report_dict(discovery.get("budget_used_json")) or {}
+        ).items():
+            try:
+                consumed_parent_budget[name] = (
+                    max(0, int(consumed_parent_budget.get(name) or 0))
+                    + max(0, int(amount or 0))
+                )
+            except (TypeError, ValueError):
+                continue
     try:
-        parallel_action_partition = ParallelActionPlanCompiler().compile(
+        parallel_action_partition = parallel_compiler.compile(
                 parent_execution_plan=canonical_parent_job.execution_plan,
                 parent_action_plan=parent_action_plan,
                 target_binding=canonical_parent_job.target,
-                child_specs=tuple({
-                    "scan_id": child_id,
-                    "index": shard.index,
-                    "label": shard.label,
-                    "options": shard.options,
-                } for shard, (child_id, _job_id, _index) in zip(
-                    plan.shards, child_identities, strict=True,
-                )),
-                consumed_budget=_as_report_dict(
-                    parent_authority_row.get("budget_used_json")
+                child_specs=tuple(
+                    child.compiler_spec(scan_id=child_id)
+                    for child, (child_id, _job_id, _index) in zip(
+                        parent_parallel_plan.children,
+                        child_identities,
+                        strict=True,
+                    )
                 ),
+                consumed_budget=consumed_parent_budget,
                 continuation_allocation=continuation_allocation,
                 strategy=plan.strategy,
-                available_worker_count=int(
-                    job_data.get('parallel_worker_count') or 0
+                available_worker_count=max(
+                    len(parent_parallel_plan.children),
+                    int(job_data.get('parallel_worker_count') or 0),
                 ),
         )
     except ParallelActionPlanError as exc:
@@ -15835,6 +16064,8 @@ async def process_scan_plan_job(job_data: dict):
                 "parallel_budget_partition": child_partition.budget.payload(),
                 "skip_global_checks": child_partition.role != "global",
         })
+    parent_options["parallel_parent_plan"] = parent_parallel_plan.canonical_dict()
+    parent_options["parallel_parent_plan_digest"] = parent_parallel_plan.plan_digest
     parent_options["parallel_action_partition"] = (
         parallel_action_partition.canonical_dict()
     )
@@ -15877,36 +16108,30 @@ async def process_scan_plan_job(job_data: dict):
                     "parallel parent request manifest is unavailable"
                 )
             manifests_by_selection[str(raw_digest).lower()] = manifest
-        endpoint_children = tuple(
-            (child_id, shard_index)
-            for shard, (child_id, _job_id, shard_index) in zip(
-                plan.shards, child_identities, strict=True,
-            )
-            if not shard.options.get("parallel_backbone")
-        )
-        if not endpoint_children:
+        assigned_selections: set[str] = set()
+        for child in parent_parallel_plan.children:
+            if child.role != "endpoint":
+                continue
+            selected = {
+                digest: manifests_by_selection[digest]
+                for digest in child.request_selection_digests
+                if digest in manifests_by_selection
+            }
+            if len(selected) != len(child.request_selection_digests):
+                raise ParallelScanInputError(
+                    "typed parallel request selection is unavailable"
+                )
+            if assigned_selections.intersection(selected):
+                raise ParallelScanInputError(
+                    "typed parallel request selection was assigned twice"
+                )
+            assigned_selections.update(selected)
+            if selected:
+                request_partitions[child.index] = selected
+        if assigned_selections != set(manifests_by_selection):
             raise ParallelScanInputError(
-                "parallel request work has no endpoint child"
+                "typed parallel request work is incomplete"
             )
-        authenticated_shards = tuple(
-            shard.index for shard in plan.shards
-            if not shard.options.get("parallel_backbone")
-            and str(shard.options.get("auth_state") or "").lower()
-            not in {"", "anonymous"}
-        )
-        eligible_lanes = (
-            {"primary": authenticated_shards, "secondary": authenticated_shards}
-            if authenticated_shards else None
-        )
-        partitions = partition_request_manifests(
-            manifests_by_selection,
-            children=endpoint_children,
-            eligible_shards_by_lane=eligible_lanes,
-        )
-        request_partitions = {
-            partition.shard_index: partition.manifests_by_selection
-            for partition in partitions
-        }
 
     child_jobs: list[
         tuple[
@@ -15922,7 +16147,12 @@ async def process_scan_plan_job(job_data: dict):
             *parallel_action_partition.allowed_continuation_capabilities,
         )
     )
-    parent_endpoint_assignments: list[Any] = []
+    parent_collection_by_selection = {
+        str(item.get("selection_digest") or "").lower(): dict(item)
+        for item in options.get("request_collections") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("selection_digest") or "").strip()
+    }
     for shard, (child_id, child_job_id, identity_shard_index) in zip(
         plan.shards, child_identities, strict=True,
     ):
@@ -15930,7 +16160,20 @@ async def process_scan_plan_job(job_data: dict):
             raise ParallelScanInputError(
                 "parallel child identity differs from its planned shard"
             )
+        planned_child = parent_parallel_plan.children[shard.index]
         child_options = dict(shard.options)
+        if planned_child.request_selection_digests:
+            child_options["request_collections"] = [
+                dict(parent_collection_by_selection[digest])
+                for digest in planned_child.request_selection_digests
+                if digest in parent_collection_by_selection
+            ]
+            if len(child_options["request_collections"]) != len(
+                planned_child.request_selection_digests
+            ):
+                raise ParallelScanInputError(
+                    "typed parallel child lost its collection reference"
+                )
         assigned_endpoints = list(
             child_options.get("custom_endpoints") or ()
         )
@@ -15938,8 +16181,6 @@ async def process_scan_plan_job(job_data: dict):
             # The global child owns baseline and discovery only. Endpoint and
             # request work belongs exclusively to endpoint children.
             assigned_endpoints = []
-        else:
-            parent_endpoint_assignments.extend(assigned_endpoints)
         child_options, child_work_manifests = (
             _compile_parallel_child_work_manifests(
                 child_scan_id=child_id,
@@ -15965,20 +16206,14 @@ async def process_scan_plan_job(job_data: dict):
             work_manifest_refs=tuple(
                 manifest.reference().canonical_dict()
                 for manifest in child_work_manifests
+            ) + tuple(
+                dict(item) for item in planned_child.candidate_manifest_refs
             ),
             allowed_family_scope=parent_allowed_family_scope,
-            work_scope=(
-                {
-                    "auth_state": str(
-                        child_options.get("auth_state") or "anonymous"
-                    ),
-                    "family": str(
-                        child_options.get("coverage_attempt_family") or "all"
-                    ),
-                }
-                if plan.strategy == "coverage_family"
-                else None
-            ),
+            work_scope={
+                "principal_lane": planned_child.principal_lane.name,
+                "family": "+".join(planned_child.family_scope) or "all",
+            },
         )
         child_work_assignments[child_id] = child_work_assignment
         child_options["parallel_work_partition_digest"] = (
@@ -16004,20 +16239,9 @@ async def process_scan_plan_job(job_data: dict):
 
     if parallel_action_partition is not None:
         try:
-            parent_work_assignment = (
-                merge_parallel_work_assignments(tuple(
-                    child_work_assignments.values()
-                ))
-                if plan.strategy == "coverage_family"
-                else build_parallel_work_assignment(
-                    endpoints=parent_endpoint_assignments,
-                    request_entries=tuple(
-                        dict(entry)
-                        for manifest in parent_request_manifests
-                        for entry in manifest.entries
-                    ),
-                )
-            )
+            parent_work_assignment = merge_parallel_work_assignments(tuple(
+                child_work_assignments.values()
+            ))
             parent_options["parallel_action_partition_record"] = (
                 parallel_action_partition.record({
                     child_id: child_action_plan
@@ -16500,6 +16724,7 @@ async def process_scan_merge_job(job_data: dict):
     campaign_id = str(parent['campaign_id']) if parent['campaign_id'] else None
     parent_options = _as_report_dict(parent['options']) or {}
     partition_record = parent_options.get("parallel_action_partition_record")
+    canonical_action_merge: dict[str, Any] | None = None
     if isinstance(partition_record, Mapping):
         try:
             validate_parallel_partition_record(
@@ -16515,6 +16740,17 @@ async def process_scan_merge_job(job_data: dict):
                     str(child["id"]): _as_report_dict(
                         child.get("scan_action_plan_json")
                     )
+                    for child in children
+                },
+            )
+            canonical_action_merge = merge_parallel_action_executions(
+                partition_record,
+                child_results={
+                    str(child["id"]): _as_report_dict(child.get("result"))
+                    for child in children
+                },
+                child_statuses={
+                    str(child["id"]): str(child.get("status") or "unknown")
                     for child in children
                 },
             )
@@ -16805,6 +17041,7 @@ async def process_scan_merge_job(job_data: dict):
         'shards_failed': failed_n,
         'shards_cancelled': cancelled_n,
         'shards_partial': partial_n,
+        'canonical_action_execution': canonical_action_merge,
     }
 
     # Coverage-aware merge: the parent must reflect the whole fan-out, not just

@@ -13,7 +13,11 @@ from api.scan.jobs import derive_scan_shard_budget
 from api.scan.parallel_compiler import (
     ParallelActionPlanCompiler,
     ParallelActionPlanError,
+    ParallelPlacementCapacity,
+    ParallelPrincipalLane,
+    ParallelRequestWork,
     build_parallel_work_assignment,
+    merge_parallel_action_executions,
     merge_parallel_work_assignments,
     validate_parallel_partition_record,
 )
@@ -44,6 +48,24 @@ def _authority():
         policy={
             "active_testing": True,
             "exclude_families": ["nuclei", "xss", "sqli", "bola"],
+        },
+    )
+    raw = ScanActionPlanCompiler().compile(
+        scan_id=PARENT_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=_target(),
+    )
+    parent = allocate_scan_action_plan(raw, contract.budget).plan
+    return contract.execution_plan, parent
+
+
+def _endpoint_authority():
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={
+            "active_testing": True,
+            "include_families": ["xss"],
+            "exclude_families": ["nuclei", "sqli", "bola"],
         },
     )
     raw = ScanActionPlanCompiler().compile(
@@ -148,6 +170,28 @@ def _parent_assignment(assignments):
         "work_partition_digest": hashlib.sha256(json.dumps(
             material, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         ).encode()).hexdigest(),
+    }
+
+
+def _canonical_child_report(plan):
+    return {
+        "canonical_action_execution": {
+            "plan_digest": plan.plan_digest,
+            "actions": [
+                {
+                    "action_id": action.action_id,
+                    "observation_manifest": None,
+                    "status": "success",
+                }
+                for action in plan.actions
+                if action.action_id != "finalize.report"
+            ],
+            "finalization_action": {
+                "action_id": "finalize.report",
+                "status": "success",
+            },
+        },
+        "scan_metadata": {"partial": False},
     }
 
 
@@ -623,4 +667,186 @@ def test_parallel_partition_rejects_more_children_than_parent_minimum_budget():
                 "http_requests": execution.budget.max_http_requests - 2,
             },
             strategy="scope",
+        )
+
+
+def test_typed_parent_plan_is_stable_and_explicitly_isolates_principals():
+    execution, parent = _endpoint_authority()
+    compiler = ParallelActionPlanCompiler()
+    primary = ParallelPrincipalLane("primary", ("profile-primary",))
+    secondary = ParallelPrincipalLane("secondary", ("profile-secondary",))
+    placements = (
+        ParallelPlacementCapacity("broker", 2, {
+            "region": "eu-west", "node_scope": "remote",
+        }),
+        ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+    )
+    request = ParallelRequestWork("a" * 64, "primary")
+    endpoints = (
+        "GET /v1/z", "GET /v1/a", "GET /v1/z", "POST /v1/items",
+    )
+    first = compiler.plan_parent(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        endpoint_manifest_entries=endpoints,
+        request_work=(request,),
+        principal_lanes=(primary, secondary),
+        placements=placements,
+        scheduling_hint="scope",
+    )
+    second = compiler.plan_parent(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        endpoint_manifest_entries=tuple(reversed(endpoints)),
+        request_work=(request,),
+        principal_lanes=(primary, secondary),
+        placements=(
+            ParallelPlacementCapacity("broker", 2, {
+                "node_scope": "remote", "region": "eu-west",
+            }),
+            ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+        ),
+        scheduling_hint="scope",
+    )
+
+    assert first.plan_digest == second.plan_digest
+    assert [child.role for child in first.children].count("global") == 1
+    endpoint_children = [
+        child for child in first.children if child.role == "endpoint"
+    ]
+    assert {child.principal_lane.name for child in endpoint_children} == {
+        "primary", "secondary",
+    }
+    assert all(
+        child.principal_lane.credential_profile_ids
+        in {("profile-primary",), ("profile-secondary",)}
+        for child in endpoint_children
+    )
+    assert sum(
+        "a" * 64 in child.request_selection_digests
+        for child in endpoint_children
+    ) == 1
+    assert {child.placement.name for child in first.children} == {
+        "local", "broker",
+    }
+
+
+def test_typed_parent_plan_allocates_exact_subbudgets_without_legacy_options():
+    execution, parent = _endpoint_authority()
+    compiler = ParallelActionPlanCompiler()
+    planned = compiler.plan_parent(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        endpoint_manifest_entries=("GET /a", "GET /b", "GET /c"),
+        principal_lanes=(ParallelPrincipalLane("anonymous"),),
+        placements=(
+            ParallelPlacementCapacity("local", 3, {"node_scope": "local"}),
+        ),
+        scheduling_hint="scope",
+    )
+    partition = compiler.compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=tuple(
+            child.compiler_spec(scan_id=CHILD_IDS[child.index])
+            for child in planned.children
+        ),
+        strategy=planned.scheduling_hint,
+        available_worker_count=3,
+    )
+
+    assert len(partition.children) == len(planned.children)
+    assert sum(
+        child.budget.max_http_requests for child in partition.children
+    ) == execution.budget.max_http_requests
+    assert all(
+        child.principal_lane == planned.children[child.index].principal_lane.name
+        for child in partition.children
+    )
+    serialized = json.dumps([
+        child.compiler_spec(scan_id=CHILD_IDS[child.index])
+        for child in planned.children
+    ])
+    assert "exhaustive" not in serialized
+    assert "smart_bola" not in serialized
+    assert "auth_header" not in serialized
+
+
+def test_typed_parent_plan_refuses_to_collapse_principal_lanes_for_capacity():
+    execution, parent = _endpoint_authority()
+    with pytest.raises(ParallelActionPlanError, match="principal isolation"):
+        ParallelActionPlanCompiler().plan_parent(
+            parent_execution_plan=execution,
+            parent_action_plan=parent,
+            target_binding=_target(),
+            endpoint_manifest_entries=("GET /a", "GET /b"),
+            principal_lanes=(
+                ParallelPrincipalLane("anonymous"),
+                ParallelPrincipalLane("primary", ("profile-primary",)),
+            ),
+            placements=(
+                ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+            ),
+            scheduling_hint="scope",
+        )
+
+
+def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
+    execution, parent = _authority()
+    children = _children()
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=children,
+        strategy="scope",
+    )
+    plans = _projected_plans(partition, parent)
+    assignments = _assignments(children)
+    record = partition.record(
+        plans,
+        child_work_assignments=assignments,
+        parent_work_assignment=_parent_assignment(assignments),
+    )
+    reports = {
+        scan_id: _canonical_child_report(plan)
+        for scan_id, plan in plans.items()
+    }
+    merged = merge_parallel_action_executions(
+        record,
+        child_results=reports,
+        child_statuses={scan_id: "completed" for scan_id in plans},
+    )
+    assert merged["partial"] is False
+    assert merged["incomplete_child_scan_ids"] == []
+    assert merged["merge_digest"]
+
+    lost = dict(reports)
+    lost[CHILD_IDS[2]] = None
+    partial = merge_parallel_action_executions(
+        record,
+        child_results=lost,
+        child_statuses={
+            **{scan_id: "completed" for scan_id in plans},
+            CHILD_IDS[2]: "failed",
+        },
+    )
+    assert partial["partial"] is True
+    assert partial["incomplete_child_scan_ids"] == [CHILD_IDS[2]]
+
+    rogue = json.loads(json.dumps(reports))
+    rogue[CHILD_IDS[1]]["canonical_action_execution"]["actions"].append({
+        "action_id": "rogue.execute",
+        "observation_manifest": None,
+        "status": "success",
+    })
+    with pytest.raises(ParallelActionPlanError, match="outside its exact"):
+        merge_parallel_action_executions(
+            record,
+            child_results=rogue,
+            child_statuses={scan_id: "completed" for scan_id in plans},
         )

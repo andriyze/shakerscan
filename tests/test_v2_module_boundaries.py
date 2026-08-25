@@ -211,15 +211,29 @@ def test_parallel_parent_uses_canonical_compiler_service():
         _class_method("api/scan/parallel_compiler.py", "ParallelActionPlanCompiler", "compile"),
         ast.FunctionDef,
     )
-    worker_tree = _tree("api/worker.py")
-    assert any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "compile"
-        and isinstance(node.func.value, ast.Call)
-        and _attribute_path(node.func.value.func) == ("ParallelActionPlanCompiler",)
-        for node in ast.walk(worker_tree)
+    assert isinstance(
+        _class_method(
+            "api/scan/parallel_compiler.py",
+            "ParallelActionPlanCompiler",
+            "plan_parent",
+        ),
+        ast.FunctionDef,
     )
+    planner = _top_level_definition("api/worker.py", "process_scan_plan_job")
+    assert isinstance(planner, ast.AsyncFunctionDef)
+    calls = {
+        _attribute_path(node.func)
+        for node in ast.walk(planner)
+        if isinstance(node, ast.Call)
+    }
+    assert ("parallel_compiler", "plan_parent") in calls
+    assert ("parallel_compiler", "compile") in calls
+    assert not {
+        ("parallel_scan", "plan_shards"),
+        ("parallel_scan", "plan_coverage_shards"),
+        ("parallel_scan", "plan_coverage_family_shards"),
+        ("parallel_scan", "with_coverage_backbone"),
+    }.intersection(calls)
     assert _has_call("api/worker.py", ("validate_parallel_partition_record",))
 
     parallel_tree = _tree("api/parallel_scan.py")
