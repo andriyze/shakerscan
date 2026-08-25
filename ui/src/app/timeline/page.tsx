@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState, Suspense } from 'react'
 import Link from 'next/link'
 import { getMissionTimeline, getTargets, formatDate, type Target, type TimelineEvent } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { boundedTargetDisplay } from '@/lib/targetChoices'
+import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import {
   Card,
   EmptyState,
@@ -107,7 +107,7 @@ function EventRow({ event }: { event: TimelineEvent }) {
           </p>
         )}
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
-          {event.target_url && <span className="truncate max-w-xs">{event.target_url}</span>}
+          {event.target_url && <span className="truncate max-w-xs">{boundedDisplayText(event.target_url, 160)}</span>}
           {Array.isArray(event.blocked_by) && event.blocked_by.length > 0 && (
             <span className="text-amber-400">blocked by: {event.blocked_by.join(', ')}</span>
           )}

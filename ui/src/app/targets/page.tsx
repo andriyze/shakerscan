@@ -8,6 +8,7 @@ import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
+import { boundedTargetDisplay } from '@/lib/targetChoices'
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -569,7 +570,7 @@ function TargetsContent() {
                   )}
                 </div>
                 {domain.root_target && (
-                  <p className="text-xs text-gray-500 truncate">{domain.root_target.url}</p>
+                  <p className="text-xs text-gray-500 truncate">{boundedTargetDisplay(domain.root_target)}</p>
                 )}
               </div>
             )

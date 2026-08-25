@@ -8,6 +8,7 @@ import { SCAN_STATUSES } from '@/lib/constants'
 import { Plus, Search } from 'lucide-react'
 import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
 import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
+import { boundedTargetDisplay } from '@/lib/targetChoices'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -76,7 +77,13 @@ function huntTargetUrl(campaign: Campaign): string {
 }
 
 function huntTargetLabel(campaign: Campaign): string {
-  return huntTargetUrl(campaign) || campaign.name || 'Autonomous run'
+  return boundedTargetDisplay({
+    url: huntTargetUrl(campaign) || campaign.name,
+  }) || 'Autonomous run'
+}
+
+function scanTargetLabel(scan: Scan): string {
+  return boundedTargetDisplay({ url: scan.target_url }) || 'Unknown target'
 }
 
 function huntMatchesFilters(campaign: Campaign, status: string, domain: string, search: string): boolean {
@@ -520,9 +527,9 @@ function ScansContent() {
                         return_include_internal: includeInternal ? 'true' : undefined
                       })}
                       className="min-w-0 flex-1 truncate text-sm font-medium text-blue-400 hover:text-blue-300"
-                      title={scan.target_url}
+                      title={scanTargetLabel(scan)}
                     >
-                      {scan.target_url}
+                      {scanTargetLabel(scan)}
                     </Link>
                     <ScanStatusBadge status={scan.status} />
                   </div>
@@ -661,9 +668,9 @@ function ScansContent() {
                         return_include_internal: includeInternal ? 'true' : undefined
                       })}
                       className="block truncate text-sm text-blue-400 hover:text-blue-300"
-                      title={scan.target_url}
+                      title={scanTargetLabel(scan)}
                     >
-                      {scan.target_url}
+                      {scanTargetLabel(scan)}
                     </Link>
                   </td>
                   <td className="hidden xl:table-cell px-4 py-3">

@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { boundedDisplayText } from '@/lib/targetChoices'
 
 // The single page-title block, replacing ~24 hand-rolled headers that had
 // drifted into four title scales, three back-link conventions (including a
@@ -25,6 +26,7 @@ export function PageHeader({
   eyebrow?: string
   className?: string
 }) {
+  const renderedTitle = typeof title === 'string' ? boundedDisplayText(title, 200) : title
   return (
     <div className={cn('mb-6', className)}>
       {backHref && (
@@ -43,7 +45,7 @@ export function PageHeader({
             {eyebrow && (
               <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">{eyebrow}</p>
             )}
-            <h1 className="text-2xl font-bold text-white">{title}</h1>
+            <h1 className="break-words text-2xl font-bold text-white">{renderedTitle}</h1>
             {description && <p className="mt-1 max-w-3xl text-sm text-gray-400">{description}</p>}
           </div>
         </div>

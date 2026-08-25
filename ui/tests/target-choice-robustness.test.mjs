@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 
-import { boundedTargetDisplay, usableWebTargets } from '../src/lib/targetChoices.ts'
+import { boundedDisplayText, boundedTargetDisplay, usableWebTargets } from '../src/lib/targetChoices.ts'
 
 const credentialsPage = fs.readFileSync(new URL('../src/app/credentials/page.tsx', import.meta.url), 'utf8')
 const collectionsPage = fs.readFileSync(new URL('../src/app/request-collections/page.tsx', import.meta.url), 'utf8')
@@ -38,6 +38,8 @@ test('historical malformed target labels stay bounded in read-only selectors', (
   })
   assert.equal(label.length, 160)
   assert.ok(label.endsWith('…'))
+  assert.equal(boundedDisplayText(`target-${'x'.repeat(500)}`, 40).length, 40)
+  assert.equal(boundedDisplayText('  normal target  '), 'normal target')
   assert.equal(boundedTargetDisplay({ url: 'https://example.test' }, { stripScheme: true }), 'example.test')
   for (const surface of [evidencePanel, timelinePage, schedulesPage]) {
     assert.match(surface, /boundedTargetDisplay/)

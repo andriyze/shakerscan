@@ -10,6 +10,7 @@ import ReportView from '@/components/ReportView'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
+import { boundedDisplayText } from '@/lib/targetChoices'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -1670,7 +1671,7 @@ function ScanDetailContent() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
           </Link>
-          <h1 className="text-2xl font-bold text-white">{scan.target_url}</h1>
+          <h1 className="break-words text-2xl font-bold text-white">{boundedDisplayText(scan.target_url, 200)}</h1>
         </div>
         <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-6">
           <div className="flex items-center justify-between mb-3">

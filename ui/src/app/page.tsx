@@ -21,6 +21,7 @@ import {
   useToast,
 } from '@/components/ui'
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
+import { boundedDisplayText } from '@/lib/targetChoices'
 
 const DASHBOARD_REFRESH_MS = 10000
 const QUEUE_REFRESH_MS = 15000
@@ -777,8 +778,8 @@ function RecentActivity({ events, loading }: { events: TimelineEvent[]; loading:
               <>
                 <span className={`mt-0.5 h-2 w-2 flex-none rounded-full ${activityTone(event.status)}`} />
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium text-gray-200">{activityTitle(event)}</span>
-                  <span className="block truncate text-xs text-gray-500">{event.operator_message || event.target_url || event.kind.replace(/_/g, ' ')}</span>
+                  <span className="block text-sm font-medium text-gray-200">{boundedDisplayText(activityTitle(event), 96)}</span>
+                  <span className="block truncate text-xs text-gray-500">{boundedDisplayText(event.operator_message || event.target_url || event.kind.replace(/_/g, ' '), 160)}</span>
                 </span>
                 <span className="flex-none text-xs text-gray-600">{event.created_at ? formatDate(event.created_at) : ''}</span>
               </>
@@ -794,7 +795,7 @@ function RecentActivity({ events, loading }: { events: TimelineEvent[]; loading:
 
 function shortHost(url?: string | null): string {
   if (!url) return 'Unknown target'
-  try { return new URL(url).host } catch { return url }
+  try { return boundedDisplayText(new URL(url).host, 96) } catch { return boundedDisplayText(url, 96) }
 }
 
 function friendlyScanType(scan: Scan): string {
