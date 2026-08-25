@@ -9656,7 +9656,7 @@ def test_arsenal_execute_gated_scan_focused_family_dispatches_when_allowed(monke
         return {"operation_id": "op-scan", "scan_id": "scan-1", "status": "queued"}
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
-    monkeypatch.setattr(api_module, "submit_scan", fake_submit_scan)
+    monkeypatch.setattr(api_module, "_submit_scan", fake_submit_scan)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
@@ -16714,7 +16714,7 @@ def test_research_preflight_claim_loser_does_not_queue_duplicate(monkeypatch):
 
     monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
     monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
-    monkeypatch.setattr(api_module, "submit_scan", forbidden_submit)
+    monkeypatch.setattr(api_module, "_submit_scan", forbidden_submit)
 
     result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
 
@@ -16802,13 +16802,18 @@ def test_research_preflight_terminal_running_marker_can_claim_successor(monkeypa
     monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
     monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
     monkeypatch.setattr(api_module, "_research_campaign_budget_snapshot", fake_budget)
-    monkeypatch.setattr(api_module, "submit_scan", fake_submit)
+    monkeypatch.setattr(api_module, "_submit_scan", fake_submit)
 
     result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
 
     assert result["action"] == "queued_authenticated_graph_preflight"
     assert result["scan_id"] == str(next_preflight_id)
     assert len(submitted) == 1
+    assert submitted[0].policy == {
+        "active_testing": True,
+        "include_families": ["recon"],
+    }
+    assert submitted[0].advanced.include_families == ["recon"]
     assert conn.campaign["metadata_json"]["autonomous_research"]["preflight_state"] == "running"
     assert conn.campaign["metadata_json"]["autonomous_research"]["preflight_attempts"] == 2
 
@@ -16892,7 +16897,7 @@ def test_research_stale_queueing_claim_and_transient_worker_failure_recover(monk
     monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
     monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
     monkeypatch.setattr(api_module, "_research_campaign_budget_snapshot", fake_budget)
-    monkeypatch.setattr(api_module, "submit_scan", stale_workers)
+    monkeypatch.setattr(api_module, "_submit_scan", stale_workers)
 
     result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
 

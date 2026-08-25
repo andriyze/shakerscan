@@ -59132,9 +59132,18 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
         for item in config.get("allowed_families") or []
         if str(item).strip()
     }
+    # ``auth`` is a Hunt/research objective, not a canonical Scan family. An
+    # authenticated surface refresh uses the Scan ``recon`` family with the
+    # exact saved principal references; BOLA remains the cross-principal proof
+    # family. Never leak the research taxonomy into Scan admission.
     focus_family = next(
-        (family for family in ("bola", "auth", "sqli", "xss") if family in families),
-        "auth" if (readiness.get("required") or {}).get("primary_credentials") else "all",
+        (family for family in ("bola", "sqli", "xss") if family in families),
+        (
+            "recon"
+            if "auth" in families
+            or (readiness.get("required") or {}).get("primary_credentials")
+            else "all"
+        ),
     )
     custom_endpoints = []
     for row in endpoint_rows:
