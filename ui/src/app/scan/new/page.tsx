@@ -11,6 +11,7 @@ import {
   submitBatchV2,
   submitScanV2,
   type CredentialProfile,
+  type ScanBudgetProfile,
   type ScanPublicContract,
   type Target,
 } from '@/lib/api'
@@ -23,9 +24,7 @@ import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { validateScanTarget } from '@/lib/targetValidation'
 import { usableWebTargets } from '@/lib/targetChoices'
 
-type BudgetProfile = 'fast' | 'balanced' | 'thorough'
-
-const BUDGETS: Array<{ value: BudgetProfile; label: string; description: string; limits: string }> = [
+const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
   { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '5 min · 1,000 requests' },
   { value: 'balanced', label: 'Balanced', description: 'The default coverage and runtime.', limits: '20 min · 5,000 requests' },
   { value: 'thorough', label: 'Thorough', description: 'Deeper release and staging coverage.', limits: '60 min · 20,000 requests' },
@@ -57,7 +56,7 @@ export default function NewScanPage() {
   const [batchTargets, setBatchTargets] = useState('')
   const [existingTargets, setExistingTargets] = useState<Target[]>([])
   const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
-  const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced')
+  const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
   const [activeTesting, setActiveTesting] = useState(false)
   const [authorized, setAuthorized] = useState(false)
   const [subdomainDiscovery, setSubdomainDiscovery] = useState(false)
@@ -165,7 +164,7 @@ export default function NewScanPage() {
       return { compatible: false, reason: 'OAuth client ID is not configured' }
     }
     const allowed = new Set(profile.allowed_capabilities)
-    if (!allowed.size || allowed.has(scanContract.credentials.legacy_capability)) return { compatible: true }
+    if (!allowed.size) return { compatible: true }
     if (includeFamilies.includes('bola') && !allowed.has('authz.verify')) {
       return { compatible: false, reason: 'does not allow the selected BOLA / IDOR verifier' }
     }

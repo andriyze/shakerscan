@@ -129,6 +129,26 @@ export const HUNT_START_CONTRACT = {
     }
   },
   "budget_schema_version": "hunt-budget/v3",
+  "credential_ref_fields": [
+    "authorization_header_credential_id",
+    "cookie_credential_id",
+    "oauth_credential_profile_id",
+    "primary_credential_profile_id",
+    "secondary_credential_profile_id",
+    "service_credential_profile_id",
+    "ssh_credential_profile_id",
+    "web_credential_profile_id"
+  ],
+  "limits": {
+    "capabilities": 128,
+    "credential_refs": 16,
+    "goal_chars": 20000,
+    "request_collections": 32
+  },
+  "patterns": {
+    "capability": "^[a-z0-9][a-z0-9_.:-]{0,127}$",
+    "identifier": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
+  },
   "policy_derived_zeros": {
     "mutation_disabled": [
       "max_state_changing_requests"

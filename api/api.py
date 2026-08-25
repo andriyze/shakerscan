@@ -5030,9 +5030,8 @@ class ScanOptions(BaseModel):
     no_early_stop: bool = False                    # Disable early stopping in smart scan
     thorough_params: bool = False                  # Test more parameters (50x10 vs 25x5)
     oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
-    budget_profile: Optional[str] = Field(
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = Field(
         default=None,
-        pattern="^(fast|balanced|thorough|exhaustive)$",
         description="Depth/time budget profile. Scan type controls modules; budget controls how hard to run them.",
     )
     custom_budget: Optional[dict[str, Any]] = Field(
@@ -5166,7 +5165,7 @@ class _ScanRequestBase(BaseModel):
     target: str
     name: Optional[str] = None
     target_kind: Literal["web", "api"] = "web"
-    budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
     policy: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
@@ -5410,7 +5409,7 @@ class _BatchRequestBase(BaseModel):
 
     targets: list[str] = Field(min_length=1, max_length=50)
     target_kind: Literal["web", "api"] = "web"
-    budget_profile: Optional[Literal["fast", "balanced", "thorough", "exhaustive"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
     policy: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)

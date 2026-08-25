@@ -13,7 +13,8 @@ def test_new_scan_ui_has_one_scan_and_no_legacy_type_picker():
     assert "getScanPublicContract" in source
     assert "include_families" in source
     assert "exclude_families" in source
-    assert "scan.execute'))" not in source
+    assert "scan.execute" not in source
+    assert "legacy_capability" not in source
     assert "removeConfirmedActiveSelections" in source
     assert "minimum === 0 ? ' · zero allowed'" in source
     assert "Run Scan" in source

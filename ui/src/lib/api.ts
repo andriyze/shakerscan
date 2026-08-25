@@ -4,6 +4,16 @@ import {
   type SeverityLevel,
   gradeTextColorClass,
 } from './constants'
+import type {
+  ScanPublicContract,
+  ScanStartRequest,
+} from './scanContract.generated'
+
+export type {
+  ScanBudgetProfile,
+  ScanPublicContract,
+  ScanStartRequest,
+} from './scanContract.generated'
 
 export function getApiUrl(): string {
   if (process.env.NEXT_PUBLIC_API_URL) {
@@ -4296,78 +4306,13 @@ export async function submitScan(target: string, options: Record<string, unknown
   return res.json()
 }
 
-export interface ScanV2Request {
-  target: string
-  name?: string
-  target_kind?: 'web' | 'api'
-  budget_profile?: 'fast' | 'balanced' | 'thorough' | 'exhaustive'
-  policy?: {
-    active_testing?: boolean
-    active_testing_authorized?: boolean
-    allow_state_changing_http?: boolean
-    subdomain_discovery?: boolean
-    network_discovery?: boolean
-    include_families?: string[]
-    exclude_families?: string[]
-    approval_receipt_id?: string
-  }
-  request_collections?: Array<Record<string, unknown>>
-  credential_profile_ids?: string[]
-  advanced?: Record<string, unknown>
-  approval_receipt_id?: string
-  options?: Record<string, unknown>
-}
-
-export interface ScanPublicContract {
-  schema_version: 'scan-public-contract/v1'
-  generation: 'v2'
-  engine: 'scan'
-  execution_plan_schema: string
-  action_plan_schema: string
-  budget_profiles: Record<BudgetProfileName, Record<string, number>>
-  advanced_limits: Array<{
-    name: string
-    minimum: number
-    maximum: number
-    profile_ceilings: Record<BudgetProfileName, number>
-  }>
-  families: Array<{
-    name: string
-    label: string
-    description: string
-    risk_level: string
-    requires_active_testing: boolean
-    requires_credentials: boolean
-    default_enabled: boolean
-    capabilities: string[]
-  }>
-  passive_coverage: {
-    description: string
-    baseline_capabilities: string[]
-    default_families: string[]
-  }
-  credentials: {
-    supported_auth_kinds: CredentialAuthKind[]
-    interactive_auth_kinds: CredentialAuthKind[]
-    secondary_auth_kinds: CredentialAuthKind[]
-    semantic_capabilities: string[]
-    legacy_capability: string
-  }
-  request_collections: {
-    replay_policies: Array<'discovery_only' | 'safe_reads' | 'confirmed_active'>
-    active_policy: 'confirmed_active'
-  }
-}
-
-type BudgetProfileName = 'fast' | 'balanced' | 'thorough'
-
 export async function getScanPublicContract(): Promise<ScanPublicContract> {
   const res = await fetch(`${API_URL}/scan/contracts`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load the Scan contract'))
   return res.json()
 }
 
-export async function submitScanV2(request: ScanV2Request) {
+export async function submitScanV2(request: ScanStartRequest) {
   const res = await fetch(`${API_URL}/scans`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -5065,7 +5010,7 @@ export async function submitBatch(
 }
 
 export async function submitBatchV2(
-  request: Omit<ScanV2Request, 'target' | 'name'> & { targets: string[] }
+  request: Omit<ScanStartRequest, 'target' | 'name'> & { targets: string[] }
 ): Promise<{
   jobs: Array<{ scan_id: string; status: string }>
   errors: Array<{ target: string; status_code: number; error: unknown }>
