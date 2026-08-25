@@ -1521,6 +1521,10 @@ _SCAN_DETAIL_ONLY_FIELDS = {
     "scan_action_plan_schema", "scan_continuation_allocation_json",
     "scan_continuation_allocation_digest", "scan_continuation_applied_at",
 }
+_FINDING_DETAIL_ONLY_FIELDS = {
+    "description", "evidence", "request", "response", "ai_rationale",
+    "ai_recommendations", "notes", "analyst_verdict_notes",
+}
 
 
 def _scan_list_options(value: Any) -> dict[str, Any]:
@@ -66852,7 +66856,8 @@ async def list_findings(
     sort_order: Optional[str] = Query("desc", pattern="^(asc|desc)$"),
     include_candidates: bool = False,
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    include_details: bool = False,
 ):
     """List findings with filtering and sorting.
 
@@ -66869,7 +66874,7 @@ async def list_findings(
         "verified_only", "driven_by", "research_campaign_id", "search",
         "seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
-        "include_candidates", "limit", "offset",
+        "include_candidates", "include_details", "limit", "offset",
     }
     unknown_params = sorted({k for k in request.query_params if k not in allowed_params})
     if unknown_params:
@@ -67153,6 +67158,9 @@ async def list_findings(
         # Single proof-state so the list distinguishes proven vs suspected at a
         # glance and agrees with the detail page (docs §7).
         row_dict.update(finding_proof_fields(row_dict))
+        if not include_details:
+            for key in _FINDING_DETAIL_ONLY_FIELDS:
+                row_dict.pop(key, None)
         findings_out.append(row_dict)
 
     included_candidates = 0
@@ -67212,6 +67220,7 @@ async def list_cli_v1_findings(
         include_candidates=False,
         limit=limit,
         offset=offset,
+        include_details=True,
     )
 
 

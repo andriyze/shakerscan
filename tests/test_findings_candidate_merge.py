@@ -217,6 +217,8 @@ def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_sur
 
     assert "include_candidates: bool = False" in endpoint
     assert '"include_candidates"' in endpoint
+    assert "include_details: bool = False" in endpoint
+    assert '"include_details"' in endpoint
     assert "source_type in (None, \"deep_hunt\")" in endpoint
     assert "status in (None, \"active\")" in endpoint
     assert "verification_verdict" in endpoint and "resolved_within_days" in endpoint
@@ -229,6 +231,9 @@ def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_sur
     # Pagination stays coherent: separate totals plus an explicit included count.
     assert "'candidates_total': candidates_total" in endpoint
     assert "'included_candidates': included_candidates" in endpoint
+    # List rows retain proof derivation but shed detail-only evidence blobs.
+    assert "row_dict.update(finding_proof_fields(row_dict))" in endpoint
+    assert "for key in _FINDING_DETAIL_ONLY_FIELDS" in endpoint
 
     client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
     assert "params?.include_candidates === true" in client
