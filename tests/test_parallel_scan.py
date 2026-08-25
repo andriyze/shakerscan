@@ -5,6 +5,7 @@ barrier reconciliation using lightweight fakes for the DB connection and Redis.
 """
 
 import asyncio
+from collections import Counter
 import json
 import os
 import sys
@@ -118,6 +119,34 @@ def test_scope_partitions_endpoints_round_robin():
     assigned = [e for s in plan.shards for e in s.options["custom_endpoints"]]
     assert sorted(assigned) == sorted(eps)
     assert len(assigned) == len(eps)
+
+
+def test_scope_partition_buckets_are_pairwise_disjoint_for_overlapping_routes():
+    endpoints = [
+        "GET /api/orders",
+        "GET /api/orders/1",
+        "PATCH /api/orders/1 json:{\"status\":\"paid\"}",
+        "GET /api/orders/10/items",
+        "GET /api/orders/10/items/2",
+        "GET /api/users",
+        "GET /api/users/1",
+        "GET /api/users/10/orders",
+    ]
+    plan = plan_shards(
+        {**ACTIVE, "custom_endpoints": endpoints},
+        strategy="scope",
+        requested_shards=4,
+    )
+
+    buckets = [set(shard.options["custom_endpoints"]) for shard in plan.shards]
+    for index, bucket in enumerate(buckets):
+        for other in buckets[index + 1:]:
+            assert bucket.isdisjoint(other)
+    assert Counter(
+        endpoint
+        for shard in plan.shards
+        for endpoint in shard.options["custom_endpoints"]
+    ) == Counter(endpoints)
 
 
 def test_scope_ignores_duplicate_empty_and_non_string_endpoints():
