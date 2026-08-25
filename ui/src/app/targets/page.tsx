@@ -36,6 +36,14 @@ function configureScanHref(targets: string[], forceBatch = false): string {
   return `/scan/new?${params.toString()}`
 }
 
+function scanHistoryHref(rootDomain: string, targetUrl: string): string {
+  const params = new URLSearchParams({
+    domain: rootDomain,
+    search: targetUrl,
+  })
+  return `/scans?${params.toString()}`
+}
+
 interface TargetsFilters {
   [key: string]: string | number | undefined
   search?: string
@@ -601,7 +609,7 @@ function TargetsContent() {
                   <>
                     <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                       <Link
-                        href={`/scans?domain=${domain.root_domain}`}
+                        href={scanHistoryHref(domain.root_domain, domain.root_target.url)}
                         onClick={(e) => e.stopPropagation()}
                         className="hover:text-blue-400 transition-colors"
                       >
@@ -821,7 +829,7 @@ function TargetsContent() {
                       {/* Subdomain Stats */}
                       <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                         <Link
-                          href={`/scans?domain=${domain.root_domain}`}
+                          href={scanHistoryHref(domain.root_domain, subdomain.url)}
                           className="hover:text-blue-400 transition-colors"
                         >
                           {subdomain.total_scans} completed scans

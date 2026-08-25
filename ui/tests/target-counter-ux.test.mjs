@@ -11,6 +11,14 @@ test('target scan counters describe completed scans instead of all linked histor
   assert.equal((targets.match(/completed scans/g) || []).length, 2)
 })
 
+test('per-target scan counters preserve exact target history context', () => {
+  assert.match(targets, /function scanHistoryHref\(rootDomain: string, targetUrl: string\)/)
+  assert.match(targets, /new URLSearchParams\(\{\s*domain: rootDomain,\s*search: targetUrl,/)
+  assert.match(targets, /scanHistoryHref\(domain\.root_domain, domain\.root_target\.url\)/)
+  assert.match(targets, /scanHistoryHref\(domain\.root_domain, subdomain\.url\)/)
+  assert.doesNotMatch(targets, /href=\{`\/scans\?domain=\$\{domain\.root_domain\}`\}/)
+})
+
 test('subdomain finding counters have an accessible text label', () => {
   assert.match(targets, /\{subdomain\.active_findings_count\} findings/)
 })
