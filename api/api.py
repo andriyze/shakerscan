@@ -11427,6 +11427,28 @@ async def _submit_scan(
                 )
 
         options_payload, _family = _apply_scan_check_family_policy(options_payload)
+        # Every selected V2 family must have its registry prerequisites satisfied
+        # before the scan is queued. Admitting the family and letting the compiler
+        # omit its action produces a scan that reports success while never running
+        # the work the operator selected.
+        family_prerequisite_errors = check_registry.scan_family_precondition_errors(
+            scan_contract.policy.include_families,
+            options_payload,
+            exploit_depth=bool(options_payload.get("exploit_depth")),
+        )
+        if family_prerequisite_errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "family_prerequisites_unmet",
+                    "message": (
+                        "selected scan families are missing required inputs; "
+                        "supply them or deselect the families"
+                    ),
+                    "families": list(scan_contract.policy.include_families),
+                    "errors": family_prerequisite_errors,
+                },
+            )
         parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
             execution_options,
             options_payload,

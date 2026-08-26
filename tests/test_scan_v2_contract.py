@@ -260,3 +260,54 @@ def test_resolved_metadata_contains_only_canonical_plan_and_deprecation_data():
     assert metadata["scan_execution_plan_digest"] == contract.execution_plan.digest
     assert "scan_compatibility" not in metadata
     assert "legacy_scan_type" not in metadata
+
+
+def test_active_family_admission_is_derived_from_the_check_registry():
+    """Every registry-active Scan family must require active_testing to select.
+
+    This is asserted against the registry rather than a literal list because the
+    defect it replaces was a second hardcoded set: sensitive_exposure, nosqli,
+    and authz_surface were all is_active=True in the registry and all admissible
+    under a passive policy, so a passive request could select active work.
+    """
+    from check_registry import get_check_family
+    from scan.contracts import SCAN_V2_FAMILY_NAMES
+
+    checked_active = 0
+    for family in SCAN_V2_FAMILY_NAMES:
+        spec = get_check_family(family)
+        assert spec is not None, f"{family} is not in the check registry"
+        policy = {
+            "preset": "custom",
+            "active_testing": False,
+            "include_families": [family],
+        }
+        if spec.is_active:
+            checked_active += 1
+            with pytest.raises(ValueError, match="active_testing is required"):
+                resolve_scan_contract(budget_profile="balanced", policy=policy)
+        else:
+            resolved = resolve_scan_contract(budget_profile="balanced", policy=policy)
+            assert family in resolved.policy.include_families
+    assert checked_active >= 7, "expected every active Scan family to be covered"
+
+
+def test_unknown_scan_family_cannot_widen_passive_admission():
+    """A family missing from the registry must fail closed as active."""
+    from scan.contracts import SCAN_V2_FAMILY_NAMES
+    import scan.contracts as contracts_module
+
+    original = contracts_module.get_check_family
+    try:
+        contracts_module.get_check_family = lambda name: None
+        with pytest.raises(ValueError, match="active_testing is required"):
+            resolve_scan_contract(
+                budget_profile="balanced",
+                policy={
+                    "preset": "custom",
+                    "active_testing": False,
+                    "include_families": [SCAN_V2_FAMILY_NAMES[0]],
+                },
+            )
+    finally:
+        contracts_module.get_check_family = original

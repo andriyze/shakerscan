@@ -303,8 +303,15 @@ def resolve_scan_contract(
     )
     if preset == "custom" and not resolved:
         raise ValueError("custom preset requires at least one selected family")
-    active_only_families = set(resolved) & {
-        "nuclei_active", "xss", "sqli", "bola",
+    # Derived from the canonical check registry, never a second hardcoded list.
+    # A family added to SCAN_V2_FAMILY_NAMES without being added here would
+    # otherwise be admissible under a passive policy: sensitive_exposure,
+    # nosqli, and authz_surface all shipped that way. An unknown family fails
+    # closed as active, so a registry gap cannot widen passive admission.
+    active_only_families = {
+        family
+        for family in resolved
+        if (lambda spec: spec is None or spec.is_active)(get_check_family(family))
     }
     if active_only_families and not active_testing:
         raise ValueError(

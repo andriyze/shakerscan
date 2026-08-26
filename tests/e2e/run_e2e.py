@@ -1619,6 +1619,20 @@ def run_hunt() -> H.Scorecard:
     return sc
 
 
+def _family_execution_facts(result: dict, family: str) -> dict:
+    """Return the finalizer's coverage row for one family, or {} if it never ran.
+
+    Asserting on the submitted policy proves nothing: the D-2/D-3 cases used to
+    resolve to families=["recon"] and still pass. This reads what the scan
+    actually executed.
+    """
+    coverage = (result or {}).get("coverage") or {}
+    for row in coverage.get("family_coverage") or []:
+        if str(row.get("family")) == family:
+            return row
+    return {}
+
+
 def run_dast() -> H.Scorecard:
     sc = H.Scorecard("dast")
     print("\n== DAST e2e ==", flush=True)
@@ -1710,9 +1724,17 @@ def run_dast() -> H.Scorecard:
             "target": fixture_target,
             "budget_profile": "balanced",
             "policy": {
+                # A bare exclude list leaves the default passive preset in place,
+                # so this case used to resolve to families=["recon"] and could
+                # pass without ever running SQLi. Select the family explicitly.
+                "preset": "custom",
                 "active_testing": True,
                 "allow_state_changing_http": True,
-                "exclude_families": ["xss", "nuclei_passive", "nuclei_active", "bola"],
+                "include_families": ["recon", "sqli"],
+                "exclude_families": [
+                    "nuclei_passive", "nuclei_active", "xss", "bola",
+                    "sensitive_exposure", "nosqli", "authz_surface",
+                ],
             },
             "advanced": {
                 "max_duration_seconds": 600,
@@ -1731,7 +1753,18 @@ def run_dast() -> H.Scorecard:
             scan = H.wait_for_scan(scan_id, timeout=600, poll=8, label="D-2")
             sc.check("D-2 bounded active scan completes", str(scan.get("status")) == "completed",
                      f"status={scan.get('status')}")
-            findings = (H.scan_result(scan_id).get("findings") or [])
+            result = H.scan_result(scan_id)
+            facts = _family_execution_facts(result, "sqli")
+            sc.check("D-2 SQLi family actually executed", bool(facts.get("batch_actions")),
+                     f"family_coverage_sqli={facts or 'ABSENT'}")
+            sc.check("D-2 SQLi attempted real candidates",
+                     int(facts.get("attempted_candidates") or 0) > 0,
+                     f"attempted={facts.get('attempted_candidates')} "
+                     f"planned={facts.get('planned_candidates')}")
+            sc.check("D-2 no selected-family gap",
+                     "sqli" not in ((result.get("coverage") or {}).get("selected_family_gaps") or []),
+                     f"gaps={(result.get('coverage') or {}).get('selected_family_gaps')}")
+            findings = (result.get("findings") or [])
             sqli = [
                 f for f in findings
                 if f.get("tool") == "request_sqli_differential"
@@ -1750,9 +1783,16 @@ def run_dast() -> H.Scorecard:
             "target": fixture_target,
             "budget_profile": "balanced",
             "policy": {
+                # Same defect as D-2: without an explicit preset and include list
+                # this resolved to families=["recon"] and proved nothing about XSS.
+                "preset": "custom",
                 "active_testing": True,
                 "allow_state_changing_http": True,
-                "exclude_families": ["sqli", "nuclei_passive", "nuclei_active", "bola"],
+                "include_families": ["recon", "xss"],
+                "exclude_families": [
+                    "nuclei_passive", "nuclei_active", "sqli", "bola",
+                    "sensitive_exposure", "nosqli", "authz_surface",
+                ],
             },
             "advanced": {
                 "max_duration_seconds": 600,
@@ -1771,7 +1811,18 @@ def run_dast() -> H.Scorecard:
             scan = H.wait_for_scan(scan_id, timeout=600, poll=8, label="D-3")
             sc.check("D-3 bounded XSS scan completes", str(scan.get("status")) == "completed",
                      f"status={scan.get('status')}")
-            findings = (H.scan_result(scan_id).get("findings") or [])
+            result = H.scan_result(scan_id)
+            facts = _family_execution_facts(result, "xss")
+            sc.check("D-3 XSS family actually executed", bool(facts.get("batch_actions")),
+                     f"family_coverage_xss={facts or 'ABSENT'}")
+            sc.check("D-3 XSS attempted real candidates",
+                     int(facts.get("attempted_candidates") or 0) > 0,
+                     f"attempted={facts.get('attempted_candidates')} "
+                     f"planned={facts.get('planned_candidates')}")
+            sc.check("D-3 no selected-family gap",
+                     "xss" not in ((result.get("coverage") or {}).get("selected_family_gaps") or []),
+                     f"gaps={(result.get('coverage') or {}).get('selected_family_gaps')}")
+            findings = (result.get("findings") or [])
             xss = [
                 f for f in findings
                 if f.get("tool") == "request_xss_differential"

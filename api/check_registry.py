@@ -819,6 +819,24 @@ def apply_asm_focus(options: dict[str, Any], value: Any) -> tuple[dict[str, Any]
     return opts, family
 
 
+def _scan_credential_lanes(options: dict[str, Any]) -> set[str]:
+    """Return the canonical V2 credential lanes attached to a scan payload.
+
+    V2 submissions carry opaque, target-bound profile references rather than
+    inline secrets, so a family prerequisite must read the lane from those refs.
+    Reading only the legacy inline keys is why an authz_surface scan with a
+    perfectly good primary profile still looked credential-less.
+    """
+    refs = options.get("credential_profile_refs")
+    if not isinstance(refs, list):
+        return set()
+    return {
+        str(item.get("scan_lane") or "")
+        for item in refs
+        if isinstance(item, dict) and item.get("scan_lane")
+    }
+
+
 def has_primary_auth_context(options: dict[str, Any]) -> bool:
     opts = options or {}
     managed_refs = opts.get("managed_credential_profiles") if isinstance(opts.get("managed_credential_profiles"), list) else []
@@ -829,6 +847,7 @@ def has_primary_auth_context(options: dict[str, Any]) -> bool:
         or opts.get("auth_scenario_json")
         or (opts.get("login_username") and opts.get("login_password"))
         or any(isinstance(item, dict) and item.get("auth_state") == "user1" for item in managed_refs)
+        or "primary" in _scan_credential_lanes(opts)
     )
 
 
@@ -839,6 +858,7 @@ def has_second_user_auth_context(options: dict[str, Any]) -> bool:
         opts.get("user2_header")
         or opts.get("user2_cookies")
         or any(isinstance(item, dict) and item.get("auth_state") == "user2" for item in managed_refs)
+        or "secondary" in _scan_credential_lanes(opts)
     )
 
 
@@ -866,6 +886,30 @@ def family_precondition_error(
     if spec.requires_auth_states and not has_second_user_auth_context(options):
         return f"check_family '{family}' requires second-user credentials in target scan options"
     return None
+
+
+def scan_family_precondition_errors(
+    families: Any,
+    options: dict[str, Any],
+    *,
+    exploit_depth: bool,
+) -> list[str]:
+    """Return every unmet prerequisite across a V2 Scan's selected families.
+
+    ``family_precondition_error`` only ever saw the single legacy "focused
+    family" value, so a V2 request selecting include_families=["authz_surface"]
+    was admitted with no credentials and the compiler then silently omitted the
+    action. The product rule is that a selected family with a missing
+    prerequisite must be rejected before queueing, never quietly dropped.
+    """
+    errors: list[str] = []
+    for family in families or ():
+        error = family_precondition_error(
+            str(family or "").strip() or None, options, exploit_depth=exploit_depth,
+        )
+        if error and error not in errors:
+            errors.append(error)
+    return errors
 
 
 def enforce_family_preconditions(

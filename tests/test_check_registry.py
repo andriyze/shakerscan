@@ -316,3 +316,50 @@ def test_scanner_execution_plan_blocks_requested_unrunnable_family():
             "blocked_by": ["registry_family_not_runnable"],
         }
     ]
+
+
+def test_v2_credential_profile_refs_satisfy_family_auth_prerequisites():
+    """V2 carries opaque target-bound profile refs, not inline secrets.
+
+    Reading only the legacy inline keys made an authz_surface scan with a valid
+    primary profile look credential-less, so the prerequisite either rejected a
+    correct request or (before the submission gate existed) let the compiler
+    silently omit the family.
+    """
+    primary = {"credential_profile_refs": [{"scan_lane": "primary"}]}
+    both = {
+        "credential_profile_refs": [
+            {"scan_lane": "primary"}, {"scan_lane": "secondary"},
+        ]
+    }
+    assert not r.has_primary_auth_context({})
+    assert r.has_primary_auth_context(primary)
+    assert not r.has_second_user_auth_context(primary)
+    assert r.has_second_user_auth_context(both)
+
+
+def test_every_selected_scan_family_prerequisite_is_reported_before_queueing():
+    """A selected family with a missing prerequisite must be rejected, not dropped."""
+    credentialed = {
+        "credential_profile_refs": [
+            {"scan_lane": "primary"}, {"scan_lane": "secondary"},
+        ]
+    }
+    unmet = r.scan_family_precondition_errors(
+        ["xss", "authz_surface", "bola"], {}, exploit_depth=True,
+    )
+    assert any("authz_surface" in message for message in unmet)
+    assert any("bola" in message for message in unmet)
+    assert not any("'xss'" in message for message in unmet)
+
+    assert r.scan_family_precondition_errors(
+        ["xss", "authz_surface", "bola"], credentialed, exploit_depth=True,
+    ) == []
+
+
+def test_families_requiring_credentials_are_declared_in_the_registry():
+    """Guards the data the submission gate depends on."""
+    authz = r.get_check_family("authz_surface")
+    bola = r.get_check_family("bola")
+    assert authz is not None and authz.requires_credentials
+    assert bola is not None and bola.requires_credentials and bola.requires_auth_states
