@@ -170,7 +170,10 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
         "folder": "Health",
         "name": "Health",
         "method": "GET",
-        "redacted_url": "https://api.example.test/health",
+        "redacted_url": (
+            "https://api.example.test/health?tenant=%3Credacted%3E"
+            "&token=%3Credacted%3E"
+        ),
         "normalized_path": "/health",
         "body_mode": "none",
         "auth_type": "bearer",
@@ -203,7 +206,7 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
         }],
     ))
 
-    assert endpoints == ["GET /health"]
+    assert endpoints == ["GET /health?tenant=&token="]
     assert refs[0]["selection_id"] == str(selection_id)
     assert refs[0]["binding_id"] == str(binding_id)
     assert refs[0]["environment_id"] == str(environment_id)
@@ -212,7 +215,10 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
     assert manifest_requests[digest] == [{
         "request_id": "get-health",
         "method": "GET",
-        "redacted_url": "https://api.example.test/health",
+        "redacted_url": (
+            "https://api.example.test/health?tenant=%3Credacted%3E"
+            "&token=%3Credacted%3E"
+        ),
         "normalized_path": "/health",
         "auth_type": "bearer",
         "body_mode": "none",

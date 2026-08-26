@@ -29545,7 +29545,26 @@ async def _generic_collection_refs(
                 continue
             path = str(item["normalized_path"] or "").strip()
             if path:
-                endpoints.append(f"{str(item['method']).upper()} {path}")
+                # Preserve only query parameter names from the already-redacted
+                # collection index. Candidate compilation needs those names to
+                # authorize deterministic XSS/SQLi checks, but no request value
+                # belongs in the public endpoint seed or queue payload.
+                redacted_url = str(item.get("redacted_url") or "").strip()
+                query_names = sorted({
+                    str(name)
+                    for name, _value in urllib.parse.parse_qsl(
+                        urllib.parse.urlsplit(redacted_url).query,
+                        keep_blank_values=True,
+                    )
+                    if str(name)
+                })
+                query = urllib.parse.urlencode(
+                    [(name, "") for name in query_names]
+                )
+                endpoint = f"{path}?{query}" if query else path
+                endpoints.append(
+                    f"{str(item['method']).upper()} {endpoint}"
+                )
         refs.append({
             "collection_id": str(row["id"]), "name": row["name"], "format": row["format"],
             "request_count": int(row["request_count"] or 0),
