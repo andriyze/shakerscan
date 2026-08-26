@@ -699,14 +699,14 @@ class ScanActionPlanCompiler:
                 not family_filter or family in family_filter
             )
 
-        passive_nuclei = enabled("nuclei")
+        passive_nuclei = enabled("nuclei_passive")
         xss = active and enabled("xss")
         sqli = active and enabled("sqli")
-        nuclei = active and passive_nuclei
+        active_nuclei = active and enabled("nuclei_active")
         bola = active and enabled("bola")
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei)
-            or (scope in {"full", "endpoint"} and nuclei and not defer_manifest_actions)
+            or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
         )
         if template_actions_expected and (
             not template_ref
@@ -720,7 +720,7 @@ class ScanActionPlanCompiler:
         explicitly_requested = set(
             execution_plan.resolved_families or policy.include_families
         )
-        needs_candidates = xss or sqli or nuclei or passive_nuclei
+        needs_candidates = xss or sqli or active_nuclei or passive_nuclei
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
         blueprints: list[_ActionBlueprint] = []
@@ -1098,13 +1098,13 @@ class ScanActionPlanCompiler:
                 dependencies=primary_dependency,
                 required=True,
                 reserve_dependency_slots=(
-                    int(nuclei and not defer_manifest_actions)
+                    int(active_nuclei and not defer_manifest_actions)
                     + int(has_manifest_work(xss, candidate_ref))
                     + int(has_manifest_work(sqli, candidate_ref))
                     + int(authz_will_run)
                 ),
             )
-        if scope in {"full", "endpoint"} and nuclei and not defer_manifest_actions:
+        if scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions:
             add_manifest_breadth(
                 "active.templates",
                 "deterministic_active",
@@ -1116,7 +1116,7 @@ class ScanActionPlanCompiler:
                 manifest_ref=endpoint_ref,
                 index_name="endpoint_index",
                 dependencies=active_dependencies,
-                required="nuclei" in explicitly_requested,
+                required="nuclei_active" in explicitly_requested,
                 reserve_dependency_slots=(
                     int(has_manifest_work(xss, candidate_ref))
                     + int(has_manifest_work(sqli, candidate_ref))

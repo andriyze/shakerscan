@@ -29894,18 +29894,16 @@ def _compile_scan_admission_action_authority(
         )
 
     required_by_family = {
+        "nuclei_active": "templates.scan",
         "xss": "xss.verify",
         "sqli": "sqli.verify",
         "bola": "authz.verify",
     }
-    allowed_by_family = {
-        "nuclei": "templates.scan",
-        **required_by_family,
-    }
+    allowed_by_family = dict(required_by_family)
     required_capabilities = tuple(
         required_by_family[family]
-        for family in scan_contract.policy.include_families
-        if family in required_by_family
+        for family in ("xss", "sqli", "bola", "nuclei_active")
+        if family in set(scan_contract.policy.include_families)
         and family not in set(scan_contract.policy.exclude_families)
     )
     enabled_families = {
@@ -30069,12 +30067,14 @@ def _compile_scan_template_work_manifest(
     policy = scan_contract.execution_plan.policy
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
-    if "nuclei" in exclude or (include and "nuclei" not in include):
+    passive_enabled = "nuclei_passive" in include and "nuclei_passive" not in exclude
+    active_enabled = "nuclei_active" in include and "nuclei_active" not in exclude
+    if not passive_enabled and not active_enabled:
         return None
     return build_canonical_scan_nuclei_template_manifest(
         scan_id=scan_id,
         target_binding_digest=target_binding.digest,
-        include_active=policy.active_testing,
+        include_active=policy.active_testing and active_enabled,
     )
 
 

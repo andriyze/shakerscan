@@ -49,7 +49,7 @@ def _authority():
         budget_profile="balanced",
         policy={
             "active_testing": True,
-            "exclude_families": ["nuclei", "xss", "sqli", "bola"],
+            "exclude_families": ["nuclei_passive", "nuclei_active", "xss", "sqli", "bola"],
         },
     )
     raw = ScanActionPlanCompiler().compile(
@@ -67,7 +67,7 @@ def _endpoint_authority():
         policy={
             "active_testing": True,
             "include_families": ["xss"],
-            "exclude_families": ["nuclei", "sqli", "bola"],
+            "exclude_families": ["nuclei_passive", "nuclei_active", "sqli", "bola"],
         },
     )
     raw = ScanActionPlanCompiler().compile(
@@ -266,7 +266,7 @@ def test_active_candidate_shard_can_fund_complete_production_verifiers():
         budget_profile="thorough",
         policy={
             "active_testing": True,
-            "exclude_families": ["nuclei", "xss", "sqli", "bola"],
+            "exclude_families": ["nuclei_passive", "nuclei_active", "xss", "sqli", "bola"],
         },
     )
     parent = allocate_scan_action_plan(
@@ -411,7 +411,7 @@ def test_parallel_partition_accepts_only_preallocated_continuation_actions():
         policy={
             "active_testing": True,
             "include_families": ["xss"],
-            "exclude_families": ["nuclei", "sqli", "bola"],
+            "exclude_families": ["nuclei_passive", "nuclei_active", "sqli", "bola"],
         },
         approval_receipt_id="approval-1",
     )
@@ -645,7 +645,7 @@ def test_parallel_partition_rejects_wrong_work_digest_and_unassigned_required_ac
         policy={
             "active_testing": True,
             "include_families": ["xss"],
-            "exclude_families": ["recon", "nuclei", "sqli", "bola"],
+            "exclude_families": ["recon", "nuclei_passive", "nuclei_active", "sqli", "bola"],
         },
     )
     active_parent = allocate_scan_action_plan(
@@ -826,7 +826,7 @@ def test_typed_parent_plan_allocates_exact_subbudgets_without_legacy_options():
 def test_typed_parent_plan_allows_sequential_fanout_under_one_worker_ceiling():
     contract = resolve_scan_contract(
         budget_profile="fast",
-        policy={"exclude_families": ["nuclei"]},
+        policy={"exclude_families": ["nuclei_passive", "nuclei_active"]},
         advanced={"max_workers": 1},
     )
     raw = ScanActionPlanCompiler().compile(

@@ -3457,7 +3457,7 @@ def build_scanner_execution_plan(
 SCANNER_REGISTRY_ADAPTER_CONTRACTS = {
     "recon": "legacy_discovery",
     "headers": "legacy_config_findings",
-    "nuclei": "legacy_nuclei_template",
+    "nuclei_active": "legacy_nuclei_template",
     "sqli": "legacy_active_loop",
     "xss": "legacy_active_loop",
     "auth": "asm_endpoint_batch",
@@ -6708,6 +6708,7 @@ async def build_report(target: str,
         scanner_execution_plan,
         "template",
         {"legacy_nuclei_template": run_legacy_nuclei_template},
+        families={"nuclei_active"},
     ))
 
     # WebSocket endpoint discovery and testing
@@ -6730,7 +6731,7 @@ async def build_report(target: str,
     template_dispatch_receipts = await template_phase_task
     template_receipt = next((
         receipt for receipt in template_dispatch_receipts
-        if receipt.get("family") == "nuclei"
+        if receipt.get("family") == "nuclei_active"
     ), None)
     if template_receipt and template_receipt.get("status") != "completed":
         nuclei_results["skipped"] = True

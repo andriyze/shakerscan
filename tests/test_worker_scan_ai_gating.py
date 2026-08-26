@@ -2323,7 +2323,10 @@ def _canonical_parallel_fixture(
     from scan.contracts import resolve_scan_contract
     from scan.jobs import CanonicalScanJob
 
-    effective_policy = {"exclude_families": ["nuclei"], **(policy or {})}
+    effective_policy = {
+        "exclude_families": ["nuclei_passive", "nuclei_active"],
+        **(policy or {}),
+    }
     contract = resolve_scan_contract(
         budget_profile=budget_profile,
         policy=effective_policy,
@@ -2560,7 +2563,7 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
 
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"exclude_families": ["nuclei"]},
+        policy={"exclude_families": ["nuclei_passive", "nuclei_active"]},
     )
     parent = CanonicalScanJob.create(
         job_id="parent-job",
@@ -2829,7 +2832,11 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
     )
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={
+            "active_testing": True,
+            "preset": "custom",
+            "include_families": ["xss"],
+        },
     )
     raw_parent = ScanActionPlanCompiler().compile(
         scan_id=scan_id,
@@ -3011,7 +3018,11 @@ def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch)
 
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={
+            "active_testing": True,
+            "preset": "custom",
+            "include_families": ["xss"],
+        },
         approval_receipt_id="approval-1",
     )
     target = TargetBinding(

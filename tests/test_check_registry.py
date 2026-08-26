@@ -45,10 +45,16 @@ def test_registry_exposes_runnable_asm_focus_families():
     assert jwt.telemetry_schema == "jwt_probe_attempt_v1"
     assert "jwt" in jwt.finding_title_markers
     assert "forged_status" in jwt.proof_contract
-    nuclei = r.CHECK_REGISTRY_BY_NAME["nuclei"]
-    assert nuclei.runnable is True
-    assert nuclei.telemetry_schema == "nuclei_template"
-    assert nuclei.proof_contract == ("template_id", "matched_at", "matcher_name", "request_url")
+    passive_nuclei = r.CHECK_REGISTRY_BY_NAME["nuclei_passive"]
+    active_nuclei = r.CHECK_REGISTRY_BY_NAME["nuclei_active"]
+    assert passive_nuclei.runnable is True
+    assert passive_nuclei.is_active is False
+    assert active_nuclei.runnable is True
+    assert active_nuclei.is_active is True
+    assert active_nuclei.telemetry_schema == "nuclei_template"
+    assert active_nuclei.proof_contract == (
+        "template_id", "matched_at", "matcher_name", "request_url",
+    )
     assert "payload" in r.CHECK_REGISTRY_BY_NAME["sqli"].proof_contract
     assert r.CHECK_REGISTRY_BY_NAME["sqli"].severity_rules["critical_requires"] == ["exploitation_proof"]
 
@@ -144,7 +150,9 @@ def test_scanner_execution_plan_uses_registry_gates():
     assert plan["summary"]["enabled_by_phase"]["active"] >= 1
     assert families["recon"]["enabled"] is True
     assert families["headers"]["enabled"] is True
-    assert families["nuclei"]["enabled"] is True
+    assert families["nuclei_passive"]["enabled"] is False
+    assert families["nuclei_passive"]["reason"] == "canonical_action_only"
+    assert families["nuclei_active"]["enabled"] is True
     assert families["sqli"]["enabled"] is True
     assert families["sqli"]["reason"] == "selected_by_check_family_scope"
     assert families["sqli"]["dispatch_adapter"] == "legacy_active_loop"
@@ -237,7 +245,7 @@ def test_scanner_execution_plan_enforces_canonical_family_policy_at_dispatch():
     }
 
 
-def test_scanner_execution_plan_dispatches_nuclei_only_with_active_permission():
+def test_scanner_execution_plan_dispatches_only_active_nuclei_through_legacy_adapter():
     standard = r.scanner_execution_plan(
         scan_mode="standard",
         active_checks=False,
@@ -255,12 +263,13 @@ def test_scanner_execution_plan_dispatches_nuclei_only_with_active_permission():
     active_families = {item["name"]: item for item in active["families"]}
     quick_families = {item["name"]: item for item in quick["families"]}
 
-    assert standard_families["nuclei"]["enabled"] is False
-    assert standard_families["nuclei"]["reason"] == "active_testing_required"
-    assert active_families["nuclei"]["enabled"] is True
-    assert active_families["nuclei"]["dispatch_adapter"] == "legacy_nuclei_template"
-    assert quick_families["nuclei"]["enabled"] is False
-    assert quick_families["nuclei"]["reason"] == "quick_mode"
+    assert standard_families["nuclei_passive"]["reason"] == "canonical_action_only"
+    assert standard_families["nuclei_active"]["enabled"] is False
+    assert standard_families["nuclei_active"]["reason"] == "active_testing_required"
+    assert active_families["nuclei_active"]["enabled"] is True
+    assert active_families["nuclei_active"]["dispatch_adapter"] == "legacy_nuclei_template"
+    assert quick_families["nuclei_active"]["enabled"] is False
+    assert quick_families["nuclei_active"]["reason"] == "quick_mode"
 
 
 def test_scanner_execution_plan_records_passive_skip_reasons():
@@ -279,8 +288,9 @@ def test_scanner_execution_plan_records_passive_skip_reasons():
     assert families["recon"]["reason"] == "zero_rediscovery_scope"
     assert families["headers"]["enabled"] is False
     assert families["headers"]["reason"] == "global_checks_skipped"
-    assert families["nuclei"]["enabled"] is False
-    assert families["nuclei"]["reason"] == "public_only"
+    assert families["nuclei_passive"]["reason"] == "canonical_action_only"
+    assert families["nuclei_active"]["enabled"] is False
+    assert families["nuclei_active"]["reason"] == "public_only"
     assert families["xss"]["enabled"] is False
     assert families["xss"]["reason"] == "public_only"
     assert plan["summary"]["skip_reason_counts"]["public_only"] >= 1

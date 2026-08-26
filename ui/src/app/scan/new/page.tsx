@@ -146,8 +146,8 @@ export default function NewScanPage() {
   const excludeFamilies: string[] = []
   const resolvedFamilies = contractPreview?.resolved_families ?? (
     familyPreset === 'standard_active'
-      ? ['recon', 'nuclei', 'xss', 'sqli']
-      : familyPreset === 'passive' ? ['recon', 'nuclei'] : customFamilies
+      ? ['recon', 'nuclei_passive', 'xss', 'sqli']
+      : familyPreset === 'passive' ? ['recon', 'nuclei_passive'] : customFamilies
   )
 
   useEffect(() => {

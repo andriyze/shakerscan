@@ -38,7 +38,7 @@ def test_canary_never_crosses_public_scan_storage_or_transport_surfaces(tmp_path
     }
     action_plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
-        execution_plan=_execution(active=False, exclude=("nuclei",)),
+        execution_plan=_execution(active=False, exclude=("nuclei_passive",)),
         target_binding=_target(),
         credential_profile_refs=(profile_ref,),
     )

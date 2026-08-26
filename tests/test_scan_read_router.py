@@ -45,7 +45,9 @@ def test_family_preview_resolves_standard_active_without_ai_or_implicit_families
         )
     ))
 
-    assert preview["resolved_families"] == ["recon", "nuclei", "xss", "sqli"]
+    assert preview["resolved_families"] == [
+        "recon", "nuclei_passive", "xss", "sqli",
+    ]
     assert preview["requested_families"] == []
     assert preview["minimum_family_quotas"] == {"xss": 1, "sqli": 1}
     assert preview["execution_topology"] == "single_worker"

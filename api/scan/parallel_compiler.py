@@ -505,8 +505,10 @@ def _capability_family(capability_name: str) -> str:
         return "xss"
     if capability_name.startswith("sqli."):
         return "sqli"
-    if capability_name.startswith("templates."):
-        return "nuclei"
+    if capability_name == "templates.passive_scan":
+        return "nuclei_passive"
+    if capability_name == "templates.scan":
+        return "nuclei_active"
     if capability_name.startswith("authz."):
         return "bola"
     if capability_name.startswith(("web.", "http.", "dns.", "tls.", "ports.", "service.", "subdomains.")):
@@ -1084,7 +1086,7 @@ class ParallelActionPlanCompiler:
             _capability_family(action.capability_name)
             for action in parent_action_plan.actions
             if _capability_family(action.capability_name)
-            in {"xss", "sqli", "nuclei", "bola", "auth"}
+            in {"xss", "sqli", "nuclei_active", "bola", "auth"}
         }))
         family_groups: tuple[tuple[str, ...], ...] = ((),)
         if hint in {"family", "coverage_family"} and family_candidates:

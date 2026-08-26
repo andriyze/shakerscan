@@ -58,18 +58,34 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         description="Crawl, API/HAR/OpenAPI discovery, and passive surface refresh.",
     ),
     CheckFamilySpec(
-        name="nuclei",
+        name="nuclei_passive",
         phase="template",
         family="nuclei",
-        label="Nuclei",
+        label="Nuclei (passive reviewed pack)",
+        default_profiles=("fast", "balanced", "thorough", "exhaustive"),
+        is_active=False,
+        risk_level="low",
+        telemetry_schema="nuclei_template",
+        proof_contract=("template_id", "matched_at", "matcher_name", "request_url"),
+        severity_rules={"template_severity_is_input": True, "promotion_requires": ["matched_at", "template_id"]},
+        dispatch_adapter=None,
+        runnable=True,
+        description="Reviewed read-only Nuclei templates included in passive Scan presets.",
+    ),
+    CheckFamilySpec(
+        name="nuclei_active",
+        phase="template",
+        family="nuclei",
+        label="Nuclei (active pack)",
         is_active=True,
         risk_level="medium",
         telemetry_schema="nuclei_template",
         proof_contract=("template_id", "matched_at", "matcher_name", "request_url"),
         severity_rules={"template_severity_is_input": True, "promotion_requires": ["matched_at", "template_id"]},
         dispatch_adapter="legacy_nuclei_template",
+        aliases=("nuclei",),
         runnable=True,
-        description="Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet.",
+        description="Explicit active Nuclei templates, scheduled after deterministic verifier quotas.",
     ),
     CheckFamilySpec(
         name="sqli",
@@ -523,7 +539,13 @@ def scanner_execution_plan(
             enabled = not skip_global_checks
             expected = enabled
             reason = "global_checks_skipped" if skip_global_checks else "default_passive"
-        elif spec.name == "nuclei":
+        elif spec.name == "nuclei_passive":
+            # The reviewed passive pack is executed by the canonical action graph.
+            # Keeping it out of the legacy report phase prevents a second Nuclei run.
+            enabled = False
+            expected = False
+            reason = "canonical_action_only"
+        elif spec.name == "nuclei_active":
             enabled = bool(
                 active_checks
                 and not public_only

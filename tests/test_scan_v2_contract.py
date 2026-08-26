@@ -25,8 +25,8 @@ def test_canonical_scan_defaults_to_balanced_passive_v2():
     assert contract.execution_plan.generation == "v2"
     assert contract.execution_plan.family_preset == "passive"
     assert contract.execution_plan.requested_families == ()
-    assert contract.execution_plan.resolved_families == ("recon", "nuclei")
-    assert contract.policy.include_families == ("recon", "nuclei")
+    assert contract.execution_plan.resolved_families == ("recon", "nuclei_passive")
+    assert contract.policy.include_families == ("recon", "nuclei_passive")
     assert not hasattr(contract, "execution_scan_type")
     assert not hasattr(contract, "legacy_scan_type")
     assert not hasattr(contract, "deprecations")
@@ -75,7 +75,7 @@ def test_active_permission_changes_policy_not_scan_identity():
     assert passive.execution_plan.schema_version == active.execution_plan.schema_version
     assert passive.policy.active_testing is False
     assert active.policy.active_testing is True
-    assert active.execution_plan.resolved_families == ("recon", "nuclei")
+    assert active.execution_plan.resolved_families == ("recon", "nuclei_passive")
     assert passive.execution_plan.digest != active.execution_plan.digest
 
 
@@ -159,12 +159,16 @@ def test_family_policy_uses_only_canonical_registry_names():
         "exclude_families": ["nuclei"],
     })
     assert contract.execution_plan.requested_families == ("sqli", "xss")
-    assert contract.execution_plan.resolved_families == ("recon", "xss", "sqli")
-    assert contract.policy.include_families == ("recon", "xss", "sqli")
-    assert contract.policy.exclude_families == ("nuclei",)
+    assert contract.execution_plan.resolved_families == (
+        "recon", "nuclei_passive", "xss", "sqli",
+    )
+    assert contract.policy.include_families == (
+        "recon", "nuclei_passive", "xss", "sqli",
+    )
+    assert contract.policy.exclude_families == ("nuclei_active",)
     assert resolve_scan_contract(
         policy={"include_families": ["all"]},
-    ).policy.include_families == ("recon", "nuclei")
+    ).policy.include_families == ("recon", "nuclei_passive")
     with pytest.raises(ValueError, match="unknown family"):
         resolve_scan_contract(policy={"include_families": ["legacy_magic"]})
     with pytest.raises(ValueError, match="cannot contain all"):
@@ -182,7 +186,7 @@ def test_standard_active_and_custom_presets_resolve_once():
     })
     assert standard.execution_plan.requested_families == ()
     assert standard.execution_plan.resolved_families == (
-        "recon", "nuclei", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli",
     )
     assert standard.policy.include_families == standard.execution_plan.resolved_families
 
@@ -206,11 +210,11 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
     assert contract["engine"] == "scan"
     assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
     assert [item["name"] for item in contract["families"]] == [
-        "recon", "nuclei", "xss", "sqli", "bola",
+        "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
     ]
-    assert contract["passive_coverage"]["default_families"] == ["recon", "nuclei"]
+    assert contract["passive_coverage"]["default_families"] == ["recon", "nuclei_passive"]
     assert contract["family_presets"]["standard_active"] == [
-        "recon", "nuclei", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli",
     ]
     assert "legacy_capability" not in contract["credentials"]
     assert "http.request" in contract["credentials"]["semantic_capabilities"]

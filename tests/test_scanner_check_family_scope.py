@@ -1556,8 +1556,8 @@ def test_nuclei_dispatch_requires_active_permission_and_profile_gate():
         zero_rediscovery=False,
     )
 
-    assert scanner_mod.registry_dispatch_decision(standard_plan, "nuclei")["dispatch_enabled"] is True
-    assert scanner_mod.registry_dispatch_decision(quick_plan, "nuclei")["dispatch_enabled"] is False
+    assert scanner_mod.registry_dispatch_decision(standard_plan, "nuclei_active")["dispatch_enabled"] is True
+    assert scanner_mod.registry_dispatch_decision(quick_plan, "nuclei_active")["dispatch_enabled"] is False
 
 
 def test_nuclei_template_phase_dispatches_only_active_registry_adapter():
@@ -1591,16 +1591,18 @@ def test_nuclei_template_phase_dispatches_only_active_registry_adapter():
         standard_plan,
         "template",
         {"legacy_nuclei_template": nuclei_adapter},
+        families={"nuclei_active"},
     ))
     quick_receipts = asyncio.run(scanner_mod.dispatch_registry_report_phase(
         quick_plan,
         "template",
         {"legacy_nuclei_template": nuclei_adapter},
+        families={"nuclei_active"},
     ))
 
     assert called == ["nuclei"]
     assert standard_receipts == [{
-        "family": "nuclei",
+        "family": "nuclei_active",
         "phase": "template",
         "dispatch_adapter": "legacy_nuclei_template",
         "status": "completed",
@@ -1885,8 +1887,8 @@ def test_scanner_execution_plan_applies_family_policy_to_real_dispatch_rows():
     assert families["xss"]["enabled"] is True
     assert families["sqli"]["enabled"] is False
     assert families["sqli"]["reason"] == "policy_not_included"
-    assert families["nuclei"]["enabled"] is False
-    assert families["nuclei"]["reason"] == "policy_excluded"
+    assert families["nuclei_active"]["enabled"] is False
+    assert families["nuclei_active"]["reason"] == "policy_excluded"
 
 
 def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
@@ -1911,7 +1913,7 @@ def test_scanner_execution_plan_records_zero_rediscovery_and_public_skips():
 
     assert families["recon"]["reason"] == "zero_rediscovery_scope"
     assert families["headers"]["reason"] == "global_checks_skipped"
-    assert families["nuclei"]["reason"] == "public_only"
+    assert families["nuclei_active"]["reason"] == "public_only"
     assert families["xss"]["enabled"] is False
     assert plan["summary"]["skip_reason_counts"]["public_only"] >= 1
     assert families["xss"]["reason"] == "public_only"
@@ -2139,7 +2141,7 @@ def test_registry_report_phase_awaits_async_adapter():
 
 def test_registry_report_phase_uses_typed_adapter_outcome():
     plan = {"families": [{
-        "name": "nuclei", "phase": "template", "enabled": True, "runnable": True,
+        "name": "nuclei_active", "phase": "template", "enabled": True, "runnable": True,
         "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_nuclei_template",
         "telemetry_schema": "nuclei_template", "proof_contract": ["template_id"],
     }]}
@@ -2158,7 +2160,7 @@ def test_registry_report_phase_uses_typed_adapter_outcome():
     ))
 
     assert receipts == [{
-        "family": "nuclei",
+        "family": "nuclei_active",
         "phase": "template",
         "dispatch_adapter": "legacy_nuclei_template",
         "status": "failed",
@@ -2175,7 +2177,7 @@ def test_registry_report_phase_uses_typed_adapter_outcome():
 
 def test_registry_report_phase_rejects_invalid_typed_adapter_outcome():
     plan = {"families": [{
-        "name": "nuclei", "phase": "template", "enabled": True, "runnable": True,
+        "name": "nuclei_active", "phase": "template", "enabled": True, "runnable": True,
         "scanner_enabled": True, "blocked_by": [], "dispatch_adapter": "legacy_nuclei_template",
     }]}
 

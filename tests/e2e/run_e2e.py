@@ -1712,7 +1712,7 @@ def run_dast() -> H.Scorecard:
             "policy": {
                 "active_testing": True,
                 "allow_state_changing_http": True,
-                "exclude_families": ["xss", "nuclei", "bola"],
+                "exclude_families": ["xss", "nuclei_passive", "nuclei_active", "bola"],
             },
             "advanced": {
                 "max_duration_seconds": 600,
@@ -1752,7 +1752,7 @@ def run_dast() -> H.Scorecard:
             "policy": {
                 "active_testing": True,
                 "allow_state_changing_http": True,
-                "exclude_families": ["sqli", "nuclei", "bola"],
+                "exclude_families": ["sqli", "nuclei_passive", "nuclei_active", "bola"],
             },
             "advanced": {
                 "max_duration_seconds": 600,

@@ -38,10 +38,12 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
 # These are the only family names with concrete canonical action-graph semantics.
 # The broader check registry remains available to ASM; accepting unimplemented
 # names here would create a successful no-op Scan.
-SCAN_V2_FAMILY_NAMES = ("recon", "nuclei", "xss", "sqli", "bola")
+SCAN_V2_FAMILY_NAMES = (
+    "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
+)
 SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
-    "passive": ("recon", "nuclei"),
-    "standard_active": ("recon", "nuclei", "xss", "sqli"),
+    "passive": ("recon", "nuclei_passive"),
+    "standard_active": ("recon", "nuclei_passive", "xss", "sqli"),
     "custom": (),
 }
 SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, int] = {
@@ -53,7 +55,8 @@ SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, int] = {
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": ("web.probe", "web.crawl", "web.content_discover"),
-    "nuclei": ("templates.passive_scan", "templates.scan"),
+    "nuclei_passive": ("templates.passive_scan",),
+    "nuclei_active": ("templates.scan",),
     "xss": ("xss.verify", "xss.request_verify"),
     "sqli": ("sqli.verify", "sqli.request_verify"),
     "bola": ("authz.verify",),
@@ -102,9 +105,9 @@ def public_scan_contract() -> dict[str, Any]:
             "label": specification.label,
             "description": specification.description,
             "risk_level": specification.risk_level,
-            "requires_active_testing": bool(specification.is_active and name != "nuclei"),
+            "requires_active_testing": bool(specification.is_active),
             "requires_credentials": specification.requires_credentials,
-            "default_enabled": name in {"recon", "nuclei"},
+            "default_enabled": name in {"recon", "nuclei_passive"},
             "capabilities": list(_SCAN_V2_FAMILY_CAPABILITIES[name]),
         })
     limits = []
@@ -138,7 +141,7 @@ def public_scan_contract() -> dict[str, Any]:
                 "and the reviewed read-only template pack unless a family is excluded."
             ),
             "baseline_capabilities": list(_SCAN_V2_BASELINE_CAPABILITIES),
-            "default_families": ["recon", "nuclei"],
+            "default_families": ["recon", "nuclei_passive"],
         },
         "credentials": {
             "supported_auth_kinds": sorted(
@@ -297,7 +300,9 @@ def resolve_scan_contract(
     )
     if preset == "custom" and not resolved:
         raise ValueError("custom preset requires at least one selected family")
-    active_only_families = set(resolved) & {"xss", "sqli", "bola"}
+    active_only_families = set(resolved) & {
+        "nuclei_active", "xss", "sqli", "bola",
+    }
     if active_only_families and not active_testing:
         raise ValueError(
             "active_testing is required to include families: "

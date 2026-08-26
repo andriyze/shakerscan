@@ -11596,6 +11596,7 @@ async def _execute_scan_template_capability(
         if canonical_action is not None else "templates.scan"
     )
     passive = capability_name == "templates.passive_scan"
+    family_name = "nuclei_passive" if passive else "nuclei_active"
 
     def skipped(reason: str) -> dict[str, Any]:
         return _skipped_scan_template_summary(
@@ -11613,13 +11614,13 @@ async def _execute_scan_template_capability(
         return skipped("global_checks_skipped")
     if execution.focused_endpoints_only or execution.zero_rediscovery:
         return skipped("assigned_endpoint_scope")
-    if execution.focused_family and execution.focused_family != "nuclei":
+    if execution.focused_family and execution.focused_family != family_name:
         return skipped("focused_other_family")
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
-    if "nuclei" in exclude:
+    if family_name in exclude:
         return skipped("policy_excluded")
-    if include and "nuclei" not in include:
+    if include and family_name not in include:
         return skipped("policy_not_included")
     if not passive and not policy.active_testing:
         return skipped("active_testing_not_authorized")
@@ -15396,11 +15397,13 @@ def _compile_parallel_child_work_manifests(
     policy = parent_job.execution_plan.policy
     include = set(policy.include_families)
     exclude = set(policy.exclude_families)
-    if "nuclei" not in exclude and (not include or "nuclei" in include):
+    passive_selected = "nuclei_passive" in include and "nuclei_passive" not in exclude
+    active_selected = "nuclei_active" in include and "nuclei_active" not in exclude
+    if passive_selected or active_selected:
         template_manifest = build_canonical_scan_nuclei_template_manifest(
             scan_id=child_scan_id,
             target_binding_digest=parent_job.target.digest,
-            include_active=policy.active_testing,
+            include_active=policy.active_testing and active_selected,
         )
         options["template_manifest_ref"] = (
             template_manifest.reference().canonical_dict()

@@ -1436,7 +1436,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 |---|---|---|
 | Public REST operations | 398 | `api/**/*.py` FastAPI decorators |
 | Unique REST paths | 335 | `api/**/*.py` |
-| Check families | 14 | `api/check_registry.py` |
+| Check families | 15 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
@@ -1869,7 +1869,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `jwt` | active | authentication | True | medium | True | `legacy_advanced_jwt` | `jwt_probe_attempt_v1` | JWT algorithm, signature, key, and claim mutation checks with acceptance proof. |
 | `lfi` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | File inclusion and path traversal checks. Planned and permission-gated. |
 | `mass_assignment` | active | access_control | True | medium | True | `legacy_phase4_mass_assignment` | `mass_assignment_attempt_v1` | Bounded privileged-field mutation with baseline-vs-response effect proof. |
-| `nuclei` | template | nuclei | True | medium | True | `legacy_nuclei_template` | `nuclei_template` | Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet. |
+| `nuclei_active` | template | nuclei | True | medium | True | `legacy_nuclei_template` | `nuclei_template` | Explicit active Nuclei templates, scheduled after deterministic verifier quotas. |
+| `nuclei_passive` | template | nuclei | False | low | True | `none` | `nuclei_template` | Reviewed read-only Nuclei templates included in passive Scan presets. |
 | `rce` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Command/code execution checks. Planned and permission-gated. |
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
 | `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |

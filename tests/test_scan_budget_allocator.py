@@ -122,7 +122,7 @@ def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
         # does not (correctly) require the canonical immutable template pack.
         policy=ScanPolicy(
             active_testing=False,
-            exclude_families=("nuclei",),
+            exclude_families=("nuclei_passive",),
         ),
         budget_profile="fast",
         budget=budget,

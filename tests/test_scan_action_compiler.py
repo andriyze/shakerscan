@@ -310,7 +310,7 @@ def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
     with pytest.raises(ScanActionPlanError, match="immutable template manifest"):
         ScanActionPlanCompiler().compile(
             scan_id=SCAN_ID,
-            execution_plan=_execution(include=("nuclei",)),
+            execution_plan=_execution(include=("nuclei_active",)),
             target_binding=_target(),
         )
 
@@ -321,7 +321,7 @@ def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
     )
     plan = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
-        execution_plan=_execution(include=("nuclei",)),
+        execution_plan=_execution(include=("nuclei_active",)),
         target_binding=_target(),
         template_manifest_ref=manifest.reference().canonical_dict(),
     )

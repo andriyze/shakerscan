@@ -56,7 +56,7 @@ def _submit(
         "policy": {
             "active_testing": True,
             "allow_state_changing_http": True,
-            "exclude_families": ["nuclei", "bola"],
+            "exclude_families": ["nuclei_passive", "nuclei_active", "bola"],
         },
         "advanced": {
             "max_duration_seconds": 600,

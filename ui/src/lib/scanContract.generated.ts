@@ -189,14 +189,25 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     },
     {
       "capabilities": [
-        "templates.passive_scan",
-        "templates.scan"
+        "templates.passive_scan"
       ],
       "default_enabled": true,
-      "description": "Nuclei template checks by severity/tag. Not an ASM endpoint-test family yet.",
-      "label": "Nuclei",
-      "name": "nuclei",
+      "description": "Reviewed read-only Nuclei templates included in passive Scan presets.",
+      "label": "Nuclei (passive reviewed pack)",
+      "name": "nuclei_passive",
       "requires_active_testing": false,
+      "requires_credentials": false,
+      "risk_level": "low"
+    },
+    {
+      "capabilities": [
+        "templates.scan"
+      ],
+      "default_enabled": false,
+      "description": "Explicit active Nuclei templates, scheduled after deterministic verifier quotas.",
+      "label": "Nuclei (active pack)",
+      "name": "nuclei_active",
+      "requires_active_testing": true,
       "requires_credentials": false,
       "risk_level": "medium"
     },
@@ -243,11 +254,11 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "custom": [],
     "passive": [
       "recon",
-      "nuclei"
+      "nuclei_passive"
     ],
     "standard_active": [
       "recon",
-      "nuclei",
+      "nuclei_passive",
       "xss",
       "sqli"
     ]
@@ -261,7 +272,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     ],
     "default_families": [
       "recon",
-      "nuclei"
+      "nuclei_passive"
     ],
     "description": "Every passive Scan runs the target baseline, surface discovery, and the reviewed read-only template pack unless a family is excluded."
   },
