@@ -255,6 +255,18 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "requires_active_testing": true,
       "requires_credentials": true,
       "risk_level": "high"
+    },
+    {
+      "capabilities": [
+        "exposure.verify_batch"
+      ],
+      "default_enabled": false,
+      "description": "Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups.",
+      "label": "Sensitive Exposure",
+      "name": "sensitive_exposure",
+      "requires_active_testing": true,
+      "requires_credentials": false,
+      "risk_level": "high"
     }
   ],
   "family_presets": {

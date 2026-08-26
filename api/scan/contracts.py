@@ -40,6 +40,7 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
 # names here would create a successful no-op Scan.
 SCAN_V2_FAMILY_NAMES = (
     "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
+    "sensitive_exposure",
 )
 SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "passive": ("recon", "nuclei_passive"),
@@ -47,9 +48,9 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "custom": (),
 }
 SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
-    "fast": {"xss": 5, "sqli": 5},
-    "balanced": {"xss": 20, "sqli": 10},
-    "thorough": {"xss": 100, "sqli": 50},
+    "fast": {"xss": 5, "sqli": 5, "sensitive_exposure": 5},
+    "balanced": {"xss": 20, "sqli": 10, "sensitive_exposure": 10},
+    "thorough": {"xss": 100, "sqli": 50, "sensitive_exposure": 20},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": ("web.probe", "web.crawl", "web.content_discover"),
@@ -58,6 +59,7 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "xss": ("xss.verify_batch", "xss.request_verify_batch"),
     "sqli": ("sqli.verify_batch", "sqli.request_verify_batch"),
     "bola": ("authz.verify",),
+    "sensitive_exposure": ("exposure.verify_batch",),
 }
 _SCAN_V2_BASELINE_CAPABILITIES = (
     "http.request", "dns.inspect", "tls.inspect",

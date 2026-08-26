@@ -680,6 +680,110 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
+def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/app", "concrete_path": "/app",
+                "query_keys": [], "source": "web.crawl",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    canned = {
+        "/id_rsa": (200, {"Content-Type": "text/plain"},
+                    b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn..."),
+        "/metrics": (200, {"Content-Type": "text/plain"},
+                     b"# HELP up 1\n# TYPE up gauge\nup 1\n"),
+        "/ftp": (200, {"Content-Type": "text/html"},
+                 b"<title>Index of /ftp</title><a href=\"secret.md\">secret.md</a>"),
+        "/ftp/secret.md": (200, {"Content-Type": "text/markdown"},
+                           b"# Internal\nConfidential."),
+    }
+
+    class FakeTransport:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            assert follow_redirects is False
+            self.sent.append(request.url)
+            path = "/" + request.url.split("/", 3)[3] if request.url.count("/") >= 3 else "/"
+            for suffix, (status, headers, body) in canned.items():
+                if request.url.endswith(suffix):
+                    return ReplayTransportResult(
+                        status_code=status, connected_address="192.0.2.10",
+                        final_url=request.url, response_headers=headers,
+                        response_body=body, elapsed_ms=5,
+                    )
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "text/plain"},
+                response_body=b"not found", elapsed_ms=5,
+            )
+
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: transport,
+    )
+    action = _action(
+        "verify.exposure", "exposure.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    first = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    proofs = [
+        item for item in first.observations
+        if item.get("kind") == "sensitive_exposure_proof"
+    ]
+    classes = {item["exposure_class"] for item in proofs}
+    assert "private_key_material" in classes
+    assert "metrics_endpoint" in classes
+    assert "directory_listing" in classes
+    # The listing was followed to its confidential file.
+    assert "confidential_file" in classes
+    assert any(
+        item["request_url"].endswith("/ftp/secret.md") for item in proofs
+    )
+    # No secret bytes escape into the observation: evidence is content-addressed
+    # and the excerpt is redacted (the visibility flag is itself masked by the
+    # receipt redaction layer, so accept either the bool or its redacted marker).
+    assert all(item["secret_values_visible"] in (False, "***") for item in proofs)
+    assert all("PRIVATE KEY" not in (item.get("redacted_excerpt") or "") for item in proofs)
+    assert all(len(item["response_body_sha256"]) == 64 for item in proofs)
+
+    # Every probe is checkpointed; a resumed run repeats no request.
+    assert backend.attempts[action.action_id]
+    sent_first = len(transport.sent)
+    second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert len(transport.sent) == sent_first  # fully resumed from durable attempts
+    assert second.redacted_execution["resumed_count"] >= 1
+
+
 def test_safe_authentication_body_batch_needs_no_general_mutation_permission(monkeypatch):
     scan_id = str(uuid.uuid4())
     route_id = "d" * 64

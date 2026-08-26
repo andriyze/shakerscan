@@ -56,6 +56,7 @@ _BATCH_CAPABILITIES = frozenset({
     "sqli.request_verify_batch",
     "sqli.prove_batch",
     "xss.browser_prove_batch",
+    "exposure.verify_batch",
 })
 _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     "fast": {
@@ -67,6 +68,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
         "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
         "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
+        "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
     },
     "balanced": {
         "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
@@ -77,6 +79,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
         "sqli.prove_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
         "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
+        "exposure.verify_batch": (60, {"http_requests": 400, "tool_wall_seconds": 180}),
     },
     "thorough": {
         "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
@@ -87,6 +90,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
         "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
+        "exposure.verify_batch": (80, {"http_requests": 600, "tool_wall_seconds": 240}),
     },
 }
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -750,6 +754,7 @@ class ScanActionPlanCompiler:
         sqli = active and enabled("sqli")
         active_nuclei = active and enabled("nuclei_active")
         bola = active and enabled("bola")
+        sensitive_exposure = active and enabled("sensitive_exposure")
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
@@ -1008,6 +1013,7 @@ class ScanActionPlanCompiler:
                     "sqli.request_verify_batch": 10,
                     "sqli.prove_batch": 20,
                     "xss.browser_prove_batch": 50,
+                    "exposure.verify_batch": 15,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1375,6 +1381,22 @@ class ScanActionPlanCompiler:
                     minimum_batches=1,
                     reserve_dependency_slots=int(authz_will_run),
                 )
+        if (
+            scope in {"full", "endpoint"}
+            and sensitive_exposure
+            and not defer_manifest_actions
+        ):
+            add_manifest_batches(
+                "verify.exposure",
+                "verify_candidates",
+                "exposure.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                required="sensitive_exposure" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
         private_request_dependencies = tuple(
             row.action_id for row in blueprints
             if row.action_id.startswith("inputs.collection_")

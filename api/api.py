@@ -29995,11 +29995,12 @@ def _compile_scan_admission_action_authority(
         "xss": "xss.verify_batch",
         "sqli": "sqli.verify_batch",
         "bola": "authz.verify",
+        "sensitive_exposure": "exposure.verify_batch",
     }
     allowed_by_family = dict(required_by_family)
     required_capabilities = tuple(
         required_by_family[family]
-        for family in ("xss", "sqli", "bola", "nuclei_active")
+        for family in ("xss", "sqli", "bola", "nuclei_active", "sensitive_exposure")
         if family in set(scan_contract.policy.include_families)
         and family not in set(scan_contract.policy.exclude_families)
     )

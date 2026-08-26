@@ -32,6 +32,14 @@ try:
     from capabilities.browser import XSSBrowserProofAdapter
     from capabilities.request_mutation import RequestMutationVerificationAdapter
     from capabilities.sqli_proof import SQLiProofAdapter
+    from capabilities.exposure_probe import (
+        SENSITIVE_SEED_PATHS,
+        EXPOSURE_PROBE_PARSER_VERSION,
+        classify_confidential_file,
+        classify_exposure,
+        directory_listing_links,
+        redacted_exposure_excerpt,
+    )
     from capabilities.scanner import ScannerExecutionAdapter
     from capabilities.tls import inspect_tls_binding
     from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -73,6 +81,14 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.browser import XSSBrowserProofAdapter
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
     from ..capabilities.sqli_proof import SQLiProofAdapter
+    from ..capabilities.exposure_probe import (
+        SENSITIVE_SEED_PATHS,
+        EXPOSURE_PROBE_PARSER_VERSION,
+        classify_confidential_file,
+        classify_exposure,
+        directory_listing_links,
+        redacted_exposure_excerpt,
+    )
     from ..capabilities.scanner import ScannerExecutionAdapter
     from ..capabilities.tls import inspect_tls_binding
     from ..hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -143,6 +159,7 @@ from .work_manifests import (
     ScanWorkManifestKind,
     ScanWorkManifestReference,
     canonical_nuclei_options_for_manifest,
+    execution_url_for_endpoint,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
     execution_routes_for_endpoint_manifest,
@@ -175,6 +192,32 @@ class ObservationBackend(Protocol):
 
 class ScanActionAdapterError(RuntimeError):
     """One immutable action has no safe database-neutral adapter mapping."""
+
+
+def _exposure_observation(
+    url: str, discovered_via: str, signature: Any, result: Any,
+) -> Mapping[str, Any]:
+    """Build one verified sensitive-exposure observation with content-free proof."""
+    content_type = next((
+        str(value) for name, value in result.response_headers.items()
+        if str(name).lower() == "content-type"
+    ), "")
+    return {
+        "kind": "sensitive_exposure_proof",
+        "proof_state": "verified",
+        "finding_verdict": "verified",
+        "exposure_class": signature.exposure_class,
+        "severity": signature.severity,
+        "request_url": url,
+        "discovered_via": discovered_via,
+        "response_status": result.status_code,
+        "content_type": content_type,
+        "response_body_sha256": hashlib.sha256(result.response_body).hexdigest(),
+        "matched_signature": signature.matched_pattern,
+        "redacted_excerpt": redacted_exposure_excerpt(result.response_body, signature),
+        "proof_producer": "shakerscan",
+        "secret_values_visible": False,
+    }
 
 
 class DatabaseNeutralScanActionDispatcher:
@@ -1418,6 +1461,181 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    def _exposure_origin(self) -> tuple[str, str] | None:
+        """Return the (origin, scheme) for canonical-host seed probing."""
+        for origin in self.target.allowed_origins:
+            parsed = urllib.parse.urlsplit(str(origin))
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if host and host == str(self.target.canonical_host or "").lower():
+                return str(origin).rstrip("/"), parsed.scheme.lower()
+        return None
+
+    async def _exposure_probe_batch(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """Probe well-known sensitive locations and discovered endpoints for
+        deterministic content disclosure, following bounded directory listings."""
+        endpoints = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if endpoints is None:
+            return self._skip(action, "manifest_unavailable")
+        raw_slice = action.capability_args.get("slice")
+        if not isinstance(raw_slice, Mapping):
+            raise ScanActionAdapterError("exposure probe batch slice is invalid")
+        start, count = raw_slice.get("start"), raw_slice.get("count")
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(count, bool) or not isinstance(count, int)
+            or not 1 <= count <= 100
+        ):
+            raise ScanActionAdapterError("exposure probe batch slice is invalid")
+        origin = self._exposure_origin()
+        if origin is None:
+            return self._skip(action, "no_canonical_origin")
+        base_origin, _scheme = origin
+        load_attempts = getattr(self.backend, "load_batch_attempts", None)
+        checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
+        if not callable(load_attempts) or not callable(checkpoint_attempt):
+            raise ScanActionAdapterError("exposure probe backend lacks durable checkpoints")
+        completed = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in await load_attempts(action.action_id)
+            if isinstance(item, Mapping)
+        }
+        manifest_digest = endpoints.reference().manifest_digest
+
+        # The seed wordlist is probed once, in the first slice; later slices scan
+        # their own endpoint window for accidental disclosure signatures.
+        probes: list[tuple[str, str]] = []
+        if start == 0:
+            probes.extend(
+                (f"{base_origin}{path}", "seed_path") for path in SENSITIVE_SEED_PATHS
+            )
+        window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
+        for entry in window:
+            try:
+                probes.append((execution_url_for_endpoint(entry), "discovered_endpoint"))
+            except (ScanWorkManifestError, KeyError):
+                continue
+
+        transport = PinnedAiohttpReplayTransport()
+        started_at = datetime.now(timezone.utc).isoformat()
+        observations: list[Mapping[str, Any]] = []
+        errors: list[str] = []
+        consumed = {name: 0 for name in action.requested_budget}
+        http_ceiling = int(action.requested_budget.get("http_requests") or 0)
+        wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
+        attempted = resumed = 0
+
+        async def probe(url: str, ordinal: int) -> Any:
+            nonlocal consumed
+            request = ReplayRequest(
+                request_id=f"exposure:{ordinal}", ordinal=ordinal,
+                name="exposure probe", folder="", method="GET", url=url,
+                headers=(), body=b"", body_mode="none",
+                auth_type="none", has_sensitive_material=False,
+            )
+            remaining = max(1, http_ceiling - consumed["http_requests"])
+            result = await transport.send(
+                request, target=self.target,
+                timeout_seconds=max(0.5, min(15.0, wall_ceiling / remaining)),
+                follow_redirects=False,
+            )
+            consumed["http_requests"] = min(
+                http_ceiling, consumed["http_requests"] + 1,
+            )
+            await heartbeat()
+            return result
+
+        ordinal = start * 1000
+        for probe_url, discovered_via in probes:
+            attempt_id = hashlib.sha256(
+                f"{manifest_digest}:exposure:{probe_url}".encode()
+            ).hexdigest()
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                observations.extend(prior.get("observations") or ())
+                continue
+            if self.cancelled() or consumed["http_requests"] >= http_ceiling:
+                break
+            ordinal += 1
+            result = await probe(probe_url, ordinal)
+            if result.error_code:
+                errors.append(str(result.error_code))
+            signature = classify_exposure(
+                path=probe_url, status=result.status_code or 0,
+                headers=result.response_headers, body=result.response_body,
+            )
+            attempt_observations: list[Mapping[str, Any]] = []
+            if signature is not None:
+                attempt_observations.append(_exposure_observation(
+                    probe_url, discovered_via, signature, result,
+                ))
+                # A browsable directory is proof its listed files are reachable;
+                # follow a bounded set to surface the confidential content itself.
+                if (
+                    signature.exposure_class == "directory_listing"
+                    and consumed["http_requests"] < http_ceiling
+                ):
+                    for link in directory_listing_links(result.response_body, limit=10):
+                        if self.cancelled() or consumed["http_requests"] >= http_ceiling:
+                            break
+                        child_url = urllib.parse.urljoin(probe_url.rstrip("/") + "/", link)
+                        if urllib.parse.urlsplit(child_url).netloc != \
+                                urllib.parse.urlsplit(probe_url).netloc:
+                            continue
+                        ordinal += 1
+                        child = await probe(child_url, ordinal)
+                        child_signature = classify_confidential_file(
+                            status=child.status_code or 0,
+                            headers=child.response_headers, body=child.response_body,
+                        )
+                        if child_signature is not None:
+                            attempt_observations.append(_exposure_observation(
+                                child_url, "directory_listing_follow",
+                                child_signature, child,
+                            ))
+            bundled = ({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": attempt_id[:32], "family": "sensitive_exposure",
+                "status": "success", "proof_state": (
+                    "verified" if attempt_observations else "not_proven"
+                ),
+                "budget_consumed": {"http_requests": 1},
+            }, *attempt_observations)
+            attempt = {
+                "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                "status": "success", "budget_consumed": {"http_requests": 1},
+                "observations": bundled,
+                "proof_state": "verified" if attempt_observations else "not_proven",
+            }
+            if not self.cancelled():
+                await checkpoint_attempt(action.action_id, attempt)
+            attempted += 1
+            observations.extend(bundled)
+        unattempted = max(0, len(probes) - attempted)
+        consumed["tool_wall_seconds"] = min(
+            wall_ceiling, max(1, len(probes)),
+        ) if "tool_wall_seconds" in consumed else consumed.get("tool_wall_seconds", 0)
+        return self._receipt(
+            action, status="partial" if unattempted else "success",
+            parser_version=EXPOSURE_PROBE_PARSER_VERSION,
+            started_at=started_at, observations=tuple(observations),
+            errors=tuple(errors[:20]), consumed=consumed,
+            partial=bool(unattempted), timed_out=False,
+            redacted_execution={
+                "action_id": action.action_id, "manifest_digest": manifest_digest,
+                "slice": {"start": start, "count": count},
+                "probe_count": len(probes), "attempted_count": attempted,
+                "resumed_count": resumed, "unattempted_count": unattempted,
+                "checkpoint_mode": "after_each_candidate",
+                "secret_values_visible": False,
+            },
+        )
+
     async def _external(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         tool_by_capability = {
             "web.probe": "httpx",
@@ -1911,6 +2129,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._sqli_proof_batch(action, heartbeat)
         if action.capability_name == "xss.browser_prove_batch":
             return await self._xss_browser_proof_batch(action, heartbeat)
+        if action.capability_name == "exposure.verify_batch":
+            return await self._exposure_probe_batch(action, heartbeat)
         if action.capability_name == "authz.verify":
             return await self._authz(action, heartbeat)
         raise ScanActionAdapterError(

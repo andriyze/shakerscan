@@ -92,6 +92,7 @@ def _findings_for_action(
         "sqli.request_verify_batch": {"candidate_attempt", "request_body_verification"},
         "sqli.prove_batch": {"candidate_attempt", "sqli_proof"},
         "xss.browser_prove_batch": {"candidate_attempt", "xss_browser_proof"},
+        "exposure.verify_batch": {"candidate_attempt", "sensitive_exposure_proof"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
@@ -361,6 +362,53 @@ def _findings_for_action(
                 "proof_state": "verified",
                 "verification_reason": (
                     "Repeated deterministic SQL injection differential satisfied"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "sensitive_exposure_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("exposure_class") or "")
+            and item.get("response_status") == 200
+            and str(item.get("response_body_sha256") or "")
+        ):
+            severity = str(item.get("severity") or "medium")
+            if severity not in {"critical", "high", "medium", "low"}:
+                severity = "medium"
+            exposure_class = str(item.get("exposure_class"))
+            secret_material = exposure_class in {
+                "private_key_material", "cloud_credential_material",
+                "environment_secret_file",
+            }
+            finding = _base_finding(
+                tool="shakerscan_exposure_probe",
+                title=f"Sensitive exposure: {exposure_class.replace('_', ' ')}",
+                severity=severity,
+                cwe="CWE-538" if secret_material else "CWE-200",
+                url=item.get("request_url"),
+                evidence={
+                    "exposure_class": exposure_class,
+                    "request_url": item.get("request_url"),
+                    "response_status": item.get("response_status"),
+                    "content_type": item.get("content_type"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "matched_signature": item.get("matched_signature"),
+                    "redacted_excerpt": item.get("redacted_excerpt"),
+                    "discovered_via": item.get("discovered_via"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "verification_reason": (
+                    "Deterministic sensitive-exposure response signature satisfied"
                 ),
             })
             findings.append(finding)
@@ -785,6 +833,7 @@ def finalize_scan_report(
         "sqli.request_verify_batch": "sqli_body",
         "sqli.prove_batch": "sqli_proof",
         "xss.browser_prove_batch": "xss_browser_proof",
+        "exposure.verify_batch": "sensitive_exposure",
     }
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:

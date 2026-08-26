@@ -280,6 +280,37 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         ),
     ),
     CheckFamilySpec(
+        name="sensitive_exposure",
+        phase="active",
+        family="disclosure",
+        label="Sensitive Exposure",
+        is_active=True,
+        risk_level="high",
+        telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("request_url", "response_status", "response_body_hash", "exposure_class"),
+        severity_rules={
+            "critical_requires": ["secret_material_disclosure"],
+            "high_requires": ["deterministic_response_signature"],
+        },
+        # V2-native: executed by the ``exposure.verify_batch`` capability, not the
+        # legacy scanner boolean-flag loop, so it carries no scanner_options and is
+        # not a legacy runnable focus family.
+        dispatch_adapter="exposure_probe_batch",
+        aliases=("exposure", "sensitive-exposure", "sensitive_data_exposure", "info_disclosure"),
+        finding_tools=("exposure_probe", "sensitive_exposure"),
+        finding_cwes=("CWE-200", "CWE-538", "CWE-548"),
+        finding_title_markers=("exposure", "exposed", "directory listing", "sensitive file"),
+        finding_type_markers=("exposure", "sensitive_exposure", "information disclosure"),
+        remediation=(
+            "Remove or authenticate exposed metrics, actuator, source-control, and backup endpoints.",
+            "Deny directory listing and block access to configuration and secret files at the edge.",
+            "Rotate any credential or key that was reachable without authentication.",
+        ),
+        scanner_focus_order=40,
+        runnable=False,
+        description="Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups.",
+    ),
+    CheckFamilySpec(
         name="ssrf",
         phase="active",
         family="server_side",
