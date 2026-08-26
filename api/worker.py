@@ -184,7 +184,7 @@ from scan.action_plan import (
     request_collection_action_refs,
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
-from scan.activity import scan_action_activity_event
+from scan.activity import scan_action_activity_event, scan_action_diagnostic_line
 from scan.action_store import PostgresScanActionStore
 from scan.operational_metrics import record_operational_event
 from scan.budget_allocator import (
@@ -7817,6 +7817,7 @@ def _local_scan_action_activity_callback(
     job_id: str,
     progress_start: int,
     progress_end: int,
+    backend: PostgresScanExecutionBackend,
 ) -> Callable[
     [ScanAction, str, CapabilityResultReference | None], Awaitable[None]
 ]:
@@ -7830,6 +7831,19 @@ def _local_scan_action_activity_callback(
             progress_end=progress_end,
         )
         _append_scan_log_line(scan_id, activity["line"])
+        if event == "settled" and result is not None:
+            try:
+                receipt = await backend.load_action_receipt(action.action_id)
+                diagnostic = scan_action_diagnostic_line(
+                    action=action,
+                    result=result,
+                    receipt=receipt,
+                )
+                if diagnostic:
+                    _append_scan_log_line(scan_id, diagnostic)
+            except Exception:
+                # Activity diagnostics must never change action settlement.
+                pass
         await update_scan_progress(
             scan_id,
             str(activity["phase"]),
@@ -11975,6 +11989,7 @@ async def _execute_reserved_deterministic_scan(
             job_id=job_id,
             progress_start=5,
             progress_end=95 if initial_has_finalizer else 45,
+            backend=backend,
         ),
     ).run(plan)
     if not initial_has_finalizer:
@@ -12034,6 +12049,7 @@ async def _execute_reserved_deterministic_scan(
                 job_id=job_id,
                 progress_start=45,
                 progress_end=95,
+                backend=backend,
             ),
         ).run(plan)
     final_result = orchestration.action_results.get("finalize.report")
@@ -14959,7 +14975,10 @@ def _canonical_parallel_placements(
     )
     node_scope = str(routing.get("node_scope") or "").strip().lower()
     name = "local" if node_scope in {"", "local"} else "broker"
-    capacity = max(2, int(worker_count or 0) or 3)
+    # Placement capacity is concurrent execution authority. Durable child
+    # partitions may outnumber it and are then drained sequentially by the
+    # per-parent leased shard semaphore.
+    capacity = max(1, int(worker_count or 0) or 1)
     return (ParallelPlacementCapacity(name, capacity, routing),)
 
 

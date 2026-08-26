@@ -7,7 +7,10 @@ from datetime import date, datetime
 import json
 from typing import Any, Mapping, Sequence
 
-from .parallel_compiler import summarize_parallel_action_coverage
+from .parallel_compiler import (
+    parallel_action_occurrence_id,
+    summarize_parallel_action_coverage,
+)
 
 
 EXPLANATION_SCHEMA = "scan-execution-explanation/v1"
@@ -153,7 +156,9 @@ def _reason_label(value: Any) -> str | None:
     return _REASON_LABELS.get(reason, _label(reason))
 
 
-def _observation_projection(value: Any, *, scan_id: str, action_id: str) -> dict[str, Any] | None:
+def _observation_projection(
+    value: Any, *, scan_id: str, occurrence_id: str,
+) -> dict[str, Any] | None:
     manifest = _object(value)
     manifest_id = _text(
         manifest.get("manifest_id") or manifest.get("id"), maximum=80,
@@ -168,8 +173,18 @@ def _observation_projection(value: Any, *, scan_id: str, action_id: str) -> dict
             manifest.get("sha256") or manifest.get("content_sha256"), maximum=64,
         ),
         "manifest_digest": _text(manifest.get("manifest_digest"), maximum=64),
-        "href": f"/scans/{scan_id}/actions#{action_id}",
+        "href": f"/scans/{scan_id}/actions#{occurrence_id}",
     }
+
+
+def _occurrence_id(
+    row: Mapping[str, Any], *, default_scan_id: str, action_id: str,
+) -> str:
+    supplied = str(row.get("occurrence_id") or "").strip().lower()
+    if len(supplied) == 64 and all(char in "0123456789abcdef" for char in supplied):
+        return supplied
+    owner = str(row.get("scan_id") or default_scan_id).strip()
+    return parallel_action_occurrence_id(owner, action_id)
 
 
 def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -269,19 +284,37 @@ def build_scan_execution_explanation(
             raw_revision.get("revision_digest"), maximum=64,
         ) or None,
     } if raw_revision else {}
-    report_actions = {
-        str(item.get("action_id")): item
-        for item in (_object(raw) for raw in _array(execution.get("actions")))
-        if item.get("action_id")
-    }
+    report_actions: dict[str, dict[str, Any]] = {}
+    for item in (_object(raw) for raw in _array(execution.get("actions"))):
+        action_id = str(item.get("action_id") or "")
+        if action_id:
+            report_actions[_occurrence_id(
+                item, default_scan_id=scan_id, action_id=action_id,
+            )] = item
     finalization = _object(
         execution.get("finalization_action")
         or report_execution.get("finalization_action")
     )
     if finalization.get("action_id"):
-        report_actions.setdefault(str(finalization["action_id"]), finalization)
+        final_action_id = str(finalization["action_id"])
+        report_actions.setdefault(
+            _occurrence_id(
+                finalization,
+                default_scan_id=scan_id,
+                action_id=final_action_id,
+            ),
+            finalization,
+        )
     indexed = {
         str(row.get("action_id")): dict(row)
+        for row in action_rows if row.get("action_id")
+    }
+    indexed_occurrences = {
+        _occurrence_id(
+            row,
+            default_scan_id=scan_id,
+            action_id=str(row.get("action_id") or ""),
+        ): dict(row)
         for row in action_rows if row.get("action_id")
     }
     planned = [
@@ -303,6 +336,11 @@ def build_scan_execution_explanation(
             planned.append({
                 **parent_action,
                 "action_id": action_id,
+                "occurrence_id": _occurrence_id(
+                    terminal,
+                    default_scan_id=scan_id,
+                    action_id=action_id,
+                ),
                 "ordinal": ordinal,
                 "stage": terminal.get("stage") or parent_action.get("stage"),
                 "capability_name": (
@@ -327,6 +365,11 @@ def build_scan_execution_explanation(
             planned.append({
                 **parent_finalizer,
                 "action_id": final_action_id,
+                "occurrence_id": _occurrence_id(
+                    finalization,
+                    default_scan_id=scan_id,
+                    action_id=final_action_id,
+                ),
                 "ordinal": len(planned),
                 "stage": parent_finalizer.get("stage") or "finalize_evidence",
                 "capability_name": (
@@ -348,8 +391,16 @@ def build_scan_execution_explanation(
     parity_ok = True
     for fallback_ordinal, raw_plan in enumerate(planned):
         action_id = str(raw_plan.get("action_id") or "")
-        row = indexed.get(action_id, {})
-        terminal = report_actions.get(action_id, {})
+        occurrence_id = _occurrence_id(
+            raw_plan,
+            default_scan_id=scan_id,
+            action_id=action_id,
+        )
+        row = (
+            indexed_occurrences.get(occurrence_id, {})
+            if parallel_actions else indexed.get(action_id, {})
+        )
+        terminal = report_actions.get(occurrence_id, {})
         plan_status = _text(raw_plan.get("admission_status"), maximum=40) or "planned"
         row_status = _text(row.get("status"), maximum=40)
         report_status = _text(terminal.get("status"), maximum=40)
@@ -377,7 +428,7 @@ def build_scan_execution_explanation(
                 terminal.get("observation_manifest")
                 or result_payload.get("observation_manifest_ref"),
                 scan_id=scan_id,
-                action_id=action_id,
+                occurrence_id=occurrence_id,
             )
             or (
                 {
@@ -386,7 +437,7 @@ def build_scan_execution_explanation(
                     "size_bytes": 0,
                     "sha256": None,
                     "manifest_digest": None,
-                    "href": f"/scans/{scan_id}/actions#{action_id}",
+                    "href": f"/scans/{scan_id}/actions#{occurrence_id}",
                 }
                 if row.get("observation_manifest_id") else None
             )
@@ -420,6 +471,7 @@ def build_scan_execution_explanation(
         )
         action = {
             "action_id": action_id,
+            "occurrence_id": occurrence_id,
             "label": _label(action_id),
             "ordinal": _integer(raw_plan.get("ordinal"), fallback_ordinal),
             "stage": _text(raw_plan.get("stage") or row.get("stage"), maximum=128) or "unknown",
@@ -465,7 +517,7 @@ def build_scan_execution_explanation(
             ),
         }
         actions.append(action)
-    actions.sort(key=lambda item: (item["ordinal"], item["action_id"]))
+    actions.sort(key=lambda item: (item["ordinal"], item["occurrence_id"]))
 
     stage_order: list[str] = []
     for action in actions:
@@ -485,7 +537,15 @@ def build_scan_execution_explanation(
         elif any(status in counts for status in ("running", "leased")):
             status = "running"
         elif "planned" in counts or "missing" in counts:
-            status = "not_run" if scan_is_terminal else "pending"
+            observed = sum(
+                amount for action_status, amount in counts.items()
+                if action_status not in {"planned", "missing"}
+            )
+            status = (
+                "partial" if scan_is_terminal and observed > 0
+                else "not_run" if scan_is_terminal
+                else "pending"
+            )
         elif any(status in counts for status in ("partial", "timed_out")):
             status = "partial"
         elif "skipped" in counts:
@@ -604,6 +664,7 @@ def build_scan_execution_explanation(
     optional_gaps = [
         {
             "action_id": item["action_id"],
+            "occurrence_id": item["occurrence_id"],
             "capability_name": item["capability_name"],
             "status": item["status"],
             "reason_code": item["reason_code"],

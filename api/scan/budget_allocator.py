@@ -60,14 +60,44 @@ class ScanBudgetLimits(Protocol):
     def ledger_limits(self) -> Mapping[str, int]: ...
 
 
-def _phase(action: ScanAction) -> int:
+_PRIMARY_ACTIVE_VERIFIER_IDS = {
+    "verify.sqli",
+    "verify.xss",
+    "verify.request_sqli",
+    "verify.request_xss",
+    "verify.authz",
+}
+_ACTIVE_VERIFIER_CAPABILITIES = {
+    "sqli.verify",
+    "xss.verify",
+    "sqli.request_verify",
+    "xss.request_verify",
+    "authz.verify",
+}
+
+
+def _allocation_priority(action: ScanAction) -> int:
+    """Fund useful proof attempts before optional breadth.
+
+    A thorough scan must not spend its finite process budget on a broad Nuclei
+    sweep and then leave SQLMap/Dalfox with a tiny residual tier.  The first
+    candidate for each deterministic verifier is the highest-value optional
+    active work; additional candidate breadth follows, then general templates.
+    Required and supporting actions retain their existing precedence.
+    """
     if action.action_id in MANDATORY_ACTION_IDS:
         return 0
     if action.required:
         return 1
     if action.supporting:
         return 2
-    return 3
+    if action.action_id in _PRIMARY_ACTIVE_VERIFIER_IDS:
+        return 3
+    if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
+        return 4
+    if action.capability_name == "templates.scan":
+        return 5
+    return 6
 
 
 def allocate_scan_action_plan(
@@ -123,7 +153,10 @@ def allocate_scan_action_plan(
             if allocated[name] + reserved.get(name, 0) + amount > limits[name]
         }
 
-    for action in sorted(plan.actions, key=lambda item: (_phase(item), item.action_id)):
+    for action in sorted(
+        plan.actions,
+        key=lambda item: (_allocation_priority(item), item.action_id),
+    ):
         failed_dependencies = tuple(
             dependency
             for dependency in action.dependencies

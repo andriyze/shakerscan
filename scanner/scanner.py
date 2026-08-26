@@ -2368,6 +2368,10 @@ except Exception as e:
         """Fallback tlsx_probe when modular import fails."""
         return {"endpoints": [], "certificate": {}}
 
+    async def _fallback_openssl_ocsp(host: str, port: int):
+        """Fallback OCSP result when the modular TLS package is unavailable."""
+        return {"stapled": False, "ocsp_url": None, "raw": ""}
+
     def _fallback_build_crypto_inventory(*args, **kwargs):
         return {"protocols": {"observed": [], "legacy": []}, "pqc_readiness": {"status": "unknown", "blockers": []}}
 
@@ -2382,6 +2386,7 @@ except Exception as e:
 
     # Ensure critical functions are defined even if import failed
     tlsx_probe = _fallback_tlsx_probe
+    openssl_ocsp = _fallback_openssl_ocsp
     build_crypto_inventory = _fallback_build_crypto_inventory
     check_forced_browsing = _fallback_check_forced_browsing
     format_forced_browsing_findings = _fallback_format_forced_browsing_findings

@@ -115,3 +115,10 @@ def test_pre_scan_validation_still_fails_closed_after_all_attempts(monkeypatch):
     assert calls["n"] == 3
     assert result["validation_attempts"] == 3
     assert result["warnings"] == ["down"]
+
+
+def test_modular_import_fallback_defines_ocsp_sibling():
+    """TLS fallback mode must not leave the OCSP task as a runtime NameError."""
+    assert callable(scanner_mod.openssl_ocsp)
+    source = open(os.path.join(_SCANNER_DIR, "scanner.py"), encoding="utf-8").read()
+    assert "openssl_ocsp = _fallback_openssl_ocsp" in source

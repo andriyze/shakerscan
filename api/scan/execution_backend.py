@@ -1003,6 +1003,22 @@ class PostgresScanExecutionBackend:
         async with self._pool.acquire() as conn:
             return await self.load_result_with_connection(conn, action_id)
 
+    async def load_action_receipt(self, action_id: str) -> dict[str, Any]:
+        """Load only the already-redacted public receipt for activity diagnostics."""
+        action = self._require_action(action_id)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT receipt_json
+                     FROM scan_capability_actions
+                    WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3""",
+                uuid.UUID(self._plan.scan_id),
+                action.action_id,
+                action.action_digest,
+            )
+        if row is None or row.get("receipt_json") is None:
+            return {}
+        return _json_object(row["receipt_json"], name="stored action receipt")
+
     async def load_result_with_connection(
         self, conn: Any, action_id: str,
     ) -> CapabilityResultReference | None:

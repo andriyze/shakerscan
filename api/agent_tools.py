@@ -791,25 +791,9 @@ def build_enforced_scanner_plan(
                 "retries": 0, "redirects": 0, "public_oob": False,
             }
         else:
-            duration = min(wall, max(0, http - 1))
-            rate = (http - 1) // duration if duration else 0
-            if duration < 1 or rate < 1:
-                raise AgentToolError("nuclei reduced profile requires rate/time capacity")
-            _replace_argv_value(argv, "-rate-limit", rate)
-            _replace_argv_value(argv, "-bulk-size", 1)
-            _replace_argv_value(argv, "-concurrency", 1)
-            timeout_seconds, timeout_ms = duration, duration * 1_000
-            hard = {
-                "http_requests": rate * duration + 1,
-                "tool_wall_seconds": duration,
-            }
-            mode, method = "conservative", "rate_time_upper_bound"
-            proof_inputs = {
-                "profile": "reduced", "rate_per_second": rate,
-                "duration_seconds": duration, "startup_burst": 1,
-                "bulk_size": 1, "concurrency": 1, "retries": 0,
-                "redirects": 0, "public_oob": False,
-            }
+            raise AgentToolError(
+                "nuclei active profile requires 4000 HTTP requests and 300 seconds"
+            )
     elif scanner == "dalfox":
         http = int(reservation.get("http_requests") or 0)
         if http >= 400 and wall >= 120:
@@ -822,23 +806,9 @@ def build_enforced_scanner_plan(
                 "parameter_mining": False, "blind_oob": False,
             }
         else:
-            duration = min(wall, max(0, http - 1))
-            if duration < 1:
-                raise AgentToolError("dalfox reduced profile requires rate/time capacity")
-            _replace_argv_value(argv, "--worker", 1)
-            _replace_argv_value(argv, "--delay", 1_000)
-            timeout_seconds, timeout_ms = duration, duration * 1_000
-            hard = {
-                "http_requests": duration + 1,
-                "tool_wall_seconds": duration,
-            }
-            mode, method = "conservative", "rate_time_upper_bound"
-            proof_inputs = {
-                "profile": "reduced", "targets": 1, "workers": 1,
-                "delay_ms": 1_000, "startup_burst": 1,
-                "headless": False, "parameter_mining": False,
-                "blind_oob": False,
-            }
+            raise AgentToolError(
+                "dalfox verification requires 400 HTTP requests and 120 seconds"
+            )
     elif scanner == "sqlmap":
         sqlmap_output_dir = str(runtime.get("sqlmap_output_dir") or "")
         argv = bind_scanner_runtime_paths(
@@ -853,20 +823,9 @@ def build_enforced_scanner_plan(
             mode, method = "conservative", "fixed_conservative_profile"
             techniques, profile = "BEUT", "full"
         else:
-            duration = min(wall, max(0, http - 1))
-            if duration < 1:
-                raise AgentToolError("sqlmap reduced profile requires rate/time capacity")
-            techniques = "BEU" if duration >= 60 else "BE"
-            _replace_argv_value(argv, "--technique", techniques)
-            _replace_argv_value(argv, "--level", 1)
-            _replace_argv_value(argv, "--risk", 1)
-            timeout_seconds, timeout_ms = duration, duration * 1_000
-            hard = {
-                "http_requests": duration + 1,
-                "tool_wall_seconds": duration,
-            }
-            mode, method = "conservative", "rate_time_upper_bound"
-            profile = "reduced"
+            raise AgentToolError(
+                "sqlmap verification requires 900 HTTP requests and 300 seconds"
+            )
         proof_inputs = {
             "profile": profile, "targets": 1, "candidate_requests": 1,
             "crawl_depth": 0, "retries": 0, "threads": 1,

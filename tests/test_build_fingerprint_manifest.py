@@ -55,7 +55,19 @@ def test_worker_handler_package_is_copied_into_release_image():
     root = Path(__file__).resolve().parents[1]
     dockerfile = (root / "scanner" / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "COPY api/worker_handlers /app/worker_handlers" in dockerfile
+    api_packages = {
+        path.name
+        for path in (root / "api").iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    copied_packages = {
+        line.split()[1].removeprefix("api/")
+        for line in dockerfile.splitlines()
+        if line.startswith("COPY api/")
+        and not line.startswith("COPY api/*.py")
+    }
+
+    assert api_packages == copied_packages
 
 
 def test_security_rule_guest_lock_and_guest_code_changes_invalidate_fingerprint(tmp_path):

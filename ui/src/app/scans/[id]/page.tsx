@@ -1480,8 +1480,9 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
             const reserved = action?.budget?.reserved || {}
             const consumed = action?.budget?.consumed || {}
             const observationCount = Number(action?.observation?.count || 0)
+            const occurrenceId = String(action.occurrence_id || action.action_id)
             return (
-              <div id={String(action.action_id)} key={String(action.action_id)} className="p-3">
+              <div id={occurrenceId} key={occurrenceId} className="p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-medium text-gray-200">{String(action.label || action.action_id)}</span>
                   <span className={`rounded px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(action.status || 'planned'))}`}>

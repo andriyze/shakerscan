@@ -254,6 +254,27 @@ def test_terminal_scan_labels_never_started_stages_not_run():
     assert explanation["coverage"]["capability_coverage"]["pending"] == 1
 
 
+def test_terminal_mixed_stage_is_partial_not_not_run():
+    plan = _plan()
+    plan["actions"][-1]["stage"] = "deterministic_baseline"
+    rows = _rows()
+    rows[0].update({"status": "success", "reason_code": None})
+
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="failed",
+        plan_payload=plan,
+        action_rows=rows,
+    )
+
+    baseline = next(
+        stage for stage in explanation["stage_timeline"]
+        if stage["stage"] == "deterministic_baseline"
+    )
+    assert baseline["status"] == "partial"
+    assert baseline["status_counts"] == {"planned": 1, "success": 1}
+
+
 def test_execution_explanation_preserves_final_report_grade_reliability():
     rows = _rows()
     rows[0]["status"] = "success"
@@ -418,3 +439,55 @@ def test_parallel_parent_explanation_uses_verified_child_merge():
         ],
         "warning": "The grade is provisional because required coverage did not complete cleanly.",
     }
+
+
+def test_parallel_duplicate_action_ids_keep_distinct_occurrences():
+    child_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    child_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    report = {
+        "parallel": {
+            "canonical_action_execution": {
+                "actions": [
+                    {
+                        "scan_id": child_a,
+                        "action_id": "verify.xss.0",
+                        "stage": "active_verification",
+                        "capability_name": "xss.verify",
+                        "status": "success",
+                        "budget_reserved": {"http_requests": 4},
+                        "budget_consumed": {"http_requests": 2},
+                        "observation_manifest": {"manifest_id": "a", "count": 1},
+                    },
+                    {
+                        "scan_id": child_b,
+                        "action_id": "verify.xss.0",
+                        "stage": "active_verification",
+                        "capability_name": "xss.verify",
+                        "status": "failed",
+                        "reason_code": "adapter_failed",
+                        "budget_reserved": {"http_requests": 5},
+                        "budget_consumed": {"http_requests": 5},
+                        "observation_manifest": {"manifest_id": "b", "count": 0},
+                    },
+                ],
+            },
+        },
+    }
+
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="completed",
+        plan_payload=_plan(),
+        action_rows=[],
+        report=report,
+    )
+
+    rows = [
+        action for action in explanation["actions"]
+        if action["action_id"] == "verify.xss.0"
+    ]
+    assert len(rows) == 2
+    assert len({row["occurrence_id"] for row in rows}) == 2
+    assert sorted(row["status"] for row in rows) == ["failed", "success"]
+    assert sum(row["budget"]["consumed"]["http_requests"] for row in rows) == 7
+    assert sorted((row["observation"] or {})["count"] for row in rows) == [0, 1]

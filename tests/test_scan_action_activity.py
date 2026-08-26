@@ -1,4 +1,8 @@
-from api.scan.activity import parallel_scan_activity_lines, scan_action_activity_event
+from api.scan.activity import (
+    parallel_scan_activity_lines,
+    scan_action_activity_event,
+    scan_action_diagnostic_line,
+)
 from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
 
 from tests.test_scan_orchestrator import _plan, _result
@@ -48,6 +52,76 @@ def test_scan_action_activity_supports_two_phase_progress_ranges():
     )
     assert event["progress"] == 45
     assert "partial" in event["line"]
+
+
+def test_scan_action_diagnostic_line_exposes_only_bounded_telemetry():
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(
+        action,
+        status=CapabilityResultStatus.TIMED_OUT,
+        reason=CapabilityResultReason.TIMED_OUT,
+    )
+    line = scan_action_diagnostic_line(
+        action=action,
+        result=result,
+        receipt={
+            "errors": ["external_process_contract: target secret must not leak"],
+            "redacted_execution": {
+                "target_url": "https://secret.example/path?token=never",
+                "process_enforcement": {
+                    "hard_budget": {
+                        "http_requests": 9,
+                        "tool_wall_seconds": 5,
+                    },
+                },
+                "wire_telemetry": {
+                    "observed_http_requests_minimum": 7,
+                    "wall_seconds": 5,
+                    "connections_attempted": 8,
+                    "connections_opened": 7,
+                    "limiter_status": "failed",
+                },
+            },
+        },
+    )
+
+    assert line is not None
+    assert "outcome=timed_out" in line
+    assert "reason=timed_out" in line
+    assert "error=external_process_contract" in line
+    assert "http=7/9/" in line
+    assert "wall=5s/5s" in line
+    assert "connections=7/8 opened/attempted" in line
+    assert "limiter=failed" in line
+    assert "secret" not in line
+    assert "token" not in line
+
+
+def test_scan_action_diagnostic_line_explains_prelaunch_failure_without_raw_error():
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(
+        action,
+        status=CapabilityResultStatus.FAILED,
+        reason=CapabilityResultReason.ADAPTER_FAILED,
+    )
+
+    line = scan_action_diagnostic_line(
+        action=action,
+        result=result,
+        receipt={
+            "errors": ["private exception text with https://secret.example"],
+            "redacted_execution": {"execution_started": False},
+        },
+    )
+
+    assert line is not None
+    assert "outcome=failed" in line
+    assert "reason=adapter_failed" in line
+    assert "error=unclassified_adapter_error" in line
+    assert "execution=not_started" in line
+    assert "secret.example" not in line
 
 
 def test_parallel_scan_activity_combines_child_logs_and_status_fallbacks():

@@ -239,26 +239,12 @@ RESERVATION_SCALED_PROFILES: Mapping[
     ),
     "templates.scan": (
         {"http_requests": 4_000, "tool_wall_seconds": 300},
-        {"http_requests": 1_001, "tool_wall_seconds": 100},
-        {"http_requests": 301, "tool_wall_seconds": 60},
-        {"http_requests": 61, "tool_wall_seconds": 30},
-        {"http_requests": 21, "tool_wall_seconds": 20},
-        {"http_requests": 11, "tool_wall_seconds": 10},
     ),
     "xss.verify": (
         {"http_requests": 400, "tool_wall_seconds": 120},
-        {"http_requests": 121, "tool_wall_seconds": 120},
-        {"http_requests": 61, "tool_wall_seconds": 60},
-        {"http_requests": 31, "tool_wall_seconds": 30},
-        {"http_requests": 16, "tool_wall_seconds": 15},
-        {"http_requests": 11, "tool_wall_seconds": 10},
     ),
     "sqli.verify": (
         {"http_requests": 900, "tool_wall_seconds": 300},
-        {"http_requests": 121, "tool_wall_seconds": 120},
-        {"http_requests": 61, "tool_wall_seconds": 60},
-        {"http_requests": 31, "tool_wall_seconds": 30},
-        {"http_requests": 21, "tool_wall_seconds": 20},
     ),
 }
 

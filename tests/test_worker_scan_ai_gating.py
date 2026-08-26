@@ -281,6 +281,7 @@ def test_parallel_executor_projection_isolates_opaque_principal_refs():
             "budget_profile": "exhaustive",
             "custom_budget": {"smart_bola_max_endpoints": 999},
             "exploit_depth": True,
+            "shard_concurrency": 1,
         },
         child=child,
         credential_refs_by_id=refs,
@@ -290,11 +291,22 @@ def test_parallel_executor_projection_isolates_opaque_principal_refs():
     assert projected["parallel_principal_lane"] == "secondary"
     assert projected["auth_state"] == "user2"
     assert projected["placement"] == {"node_scope": "remote"}
+    assert projected["shard_concurrency"] == 1
     assert not {
         "auth_header", "user2_header", "custom_budget", "exploit_depth",
     }.intersection(projected)
     assert "smart_bola" not in json.dumps(projected)
     assert "exhaustive" not in json.dumps(projected)
+
+
+def test_canonical_parallel_placement_does_not_floor_single_worker_to_two():
+    placements = worker._canonical_parallel_placements(
+        {"placement": {"node_scope": "local"}},
+        worker_count=1,
+    )
+
+    assert len(placements) == 1
+    assert placements[0].capacity == 1
 
 
 @pytest.mark.parametrize("conflict", [

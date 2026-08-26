@@ -118,30 +118,18 @@ def test_ffuf_scales_throughput_to_finish_immutable_wordlist_within_hold():
 
 
 @pytest.mark.parametrize(
-    "name,reserved,rate_flag,concurrency_flag",
+    "name,reserved,required",
     [
-        ("nuclei", {"http_requests": 301, "tool_wall_seconds": 60}, "-rate-limit", "-concurrency"),
-        ("dalfox", {"http_requests": 61, "tool_wall_seconds": 60}, "--delay", "--worker"),
-        ("sqlmap", {"http_requests": 61, "tool_wall_seconds": 60}, "--delay", "--threads"),
+        ("nuclei", {"http_requests": 301, "tool_wall_seconds": 60}, "4000 HTTP requests and 300 seconds"),
+        ("dalfox", {"http_requests": 61, "tool_wall_seconds": 60}, "400 HTTP requests and 120 seconds"),
+        ("sqlmap", {"http_requests": 61, "tool_wall_seconds": 60}, "900 HTTP requests and 300 seconds"),
     ],
 )
-def test_verifier_commands_scale_to_reviewed_reservations(
-    name, reserved, rate_flag, concurrency_flag,
+def test_underpowered_active_verifier_profiles_fail_before_launch(
+    name, reserved, required,
 ):
-    plan = _plan(name, reserved)
-
-    assert plan.hard_budget_dict == reserved
-    assert plan.timeout_ms == reserved["tool_wall_seconds"] * 1_000
-    assert plan.argv[plan.argv.index(concurrency_flag) + 1] == "1"
-    assert rate_flag in plan.argv
-    assert plan.budget_proof["inputs"]["profile"] == "reduced"
-    assert plan.budget_proof["method"] == "rate_time_upper_bound"
-
-
-@pytest.mark.parametrize("name", ["nuclei", "dalfox", "sqlmap"])
-def test_reduced_verifier_profiles_still_fail_closed_below_minimum(name):
-    with pytest.raises(agent_tools.AgentToolError, match="capacity"):
-        _plan(name, {"http_requests": 1, "tool_wall_seconds": 1})
+    with pytest.raises(agent_tools.AgentToolError, match=required):
+        _plan(name, reserved)
 
 
 def test_sqlmap_profile_is_single_target_noninteractive_and_has_no_expansion_flags():
@@ -153,14 +141,6 @@ def test_sqlmap_profile_is_single_target_noninteractive_and_has_no_expansion_fla
     assert "--crawl" not in plan.argv
     for forbidden in ("--os-shell", "--sql-shell", "--file-read", "--dump", "--dump-all"):
         assert forbidden not in plan.argv
-
-
-def test_reduced_sqlmap_profile_drops_time_based_techniques_and_risk():
-    plan = _plan("sqlmap", {"http_requests": 31, "tool_wall_seconds": 30})
-
-    assert plan.argv[plan.argv.index("--technique") + 1] == "BE"
-    assert plan.argv[plan.argv.index("--level") + 1] == "1"
-    assert plan.argv[plan.argv.index("--risk") + 1] == "1"
 
 
 def test_enforcement_receipt_cannot_authorize_more_than_the_hold():

@@ -150,10 +150,6 @@ def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
 def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
     budget = ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25)
     compiled = _compile(budget)
-    maximum_digest = next(
-        action.action_digest for action in compiled.actions
-        if action.action_id == "active.templates"
-    )
     allocation = allocate_scan_action_plan(compiled, budget)
     rows = {action.action_id: action for action in allocation.plan.actions}
 
@@ -161,13 +157,31 @@ def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
     assert rows["passive.templates"].requested_budget == {
         "http_requests": 7, "tool_wall_seconds": 30,
     }
-    assert rows["active.templates"].requested_budget == {
-        "http_requests": 11, "tool_wall_seconds": 10,
-    }
-    assert rows["active.templates"].action_digest != maximum_digest
+    assert rows["active.templates"].reason_code == "insufficient_plan_budget"
+    assert rows["active.templates"].requested_budget == {}
     assert rows["verify.xss"].reason_code == "insufficient_plan_budget"
+    assert rows["verify.xss"].requested_budget == {}
     assert rows["verify.sqli"].reason_code == "insufficient_plan_budget"
     assert rows["finalize.report"].admission_status == "planned"
+
+
+def test_thorough_allocator_funds_full_verifiers_before_template_breadth():
+    budget = ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 2_700, 8, 0, 500)
+    allocation = allocate_scan_action_plan(_compile(budget), budget)
+    rows = {action.action_id: action for action in allocation.plan.actions}
+
+    assert rows["verify.sqli"].requested_budget == {
+        "http_requests": 900,
+        "tool_wall_seconds": 300,
+    }
+    assert rows["verify.xss"].requested_budget == {
+        "http_requests": 400,
+        "tool_wall_seconds": 120,
+    }
+    assert rows["active.templates"].requested_budget == {
+        "http_requests": 4_000,
+        "tool_wall_seconds": 300,
+    }
 
 
 def test_allocator_scales_required_passive_pack_inside_parallel_child_budget():

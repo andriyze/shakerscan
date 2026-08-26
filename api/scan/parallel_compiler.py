@@ -187,11 +187,19 @@ class ParallelPlannedChild:
 
     @property
     def work_weight(self) -> int:
+        # Saved requests and evidence-backed candidates carry more expensive
+        # active verification work than a plain endpoint. Parameterized URLs
+        # are also more likely to produce mutation candidates. Weighting them
+        # here divides the existing immutable parent ceiling; it never widens
+        # traffic or time authority.
+        endpoint_weight = sum(
+            3 if "?" in endpoint else 1 for endpoint in self.endpoints
+        )
         return max(
             1,
-            len(self.endpoints)
-            + len(self.request_selection_digests)
-            + len(self.candidate_manifest_refs),
+            endpoint_weight
+            + (2 * len(self.request_selection_digests))
+            + (4 * len(self.candidate_manifest_refs)),
         )
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -277,6 +285,17 @@ def _digest(value: Mapping[str, Any]) -> str:
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def parallel_action_occurrence_id(scan_id: str, action_id: str) -> str:
+    """Return a content-free identity for one child action occurrence."""
+    owner = str(scan_id or "").strip()
+    action = str(action_id or "").strip()
+    if not owner or not action:
+        raise ParallelActionPlanError(
+            "parallel action occurrence requires scan and action identities"
+        )
+    return hashlib.sha256(f"{owner}:{action}".encode("utf-8")).hexdigest()
 
 
 def _weighted_shares(
@@ -1017,27 +1036,24 @@ class ParallelActionPlanCompiler:
             family_groups = tuple((item,) for item in family_candidates)
 
         endpoint_lanes = tuple(lanes)
-        # ``max_workers`` bounds concurrent execution, not the number of durable
-        # child partitions. A one-worker scan can still preserve the global and
-        # endpoint authority split by running those children sequentially. The
-        # placement capacities bound the committed child set; worker admission
-        # enforces the execution-plan concurrency ceiling when children run.
-        max_children = sum(item.capacity for item in placement_lanes)
-        available_endpoint_slots = max(0, max_children - 1)
-        if available_endpoint_slots < len(endpoint_lanes):
-            raise ParallelActionPlanError(
-                "parallel capacity cannot preserve explicit principal isolation"
-            )
+        # Placement capacity is a concurrency ceiling, not a child-count
+        # ceiling. Keep at least one endpoint partition beside the global
+        # partition even for max_workers=1; the leased per-parent semaphore
+        # executes them sequentially. Explicit principal lanes also remain
+        # separate when they must share one worker over time.
+        concurrent_capacity = sum(item.capacity for item in placement_lanes)
+        available_endpoint_slots = max(
+            1,
+            concurrent_capacity - 1,
+            len(endpoint_lanes),
+        )
         if len(endpoint_lanes) * len(family_groups) > available_endpoint_slots:
             family_groups = (family_candidates,) if family_candidates else ((),)
             notes.append(
                 "family scheduling lanes coalesced to preserve principal isolation"
             )
         axis_count = len(endpoint_lanes) * len(family_groups)
-        if axis_count > available_endpoint_slots:
-            raise ParallelActionPlanError(
-                "parallel capacity cannot preserve typed work axes"
-            )
+        available_endpoint_slots = max(available_endpoint_slots, axis_count)
 
         work_count = max(1, len(endpoints), len(requests), len(candidate_refs))
         per_axis_slots = max(1, min(
@@ -1186,7 +1202,14 @@ class ParallelActionPlanCompiler:
             for item in child_specs
         ]
         weights = list(base_weights)
-        weights[global_index] += max(1, sum(base_weights) - base_weights[global_index])
+        endpoint_weight = sum(base_weights) - base_weights[global_index]
+        if parent_execution_plan.policy.active_testing:
+            # Active candidate shards need enough of the fixed parent ceiling
+            # for complete deterministic verifiers. Discovery still receives
+            # a bounded share, but no longer automatically owns half the scan.
+            weights[global_index] += max(1, endpoint_weight // 4)
+        else:
+            weights[global_index] += max(1, endpoint_weight)
 
         parent_budget: ScanBudget = parent_execution_plan.budget
         consumed = dict(consumed_budget or {})
@@ -1601,6 +1624,9 @@ def merge_parallel_action_executions(
         for row in action_rows:
             normalized = dict(row)
             normalized["scan_id"] = scan_id
+            normalized["occurrence_id"] = parallel_action_occurrence_id(
+                scan_id, str(row.get("action_id") or ""),
+            )
             merged_actions.append(normalized)
             reference = row.get("observation_manifest")
             if reference is not None:
@@ -1609,8 +1635,8 @@ def merge_parallel_action_executions(
                         "parallel child observation manifest reference is invalid"
                     )
                 observation_refs.append({
-                    "scan_id": scan_id,
                     "action_id": row.get("action_id"),
+                    "occurrence_id": normalized["occurrence_id"],
                     "reference": dict(reference),
                 })
                 child_observation_count += 1
@@ -1674,6 +1700,7 @@ def summarize_parallel_action_coverage(
     optional_gaps = [
         {
             "action_id": str(item.get("action_id")),
+            "occurrence_id": str(item.get("occurrence_id") or ""),
             "capability_name": str(item.get("capability_name") or "unknown"),
             "status": str(item.get("status") or "missing"),
             "reason_code": item.get("reason_code"),
@@ -1710,6 +1737,7 @@ def summarize_parallel_action_coverage(
             "actions": [
                 {
                     "action_id": str(item.get("action_id")),
+                    "occurrence_id": str(item.get("occurrence_id") or ""),
                     "capability_name": str(item.get("capability_name") or "unknown"),
                     "required": item.get("required") is True,
                     "status": str(item.get("status") or "missing"),

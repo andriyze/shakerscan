@@ -24,6 +24,12 @@ test('execution explanation remains visible while running and after terminal out
   assert.match(detail, /complete_with_gaps/)
 })
 
+test('parallel action occurrences use collision-free DOM identities', () => {
+  assert.match(detail, /action\.occurrence_id \|\| action\.action_id/)
+  assert.match(detail, /id=\{occurrenceId\} key=\{occurrenceId\}/)
+  assert.doesNotMatch(detail, /id=\{String\(action\.action_id\)\} key=\{String\(action\.action_id\)\}/)
+})
+
 test('direct shard pages identify the parent as the authoritative Scan', () => {
   assert.match(detail, /function ShardContextBanner/)
   assert.match(detail, /Parallel work unit · shard/)

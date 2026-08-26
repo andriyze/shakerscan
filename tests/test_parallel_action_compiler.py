@@ -260,6 +260,51 @@ def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():
     assert "secret=redacted-at-source" not in str(first.canonical_dict())
 
 
+def test_active_candidate_shard_can_fund_complete_production_verifiers():
+    contract = resolve_scan_contract(
+        budget_profile="thorough",
+        policy={
+            "active_testing": True,
+            "exclude_families": ["nuclei", "xss", "sqli", "bola"],
+        },
+    )
+    parent = allocate_scan_action_plan(
+        ScanActionPlanCompiler().compile(
+            scan_id=PARENT_ID,
+            execution_plan=contract.execution_plan,
+            target_binding=_target(),
+        ),
+        contract.budget,
+    ).plan
+    children = (
+        {
+            "scan_id": CHILD_IDS[0], "index": 0, "role": "global",
+            "work_weight": 1, "options": {"parallel_backbone": True},
+        },
+        {
+            "scan_id": CHILD_IDS[1], "index": 1, "role": "endpoint",
+            "work_weight": 1, "options": {"custom_endpoints": ["GET /"]},
+        },
+        {
+            "scan_id": CHILD_IDS[2], "index": 2, "role": "endpoint",
+            "work_weight": 9,
+            "options": {"custom_endpoints": ["GET /search?q=one"]},
+        },
+    )
+
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=contract.execution_plan,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=children,
+        strategy="scope",
+    )
+    candidate_budget = partition.children[2].budget
+
+    assert candidate_budget.max_http_requests >= 4_000 + 400 + 900
+    assert candidate_budget.max_tool_wall_seconds >= 300 + 120 + 300
+
+
 def test_parallel_partition_uses_remaining_parent_ledger_and_exact_child_budget():
     execution, parent = _authority()
     partition = ParallelActionPlanCompiler().compile(
@@ -818,7 +863,7 @@ def test_typed_parent_plan_allows_sequential_fanout_under_one_worker_ceiling():
         request_work=(ParallelRequestWork("a" * 64, "anonymous"),),
         principal_lanes=(ParallelPrincipalLane("anonymous"),),
         placements=(
-            ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+            ParallelPlacementCapacity("local", 1, {"node_scope": "local"}),
         ),
         scheduling_hint="scope",
     )
@@ -828,23 +873,30 @@ def test_typed_parent_plan_allows_sequential_fanout_under_one_worker_ceiling():
     assert planned.children[1].request_selection_digests == ("a" * 64,)
 
 
-def test_typed_parent_plan_refuses_to_collapse_principal_lanes_for_capacity():
+def test_typed_parent_plan_preserves_principal_lanes_sequentially():
     execution, parent = _endpoint_authority()
-    with pytest.raises(ParallelActionPlanError, match="principal isolation"):
-        ParallelActionPlanCompiler().plan_parent(
-            parent_execution_plan=execution,
-            parent_action_plan=parent,
-            target_binding=_target(),
-            endpoint_manifest_entries=("GET /a", "GET /b"),
-            principal_lanes=(
-                ParallelPrincipalLane("anonymous"),
-                ParallelPrincipalLane("primary", ("profile-primary",)),
-            ),
-            placements=(
-                ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
-            ),
-            scheduling_hint="scope",
-        )
+    planned = ParallelActionPlanCompiler().plan_parent(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        endpoint_manifest_entries=("GET /a", "GET /b"),
+        principal_lanes=(
+            ParallelPrincipalLane("anonymous"),
+            ParallelPrincipalLane("primary", ("profile-primary",)),
+        ),
+        placements=(
+            ParallelPlacementCapacity("local", 1, {"node_scope": "local"}),
+        ),
+        scheduling_hint="scope",
+    )
+
+    assert [child.role for child in planned.children] == [
+        "global", "endpoint", "endpoint",
+    ]
+    assert {child.principal_lane.name for child in planned.children[1:]} == {
+        "anonymous", "primary",
+    }
+    assert all(child.placement.capacity == 1 for child in planned.children)
 
 
 def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
@@ -876,6 +928,12 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
     assert merged["partial"] is False
     assert merged["incomplete_child_scan_ids"] == []
     assert merged["merge_digest"]
+    assert all(
+        len(action["occurrence_id"]) == 64 for action in merged["actions"]
+    )
+    assert len({
+        action["occurrence_id"] for action in merged["actions"]
+    }) == len(merged["actions"])
     coverage = summarize_parallel_action_coverage(merged)
     assert coverage["status"] == "complete"
     assert coverage["grade_reliability"] == {"reliable": True, "reasons": []}
