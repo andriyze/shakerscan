@@ -18,7 +18,7 @@ from pathlib import Path
 # Frozen decomposition baselines (line counts). Lower these — never raise them —
 # as each bounded domain is extracted into api/<domain>/router.py + services.
 LIMITS: dict[str, int] = {
-    "api/api.py": 72963,
+    "api/api.py": 72932,
     "api/worker.py": 23_513,
 }
 

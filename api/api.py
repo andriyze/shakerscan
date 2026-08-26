@@ -436,6 +436,30 @@ except ModuleNotFoundError:  # package import in host-side tests
         _json_object,
         _decode_jsonb_scalar,
     )
+try:
+    from api_utils import (
+        _clean_string_list,
+        _content_free_hash,
+        _direct_query_value,
+        _int_or_none,
+        _iso_or_none,
+        _json_safe_row,
+        _optional_uuid,
+        _row_value,
+        _uuid_or_400,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.api_utils import (
+        _clean_string_list,
+        _content_free_hash,
+        _direct_query_value,
+        _int_or_none,
+        _iso_or_none,
+        _json_safe_row,
+        _optional_uuid,
+        _row_value,
+        _uuid_or_400,
+    )
 import parallel_scan
 import asm_inventory
 import adjudicate
@@ -1213,11 +1237,6 @@ def _public_investigation_candidate(row: Any) -> dict[str, Any]:
     return payload
 
 
-def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _parallel_shard_contribution(shard: dict[str, Any]) -> dict[str, Any]:
@@ -9478,21 +9497,8 @@ def _build_ai_scan_replay_plan(
     }
 
 
-def _row_value(row: Any, key: str, default: Any = None) -> Any:
-    if isinstance(row, dict):
-        return row.get(key, default)
-    try:
-        return row[key]
-    except Exception:
-        return default
 
 
-def _iso_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
 
 
 def _ai_campaign_context_from_scan(scan_row: Any) -> dict[str, Any]:
@@ -20832,10 +20838,6 @@ async def get_model_intake_automatic_review_report(
     return report
 
 
-def _content_free_hash(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
 
 
 def _model_intake_status_map(value: Any) -> dict[str, Any]:
@@ -32299,14 +32301,6 @@ async def create_target(request: TargetCreate):
             raise HTTPException(status_code=409, detail="Target already exists")
 
 
-def _uuid_or_400(value: str, label: str = "id") -> uuid.UUID:
-    """Parse a path/query value as a UUID, returning HTTP 400 (not a 500) on garbage.
-    A bad id is a client error — and a GET to a POST-only path like /targets/dedupe
-    that falls through to /targets/{target_id} should 400, not crash."""
-    try:
-        return uuid.UUID(str(value))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status_code=400, detail=f"Invalid {label}: {value!r}")
 
 
 def _normalize_target_principal_label(value: Any) -> str:
@@ -35377,9 +35371,6 @@ def _research_hypothesis_matches_live_surface(
     return any(candidate_route == route for _, candidate_route in live_surface)
 
 
-def _json_safe_row(row: Any) -> dict[str, Any]:
-    payload = row_to_dict(row)
-    return _decode_json_value(payload) if isinstance(payload, dict) else payload
 
 
 async def _persist_agent_context_pack(conn, req: AgentContextPackRequest) -> dict[str, Any]:
@@ -43799,32 +43790,10 @@ async def _persist_operation_plan(conn, req: OperationPlanRequest) -> dict[str, 
     }
 
 
-def _direct_query_value(value: Any) -> Any:
-    """Unwrap FastAPI parameter defaults for trusted in-process endpoint calls."""
-    # Avoid coupling this module (and isolated test harnesses) to FastAPI's
-    # private Param base class while still recognizing Query/Header subclasses.
-    value_type = type(value)
-    if value_type.__module__ == "fastapi.params" and hasattr(value, "default"):
-        return value.default
-    return value
 
 
-def _optional_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
-    value = _direct_query_value(value)
-    if not value:
-        return None
-    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
 
 
-def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list[str]:
-    cleaned: list[str] = []
-    for value in values or []:
-        item = str(value or "").strip()
-        if item:
-            cleaned.append(item)
-        if len(cleaned) >= max_items:
-            break
-    return cleaned
 
 
 def _normalize_hypothesis_dedupe_value(value: Any, *, lower: bool = False) -> Optional[str]:
