@@ -450,6 +450,26 @@ SCANNER_AUTH_CONFIG_KEYS = {
     "user2_login_password",
 }
 
+
+def _auth_value_is_present(value: Any) -> bool:
+    """Return whether an auth-config option carries an active authentication path.
+
+    Canonical submissions may carry explicit false booleans such as
+    ``auto_auth: false``. A switched-off control is not a second
+    authentication path: it must neither conflict with generic credential
+    references nor be projected into the secret scanner handoff.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value is True
+    if isinstance(value, str):
+        return bool(value)
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) > 0
+    return True
+
+
 FOCUSED_MERGE_FAMILY_RULES = {
     "sqli": {
         "tools": {"smart_sqli", "sqlmap", "sqli", "nosql_injection", "nosql"},
@@ -499,9 +519,7 @@ def _scanner_auth_config_from_options(options: dict[str, Any]) -> dict[str, Any]
     config: dict[str, Any] = {}
     for key in sorted(SCANNER_AUTH_CONFIG_KEYS):
         value = options.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str) and not value:
+        if not _auth_value_is_present(value):
             continue
         config[key] = value
     return config
@@ -1861,9 +1879,12 @@ async def _hydrate_generic_scan_credentials(
     if not isinstance(raw_refs, list) or not raw_refs:
         return hydrated
     if (
-        hydrated.get("managed_credential_profiles") not in (None, "", [], {})
-        or hydrated.get("authentication") not in (None, "", [], {})
-        or any(hydrated.get(key) not in (None, "", [], {}) for key in SCANNER_AUTH_CONFIG_KEYS)
+        _auth_value_is_present(hydrated.get("managed_credential_profiles"))
+        or _auth_value_is_present(hydrated.get("authentication"))
+        or any(
+            _auth_value_is_present(hydrated.get(key))
+            for key in SCANNER_AUTH_CONFIG_KEYS
+        )
     ):
         raise ScanCredentialError(
             "generic Scan credential references cannot be combined with another authentication path"
@@ -16785,6 +16806,46 @@ async def process_scan_merge_job(job_data: dict):
     parent_options = _as_report_dict(parent['options']) or {}
     partition_record = parent_options.get("parallel_action_partition_record")
     canonical_action_merge: dict[str, Any] | None = None
+    has_canonical_child_plans = any(
+        str(child.get("scan_action_plan_digest") or "") for child in children
+    )
+    if not isinstance(partition_record, Mapping) and has_canonical_child_plans:
+        # A canonical V2 parallel parent must carry the immutable partition
+        # record its children were compiled against. Absence is a merge
+        # contract failure, never a silent legacy-style aggregation.
+        error = (
+            "Parallel action partition verification failed: canonical shard "
+            "plans present without a parallel action partition record"
+        )[:1000]
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE scans SET status='failed', progress=100,
+                    current_phase='parallel_partition_failed',
+                    completed_at=NOW(), error_message=$2,
+                    result=$3::jsonb
+                WHERE id=$1 AND status <> 'cancelled'
+                """,
+                uuid.UUID(parent_id),
+                error,
+                json.dumps({
+                    "technical_outcome": "INCOMPLETE",
+                    "error": error,
+                    "parallel": {
+                        "degraded": True,
+                        "partition_verified": False,
+                    },
+                }),
+            )
+        r.hset(f"job:{parent_job_id}", mapping={
+            "status": "failed",
+            "progress": "100",
+            "current_phase": "parallel_partition_failed",
+            "error": error,
+        })
+        r.expire(f"job:{parent_job_id}", 86400)
+        print(f"[merge {parent_id[:8]}] {error}", flush=True)
+        return
     if isinstance(partition_record, Mapping):
         try:
             validate_parallel_partition_record(
@@ -19048,7 +19109,13 @@ async def _execute_agent_scanner_process(
         process_enforcement = process_plan.enforcement_receipt()
         requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
         timeout_ms = max(1_000, min(process_plan.timeout_ms, requested_timeout))
-        process_environment = dict(os.environ)
+        process_environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+        }
+        # External tools must reach the target through the pinned transport
+        # channel (argv/plan env), never an ambient worker proxy variable.
         process_environment.update(dict(process_plan.env))
         proc = await asyncio.create_subprocess_exec(
             binary,

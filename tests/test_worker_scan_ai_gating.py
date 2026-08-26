@@ -313,6 +313,7 @@ def test_canonical_parallel_placement_does_not_floor_single_worker_to_two():
     {"auth_header": "Bearer smuggled"},
     {"authentication": {"auth_header": "Bearer smuggled"}},
     {"managed_credential_profiles": [{"profile_id": str(uuid.uuid4())}]},
+    {"auto_auth": True},
 ])
 def test_generic_scan_worker_rejects_other_auth_paths_before_decryption(
     monkeypatch, conflict,
@@ -326,6 +327,50 @@ def test_generic_scan_worker_rejects_other_auth_paths_before_decryption(
     }
     with pytest.raises(worker.ScanCredentialError, match="another authentication path"):
         asyncio.run(worker._hydrate_generic_scan_credentials(queued, str(uuid.uuid4())))
+
+
+def test_generic_scan_accepts_explicit_false_auto_auth_with_credential_refs(
+    monkeypatch,
+):
+    monkeypatch.setattr(worker, "db_pool", _GenericCredentialPool(uuid.uuid4()))
+    queued = {
+        "credential_profile_refs": [{
+            "profile_id": str(uuid.uuid4()),
+            "scan_lane": "primary",
+        }],
+        "credential_target_kind": "web",
+        "credential_action_name": "scan.submit",
+        "auto_auth": False,
+        "login_url": "",
+        "auth_cookies": [],
+        "user2_header": None,
+    }
+    # Passing the conflicting-auth gate means hydration proceeds past auth
+    # conflict detection toward target/authority resolution, where the stub
+    # environment has no approval receipt row.
+    try:
+        asyncio.run(worker._hydrate_generic_scan_credentials(queued, str(uuid.uuid4())))
+        raised = ""
+    except worker.ScanCredentialError as exc:
+        raised = str(exc)
+    except Exception as exc:
+        raised = f"{type(exc).__name__}: {exc}"
+    assert "another authentication path" not in raised
+    assert raised
+
+
+def test_scanner_auth_config_projection_omits_absent_and_false_values():
+    config = worker._scanner_auth_config_from_options({
+        "auto_auth": False,
+        "login_url": "",
+        "auth_cookies": [],
+        "user2_header": None,
+        "oauth_client_id": {},
+        "auth_header": "Bearer real-secret",
+    })
+
+    assert config == {"auth_header": "Bearer real-secret"}
+    assert "auto_auth" not in json.dumps(config)
 
 
 def test_asm_bola_user1_scope_preserves_second_user_comparator():
@@ -2464,6 +2509,47 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
         "verify.xss" in child["expected_action_ids"]
         for child in record["children"]
     )
+
+
+def test_parallel_global_backbone_plan_excludes_discovery_actions():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+    from scan.jobs import CanonicalScanJob
+
+    contract = resolve_scan_contract(budget_profile="balanced", policy={})
+    parent = CanonicalScanJob.create(
+        job_id="parent-job",
+        scan_id="parent-scan",
+        target=TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="example.test",
+            allowed_origins=("https://example.test",),
+            allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",),
+        ),
+        execution_plan=contract.execution_plan,
+    )
+    options = contract.option_metadata()
+    options.update({
+        "parallel_action_partition_role": "global",
+        "zero_rediscovery": False,
+    })
+
+    child, persisted, _queued = worker._canonical_shard_job(
+        parent,
+        child_id="33333333-3333-4333-8333-333333333333",
+        child_job_id="global-child-job",
+        child_options=options,
+        shard_label="global",
+        shard_index=0,
+        shard_count=2,
+    )
+
+    plan = worker._compile_parallel_child_action_plan(child, persisted)
+    capability_names = [action.capability_name for action in plan.actions]
+    assert not [name for name in capability_names if name.startswith("discover.")]
+    assert "scan.finalize" in capability_names
 
 
 def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
