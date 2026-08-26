@@ -88,6 +88,12 @@ jobs:
           httpx==0.28.1 pydantic==2.13.4 PyJWT==2.13.0
           PyYAML==6.0.3 redis==8.0.1 requests==2.34.2
 
+      - name: Freeze monolith growth and lock the API contract
+        run: |
+          python scripts/check_module_size.py
+          PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
+            tests/test_api_characterization.py
+
       - name: Reject canonical target-transport bypasses
         run: |
           python scripts/check_scan_target_transport.py

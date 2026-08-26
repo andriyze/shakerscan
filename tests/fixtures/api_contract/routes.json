@@ -1,0 +1,2567 @@
+[
+  {
+    "path": null,
+    "methods": [],
+    "name": null
+  },
+  {
+    "path": null,
+    "methods": [],
+    "name": null
+  },
+  {
+    "path": null,
+    "methods": [],
+    "name": null
+  },
+  {
+    "path": null,
+    "methods": [],
+    "name": null
+  },
+  {
+    "path": "/",
+    "methods": [
+      "GET"
+    ],
+    "name": "root"
+  },
+  {
+    "path": "/agent/context/{target_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_agent_context_pack"
+  },
+  {
+    "path": "/agent/findings/{finding_id}/verify",
+    "methods": [
+      "POST"
+    ],
+    "name": "verify_suspected_agent_finding"
+  },
+  {
+    "path": "/agent/findings/{target_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_agent_two_tier_findings"
+  },
+  {
+    "path": "/agent/hunt/runs",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_agent_hunt_runs"
+  },
+  {
+    "path": "/agent/hunt/session/{run_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_agent_hunt_session"
+  },
+  {
+    "path": "/agent/hunt/session/{run_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_agent_hunt_session"
+  },
+  {
+    "path": "/agent/hunt/session/{run_id}/reply",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_agent_hunt_reply"
+  },
+  {
+    "path": "/agent/hunt/{target_id}",
+    "methods": [
+      "POST"
+    ],
+    "name": "run_agent_hunt_endpoint"
+  },
+  {
+    "path": "/agent/hunt/{target_id}/session",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_agent_hunt_session"
+  },
+  {
+    "path": "/agent/tools/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_agent_tool_readiness"
+  },
+  {
+    "path": "/agent/tools/{target_id}/execute",
+    "methods": [
+      "POST"
+    ],
+    "name": "execute_agent_tool_endpoint"
+  },
+  {
+    "path": "/agents/local",
+    "methods": [
+      "GET"
+    ],
+    "name": "local_agents"
+  },
+  {
+    "path": "/agents/local/plan",
+    "methods": [
+      "POST"
+    ],
+    "name": "local_agent_dry_run_plan"
+  },
+  {
+    "path": "/agents/local/plan/parse",
+    "methods": [
+      "POST"
+    ],
+    "name": "local_agent_parse_candidate_plan"
+  },
+  {
+    "path": "/agents/local/test",
+    "methods": [
+      "POST"
+    ],
+    "name": "local_agent_test"
+  },
+  {
+    "path": "/ai/demo/run",
+    "methods": [
+      "POST"
+    ],
+    "name": "run_ai_honey_demo"
+  },
+  {
+    "path": "/ai/findings/{finding_id:path}/retest",
+    "methods": [
+      "POST"
+    ],
+    "name": "retest_ai_finding"
+  },
+  {
+    "path": "/ai/inventory",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_inventory"
+  },
+  {
+    "path": "/ai/learning-guide",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_learning_guide"
+  },
+  {
+    "path": "/ai/ops/route",
+    "methods": [
+      "POST"
+    ],
+    "name": "ai_ops_route"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/campaign-history",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_scan_campaign_history"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/replay",
+    "methods": [
+      "POST"
+    ],
+    "name": "replay_ai_scan"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/transcript",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "purge_ai_scan_transcript"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/transcript",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_scan_transcript"
+  },
+  {
+    "path": "/ai/surfaces",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_surfaces"
+  },
+  {
+    "path": "/ai/surfaces/sync",
+    "methods": [
+      "POST"
+    ],
+    "name": "sync_ai_surfaces"
+  },
+  {
+    "path": "/ai/surfaces/{surface_id}/attempts",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_surface_attempts"
+  },
+  {
+    "path": "/ai/targets",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_targets"
+  },
+  {
+    "path": "/ai/targets",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_ai_target"
+  },
+  {
+    "path": "/ai/targets/{target_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_ai_target"
+  },
+  {
+    "path": "/ai/targets/{target_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_ai_target"
+  },
+  {
+    "path": "/ai/targets/{target_id}/campaign-history",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_target_campaign_history"
+  },
+  {
+    "path": "/ai/targets/{target_id}/campaign-history/export",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_target_campaign_history_export"
+  },
+  {
+    "path": "/ai/targets/{target_id}/mcp/live-readiness",
+    "methods": [
+      "POST"
+    ],
+    "name": "test_ai_target_mcp_live_readiness"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_target_principals"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_ai_target_principal"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals/{principal_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_ai_target_principal"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals/{principal_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_ai_target_principal"
+  },
+  {
+    "path": "/ai/targets/{target_id}/runtime-risk",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_target_runtime_risk"
+  },
+  {
+    "path": "/ai/targets/{target_id}/scan",
+    "methods": [
+      "POST"
+    ],
+    "name": "scan_ai_target"
+  },
+  {
+    "path": "/ai/targets/{target_id}/test",
+    "methods": [
+      "POST"
+    ],
+    "name": "test_ai_target_connectivity"
+  },
+  {
+    "path": "/ai/test-cases",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_test_cases"
+  },
+  {
+    "path": "/ai/test-cases/export",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_ai_test_cases"
+  },
+  {
+    "path": "/ai/test-scenarios",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_test_scenarios"
+  },
+  {
+    "path": "/api/v1/findings",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_cli_v1_findings"
+  },
+  {
+    "path": "/api/v1/scan",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_cli_v1_scan"
+  },
+  {
+    "path": "/arsenal/approvals",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_create_approval"
+  },
+  {
+    "path": "/arsenal/approvals/{approval_receipt_id}/revoke",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_revoke_approval"
+  },
+  {
+    "path": "/arsenal/campaign-actions",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_campaign_actions"
+  },
+  {
+    "path": "/arsenal/campaign-actions/{campaign_action_id}/authz-promote",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_promote_authz_replay"
+  },
+  {
+    "path": "/arsenal/campaign-actions/{campaign_action_id}/authz-replay",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_execute_authz_replay"
+  },
+  {
+    "path": "/arsenal/campaigns",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_campaigns"
+  },
+  {
+    "path": "/arsenal/campaigns",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_create_campaign"
+  },
+  {
+    "path": "/arsenal/campaigns/{campaign_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_campaign_detail"
+  },
+  {
+    "path": "/arsenal/campaigns/{campaign_id}/actions",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_link_campaign_action"
+  },
+  {
+    "path": "/arsenal/command-results",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_command_results"
+  },
+  {
+    "path": "/arsenal/commands",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_commands"
+  },
+  {
+    "path": "/arsenal/context-packs",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_agent_context_packs"
+  },
+  {
+    "path": "/arsenal/context-packs",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_create_agent_context_pack"
+  },
+  {
+    "path": "/arsenal/context-packs/from-target",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_create_agent_context_pack_from_target"
+  },
+  {
+    "path": "/arsenal/contracts",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_contracts"
+  },
+  {
+    "path": "/arsenal/decision-traces",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_agent_decision_traces"
+  },
+  {
+    "path": "/arsenal/decision-traces",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_create_agent_decision_trace"
+  },
+  {
+    "path": "/arsenal/execute",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_execute"
+  },
+  {
+    "path": "/arsenal/family-proof/contracts",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_family_proof_contracts"
+  },
+  {
+    "path": "/arsenal/family-proof/evaluate",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_family_proof_evaluate"
+  },
+  {
+    "path": "/arsenal/findings/{finding_id}/refuter-panel",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_finding_refuter_panel"
+  },
+  {
+    "path": "/arsenal/hypotheses",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_hypotheses"
+  },
+  {
+    "path": "/arsenal/hypotheses",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_record_hypothesis"
+  },
+  {
+    "path": "/arsenal/hypotheses/from-benchmark",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_generate_hypotheses_from_benchmark"
+  },
+  {
+    "path": "/arsenal/hypotheses/from-plan",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_generate_hypotheses_from_plan"
+  },
+  {
+    "path": "/arsenal/hypotheses/schedule",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_schedule_hypotheses"
+  },
+  {
+    "path": "/arsenal/hypotheses/situation-report",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_hypothesis_situation_report"
+  },
+  {
+    "path": "/arsenal/hypotheses/source-ingest",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_generate_hypotheses_from_source"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/claim",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_claim_hypothesis"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/plan-campaign",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_plan_hypothesis_campaign"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/reconcile-proof",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_reconcile_hypothesis_proof"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/signals",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_append_hypothesis_signal"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/transition",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_transition_hypothesis"
+  },
+  {
+    "path": "/arsenal/plans",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_operation_plans"
+  },
+  {
+    "path": "/arsenal/plans",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_create_operation_plan"
+  },
+  {
+    "path": "/arsenal/refuter-reviews",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_refuter_reviews"
+  },
+  {
+    "path": "/arsenal/refuter-reviews",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_record_refuter_review"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/queue-from-summary",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_queue_refuter_reviews_from_summary"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/summary",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_refuter_review_summary"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_derive_refuter_review_verdict"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/{refuter_review_id}/execute",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_execute_refuter_review_plan"
+  },
+  {
+    "path": "/arsenal/scope/preview",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_scope_preview"
+  },
+  {
+    "path": "/arsenal/tool-receipts",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_tool_receipts"
+  },
+  {
+    "path": "/arsenal/tool-receipts",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_record_tool_receipt"
+  },
+  {
+    "path": "/arsenal/tools",
+    "methods": [
+      "GET"
+    ],
+    "name": "arsenal_tools"
+  },
+  {
+    "path": "/artifacts/storage/health",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_artifact_storage_health"
+  },
+  {
+    "path": "/asm/check-families",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_check_families"
+  },
+  {
+    "path": "/dashboard",
+    "methods": [
+      "GET"
+    ],
+    "name": "dashboard"
+  },
+  {
+    "path": "/device-agent/runs",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_device_agent_runs"
+  },
+  {
+    "path": "/device-agent/session/{run_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_device_agent_session"
+  },
+  {
+    "path": "/device-agent/session/{run_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_device_agent_session"
+  },
+  {
+    "path": "/device-agent/session/{run_id}/reply",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_device_agent_reply"
+  },
+  {
+    "path": "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm",
+    "methods": [
+      "POST"
+    ],
+    "name": "confirm_device_agent_shell_plan"
+  },
+  {
+    "path": "/device-policies",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_device_policies"
+  },
+  {
+    "path": "/device-policies",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_device_policy"
+  },
+  {
+    "path": "/device-policies/{policy_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_device_policy"
+  },
+  {
+    "path": "/device-scans",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_device_scans"
+  },
+  {
+    "path": "/devices",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_devices"
+  },
+  {
+    "path": "/devices",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_device"
+  },
+  {
+    "path": "/devices/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_device_readiness"
+  },
+  {
+    "path": "/devices/{device_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_device"
+  },
+  {
+    "path": "/devices/{device_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_device"
+  },
+  {
+    "path": "/devices/{device_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_device"
+  },
+  {
+    "path": "/devices/{device_id}/agent/session",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_device_agent_session"
+  },
+  {
+    "path": "/devices/{device_id}/capabilities",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_device_capabilities"
+  },
+  {
+    "path": "/devices/{device_id}/credentials",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_device_credentials"
+  },
+  {
+    "path": "/devices/{device_id}/credentials",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_device_credential"
+  },
+  {
+    "path": "/devices/{device_id}/credentials/{profile_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_device_credential"
+  },
+  {
+    "path": "/devices/{device_id}/credentials/{profile_id}/acknowledge-lockout",
+    "methods": [
+      "POST"
+    ],
+    "name": "acknowledge_device_credential_lockout"
+  },
+  {
+    "path": "/devices/{device_id}/credentials/{profile_id}/rotate",
+    "methods": [
+      "POST"
+    ],
+    "name": "rotate_device_credential"
+  },
+  {
+    "path": "/devices/{device_id}/locator",
+    "methods": [
+      "POST"
+    ],
+    "name": "change_device_locator"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_device_request_collections"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_device_request_collection"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections/{collection_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_device_request_collection"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections/{collection_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_device_request_collection"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections/{collection_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_device_request_collection"
+  },
+  {
+    "path": "/devices/{device_id}/scan",
+    "methods": [
+      "POST"
+    ],
+    "name": "scan_device"
+  },
+  {
+    "path": "/devices/{device_id}/verify-service",
+    "methods": [
+      "POST"
+    ],
+    "name": "verify_device_service"
+  },
+  {
+    "path": "/discovery",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_discovery_runs"
+  },
+  {
+    "path": "/discovery",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_discovery"
+  },
+  {
+    "path": "/discovery/{discovery_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_discovery"
+  },
+  {
+    "path": "/docs",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "swagger_ui_html"
+  },
+  {
+    "path": "/docs/oauth2-redirect",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "swagger_ui_redirect"
+  },
+  {
+    "path": "/domains",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_domains"
+  },
+  {
+    "path": "/evidence/export-bundle",
+    "methods": [
+      "GET"
+    ],
+    "name": "evidence_export_bundle"
+  },
+  {
+    "path": "/evidence/export-manifest",
+    "methods": [
+      "GET"
+    ],
+    "name": "evidence_export_manifest"
+  },
+  {
+    "path": "/evidence/instances",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_evidence_instances"
+  },
+  {
+    "path": "/evidence/instances",
+    "methods": [
+      "POST"
+    ],
+    "name": "record_evidence_instance"
+  },
+  {
+    "path": "/evidence/instances/{instance_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_evidence_instance"
+  },
+  {
+    "path": "/evidence/retention/executions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_evidence_retention_executions"
+  },
+  {
+    "path": "/evidence/retention/sweep",
+    "methods": [
+      "POST"
+    ],
+    "name": "evidence_retention_sweep"
+  },
+  {
+    "path": "/evidence/{evidence_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_evidence_object"
+  },
+  {
+    "path": "/experiments/workflows/{workflow_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_workflow_experiment"
+  },
+  {
+    "path": "/exposure/assets",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_assets"
+  },
+  {
+    "path": "/exposure/attack-paths",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_attack_paths"
+  },
+  {
+    "path": "/exposure/changes",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_changes"
+  },
+  {
+    "path": "/exposure/graph",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_graph"
+  },
+  {
+    "path": "/exposure/nodes",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_nodes"
+  },
+  {
+    "path": "/finding-exceptions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_finding_exceptions"
+  },
+  {
+    "path": "/finding-exceptions",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_finding_exception"
+  },
+  {
+    "path": "/finding-exceptions/lifecycle/sweep",
+    "methods": [
+      "POST"
+    ],
+    "name": "finding_exception_lifecycle_sweep"
+  },
+  {
+    "path": "/finding-exceptions/{exception_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_finding_exception"
+  },
+  {
+    "path": "/finding-exceptions/{exception_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_finding_exception"
+  },
+  {
+    "path": "/findings",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_findings"
+  },
+  {
+    "path": "/findings/bulk",
+    "methods": [
+      "POST"
+    ],
+    "name": "bulk_update_findings"
+  },
+  {
+    "path": "/findings/cleanup",
+    "methods": [
+      "POST"
+    ],
+    "name": "cleanup_findings"
+  },
+  {
+    "path": "/findings/manual",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_manual_finding"
+  },
+  {
+    "path": "/findings/retest",
+    "methods": [
+      "POST"
+    ],
+    "name": "bulk_retest_findings"
+  },
+  {
+    "path": "/findings/{finding_id:path}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_finding"
+  },
+  {
+    "path": "/findings/{finding_id:path}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_finding"
+  },
+  {
+    "path": "/findings/{finding_id:path}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_finding"
+  },
+  {
+    "path": "/findings/{finding_id:path}/retest",
+    "methods": [
+      "POST"
+    ],
+    "name": "retest_finding"
+  },
+  {
+    "path": "/findings/{finding_id}/evidence",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_finding_evidence"
+  },
+  {
+    "path": "/fleet/acceptance/lease-probe",
+    "methods": [
+      "POST"
+    ],
+    "name": "run_fleet_acceptance_lease_probe"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/lease",
+    "methods": [
+      "POST"
+    ],
+    "name": "lease_broker_job"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_broker_scan_action"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/heartbeat",
+    "methods": [
+      "POST"
+    ],
+    "name": "heartbeat_broker_scan_action"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease",
+    "methods": [
+      "POST"
+    ],
+    "name": "lease_broker_scan_action"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/observations",
+    "methods": [
+      "POST"
+    ],
+    "name": "get_broker_scan_action_observations"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/result",
+    "methods": [
+      "POST"
+    ],
+    "name": "settle_broker_scan_action"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/status",
+    "methods": [
+      "POST"
+    ],
+    "name": "get_broker_scan_action_status"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/work-manifest",
+    "methods": [
+      "POST"
+    ],
+    "name": "get_broker_scan_action_work_manifest"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/artifacts",
+    "methods": [
+      "PUT"
+    ],
+    "name": "upload_broker_job_artifact"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/cancel-status",
+    "methods": [
+      "POST"
+    ],
+    "name": "get_broker_scan_cancel_status"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/continuation",
+    "methods": [
+      "POST"
+    ],
+    "name": "continue_broker_scan_action_plan"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat",
+    "methods": [
+      "POST"
+    ],
+    "name": "heartbeat_broker_job"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/result",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_broker_job_result"
+  },
+  {
+    "path": "/fleet/join-tokens",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_fleet_join_token"
+  },
+  {
+    "path": "/fleet/join-tokens/{token_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "revoke_fleet_join_token"
+  },
+  {
+    "path": "/fleet/nodes",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_fleet_nodes"
+  },
+  {
+    "path": "/fleet/nodes/join",
+    "methods": [
+      "POST"
+    ],
+    "name": "join_fleet_node"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/activity",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_fleet_node_activity"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/connection-bundle",
+    "methods": [
+      "POST"
+    ],
+    "name": "get_fleet_connection_bundle"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/credentials/rotate",
+    "methods": [
+      "POST"
+    ],
+    "name": "rotate_fleet_node_credential"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/events",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_fleet_node_events"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/heartbeat",
+    "methods": [
+      "POST"
+    ],
+    "name": "heartbeat_fleet_node"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/revoke",
+    "methods": [
+      "POST"
+    ],
+    "name": "revoke_fleet_node"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/state",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_fleet_node_state"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/state",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_fleet_node_state"
+  },
+  {
+    "path": "/fleet/public-health",
+    "methods": [
+      "GET"
+    ],
+    "name": "fleet_public_health"
+  },
+  {
+    "path": "/fleet/scale",
+    "methods": [
+      "POST"
+    ],
+    "name": "scale_fleet_workers"
+  },
+  {
+    "path": "/gungnir/start",
+    "methods": [
+      "POST"
+    ],
+    "name": "gungnir_start"
+  },
+  {
+    "path": "/gungnir/status",
+    "methods": [
+      "GET"
+    ],
+    "name": "gungnir_status"
+  },
+  {
+    "path": "/gungnir/stop",
+    "methods": [
+      "POST"
+    ],
+    "name": "gungnir_stop"
+  },
+  {
+    "path": "/health",
+    "methods": [
+      "GET"
+    ],
+    "name": "health"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_hunt_candidate"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
+    "methods": [
+      "POST"
+    ],
+    "name": "verify_hunt_candidate"
+  },
+  {
+    "path": "/hunts/{hunt_id}/capabilities/{capability_name:path}",
+    "methods": [
+      "POST"
+    ],
+    "name": "execute_hunt_capability"
+  },
+  {
+    "path": "/hunts/{hunt_id}/query",
+    "methods": [
+      "POST"
+    ],
+    "name": "query_hunt"
+  },
+  {
+    "path": "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm",
+    "methods": [
+      "POST"
+    ],
+    "name": "confirm_hunt_shell_plan"
+  },
+  {
+    "path": "/investigation/candidates",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_investigation_candidates"
+  },
+  {
+    "path": "/investigation/candidates/{candidate_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_investigation_candidate"
+  },
+  {
+    "path": "/metrics/v2",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_v2_operational_metrics"
+  },
+  {
+    "path": "/model-intake/admission/verify",
+    "methods": [
+      "POST"
+    ],
+    "name": "verify_model_intake_admission"
+  },
+  {
+    "path": "/model-intake/admissions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_model_intake_admissions"
+  },
+  {
+    "path": "/model-intake/admissions/v2/observe",
+    "methods": [
+      "POST"
+    ],
+    "name": "observe_model_intake_deployment_v2"
+  },
+  {
+    "path": "/model-intake/admissions/v2/verify",
+    "methods": [
+      "POST"
+    ],
+    "name": "verify_model_intake_admission_v2"
+  },
+  {
+    "path": "/model-intake/admissions/{admission_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_admission"
+  },
+  {
+    "path": "/model-intake/admissions/{admission_id}/revoke",
+    "methods": [
+      "POST"
+    ],
+    "name": "revoke_model_intake_admission"
+  },
+  {
+    "path": "/model-intake/agent/session/{session_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_agent_session"
+  },
+  {
+    "path": "/model-intake/agent/session/{session_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_model_intake_agent_session"
+  },
+  {
+    "path": "/model-intake/agent/session/{session_id}/reply",
+    "methods": [
+      "POST"
+    ],
+    "name": "reply_model_intake_agent_session"
+  },
+  {
+    "path": "/model-intake/automatic-reviews",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_model_intake_automatic_reviews"
+  },
+  {
+    "path": "/model-intake/automatic-reviews",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_automatic_review"
+  },
+  {
+    "path": "/model-intake/automatic-reviews/{review_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_automatic_review"
+  },
+  {
+    "path": "/model-intake/automatic-reviews/{review_id}/report",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_automatic_review_report"
+  },
+  {
+    "path": "/model-intake/capabilities",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_capabilities"
+  },
+  {
+    "path": "/model-intake/checks",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_check_catalog"
+  },
+  {
+    "path": "/model-intake/conversion-profiles/resolve",
+    "methods": [
+      "POST"
+    ],
+    "name": "resolve_model_intake_conversion_profile"
+  },
+  {
+    "path": "/model-intake/loader-profiles/resolve",
+    "methods": [
+      "POST"
+    ],
+    "name": "resolve_model_intake_loader_profile"
+  },
+  {
+    "path": "/model-intake/operator-session",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_operator_session"
+  },
+  {
+    "path": "/model-intake/providers/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_provider_readiness"
+  },
+  {
+    "path": "/model-intake/reassessment/events",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_reassessment_event"
+  },
+  {
+    "path": "/model-intake/resolve",
+    "methods": [
+      "POST"
+    ],
+    "name": "resolve_model_intake"
+  },
+  {
+    "path": "/model-intake/retention/cleanup",
+    "methods": [
+      "POST"
+    ],
+    "name": "cleanup_model_intake_quarantine"
+  },
+  {
+    "path": "/model-intake/runners/install-plan",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_runner_install_plan"
+  },
+  {
+    "path": "/model-intake/runners/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_runner_readiness"
+  },
+  {
+    "path": "/model-intake/runners/stage",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_runner_stage_status"
+  },
+  {
+    "path": "/model-intake/runners/stage",
+    "methods": [
+      "POST"
+    ],
+    "name": "model_intake_runner_stage"
+  },
+  {
+    "path": "/model-intake/runners/storage",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_runner_storage"
+  },
+  {
+    "path": "/model-intake/runners/storage/cleanup",
+    "methods": [
+      "POST"
+    ],
+    "name": "model_intake_runner_storage_cleanup"
+  },
+  {
+    "path": "/model-intake/scan",
+    "methods": [
+      "POST"
+    ],
+    "name": "scan_model_intake"
+  },
+  {
+    "path": "/model-intake/scanners/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_scanner_readiness"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/evidence-export",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_evidence_export"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/license-bom",
+    "methods": [
+      "GET"
+    ],
+    "name": "download_model_intake_license_bom"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/sbom",
+    "methods": [
+      "GET"
+    ],
+    "name": "download_model_intake_sbom"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/sbom/summary",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_sbom_summary"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/third-party-notices",
+    "methods": [
+      "GET"
+    ],
+    "name": "download_model_intake_third_party_notices"
+  },
+  {
+    "path": "/model-intake/submissions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_model_intake_submissions"
+  },
+  {
+    "path": "/model-intake/submissions",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_submission"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_submission"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/agent/session",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_agent_session"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/agent/sessions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_model_intake_agent_sessions"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/approvals",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_approval"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/embedding-configuration",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_embedding_configuration"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/evidence-receipts",
+    "methods": [
+      "POST"
+    ],
+    "name": "attach_model_intake_runner_evidence"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/freeze-evidence",
+    "methods": [
+      "POST"
+    ],
+    "name": "freeze_model_intake_evidence"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/policy-decisions",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_policy_decision"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/promote",
+    "methods": [
+      "POST"
+    ],
+    "name": "promote_model_intake_submission"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/report",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_submission_report"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-bundle",
+    "methods": [
+      "GET"
+    ],
+    "name": "model_intake_runner_bundle"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-jobs",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_model_intake_runner_jobs"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-jobs",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_runner_job"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-jobs/{job_id}/refresh",
+    "methods": [
+      "POST"
+    ],
+    "name": "refresh_model_intake_runner_job"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/static-runs",
+    "methods": [
+      "POST"
+    ],
+    "name": "attach_model_intake_static_run"
+  },
+  {
+    "path": "/model-intake/targets/{target_id}/rescan",
+    "methods": [
+      "POST"
+    ],
+    "name": "rescan_model_intake_target"
+  },
+  {
+    "path": "/model-intake/trust-anchors",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_model_intake_trust_anchors"
+  },
+  {
+    "path": "/model-intake/trust-anchors",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_model_intake_trust_anchor"
+  },
+  {
+    "path": "/model-intake/trust-anchors/{anchor_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_model_intake_trust_anchor"
+  },
+  {
+    "path": "/model-intake/trust-anchors/{anchor_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_model_intake_trust_anchor"
+  },
+  {
+    "path": "/openapi.json",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "openapi"
+  },
+  {
+    "path": "/policy-profiles",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_policy_profiles"
+  },
+  {
+    "path": "/policy-profiles",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_policy_profile"
+  },
+  {
+    "path": "/policy-profiles/{profile_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_policy_profile"
+  },
+  {
+    "path": "/policy-profiles/{profile_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_policy_profile"
+  },
+  {
+    "path": "/queue/clear",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "clear_queue"
+  },
+  {
+    "path": "/queue/stats",
+    "methods": [
+      "GET"
+    ],
+    "name": "queue_stats"
+  },
+  {
+    "path": "/redoc",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "redoc_html"
+  },
+  {
+    "path": "/research/campaigns/launch",
+    "methods": [
+      "POST"
+    ],
+    "name": "launch_research_campaign"
+  },
+  {
+    "path": "/research/campaigns/{campaign_id}/control",
+    "methods": [
+      "POST"
+    ],
+    "name": "control_research_campaign"
+  },
+  {
+    "path": "/research/episodes",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_research_episodes"
+  },
+  {
+    "path": "/research/episodes",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_research_episode"
+  },
+  {
+    "path": "/research/episodes/{episode_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_research_episode"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/autopilot",
+    "methods": [
+      "PUT"
+    ],
+    "name": "set_research_episode_autopilot"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/benchmark",
+    "methods": [
+      "GET"
+    ],
+    "name": "research_episode_benchmark"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_research_episode"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/decisions",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_research_decision"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/observe",
+    "methods": [
+      "POST"
+    ],
+    "name": "refresh_research_observation"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/plan-step",
+    "methods": [
+      "POST"
+    ],
+    "name": "plan_research_episode_step"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/settle",
+    "methods": [
+      "POST"
+    ],
+    "name": "settle_research_episode"
+  },
+  {
+    "path": "/research/launch",
+    "methods": [
+      "POST"
+    ],
+    "name": "launch_research_episode"
+  },
+  {
+    "path": "/research/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "research_readiness"
+  },
+  {
+    "path": "/results",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_results"
+  },
+  {
+    "path": "/results/{target_folder}/latest",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_latest_result"
+  },
+  {
+    "path": "/retests/finding/{finding_id:path}",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_finding_retests"
+  },
+  {
+    "path": "/retests/{retest_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_retest"
+  },
+  {
+    "path": "/scans",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_scans"
+  },
+  {
+    "path": "/scans",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_scan_endpoint"
+  },
+  {
+    "path": "/scans/batch",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_batch_endpoint"
+  },
+  {
+    "path": "/scans/{scan_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan"
+  },
+  {
+    "path": "/scans/{scan_id}/ai-redteam-report",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_redteam_report"
+  },
+  {
+    "path": "/scans/{scan_id}/artifacts",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_scan_artifacts"
+  },
+  {
+    "path": "/scans/{scan_id}/artifacts/{artifact_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "download_scan_artifact"
+  },
+  {
+    "path": "/scans/{scan_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_scan"
+  },
+  {
+    "path": "/scans/{scan_id}/deployment-decision",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_deployment_decision"
+  },
+  {
+    "path": "/scans/{scan_id}/device-activity",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_device_activity"
+  },
+  {
+    "path": "/scans/{scan_id}/logs",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_logs"
+  },
+  {
+    "path": "/scans/{scan_id}/queue-delivery",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_queue_delivery"
+  },
+  {
+    "path": "/scans/{scan_id}/result",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_result"
+  },
+  {
+    "path": "/schedules",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_schedules"
+  },
+  {
+    "path": "/schedules",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_schedule"
+  },
+  {
+    "path": "/schedules/{schedule_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_schedule"
+  },
+  {
+    "path": "/schedules/{schedule_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_schedule"
+  },
+  {
+    "path": "/schedules/{schedule_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_schedule"
+  },
+  {
+    "path": "/session/start",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_session"
+  },
+  {
+    "path": "/session/{session_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "end_session"
+  },
+  {
+    "path": "/session/{session_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_session_state"
+  },
+  {
+    "path": "/session/{session_id}/action",
+    "methods": [
+      "POST"
+    ],
+    "name": "session_action"
+  },
+  {
+    "path": "/session/{session_id}/findings",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_session_finding"
+  },
+  {
+    "path": "/session/{session_id}/screenshot",
+    "methods": [
+      "POST"
+    ],
+    "name": "session_screenshot"
+  },
+  {
+    "path": "/session/{session_id}/screenshot.png",
+    "methods": [
+      "GET"
+    ],
+    "name": "session_screenshot_raw"
+  },
+  {
+    "path": "/session/{session_id}/test-endpoint",
+    "methods": [
+      "POST"
+    ],
+    "name": "session_test_endpoint"
+  },
+  {
+    "path": "/sessions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_sessions"
+  },
+  {
+    "path": "/settings/ai",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_ai_settings"
+  },
+  {
+    "path": "/settings/ai",
+    "methods": [
+      "PUT"
+    ],
+    "name": "update_ai_settings"
+  },
+  {
+    "path": "/settings/ai/test",
+    "methods": [
+      "POST"
+    ],
+    "name": "test_ai_settings"
+  },
+  {
+    "path": "/settings/automation",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_automation_settings"
+  },
+  {
+    "path": "/settings/automation",
+    "methods": [
+      "PUT"
+    ],
+    "name": "update_automation_settings"
+  },
+  {
+    "path": "/settings/scan-execution",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_execution_settings"
+  },
+  {
+    "path": "/settings/scan-execution",
+    "methods": [
+      "PUT"
+    ],
+    "name": "update_scan_execution_settings"
+  },
+  {
+    "path": "/system/resources",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_system_resources"
+  },
+  {
+    "path": "/targets",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_targets"
+  },
+  {
+    "path": "/targets",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target"
+  },
+  {
+    "path": "/targets/dedupe",
+    "methods": [
+      "POST"
+    ],
+    "name": "dedupe_targets"
+  },
+  {
+    "path": "/targets/grouped",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_targets_grouped"
+  },
+  {
+    "path": "/targets/{target_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target"
+  },
+  {
+    "path": "/targets/{target_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target"
+  },
+  {
+    "path": "/targets/{target_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_target"
+  },
+  {
+    "path": "/targets/{target_id}/asm/activity",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_activity"
+  },
+  {
+    "path": "/targets/{target_id}/asm/coverage",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_coverage"
+  },
+  {
+    "path": "/targets/{target_id}/asm/diff",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_diff"
+  },
+  {
+    "path": "/targets/{target_id}/asm/endpoints",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_list_endpoints"
+  },
+  {
+    "path": "/targets/{target_id}/asm/gaps",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_gaps"
+  },
+  {
+    "path": "/targets/{target_id}/asm/improve",
+    "methods": [
+      "POST"
+    ],
+    "name": "asm_improve"
+  },
+  {
+    "path": "/targets/{target_id}/asm/policy",
+    "methods": [
+      "GET"
+    ],
+    "name": "asm_get_policy"
+  },
+  {
+    "path": "/targets/{target_id}/asm/policy",
+    "methods": [
+      "PUT"
+    ],
+    "name": "asm_set_policy"
+  },
+  {
+    "path": "/targets/{target_id}/asm/prune",
+    "methods": [
+      "POST"
+    ],
+    "name": "asm_prune"
+  },
+  {
+    "path": "/targets/{target_id}/asm/recon",
+    "methods": [
+      "POST"
+    ],
+    "name": "asm_recon"
+  },
+  {
+    "path": "/targets/{target_id}/asm/test",
+    "methods": [
+      "POST"
+    ],
+    "name": "asm_test"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_target_credential_profiles"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target_credential_profile"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles/{profile_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target_credential_profile"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles/{profile_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_target_credential_profile"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles/{profile_id}/rotate",
+    "methods": [
+      "POST"
+    ],
+    "name": "rotate_target_credential_profile"
+  },
+  {
+    "path": "/targets/{target_id}/graph",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_application_graph"
+  },
+  {
+    "path": "/targets/{target_id}/graph/hypotheses",
+    "methods": [
+      "POST"
+    ],
+    "name": "generate_application_graph_hypotheses"
+  },
+  {
+    "path": "/targets/{target_id}/invariants",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_target_invariant_contracts"
+  },
+  {
+    "path": "/targets/{target_id}/invariants",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target_invariant_contract"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/compile",
+    "methods": [
+      "POST"
+    ],
+    "name": "compile_target_invariant_rule"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/hypotheses",
+    "methods": [
+      "POST"
+    ],
+    "name": "generate_target_invariant_hypotheses"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/{contract_id}/approve",
+    "methods": [
+      "POST"
+    ],
+    "name": "approve_target_invariant_contract"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/{contract_id}/retire",
+    "methods": [
+      "POST"
+    ],
+    "name": "retire_target_invariant_contract"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/{contract_id}/verification-plan",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_invariant_verification_plan"
+  },
+  {
+    "path": "/targets/{target_id}/inventory/hypotheses",
+    "methods": [
+      "POST"
+    ],
+    "name": "generate_endpoint_inventory_hypotheses"
+  },
+  {
+    "path": "/targets/{target_id}/principal-matrix",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_target_principal_matrix"
+  },
+  {
+    "path": "/targets/{target_id}/principal-matrix",
+    "methods": [
+      "POST"
+    ],
+    "name": "upsert_target_principal_matrix"
+  },
+  {
+    "path": "/targets/{target_id}/principal-matrix/{expectation_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target_principal_expectation"
+  },
+  {
+    "path": "/targets/{target_id}/principals",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_target_principals"
+  },
+  {
+    "path": "/targets/{target_id}/principals",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target_principal"
+  },
+  {
+    "path": "/targets/{target_id}/principals/auto-provision",
+    "methods": [
+      "POST"
+    ],
+    "name": "auto_provision_target_principals"
+  },
+  {
+    "path": "/targets/{target_id}/principals/{principal_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target_principal"
+  },
+  {
+    "path": "/targets/{target_id}/principals/{principal_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_target_principal"
+  },
+  {
+    "path": "/targets/{target_id}/scan",
+    "methods": [
+      "POST"
+    ],
+    "name": "scan_target"
+  },
+  {
+    "path": "/timeline",
+    "methods": [
+      "GET"
+    ],
+    "name": "mission_timeline"
+  },
+  {
+    "path": "/workers",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_workers"
+  },
+  {
+    "path": "/workers",
+    "methods": [
+      "POST"
+    ],
+    "name": "scale_workers"
+  }
+]

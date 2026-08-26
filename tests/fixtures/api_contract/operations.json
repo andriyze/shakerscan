@@ -1,0 +1,1942 @@
+[
+  {
+    "path": "/",
+    "method": "get",
+    "operation_id": "root__get"
+  },
+  {
+    "path": "/agent/context/{target_id}",
+    "method": "get",
+    "operation_id": "get_agent_context_pack_agent_context__target_id__get"
+  },
+  {
+    "path": "/agent/findings/{finding_id}/verify",
+    "method": "post",
+    "operation_id": "verify_suspected_agent_finding_agent_findings__finding_id__verify_post"
+  },
+  {
+    "path": "/agent/findings/{target_id}",
+    "method": "get",
+    "operation_id": "get_agent_two_tier_findings_agent_findings__target_id__get"
+  },
+  {
+    "path": "/agent/hunt/runs",
+    "method": "get",
+    "operation_id": "list_agent_hunt_runs_agent_hunt_runs_get"
+  },
+  {
+    "path": "/agent/hunt/session/{run_id}",
+    "method": "get",
+    "operation_id": "get_agent_hunt_session_agent_hunt_session__run_id__get"
+  },
+  {
+    "path": "/agent/hunt/session/{run_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post"
+  },
+  {
+    "path": "/agent/hunt/session/{run_id}/reply",
+    "method": "post",
+    "operation_id": "submit_agent_hunt_reply_agent_hunt_session__run_id__reply_post"
+  },
+  {
+    "path": "/agent/hunt/{target_id}",
+    "method": "post",
+    "operation_id": "run_agent_hunt_endpoint_agent_hunt__target_id__post"
+  },
+  {
+    "path": "/agent/hunt/{target_id}/session",
+    "method": "post",
+    "operation_id": "start_agent_hunt_session_agent_hunt__target_id__session_post"
+  },
+  {
+    "path": "/agent/tools/readiness",
+    "method": "get",
+    "operation_id": "get_agent_tool_readiness_agent_tools_readiness_get"
+  },
+  {
+    "path": "/agent/tools/{target_id}/execute",
+    "method": "post",
+    "operation_id": "execute_agent_tool_endpoint_agent_tools__target_id__execute_post"
+  },
+  {
+    "path": "/agents/local",
+    "method": "get",
+    "operation_id": "local_agents_agents_local_get"
+  },
+  {
+    "path": "/agents/local/plan",
+    "method": "post",
+    "operation_id": "local_agent_dry_run_plan_agents_local_plan_post"
+  },
+  {
+    "path": "/agents/local/plan/parse",
+    "method": "post",
+    "operation_id": "local_agent_parse_candidate_plan_agents_local_plan_parse_post"
+  },
+  {
+    "path": "/agents/local/test",
+    "method": "post",
+    "operation_id": "local_agent_test_agents_local_test_post"
+  },
+  {
+    "path": "/ai/demo/run",
+    "method": "post",
+    "operation_id": "run_ai_honey_demo_ai_demo_run_post"
+  },
+  {
+    "path": "/ai/findings/{finding_id}/retest",
+    "method": "post",
+    "operation_id": "retest_ai_finding_ai_findings__finding_id__retest_post"
+  },
+  {
+    "path": "/ai/inventory",
+    "method": "get",
+    "operation_id": "get_ai_inventory_ai_inventory_get"
+  },
+  {
+    "path": "/ai/learning-guide",
+    "method": "get",
+    "operation_id": "get_ai_learning_guide_ai_learning_guide_get"
+  },
+  {
+    "path": "/ai/ops/route",
+    "method": "post",
+    "operation_id": "ai_ops_route_ai_ops_route_post"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/campaign-history",
+    "method": "get",
+    "operation_id": "get_ai_scan_campaign_history_ai_scans__scan_id__campaign_history_get"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/replay",
+    "method": "post",
+    "operation_id": "replay_ai_scan_ai_scans__scan_id__replay_post"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/transcript",
+    "method": "delete",
+    "operation_id": "purge_ai_scan_transcript_ai_scans__scan_id__transcript_delete"
+  },
+  {
+    "path": "/ai/scans/{scan_id}/transcript",
+    "method": "get",
+    "operation_id": "get_ai_scan_transcript_ai_scans__scan_id__transcript_get"
+  },
+  {
+    "path": "/ai/surfaces",
+    "method": "get",
+    "operation_id": "list_ai_surfaces_ai_surfaces_get"
+  },
+  {
+    "path": "/ai/surfaces/sync",
+    "method": "post",
+    "operation_id": "sync_ai_surfaces_ai_surfaces_sync_post"
+  },
+  {
+    "path": "/ai/surfaces/{surface_id}/attempts",
+    "method": "get",
+    "operation_id": "list_ai_surface_attempts_ai_surfaces__surface_id__attempts_get"
+  },
+  {
+    "path": "/ai/targets",
+    "method": "get",
+    "operation_id": "list_ai_targets_ai_targets_get"
+  },
+  {
+    "path": "/ai/targets",
+    "method": "post",
+    "operation_id": "create_ai_target_ai_targets_post"
+  },
+  {
+    "path": "/ai/targets/{target_id}",
+    "method": "delete",
+    "operation_id": "delete_ai_target_ai_targets__target_id__delete"
+  },
+  {
+    "path": "/ai/targets/{target_id}",
+    "method": "patch",
+    "operation_id": "update_ai_target_ai_targets__target_id__patch"
+  },
+  {
+    "path": "/ai/targets/{target_id}/campaign-history",
+    "method": "get",
+    "operation_id": "get_ai_target_campaign_history_ai_targets__target_id__campaign_history_get"
+  },
+  {
+    "path": "/ai/targets/{target_id}/campaign-history/export",
+    "method": "get",
+    "operation_id": "get_ai_target_campaign_history_export_ai_targets__target_id__campaign_history_export_get"
+  },
+  {
+    "path": "/ai/targets/{target_id}/mcp/live-readiness",
+    "method": "post",
+    "operation_id": "test_ai_target_mcp_live_readiness_ai_targets__target_id__mcp_live_readiness_post"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals",
+    "method": "get",
+    "operation_id": "list_ai_target_principals_ai_targets__target_id__principals_get"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals",
+    "method": "post",
+    "operation_id": "create_ai_target_principal_ai_targets__target_id__principals_post"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals/{principal_id}",
+    "method": "delete",
+    "operation_id": "delete_ai_target_principal_ai_targets__target_id__principals__principal_id__delete"
+  },
+  {
+    "path": "/ai/targets/{target_id}/principals/{principal_id}",
+    "method": "patch",
+    "operation_id": "update_ai_target_principal_ai_targets__target_id__principals__principal_id__patch"
+  },
+  {
+    "path": "/ai/targets/{target_id}/runtime-risk",
+    "method": "get",
+    "operation_id": "get_ai_target_runtime_risk_ai_targets__target_id__runtime_risk_get"
+  },
+  {
+    "path": "/ai/targets/{target_id}/scan",
+    "method": "post",
+    "operation_id": "scan_ai_target_ai_targets__target_id__scan_post"
+  },
+  {
+    "path": "/ai/targets/{target_id}/test",
+    "method": "post",
+    "operation_id": "test_ai_target_connectivity_ai_targets__target_id__test_post"
+  },
+  {
+    "path": "/ai/test-cases",
+    "method": "get",
+    "operation_id": "list_ai_test_cases_ai_test_cases_get"
+  },
+  {
+    "path": "/ai/test-cases/export",
+    "method": "get",
+    "operation_id": "export_ai_test_cases_ai_test_cases_export_get"
+  },
+  {
+    "path": "/ai/test-scenarios",
+    "method": "get",
+    "operation_id": "list_ai_test_scenarios_ai_test_scenarios_get"
+  },
+  {
+    "path": "/api/v1/findings",
+    "method": "get",
+    "operation_id": "list_cli_v1_findings_api_v1_findings_get"
+  },
+  {
+    "path": "/api/v1/scan",
+    "method": "get",
+    "operation_id": "get_cli_v1_scan_api_v1_scan_get"
+  },
+  {
+    "path": "/arsenal/approvals",
+    "method": "post",
+    "operation_id": "arsenal_create_approval_arsenal_approvals_post"
+  },
+  {
+    "path": "/arsenal/approvals/{approval_receipt_id}/revoke",
+    "method": "post",
+    "operation_id": "arsenal_revoke_approval_arsenal_approvals__approval_receipt_id__revoke_post"
+  },
+  {
+    "path": "/arsenal/campaign-actions",
+    "method": "get",
+    "operation_id": "arsenal_campaign_actions_arsenal_campaign_actions_get"
+  },
+  {
+    "path": "/arsenal/campaign-actions/{campaign_action_id}/authz-promote",
+    "method": "post",
+    "operation_id": "arsenal_promote_authz_replay_arsenal_campaign_actions__campaign_action_id__authz_promote_post"
+  },
+  {
+    "path": "/arsenal/campaign-actions/{campaign_action_id}/authz-replay",
+    "method": "post",
+    "operation_id": "arsenal_execute_authz_replay_arsenal_campaign_actions__campaign_action_id__authz_replay_post"
+  },
+  {
+    "path": "/arsenal/campaigns",
+    "method": "get",
+    "operation_id": "arsenal_campaigns_arsenal_campaigns_get"
+  },
+  {
+    "path": "/arsenal/campaigns",
+    "method": "post",
+    "operation_id": "arsenal_create_campaign_arsenal_campaigns_post"
+  },
+  {
+    "path": "/arsenal/campaigns/{campaign_id}",
+    "method": "get",
+    "operation_id": "arsenal_campaign_detail_arsenal_campaigns__campaign_id__get"
+  },
+  {
+    "path": "/arsenal/campaigns/{campaign_id}/actions",
+    "method": "post",
+    "operation_id": "arsenal_link_campaign_action_arsenal_campaigns__campaign_id__actions_post"
+  },
+  {
+    "path": "/arsenal/command-results",
+    "method": "get",
+    "operation_id": "arsenal_command_results_arsenal_command_results_get"
+  },
+  {
+    "path": "/arsenal/commands",
+    "method": "get",
+    "operation_id": "arsenal_commands_arsenal_commands_get"
+  },
+  {
+    "path": "/arsenal/context-packs",
+    "method": "get",
+    "operation_id": "arsenal_agent_context_packs_arsenal_context_packs_get"
+  },
+  {
+    "path": "/arsenal/context-packs",
+    "method": "post",
+    "operation_id": "arsenal_create_agent_context_pack_arsenal_context_packs_post"
+  },
+  {
+    "path": "/arsenal/context-packs/from-target",
+    "method": "post",
+    "operation_id": "arsenal_create_agent_context_pack_from_target_arsenal_context_packs_from_target_post"
+  },
+  {
+    "path": "/arsenal/contracts",
+    "method": "get",
+    "operation_id": "arsenal_contracts_arsenal_contracts_get"
+  },
+  {
+    "path": "/arsenal/decision-traces",
+    "method": "get",
+    "operation_id": "arsenal_agent_decision_traces_arsenal_decision_traces_get"
+  },
+  {
+    "path": "/arsenal/decision-traces",
+    "method": "post",
+    "operation_id": "arsenal_create_agent_decision_trace_arsenal_decision_traces_post"
+  },
+  {
+    "path": "/arsenal/execute",
+    "method": "post",
+    "operation_id": "arsenal_execute_arsenal_execute_post"
+  },
+  {
+    "path": "/arsenal/family-proof/contracts",
+    "method": "get",
+    "operation_id": "arsenal_family_proof_contracts_arsenal_family_proof_contracts_get"
+  },
+  {
+    "path": "/arsenal/family-proof/evaluate",
+    "method": "post",
+    "operation_id": "arsenal_family_proof_evaluate_arsenal_family_proof_evaluate_post"
+  },
+  {
+    "path": "/arsenal/findings/{finding_id}/refuter-panel",
+    "method": "get",
+    "operation_id": "arsenal_finding_refuter_panel_arsenal_findings__finding_id__refuter_panel_get"
+  },
+  {
+    "path": "/arsenal/hypotheses",
+    "method": "get",
+    "operation_id": "arsenal_hypotheses_arsenal_hypotheses_get"
+  },
+  {
+    "path": "/arsenal/hypotheses",
+    "method": "post",
+    "operation_id": "arsenal_record_hypothesis_arsenal_hypotheses_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/from-benchmark",
+    "method": "post",
+    "operation_id": "arsenal_generate_hypotheses_from_benchmark_arsenal_hypotheses_from_benchmark_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/from-plan",
+    "method": "post",
+    "operation_id": "arsenal_generate_hypotheses_from_plan_arsenal_hypotheses_from_plan_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/schedule",
+    "method": "get",
+    "operation_id": "arsenal_schedule_hypotheses_arsenal_hypotheses_schedule_get"
+  },
+  {
+    "path": "/arsenal/hypotheses/situation-report",
+    "method": "get",
+    "operation_id": "arsenal_hypothesis_situation_report_arsenal_hypotheses_situation_report_get"
+  },
+  {
+    "path": "/arsenal/hypotheses/source-ingest",
+    "method": "post",
+    "operation_id": "arsenal_generate_hypotheses_from_source_arsenal_hypotheses_source_ingest_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/claim",
+    "method": "post",
+    "operation_id": "arsenal_claim_hypothesis_arsenal_hypotheses__hypothesis_id__claim_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/plan-campaign",
+    "method": "post",
+    "operation_id": "arsenal_plan_hypothesis_campaign_arsenal_hypotheses__hypothesis_id__plan_campaign_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/reconcile-proof",
+    "method": "post",
+    "operation_id": "arsenal_reconcile_hypothesis_proof_arsenal_hypotheses__hypothesis_id__reconcile_proof_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/signals",
+    "method": "post",
+    "operation_id": "arsenal_append_hypothesis_signal_arsenal_hypotheses__hypothesis_id__signals_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/transition",
+    "method": "post",
+    "operation_id": "arsenal_transition_hypothesis_arsenal_hypotheses__hypothesis_id__transition_post"
+  },
+  {
+    "path": "/arsenal/plans",
+    "method": "get",
+    "operation_id": "arsenal_operation_plans_arsenal_plans_get"
+  },
+  {
+    "path": "/arsenal/plans",
+    "method": "post",
+    "operation_id": "arsenal_create_operation_plan_arsenal_plans_post"
+  },
+  {
+    "path": "/arsenal/refuter-reviews",
+    "method": "get",
+    "operation_id": "arsenal_refuter_reviews_arsenal_refuter_reviews_get"
+  },
+  {
+    "path": "/arsenal/refuter-reviews",
+    "method": "post",
+    "operation_id": "arsenal_record_refuter_review_arsenal_refuter_reviews_post"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/queue-from-summary",
+    "method": "post",
+    "operation_id": "arsenal_queue_refuter_reviews_from_summary_arsenal_refuter_reviews_queue_from_summary_post"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/summary",
+    "method": "get",
+    "operation_id": "arsenal_refuter_review_summary_arsenal_refuter_reviews_summary_get"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict",
+    "method": "post",
+    "operation_id": "arsenal_derive_refuter_review_verdict_arsenal_refuter_reviews__refuter_review_id__derive_verdict_post"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/{refuter_review_id}/execute",
+    "method": "post",
+    "operation_id": "arsenal_execute_refuter_review_plan_arsenal_refuter_reviews__refuter_review_id__execute_post"
+  },
+  {
+    "path": "/arsenal/scope/preview",
+    "method": "post",
+    "operation_id": "arsenal_scope_preview_arsenal_scope_preview_post"
+  },
+  {
+    "path": "/arsenal/tool-receipts",
+    "method": "get",
+    "operation_id": "arsenal_tool_receipts_arsenal_tool_receipts_get"
+  },
+  {
+    "path": "/arsenal/tool-receipts",
+    "method": "post",
+    "operation_id": "arsenal_record_tool_receipt_arsenal_tool_receipts_post"
+  },
+  {
+    "path": "/arsenal/tools",
+    "method": "get",
+    "operation_id": "arsenal_tools_arsenal_tools_get"
+  },
+  {
+    "path": "/artifacts/storage/health",
+    "method": "get",
+    "operation_id": "get_artifact_storage_health_artifacts_storage_health_get"
+  },
+  {
+    "path": "/asm/check-families",
+    "method": "get",
+    "operation_id": "asm_check_families_asm_check_families_get"
+  },
+  {
+    "path": "/credential-profiles",
+    "method": "get",
+    "operation_id": "list_credential_profiles_credential_profiles_get"
+  },
+  {
+    "path": "/credential-profiles",
+    "method": "post",
+    "operation_id": "create_credential_profile_credential_profiles_post"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}",
+    "method": "delete",
+    "operation_id": "delete_credential_profile_credential_profiles__profile_id__delete"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}",
+    "method": "get",
+    "operation_id": "get_credential_profile_credential_profiles__profile_id__get"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}",
+    "method": "patch",
+    "operation_id": "patch_credential_profile_credential_profiles__profile_id__patch"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}/rotate",
+    "method": "post",
+    "operation_id": "rotate_credential_profile_credential_profiles__profile_id__rotate_post"
+  },
+  {
+    "path": "/dashboard",
+    "method": "get",
+    "operation_id": "dashboard_dashboard_get"
+  },
+  {
+    "path": "/device-agent/runs",
+    "method": "get",
+    "operation_id": "list_device_agent_runs_device_agent_runs_get"
+  },
+  {
+    "path": "/device-agent/session/{run_id}",
+    "method": "get",
+    "operation_id": "get_device_agent_session_device_agent_session__run_id__get"
+  },
+  {
+    "path": "/device-agent/session/{run_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_device_agent_session_device_agent_session__run_id__cancel_post"
+  },
+  {
+    "path": "/device-agent/session/{run_id}/reply",
+    "method": "post",
+    "operation_id": "submit_device_agent_reply_device_agent_session__run_id__reply_post"
+  },
+  {
+    "path": "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm",
+    "method": "post",
+    "operation_id": "confirm_device_agent_shell_plan_device_agent_session__run_id__shell_plans__plan_id__confirm_post"
+  },
+  {
+    "path": "/device-policies",
+    "method": "get",
+    "operation_id": "list_device_policies_device_policies_get"
+  },
+  {
+    "path": "/device-policies",
+    "method": "post",
+    "operation_id": "create_device_policy_device_policies_post"
+  },
+  {
+    "path": "/device-policies/{policy_id}",
+    "method": "patch",
+    "operation_id": "update_device_policy_device_policies__policy_id__patch"
+  },
+  {
+    "path": "/device-scans",
+    "method": "get",
+    "operation_id": "list_device_scans_device_scans_get"
+  },
+  {
+    "path": "/devices",
+    "method": "get",
+    "operation_id": "list_devices_devices_get"
+  },
+  {
+    "path": "/devices",
+    "method": "post",
+    "operation_id": "create_device_devices_post"
+  },
+  {
+    "path": "/devices/readiness",
+    "method": "get",
+    "operation_id": "get_device_readiness_devices_readiness_get"
+  },
+  {
+    "path": "/devices/{device_id}",
+    "method": "delete",
+    "operation_id": "deactivate_device_devices__device_id__delete"
+  },
+  {
+    "path": "/devices/{device_id}",
+    "method": "get",
+    "operation_id": "get_device_devices__device_id__get"
+  },
+  {
+    "path": "/devices/{device_id}",
+    "method": "patch",
+    "operation_id": "update_device_devices__device_id__patch"
+  },
+  {
+    "path": "/devices/{device_id}/agent/session",
+    "method": "post",
+    "operation_id": "start_device_agent_session_devices__device_id__agent_session_post"
+  },
+  {
+    "path": "/devices/{device_id}/capabilities",
+    "method": "get",
+    "operation_id": "get_device_capabilities_devices__device_id__capabilities_get"
+  },
+  {
+    "path": "/devices/{device_id}/credentials",
+    "method": "get",
+    "operation_id": "list_device_credentials_devices__device_id__credentials_get"
+  },
+  {
+    "path": "/devices/{device_id}/credentials",
+    "method": "post",
+    "operation_id": "create_device_credential_devices__device_id__credentials_post"
+  },
+  {
+    "path": "/devices/{device_id}/credentials/{profile_id}",
+    "method": "delete",
+    "operation_id": "deactivate_device_credential_devices__device_id__credentials__profile_id__delete"
+  },
+  {
+    "path": "/devices/{device_id}/credentials/{profile_id}/acknowledge-lockout",
+    "method": "post",
+    "operation_id": "acknowledge_device_credential_lockout_devices__device_id__credentials__profile_id__acknowledge_lockout_post"
+  },
+  {
+    "path": "/devices/{device_id}/credentials/{profile_id}/rotate",
+    "method": "post",
+    "operation_id": "rotate_device_credential_devices__device_id__credentials__profile_id__rotate_post"
+  },
+  {
+    "path": "/devices/{device_id}/locator",
+    "method": "post",
+    "operation_id": "change_device_locator_devices__device_id__locator_post"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections",
+    "method": "get",
+    "operation_id": "list_device_request_collections_devices__device_id__request_collections_get"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections",
+    "method": "post",
+    "operation_id": "create_device_request_collection_devices__device_id__request_collections_post"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections/{collection_id}",
+    "method": "delete",
+    "operation_id": "deactivate_device_request_collection_devices__device_id__request_collections__collection_id__delete"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections/{collection_id}",
+    "method": "get",
+    "operation_id": "get_device_request_collection_devices__device_id__request_collections__collection_id__get"
+  },
+  {
+    "path": "/devices/{device_id}/request-collections/{collection_id}",
+    "method": "patch",
+    "operation_id": "update_device_request_collection_devices__device_id__request_collections__collection_id__patch"
+  },
+  {
+    "path": "/devices/{device_id}/scan",
+    "method": "post",
+    "operation_id": "scan_device_devices__device_id__scan_post"
+  },
+  {
+    "path": "/devices/{device_id}/verify-service",
+    "method": "post",
+    "operation_id": "verify_device_service_devices__device_id__verify_service_post"
+  },
+  {
+    "path": "/discovery",
+    "method": "get",
+    "operation_id": "list_discovery_runs_discovery_get"
+  },
+  {
+    "path": "/discovery",
+    "method": "post",
+    "operation_id": "start_discovery_discovery_post"
+  },
+  {
+    "path": "/discovery/{discovery_id}",
+    "method": "get",
+    "operation_id": "get_discovery_discovery__discovery_id__get"
+  },
+  {
+    "path": "/domains",
+    "method": "get",
+    "operation_id": "list_domains_domains_get"
+  },
+  {
+    "path": "/evidence/export-bundle",
+    "method": "get",
+    "operation_id": "evidence_export_bundle_evidence_export_bundle_get"
+  },
+  {
+    "path": "/evidence/export-manifest",
+    "method": "get",
+    "operation_id": "evidence_export_manifest_evidence_export_manifest_get"
+  },
+  {
+    "path": "/evidence/instances",
+    "method": "get",
+    "operation_id": "list_evidence_instances_evidence_instances_get"
+  },
+  {
+    "path": "/evidence/instances",
+    "method": "post",
+    "operation_id": "record_evidence_instance_evidence_instances_post"
+  },
+  {
+    "path": "/evidence/instances/{instance_id}",
+    "method": "get",
+    "operation_id": "get_evidence_instance_evidence_instances__instance_id__get"
+  },
+  {
+    "path": "/evidence/retention/executions",
+    "method": "get",
+    "operation_id": "list_evidence_retention_executions_evidence_retention_executions_get"
+  },
+  {
+    "path": "/evidence/retention/sweep",
+    "method": "post",
+    "operation_id": "evidence_retention_sweep_evidence_retention_sweep_post"
+  },
+  {
+    "path": "/evidence/{evidence_id}",
+    "method": "get",
+    "operation_id": "get_evidence_object_evidence__evidence_id__get"
+  },
+  {
+    "path": "/experiments/workflows/{workflow_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_workflow_experiment_experiments_workflows__workflow_id__cancel_post"
+  },
+  {
+    "path": "/exposure/assets",
+    "method": "get",
+    "operation_id": "exposure_assets_exposure_assets_get"
+  },
+  {
+    "path": "/exposure/attack-paths",
+    "method": "get",
+    "operation_id": "exposure_attack_paths_exposure_attack_paths_get"
+  },
+  {
+    "path": "/exposure/changes",
+    "method": "get",
+    "operation_id": "exposure_changes_exposure_changes_get"
+  },
+  {
+    "path": "/exposure/graph",
+    "method": "get",
+    "operation_id": "exposure_graph_exposure_graph_get"
+  },
+  {
+    "path": "/exposure/nodes",
+    "method": "get",
+    "operation_id": "exposure_nodes_exposure_nodes_get"
+  },
+  {
+    "path": "/finding-exceptions",
+    "method": "get",
+    "operation_id": "list_finding_exceptions_finding_exceptions_get"
+  },
+  {
+    "path": "/finding-exceptions",
+    "method": "post",
+    "operation_id": "create_finding_exception_finding_exceptions_post"
+  },
+  {
+    "path": "/finding-exceptions/lifecycle/sweep",
+    "method": "post",
+    "operation_id": "finding_exception_lifecycle_sweep_finding_exceptions_lifecycle_sweep_post"
+  },
+  {
+    "path": "/finding-exceptions/{exception_id}",
+    "method": "delete",
+    "operation_id": "delete_finding_exception_finding_exceptions__exception_id__delete"
+  },
+  {
+    "path": "/finding-exceptions/{exception_id}",
+    "method": "patch",
+    "operation_id": "update_finding_exception_finding_exceptions__exception_id__patch"
+  },
+  {
+    "path": "/findings",
+    "method": "get",
+    "operation_id": "list_findings_findings_get"
+  },
+  {
+    "path": "/findings/bulk",
+    "method": "post",
+    "operation_id": "bulk_update_findings_findings_bulk_post"
+  },
+  {
+    "path": "/findings/cleanup",
+    "method": "post",
+    "operation_id": "cleanup_findings_findings_cleanup_post"
+  },
+  {
+    "path": "/findings/manual",
+    "method": "post",
+    "operation_id": "create_manual_finding_findings_manual_post"
+  },
+  {
+    "path": "/findings/retest",
+    "method": "post",
+    "operation_id": "bulk_retest_findings_findings_retest_post"
+  },
+  {
+    "path": "/findings/{finding_id}",
+    "method": "delete",
+    "operation_id": "delete_finding_findings__finding_id__delete"
+  },
+  {
+    "path": "/findings/{finding_id}",
+    "method": "get",
+    "operation_id": "get_finding_findings__finding_id__get"
+  },
+  {
+    "path": "/findings/{finding_id}",
+    "method": "patch",
+    "operation_id": "update_finding_findings__finding_id__patch"
+  },
+  {
+    "path": "/findings/{finding_id}/evidence",
+    "method": "get",
+    "operation_id": "list_finding_evidence_findings__finding_id__evidence_get"
+  },
+  {
+    "path": "/findings/{finding_id}/retest",
+    "method": "post",
+    "operation_id": "retest_finding_findings__finding_id__retest_post"
+  },
+  {
+    "path": "/fleet/acceptance/lease-probe",
+    "method": "post",
+    "operation_id": "run_fleet_acceptance_lease_probe_fleet_acceptance_lease_probe_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/lease",
+    "method": "post",
+    "operation_id": "lease_broker_job_fleet_broker_nodes__node_id__lease_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_broker_scan_action_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__cancel_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/heartbeat",
+    "method": "post",
+    "operation_id": "heartbeat_broker_scan_action_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__heartbeat_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease",
+    "method": "post",
+    "operation_id": "lease_broker_scan_action_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__lease_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/observations",
+    "method": "post",
+    "operation_id": "get_broker_scan_action_observations_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__observations_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/result",
+    "method": "post",
+    "operation_id": "settle_broker_scan_action_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__result_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/status",
+    "method": "post",
+    "operation_id": "get_broker_scan_action_status_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__status_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/work-manifest",
+    "method": "post",
+    "operation_id": "get_broker_scan_action_work_manifest_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__work_manifest_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/artifacts",
+    "method": "put",
+    "operation_id": "upload_broker_job_artifact_fleet_broker_nodes__node_id__leases__lease_id__artifacts_put"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/cancel-status",
+    "method": "post",
+    "operation_id": "get_broker_scan_cancel_status_fleet_broker_nodes__node_id__leases__lease_id__cancel_status_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/continuation",
+    "method": "post",
+    "operation_id": "continue_broker_scan_action_plan_fleet_broker_nodes__node_id__leases__lease_id__continuation_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/heartbeat",
+    "method": "post",
+    "operation_id": "heartbeat_broker_job_fleet_broker_nodes__node_id__leases__lease_id__heartbeat_post"
+  },
+  {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/result",
+    "method": "post",
+    "operation_id": "submit_broker_job_result_fleet_broker_nodes__node_id__leases__lease_id__result_post"
+  },
+  {
+    "path": "/fleet/join-tokens",
+    "method": "post",
+    "operation_id": "create_fleet_join_token_fleet_join_tokens_post"
+  },
+  {
+    "path": "/fleet/join-tokens/{token_id}",
+    "method": "delete",
+    "operation_id": "revoke_fleet_join_token_fleet_join_tokens__token_id__delete"
+  },
+  {
+    "path": "/fleet/nodes",
+    "method": "get",
+    "operation_id": "list_fleet_nodes_fleet_nodes_get"
+  },
+  {
+    "path": "/fleet/nodes/join",
+    "method": "post",
+    "operation_id": "join_fleet_node_fleet_nodes_join_post"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/activity",
+    "method": "get",
+    "operation_id": "get_fleet_node_activity_fleet_nodes__node_id__activity_get"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/connection-bundle",
+    "method": "post",
+    "operation_id": "get_fleet_connection_bundle_fleet_nodes__node_id__connection_bundle_post"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/credentials/rotate",
+    "method": "post",
+    "operation_id": "rotate_fleet_node_credential_fleet_nodes__node_id__credentials_rotate_post"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/events",
+    "method": "get",
+    "operation_id": "get_fleet_node_events_fleet_nodes__node_id__events_get"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/heartbeat",
+    "method": "post",
+    "operation_id": "heartbeat_fleet_node_fleet_nodes__node_id__heartbeat_post"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/revoke",
+    "method": "post",
+    "operation_id": "revoke_fleet_node_fleet_nodes__node_id__revoke_post"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/state",
+    "method": "get",
+    "operation_id": "get_fleet_node_state_fleet_nodes__node_id__state_get"
+  },
+  {
+    "path": "/fleet/nodes/{node_id}/state",
+    "method": "patch",
+    "operation_id": "update_fleet_node_state_fleet_nodes__node_id__state_patch"
+  },
+  {
+    "path": "/fleet/scale",
+    "method": "post",
+    "operation_id": "scale_fleet_workers_fleet_scale_post"
+  },
+  {
+    "path": "/gungnir/start",
+    "method": "post",
+    "operation_id": "gungnir_start_gungnir_start_post"
+  },
+  {
+    "path": "/gungnir/status",
+    "method": "get",
+    "operation_id": "gungnir_status_gungnir_status_get"
+  },
+  {
+    "path": "/gungnir/stop",
+    "method": "post",
+    "operation_id": "gungnir_stop_gungnir_stop_post"
+  },
+  {
+    "path": "/health",
+    "method": "get",
+    "operation_id": "health_health_get"
+  },
+  {
+    "path": "/hunts",
+    "method": "get",
+    "operation_id": "list_hunts_hunts_get"
+  },
+  {
+    "path": "/hunts",
+    "method": "post",
+    "operation_id": "start_hunt_hunts_post"
+  },
+  {
+    "path": "/hunts/contract",
+    "method": "get",
+    "operation_id": "get_hunt_contract_hunts_contract_get"
+  },
+  {
+    "path": "/hunts/lifecycle-metrics",
+    "method": "get",
+    "operation_id": "get_hunt_lifecycle_metrics_hunts_lifecycle_metrics_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}",
+    "method": "get",
+    "operation_id": "get_hunt_hunts__hunt_id__get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_hunt_hunts__hunt_id__cancel_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates",
+    "method": "post",
+    "operation_id": "create_hunt_candidate_hunts__hunt_id__candidates_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
+    "method": "post",
+    "operation_id": "verify_hunt_candidate_hunts__hunt_id__candidates__candidate_id__verify_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/capabilities/{capability_name}",
+    "method": "post",
+    "operation_id": "execute_hunt_capability_hunts__hunt_id__capabilities__capability_name__post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/finish",
+    "method": "post",
+    "operation_id": "finish_hunt_hunts__hunt_id__finish_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/query",
+    "method": "post",
+    "operation_id": "query_hunt_hunts__hunt_id__query_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/resume",
+    "method": "post",
+    "operation_id": "resume_hunt_hunts__hunt_id__resume_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm",
+    "method": "post",
+    "operation_id": "confirm_hunt_shell_plan_hunts__hunt_id__shell_plans__plan_id__confirm_post"
+  },
+  {
+    "path": "/investigation/candidates",
+    "method": "get",
+    "operation_id": "list_investigation_candidates_investigation_candidates_get"
+  },
+  {
+    "path": "/investigation/candidates/{candidate_id}",
+    "method": "get",
+    "operation_id": "get_investigation_candidate_investigation_candidates__candidate_id__get"
+  },
+  {
+    "path": "/metrics/v2",
+    "method": "get",
+    "operation_id": "get_v2_operational_metrics_metrics_v2_get"
+  },
+  {
+    "path": "/model-intake/admission/verify",
+    "method": "post",
+    "operation_id": "verify_model_intake_admission_model_intake_admission_verify_post"
+  },
+  {
+    "path": "/model-intake/admissions",
+    "method": "get",
+    "operation_id": "list_model_intake_admissions_model_intake_admissions_get"
+  },
+  {
+    "path": "/model-intake/admissions/v2/observe",
+    "method": "post",
+    "operation_id": "observe_model_intake_deployment_v2_model_intake_admissions_v2_observe_post"
+  },
+  {
+    "path": "/model-intake/admissions/v2/verify",
+    "method": "post",
+    "operation_id": "verify_model_intake_admission_v2_model_intake_admissions_v2_verify_post"
+  },
+  {
+    "path": "/model-intake/admissions/{admission_id}",
+    "method": "get",
+    "operation_id": "get_model_intake_admission_model_intake_admissions__admission_id__get"
+  },
+  {
+    "path": "/model-intake/admissions/{admission_id}/revoke",
+    "method": "post",
+    "operation_id": "revoke_model_intake_admission_model_intake_admissions__admission_id__revoke_post"
+  },
+  {
+    "path": "/model-intake/agent/session/{session_id}",
+    "method": "get",
+    "operation_id": "get_model_intake_agent_session_model_intake_agent_session__session_id__get"
+  },
+  {
+    "path": "/model-intake/agent/session/{session_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_model_intake_agent_session_model_intake_agent_session__session_id__cancel_post"
+  },
+  {
+    "path": "/model-intake/agent/session/{session_id}/reply",
+    "method": "post",
+    "operation_id": "reply_model_intake_agent_session_model_intake_agent_session__session_id__reply_post"
+  },
+  {
+    "path": "/model-intake/automatic-reviews",
+    "method": "get",
+    "operation_id": "list_model_intake_automatic_reviews_model_intake_automatic_reviews_get"
+  },
+  {
+    "path": "/model-intake/automatic-reviews",
+    "method": "post",
+    "operation_id": "create_model_intake_automatic_review_model_intake_automatic_reviews_post"
+  },
+  {
+    "path": "/model-intake/automatic-reviews/{review_id}",
+    "method": "get",
+    "operation_id": "get_model_intake_automatic_review_model_intake_automatic_reviews__review_id__get"
+  },
+  {
+    "path": "/model-intake/automatic-reviews/{review_id}/report",
+    "method": "get",
+    "operation_id": "get_model_intake_automatic_review_report_model_intake_automatic_reviews__review_id__report_get"
+  },
+  {
+    "path": "/model-intake/capabilities",
+    "method": "get",
+    "operation_id": "model_intake_capabilities_model_intake_capabilities_get"
+  },
+  {
+    "path": "/model-intake/checks",
+    "method": "get",
+    "operation_id": "model_intake_check_catalog_model_intake_checks_get"
+  },
+  {
+    "path": "/model-intake/conversion-profiles/resolve",
+    "method": "post",
+    "operation_id": "resolve_model_intake_conversion_profile_model_intake_conversion_profiles_resolve_post"
+  },
+  {
+    "path": "/model-intake/loader-profiles/resolve",
+    "method": "post",
+    "operation_id": "resolve_model_intake_loader_profile_model_intake_loader_profiles_resolve_post"
+  },
+  {
+    "path": "/model-intake/operator-session",
+    "method": "get",
+    "operation_id": "model_intake_operator_session_model_intake_operator_session_get"
+  },
+  {
+    "path": "/model-intake/providers/readiness",
+    "method": "get",
+    "operation_id": "model_intake_provider_readiness_model_intake_providers_readiness_get"
+  },
+  {
+    "path": "/model-intake/reassessment/events",
+    "method": "post",
+    "operation_id": "create_model_intake_reassessment_event_model_intake_reassessment_events_post"
+  },
+  {
+    "path": "/model-intake/resolve",
+    "method": "post",
+    "operation_id": "resolve_model_intake_model_intake_resolve_post"
+  },
+  {
+    "path": "/model-intake/retention/cleanup",
+    "method": "post",
+    "operation_id": "cleanup_model_intake_quarantine_model_intake_retention_cleanup_post"
+  },
+  {
+    "path": "/model-intake/runners/install-plan",
+    "method": "get",
+    "operation_id": "model_intake_runner_install_plan_model_intake_runners_install_plan_get"
+  },
+  {
+    "path": "/model-intake/runners/readiness",
+    "method": "get",
+    "operation_id": "model_intake_runner_readiness_model_intake_runners_readiness_get"
+  },
+  {
+    "path": "/model-intake/runners/stage",
+    "method": "get",
+    "operation_id": "model_intake_runner_stage_status_model_intake_runners_stage_get"
+  },
+  {
+    "path": "/model-intake/runners/stage",
+    "method": "post",
+    "operation_id": "model_intake_runner_stage_model_intake_runners_stage_post"
+  },
+  {
+    "path": "/model-intake/runners/storage",
+    "method": "get",
+    "operation_id": "model_intake_runner_storage_model_intake_runners_storage_get"
+  },
+  {
+    "path": "/model-intake/runners/storage/cleanup",
+    "method": "post",
+    "operation_id": "model_intake_runner_storage_cleanup_model_intake_runners_storage_cleanup_post"
+  },
+  {
+    "path": "/model-intake/scan",
+    "method": "post",
+    "operation_id": "scan_model_intake_model_intake_scan_post"
+  },
+  {
+    "path": "/model-intake/scanners/readiness",
+    "method": "get",
+    "operation_id": "model_intake_scanner_readiness_model_intake_scanners_readiness_get"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/evidence-export",
+    "method": "get",
+    "operation_id": "get_model_intake_evidence_export_model_intake_scans__scan_id__evidence_export_get"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/license-bom",
+    "method": "get",
+    "operation_id": "download_model_intake_license_bom_model_intake_scans__scan_id__license_bom_get"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/sbom",
+    "method": "get",
+    "operation_id": "download_model_intake_sbom_model_intake_scans__scan_id__sbom_get"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/sbom/summary",
+    "method": "get",
+    "operation_id": "model_intake_sbom_summary_model_intake_scans__scan_id__sbom_summary_get"
+  },
+  {
+    "path": "/model-intake/scans/{scan_id}/third-party-notices",
+    "method": "get",
+    "operation_id": "download_model_intake_third_party_notices_model_intake_scans__scan_id__third_party_notices_get"
+  },
+  {
+    "path": "/model-intake/submissions",
+    "method": "get",
+    "operation_id": "list_model_intake_submissions_model_intake_submissions_get"
+  },
+  {
+    "path": "/model-intake/submissions",
+    "method": "post",
+    "operation_id": "create_model_intake_submission_model_intake_submissions_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}",
+    "method": "get",
+    "operation_id": "get_model_intake_submission_model_intake_submissions__submission_id__get"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/agent/session",
+    "method": "post",
+    "operation_id": "create_model_intake_agent_session_model_intake_submissions__submission_id__agent_session_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/agent/sessions",
+    "method": "get",
+    "operation_id": "list_model_intake_agent_sessions_model_intake_submissions__submission_id__agent_sessions_get"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/approvals",
+    "method": "post",
+    "operation_id": "create_model_intake_approval_model_intake_submissions__submission_id__approvals_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/embedding-configuration",
+    "method": "get",
+    "operation_id": "model_intake_embedding_configuration_model_intake_submissions__submission_id__embedding_configuration_get"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/evidence-receipts",
+    "method": "post",
+    "operation_id": "attach_model_intake_runner_evidence_model_intake_submissions__submission_id__evidence_receipts_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/freeze-evidence",
+    "method": "post",
+    "operation_id": "freeze_model_intake_evidence_model_intake_submissions__submission_id__freeze_evidence_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/policy-decisions",
+    "method": "post",
+    "operation_id": "create_model_intake_policy_decision_model_intake_submissions__submission_id__policy_decisions_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/promote",
+    "method": "post",
+    "operation_id": "promote_model_intake_submission_model_intake_submissions__submission_id__promote_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/report",
+    "method": "get",
+    "operation_id": "get_model_intake_submission_report_model_intake_submissions__submission_id__report_get"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-bundle",
+    "method": "get",
+    "operation_id": "model_intake_runner_bundle_model_intake_submissions__submission_id__runner_bundle_get"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-jobs",
+    "method": "get",
+    "operation_id": "list_model_intake_runner_jobs_model_intake_submissions__submission_id__runner_jobs_get"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-jobs",
+    "method": "post",
+    "operation_id": "create_model_intake_runner_job_model_intake_submissions__submission_id__runner_jobs_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/runner-jobs/{job_id}/refresh",
+    "method": "post",
+    "operation_id": "refresh_model_intake_runner_job_model_intake_submissions__submission_id__runner_jobs__job_id__refresh_post"
+  },
+  {
+    "path": "/model-intake/submissions/{submission_id}/static-runs",
+    "method": "post",
+    "operation_id": "attach_model_intake_static_run_model_intake_submissions__submission_id__static_runs_post"
+  },
+  {
+    "path": "/model-intake/targets/{target_id}/rescan",
+    "method": "post",
+    "operation_id": "rescan_model_intake_target_model_intake_targets__target_id__rescan_post"
+  },
+  {
+    "path": "/model-intake/trust-anchors",
+    "method": "get",
+    "operation_id": "list_model_intake_trust_anchors_model_intake_trust_anchors_get"
+  },
+  {
+    "path": "/model-intake/trust-anchors",
+    "method": "post",
+    "operation_id": "create_model_intake_trust_anchor_model_intake_trust_anchors_post"
+  },
+  {
+    "path": "/model-intake/trust-anchors/{anchor_id}",
+    "method": "delete",
+    "operation_id": "deactivate_model_intake_trust_anchor_model_intake_trust_anchors__anchor_id__delete"
+  },
+  {
+    "path": "/model-intake/trust-anchors/{anchor_id}",
+    "method": "patch",
+    "operation_id": "update_model_intake_trust_anchor_model_intake_trust_anchors__anchor_id__patch"
+  },
+  {
+    "path": "/policy-profiles",
+    "method": "get",
+    "operation_id": "list_policy_profiles_policy_profiles_get"
+  },
+  {
+    "path": "/policy-profiles",
+    "method": "post",
+    "operation_id": "create_policy_profile_policy_profiles_post"
+  },
+  {
+    "path": "/policy-profiles/{profile_id}",
+    "method": "delete",
+    "operation_id": "delete_policy_profile_policy_profiles__profile_id__delete"
+  },
+  {
+    "path": "/policy-profiles/{profile_id}",
+    "method": "patch",
+    "operation_id": "update_policy_profile_policy_profiles__profile_id__patch"
+  },
+  {
+    "path": "/queue/clear",
+    "method": "delete",
+    "operation_id": "clear_queue_queue_clear_delete"
+  },
+  {
+    "path": "/queue/stats",
+    "method": "get",
+    "operation_id": "queue_stats_queue_stats_get"
+  },
+  {
+    "path": "/request-collections",
+    "method": "get",
+    "operation_id": "list_request_collections_request_collections_get"
+  },
+  {
+    "path": "/request-collections",
+    "method": "post",
+    "operation_id": "create_request_collection_request_collections_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}",
+    "method": "get",
+    "operation_id": "get_request_collection_request_collections__collection_id__get"
+  },
+  {
+    "path": "/request-collections/{collection_id}/bindings",
+    "method": "post",
+    "operation_id": "upsert_request_collection_binding_request_collections__collection_id__bindings_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}/environments",
+    "method": "post",
+    "operation_id": "upsert_request_collection_environment_request_collections__collection_id__environments_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}/environments/{environment_id}",
+    "method": "delete",
+    "operation_id": "deactivate_request_collection_environment_request_collections__collection_id__environments__environment_id__delete"
+  },
+  {
+    "path": "/request-collections/{collection_id}/requests",
+    "method": "get",
+    "operation_id": "list_request_collection_requests_request_collections__collection_id__requests_get"
+  },
+  {
+    "path": "/request-collections/{collection_id}/select",
+    "method": "post",
+    "operation_id": "select_request_collection_index_request_collections__collection_id__select_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}/selections",
+    "method": "post",
+    "operation_id": "upsert_request_collection_selection_request_collections__collection_id__selections_post"
+  },
+  {
+    "path": "/request-collections/{collection_id}/selections/{selection_id}",
+    "method": "delete",
+    "operation_id": "deactivate_request_collection_selection_request_collections__collection_id__selections__selection_id__delete"
+  },
+  {
+    "path": "/research/campaigns/launch",
+    "method": "post",
+    "operation_id": "launch_research_campaign_research_campaigns_launch_post"
+  },
+  {
+    "path": "/research/campaigns/{campaign_id}/control",
+    "method": "post",
+    "operation_id": "control_research_campaign_research_campaigns__campaign_id__control_post"
+  },
+  {
+    "path": "/research/episodes",
+    "method": "get",
+    "operation_id": "list_research_episodes_research_episodes_get"
+  },
+  {
+    "path": "/research/episodes",
+    "method": "post",
+    "operation_id": "create_research_episode_research_episodes_post"
+  },
+  {
+    "path": "/research/episodes/{episode_id}",
+    "method": "get",
+    "operation_id": "get_research_episode_research_episodes__episode_id__get"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/autopilot",
+    "method": "put",
+    "operation_id": "set_research_episode_autopilot_research_episodes__episode_id__autopilot_put"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/benchmark",
+    "method": "get",
+    "operation_id": "research_episode_benchmark_research_episodes__episode_id__benchmark_get"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_research_episode_research_episodes__episode_id__cancel_post"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/decisions",
+    "method": "post",
+    "operation_id": "submit_research_decision_research_episodes__episode_id__decisions_post"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/observe",
+    "method": "post",
+    "operation_id": "refresh_research_observation_research_episodes__episode_id__observe_post"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/plan-step",
+    "method": "post",
+    "operation_id": "plan_research_episode_step_research_episodes__episode_id__plan_step_post"
+  },
+  {
+    "path": "/research/episodes/{episode_id}/settle",
+    "method": "post",
+    "operation_id": "settle_research_episode_research_episodes__episode_id__settle_post"
+  },
+  {
+    "path": "/research/launch",
+    "method": "post",
+    "operation_id": "launch_research_episode_research_launch_post"
+  },
+  {
+    "path": "/research/readiness",
+    "method": "get",
+    "operation_id": "research_readiness_research_readiness_get"
+  },
+  {
+    "path": "/results",
+    "method": "get",
+    "operation_id": "list_results_results_get"
+  },
+  {
+    "path": "/results/{target_folder}/latest",
+    "method": "get",
+    "operation_id": "get_latest_result_results__target_folder__latest_get"
+  },
+  {
+    "path": "/retests/finding/{finding_id}",
+    "method": "get",
+    "operation_id": "list_finding_retests_retests_finding__finding_id__get"
+  },
+  {
+    "path": "/retests/{retest_id}",
+    "method": "get",
+    "operation_id": "get_retest_retests__retest_id__get"
+  },
+  {
+    "path": "/scan/contracts",
+    "method": "get",
+    "operation_id": "get_scan_public_contract_scan_contracts_get"
+  },
+  {
+    "path": "/scan/contracts/preview",
+    "method": "post",
+    "operation_id": "preview_scan_contract_scan_contracts_preview_post"
+  },
+  {
+    "path": "/scans",
+    "method": "get",
+    "operation_id": "list_scans_scans_get"
+  },
+  {
+    "path": "/scans",
+    "method": "post",
+    "operation_id": "submit_scan_scans_post"
+  },
+  {
+    "path": "/scans/batch",
+    "method": "post",
+    "operation_id": "submit_batch_scans_batch_post"
+  },
+  {
+    "path": "/scans/{scan_id}",
+    "method": "get",
+    "operation_id": "get_scan_scans__scan_id__get"
+  },
+  {
+    "path": "/scans/{scan_id}/actions",
+    "method": "get",
+    "operation_id": "get_scan_actions_scans__scan_id__actions_get"
+  },
+  {
+    "path": "/scans/{scan_id}/ai-redteam-report",
+    "method": "get",
+    "operation_id": "get_ai_redteam_report_scans__scan_id__ai_redteam_report_get"
+  },
+  {
+    "path": "/scans/{scan_id}/artifacts",
+    "method": "get",
+    "operation_id": "list_scan_artifacts_scans__scan_id__artifacts_get"
+  },
+  {
+    "path": "/scans/{scan_id}/artifacts/{artifact_id}",
+    "method": "get",
+    "operation_id": "download_scan_artifact_scans__scan_id__artifacts__artifact_id__get"
+  },
+  {
+    "path": "/scans/{scan_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_scan_scans__scan_id__cancel_post"
+  },
+  {
+    "path": "/scans/{scan_id}/capabilities",
+    "method": "get",
+    "operation_id": "get_scan_capabilities_scans__scan_id__capabilities_get"
+  },
+  {
+    "path": "/scans/{scan_id}/coverage",
+    "method": "get",
+    "operation_id": "get_scan_coverage_scans__scan_id__coverage_get"
+  },
+  {
+    "path": "/scans/{scan_id}/deployment-decision",
+    "method": "get",
+    "operation_id": "get_scan_deployment_decision_scans__scan_id__deployment_decision_get"
+  },
+  {
+    "path": "/scans/{scan_id}/device-activity",
+    "method": "get",
+    "operation_id": "get_scan_device_activity_scans__scan_id__device_activity_get"
+  },
+  {
+    "path": "/scans/{scan_id}/logs",
+    "method": "get",
+    "operation_id": "get_scan_logs_scans__scan_id__logs_get"
+  },
+  {
+    "path": "/scans/{scan_id}/parity-artifact",
+    "method": "get",
+    "operation_id": "get_scan_parity_artifact_scans__scan_id__parity_artifact_get"
+  },
+  {
+    "path": "/scans/{scan_id}/queue-delivery",
+    "method": "get",
+    "operation_id": "get_scan_queue_delivery_scans__scan_id__queue_delivery_get"
+  },
+  {
+    "path": "/scans/{scan_id}/result",
+    "method": "get",
+    "operation_id": "get_scan_result_scans__scan_id__result_get"
+  },
+  {
+    "path": "/schedules",
+    "method": "get",
+    "operation_id": "list_schedules_schedules_get"
+  },
+  {
+    "path": "/schedules",
+    "method": "post",
+    "operation_id": "create_schedule_schedules_post"
+  },
+  {
+    "path": "/schedules/{schedule_id}",
+    "method": "delete",
+    "operation_id": "delete_schedule_schedules__schedule_id__delete"
+  },
+  {
+    "path": "/schedules/{schedule_id}",
+    "method": "get",
+    "operation_id": "get_schedule_schedules__schedule_id__get"
+  },
+  {
+    "path": "/schedules/{schedule_id}",
+    "method": "patch",
+    "operation_id": "update_schedule_schedules__schedule_id__patch"
+  },
+  {
+    "path": "/session/start",
+    "method": "post",
+    "operation_id": "start_session_session_start_post"
+  },
+  {
+    "path": "/session/{session_id}",
+    "method": "delete",
+    "operation_id": "end_session_session__session_id__delete"
+  },
+  {
+    "path": "/session/{session_id}",
+    "method": "get",
+    "operation_id": "get_session_state_session__session_id__get"
+  },
+  {
+    "path": "/session/{session_id}/action",
+    "method": "post",
+    "operation_id": "session_action_session__session_id__action_post"
+  },
+  {
+    "path": "/session/{session_id}/findings",
+    "method": "post",
+    "operation_id": "create_session_finding_session__session_id__findings_post"
+  },
+  {
+    "path": "/session/{session_id}/screenshot",
+    "method": "post",
+    "operation_id": "session_screenshot_session__session_id__screenshot_post"
+  },
+  {
+    "path": "/session/{session_id}/screenshot.png",
+    "method": "get",
+    "operation_id": "session_screenshot_raw_session__session_id__screenshot_png_get"
+  },
+  {
+    "path": "/session/{session_id}/test-endpoint",
+    "method": "post",
+    "operation_id": "session_test_endpoint_session__session_id__test_endpoint_post"
+  },
+  {
+    "path": "/sessions",
+    "method": "get",
+    "operation_id": "list_sessions_sessions_get"
+  },
+  {
+    "path": "/settings/ai",
+    "method": "get",
+    "operation_id": "get_ai_settings_settings_ai_get"
+  },
+  {
+    "path": "/settings/ai",
+    "method": "put",
+    "operation_id": "update_ai_settings_settings_ai_put"
+  },
+  {
+    "path": "/settings/ai/test",
+    "method": "post",
+    "operation_id": "test_ai_settings_settings_ai_test_post"
+  },
+  {
+    "path": "/settings/automation",
+    "method": "get",
+    "operation_id": "get_automation_settings_settings_automation_get"
+  },
+  {
+    "path": "/settings/automation",
+    "method": "put",
+    "operation_id": "update_automation_settings_settings_automation_put"
+  },
+  {
+    "path": "/settings/scan-execution",
+    "method": "get",
+    "operation_id": "get_scan_execution_settings_settings_scan_execution_get"
+  },
+  {
+    "path": "/settings/scan-execution",
+    "method": "put",
+    "operation_id": "update_scan_execution_settings_settings_scan_execution_put"
+  },
+  {
+    "path": "/system/resources",
+    "method": "get",
+    "operation_id": "get_system_resources_system_resources_get"
+  },
+  {
+    "path": "/targets",
+    "method": "get",
+    "operation_id": "list_targets_targets_get"
+  },
+  {
+    "path": "/targets",
+    "method": "post",
+    "operation_id": "create_target_targets_post"
+  },
+  {
+    "path": "/targets/dedupe",
+    "method": "post",
+    "operation_id": "dedupe_targets_targets_dedupe_post"
+  },
+  {
+    "path": "/targets/grouped",
+    "method": "get",
+    "operation_id": "list_targets_grouped_targets_grouped_get"
+  },
+  {
+    "path": "/targets/{target_id}",
+    "method": "delete",
+    "operation_id": "delete_target_targets__target_id__delete"
+  },
+  {
+    "path": "/targets/{target_id}",
+    "method": "get",
+    "operation_id": "get_target_targets__target_id__get"
+  },
+  {
+    "path": "/targets/{target_id}",
+    "method": "patch",
+    "operation_id": "update_target_targets__target_id__patch"
+  },
+  {
+    "path": "/targets/{target_id}/asm/activity",
+    "method": "get",
+    "operation_id": "asm_activity_targets__target_id__asm_activity_get"
+  },
+  {
+    "path": "/targets/{target_id}/asm/coverage",
+    "method": "get",
+    "operation_id": "asm_coverage_targets__target_id__asm_coverage_get"
+  },
+  {
+    "path": "/targets/{target_id}/asm/diff",
+    "method": "get",
+    "operation_id": "asm_diff_targets__target_id__asm_diff_get"
+  },
+  {
+    "path": "/targets/{target_id}/asm/endpoints",
+    "method": "get",
+    "operation_id": "asm_list_endpoints_targets__target_id__asm_endpoints_get"
+  },
+  {
+    "path": "/targets/{target_id}/asm/gaps",
+    "method": "get",
+    "operation_id": "asm_gaps_targets__target_id__asm_gaps_get"
+  },
+  {
+    "path": "/targets/{target_id}/asm/improve",
+    "method": "post",
+    "operation_id": "asm_improve_targets__target_id__asm_improve_post"
+  },
+  {
+    "path": "/targets/{target_id}/asm/policy",
+    "method": "get",
+    "operation_id": "asm_get_policy_targets__target_id__asm_policy_get"
+  },
+  {
+    "path": "/targets/{target_id}/asm/policy",
+    "method": "put",
+    "operation_id": "asm_set_policy_targets__target_id__asm_policy_put"
+  },
+  {
+    "path": "/targets/{target_id}/asm/prune",
+    "method": "post",
+    "operation_id": "asm_prune_targets__target_id__asm_prune_post"
+  },
+  {
+    "path": "/targets/{target_id}/asm/recon",
+    "method": "post",
+    "operation_id": "asm_recon_targets__target_id__asm_recon_post"
+  },
+  {
+    "path": "/targets/{target_id}/asm/test",
+    "method": "post",
+    "operation_id": "asm_test_targets__target_id__asm_test_post"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles",
+    "method": "get",
+    "operation_id": "list_target_credential_profiles_targets__target_id__credential_profiles_get"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles",
+    "method": "post",
+    "operation_id": "create_target_credential_profile_targets__target_id__credential_profiles_post"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles/{profile_id}",
+    "method": "delete",
+    "operation_id": "delete_target_credential_profile_targets__target_id__credential_profiles__profile_id__delete"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles/{profile_id}",
+    "method": "patch",
+    "operation_id": "update_target_credential_profile_targets__target_id__credential_profiles__profile_id__patch"
+  },
+  {
+    "path": "/targets/{target_id}/credential-profiles/{profile_id}/rotate",
+    "method": "post",
+    "operation_id": "rotate_target_credential_profile_targets__target_id__credential_profiles__profile_id__rotate_post"
+  },
+  {
+    "path": "/targets/{target_id}/graph",
+    "method": "get",
+    "operation_id": "get_application_graph_targets__target_id__graph_get"
+  },
+  {
+    "path": "/targets/{target_id}/graph/hypotheses",
+    "method": "post",
+    "operation_id": "generate_application_graph_hypotheses_targets__target_id__graph_hypotheses_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants",
+    "method": "get",
+    "operation_id": "list_target_invariant_contracts_targets__target_id__invariants_get"
+  },
+  {
+    "path": "/targets/{target_id}/invariants",
+    "method": "post",
+    "operation_id": "create_target_invariant_contract_targets__target_id__invariants_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/compile",
+    "method": "post",
+    "operation_id": "compile_target_invariant_rule_targets__target_id__invariants_compile_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/hypotheses",
+    "method": "post",
+    "operation_id": "generate_target_invariant_hypotheses_targets__target_id__invariants_hypotheses_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/{contract_id}/approve",
+    "method": "post",
+    "operation_id": "approve_target_invariant_contract_targets__target_id__invariants__contract_id__approve_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/{contract_id}/retire",
+    "method": "post",
+    "operation_id": "retire_target_invariant_contract_targets__target_id__invariants__contract_id__retire_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/{contract_id}/verification-plan",
+    "method": "get",
+    "operation_id": "get_target_invariant_verification_plan_targets__target_id__invariants__contract_id__verification_plan_get"
+  },
+  {
+    "path": "/targets/{target_id}/inventory/hypotheses",
+    "method": "post",
+    "operation_id": "generate_endpoint_inventory_hypotheses_targets__target_id__inventory_hypotheses_post"
+  },
+  {
+    "path": "/targets/{target_id}/principal-matrix",
+    "method": "get",
+    "operation_id": "list_target_principal_matrix_targets__target_id__principal_matrix_get"
+  },
+  {
+    "path": "/targets/{target_id}/principal-matrix",
+    "method": "post",
+    "operation_id": "upsert_target_principal_matrix_targets__target_id__principal_matrix_post"
+  },
+  {
+    "path": "/targets/{target_id}/principal-matrix/{expectation_id}",
+    "method": "delete",
+    "operation_id": "delete_target_principal_expectation_targets__target_id__principal_matrix__expectation_id__delete"
+  },
+  {
+    "path": "/targets/{target_id}/principals",
+    "method": "get",
+    "operation_id": "list_target_principals_targets__target_id__principals_get"
+  },
+  {
+    "path": "/targets/{target_id}/principals",
+    "method": "post",
+    "operation_id": "create_target_principal_targets__target_id__principals_post"
+  },
+  {
+    "path": "/targets/{target_id}/principals/auto-provision",
+    "method": "post",
+    "operation_id": "auto_provision_target_principals_targets__target_id__principals_auto_provision_post"
+  },
+  {
+    "path": "/targets/{target_id}/principals/{principal_id}",
+    "method": "delete",
+    "operation_id": "delete_target_principal_targets__target_id__principals__principal_id__delete"
+  },
+  {
+    "path": "/targets/{target_id}/principals/{principal_id}",
+    "method": "patch",
+    "operation_id": "update_target_principal_targets__target_id__principals__principal_id__patch"
+  },
+  {
+    "path": "/targets/{target_id}/scan",
+    "method": "post",
+    "operation_id": "scan_target_targets__target_id__scan_post"
+  },
+  {
+    "path": "/timeline",
+    "method": "get",
+    "operation_id": "mission_timeline_timeline_get"
+  },
+  {
+    "path": "/workers",
+    "method": "get",
+    "operation_id": "get_workers_workers_get"
+  },
+  {
+    "path": "/workers",
+    "method": "post",
+    "operation_id": "scale_workers_workers_post"
+  }
+]

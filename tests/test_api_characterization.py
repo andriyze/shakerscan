@@ -1,0 +1,149 @@
+"""Characterization tests that lock the public API contract before, during, and
+after the api.py decomposition.
+
+The golden fixtures under ``tests/fixtures/api_contract/`` are the frozen public
+surface: the normalized route manifest, the OpenAPI operation set, and the app
+composition (middleware order and exception handlers). Every behavior-preserving
+router extraction must leave all three byte-identical. When a commit deliberately
+changes the public contract, regenerate the fixtures in the same commit:
+
+    SHAKERSCAN_UPDATE_API_CONTRACT=1 python3 -m pytest tests/test_api_characterization.py
+
+The module-size ratchet keeps the monolith from growing while extraction is in
+progress; it is lowered by each extraction, never raised.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from scripts.check_module_size import check_module_sizes
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+_FIXTURES = _ROOT / "tests" / "fixtures" / "api_contract"
+
+
+def _app():
+    try:
+        import api.api as api_module
+    except Exception as exc:  # pragma: no cover - host dependency guard
+        pytest.skip(f"api.api is not importable in this environment: {exc}")
+    return api_module.app
+
+
+def _normalized_routes(app):
+    rows = []
+    for route in app.routes:
+        methods = sorted(getattr(route, "methods", None) or [])
+        rows.append({
+            "path": getattr(route, "path", None),
+            "methods": methods,
+            "name": getattr(route, "name", None),
+        })
+    return sorted(rows, key=lambda r: (r["path"] or "", r["methods"], r["name"] or ""))
+
+
+def _operations(app):
+    spec = app.openapi()
+    ops = []
+    for path, item in spec.get("paths", {}).items():
+        for method, body in item.items():
+            if isinstance(body, dict) and "operationId" in body:
+                ops.append({
+                    "path": path, "method": method,
+                    "operation_id": body.get("operationId"),
+                })
+    return sorted(ops, key=lambda r: (r["path"], r["method"]))
+
+
+def _app_contract(app):
+    return {
+        "middleware": [
+            getattr(x.cls, "__name__", str(x.cls)) for x in app.user_middleware
+        ],
+        "exception_handlers": sorted(
+            str(getattr(k, "__name__", k)) for k in app.exception_handlers.keys()
+        ),
+        "route_count": len([r for r in app.routes if getattr(r, "methods", None)]),
+    }
+
+
+def _load(name):
+    return json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _maybe_update(name, value):
+    if os.environ.get("SHAKERSCAN_UPDATE_API_CONTRACT") == "1":
+        (_FIXTURES / name).write_text(
+            json.dumps(value, indent=2) + "\n", encoding="utf-8",
+        )
+
+
+def test_route_manifest_is_unchanged():
+    app = _app()
+    live = _normalized_routes(app)
+    _maybe_update("routes.json", live)
+    stored = _load("routes.json")
+    assert live == stored, (
+        "The route manifest changed. A behavior-preserving extraction must keep "
+        "every path/method/name identical; regenerate the fixture only for a "
+        "deliberate public-contract change."
+    )
+
+
+def test_openapi_operations_are_unchanged():
+    app = _app()
+    live = _operations(app)
+    _maybe_update("operations.json", live)
+    stored = _load("operations.json")
+    live_ids = {row["operation_id"] for row in live}
+    stored_ids = {row["operation_id"] for row in stored}
+    assert live_ids == stored_ids, (
+        "OpenAPI operationId set changed: "
+        f"added={sorted(live_ids - stored_ids)} removed={sorted(stored_ids - live_ids)}"
+    )
+    assert live == stored, "an operation's path or method changed"
+
+
+def test_app_composition_is_unchanged():
+    app = _app()
+    live = _app_contract(app)
+    _maybe_update("app_contract.json", live)
+    stored = _load("app_contract.json")
+    # Middleware order is part of behavior and must be preserved exactly.
+    assert live["middleware"] == stored["middleware"]
+    assert live["exception_handlers"] == stored["exception_handlers"]
+    assert live["route_count"] == stored["route_count"]
+
+
+def test_module_size_ratchet_holds():
+    failures = check_module_sizes()
+    assert not failures, "\n".join(failures)
+
+
+def test_domain_modules_do_not_import_the_app_module():
+    """Extracted domain code must not import back into api.api.
+
+    The dependency direction is app-composition -> routers -> services. A domain
+    module that imports ``api.api`` recreates the circular monolith coupling the
+    decomposition exists to remove. api.api itself, and the app entrypoints, are
+    exempt.
+    """
+    offenders: list[str] = []
+    allow = {"api/api.py"}
+    for path in sorted((_ROOT / "api").rglob("*.py")):
+        rel = path.relative_to(_ROOT).as_posix()
+        if rel in allow:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "import api.api" in text or "from api.api import" in text or "from api import api" in text:
+            offenders.append(rel)
+    assert not offenders, (
+        "these api submodules import the monolith (api.api), which reintroduces "
+        f"the coupling decomposition removes: {offenders}"
+    )

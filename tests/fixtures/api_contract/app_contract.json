@@ -1,0 +1,16 @@
+{
+  "middleware": [
+    "PublicV2BodyLimitMiddleware",
+    "PublicV2IdempotencyMiddleware",
+    "LegacyHuntIsolationMiddleware",
+    "UnsafeOriginGuardMiddleware",
+    "CORSMiddleware"
+  ],
+  "exception_handlers": [
+    "HTTPException",
+    "RequestValidationError",
+    "ValueError",
+    "WebSocketRequestValidationError"
+  ],
+  "route_count": 363
+}
