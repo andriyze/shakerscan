@@ -7,6 +7,7 @@ import { isApiResponse } from './real-stack-api'
 const REAL_STACK = process.env.PLAYWRIGHT_REAL_STACK === '1'
 const API_URL = process.env.SHAKERSCAN_API_URL || 'http://localhost:8080'
 const FIXTURE_TARGET = process.env.SHAKERSCAN_E2E_HUNT_TARGET
+  || process.env.SHAKERSCAN_E2E_DAST_TARGET
   || 'http://host.docker.internal:18099'
 
 

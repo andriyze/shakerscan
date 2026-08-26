@@ -160,7 +160,15 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
     assert "npm --prefix ui run test:unit" in full_e2e
     assert "npm --prefix ui run test:browser" in full_e2e
     assert 'PLAYWRIGHT_REAL_STACK: "1"' in full_e2e
+    assert "SHAKERSCAN_E2E_SCAN_TARGET: http://juice-shop:3000" in full_e2e
+    assert "SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000" in full_e2e
     assert "artifacts/playwright.json" in full_e2e
+
+    installed_smoke = (ROOT / "scripts" / "installed_stack_smoke.sh").read_text(
+        encoding="utf-8",
+    )
+    assert 'SHAKERSCAN_E2E_SCAN_TARGET="http://juice-shop:3000"' in installed_smoke
+    assert 'SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000"' in installed_smoke
 
 
 def test_release_candidate_requires_candidate_image_external_wire_acceptance():

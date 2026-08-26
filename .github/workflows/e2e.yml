@@ -26,6 +26,8 @@ jobs:
       # Juice Shop shares the Compose network with the scanner worker. Do not
       # route active scans through the runner host gateway.
       SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
+      SHAKERSCAN_E2E_SCAN_TARGET: http://juice-shop:3000
+      SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
       MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
@@ -93,7 +95,6 @@ jobs:
         env:
           PLAYWRIGHT_REAL_STACK: "1"
           SHAKERSCAN_API_URL: http://localhost:8080
-          SHAKERSCAN_E2E_HUNT_TARGET: http://host.docker.internal:18099
         run: |
           npm --prefix ui ci
           npm --prefix ui run test:unit

@@ -22,6 +22,7 @@ from pathlib import Path
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+import urllib.parse
 
 try:
     from . import harness as H
@@ -839,6 +840,10 @@ def run_ai_gate() -> H.Scorecard:
 
 
 JUICE_SHOP = os.environ.get("SHAKERSCAN_E2E_DAST_TARGET", f"http://{HONEY_HOST}:3001")
+HUNT_WEB_TARGET = os.environ.get(
+    "SHAKERSCAN_E2E_HUNT_TARGET",
+    os.environ.get("SHAKERSCAN_E2E_DAST_TARGET", FIXTURES_BASE),
+)
 
 
 def _dast_fixture_authority(
@@ -1149,7 +1154,11 @@ def run_hunt() -> H.Scorecard:
     print("\n== Hunt V2 e2e ==", flush=True)
     target_id = scope_id = approval_id = ""
     try:
-        target_id, scope_id, approval_id = _hunt_fixture_authority()
+        hunt_host = urllib.parse.urlsplit(HUNT_WEB_TARGET).hostname or HONEY_HOST
+        target_id, scope_id, approval_id = _hunt_fixture_authority(
+            HUNT_WEB_TARGET,
+            allowed_host=hunt_host,
+        )
     except Exception as exc:
         sc.error("H-0 target-bound fixture authority", exc)
         return sc
