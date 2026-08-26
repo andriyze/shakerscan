@@ -6257,3 +6257,11 @@ def _research_family_scope_keys(family: Any) -> set[str]:
 
 
 
+@router.post("/experiments/workflows/{workflow_id}/cancel")
+async def cancel_workflow_experiment(workflow_id: str):
+    workflow_uuid = _uuid_or_400(workflow_id, "workflow id")
+    event = _active_workflow_cancellations.get(str(workflow_uuid))
+    if not event:
+        raise HTTPException(status_code=404, detail="Active workflow not found")
+    event.set()
+    return {"workflow_id": str(workflow_uuid), "cancel_requested": True, "finding_created": False}

@@ -5678,3 +5678,11 @@ def _application_graph_context_for_hypotheses(
         "missing_graph_target_ids": missing_graph_target_ids,
         "truncated": len(target_order) > bounded_targets,
     }
+@router.get("/asm/check-families")
+async def asm_check_families():
+    """Return the registered check-family contract for API/UI/AI clients."""
+    return {
+        "families": check_registry.describe_check_families(),
+        "asm_focus_allowed": list(check_registry.asm_focus_family_names()),
+        "default": "all",
+    }
