@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import sys
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
@@ -104,11 +108,11 @@ def test_zero_ceiling_removes_capabilities_that_require_that_dimension():
 
 def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     root = Path(__file__).resolve().parents[1]
-    api = (root / "api" / "api.py").read_text()
+    api = api_tree_source()
     migration = (root / "api" / "retest_contract.py").read_text()
 
-    assert 'app.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")' in api
-    assert 'app.post("/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")' in api
+    assert route_is_declared("POST", "/hunts/{hunt_id}/capabilities/{capability_name:path}")
+    assert route_is_declared("POST", "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")
     assert "capability_name=name" in api
     assert "adapter_name=str(spec.adapter)" in api
     assert '"used_after_reconciliation": reconciled_used' in api

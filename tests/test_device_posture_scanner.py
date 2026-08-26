@@ -1,6 +1,10 @@
 import asyncio
 import os
 import sys
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 from pathlib import Path
 
 import pytest
@@ -810,7 +814,7 @@ def test_device_worker_deployment_is_isolated_from_web_dast():
 def test_device_inventory_only_retires_services_after_matching_complete_coverage():
     root = Path(__file__).resolve().parents[1]
     worker = (root / "api" / "worker.py").read_text(encoding="utf-8")
-    api = (root / "api" / "api.py").read_text(encoding="utf-8")
+    api = api_tree_source()
 
     assert 'completeness.get("complete") and completeness.get("tcp_scope") == "all_65535"' in worker
     assert 'completeness.get("udp_discovery_complete") and udp_ports_requested' in worker

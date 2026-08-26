@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.api_sources import declared_routes, route_is_declared
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
@@ -64,11 +66,19 @@ def test_legacy_scan_writes_are_removed_and_canonical_clients_do_not_use_them():
     assert not (root / ".claude" / "commands" / "scan-full.md").exists()
     assert not (root / ".claude" / "commands" / "scan-smart.md").exists()
 
-    api_source = (root / "api" / "api.py").read_text()
-    assert '@app.post("/scans/compat"' not in api_source
-    assert '@app.post("/scans/compat/batch"' not in api_source
-    assert '@app.post("/api/v1/scan"' not in api_source
-    assert '@app.get("/api/v1/scan"' in api_source
+    # Disposition contract for the deprecated surfaces: no writes anywhere under
+    # api/, and exactly the bounded V1 reads that installed clients still need.
+    assert not route_is_declared("POST", "/scans/compat")
+    assert not route_is_declared("POST", "/scans/compat/batch")
+    assert not route_is_declared("POST", "/api/v1/scan")
+    assert route_is_declared("GET", "/api/v1/scan")
+    surviving_v1 = sorted(
+        (method, path)
+        for method, path in declared_routes("/api/v1")
+    )
+    assert all(method == "GET" for method, _ in surviving_v1), (
+        f"a non-read V1 route survives: {surviving_v1}"
+    )
 
     cli_source = (root / "scripts" / "scan_cli.py").read_text()
     ui_source = "\n".join(

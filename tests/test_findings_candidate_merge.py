@@ -215,9 +215,7 @@ def test_auto_verify_limit_is_raised_to_eight():
 
 
 def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_surface():
-    source = api_tree_source()
-    endpoint = source[source.index('@app.get("/findings")'):]
-    endpoint = endpoint[:endpoint.index('def _public_evidence_object_row')]
+    endpoint = route_source("GET", "/findings")
 
     assert "include_candidates: bool = False" in endpoint
     assert '"include_candidates"' in endpoint

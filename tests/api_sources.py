@@ -118,3 +118,10 @@ def route_defining_file(method: str, path: str) -> Path:
     entry = _route_index().get(key)
     assert entry is not None, f"no handler under api/ declares {method.upper()} {path}"
     return Path(entry[0])
+
+
+def declared_routes(prefix: str = "") -> tuple[tuple[str, str], ...]:
+    """Every (METHOD, path) the api tree declares, optionally filtered by prefix."""
+    return tuple(sorted(
+        key for key in _route_index() if key[1].startswith(prefix)
+    ))
