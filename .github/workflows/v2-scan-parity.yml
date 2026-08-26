@@ -43,6 +43,22 @@ jobs:
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 
+      - name: Publish parity identity receipt
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          resolved="$(git rev-parse HEAD)"
+          printf '{"candidate_sha":"%s","resolved_head_sha":"%s"}\n' \
+            "$CANDIDATE_SHA" "$resolved" > parity-identity.json
+
+      - name: Upload parity identity receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: parity-identity-${{ inputs.candidate_sha }}
+          path: parity-identity.json
+          if-no-files-found: error
+
       - name: Run non-skippable real Scan parity
         shell: bash
         env:
