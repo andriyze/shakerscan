@@ -13,4 +13,3 @@ test('device collection previews are loaded from the detail endpoint on demand',
   assert.match(apiClient, /request-collections\/\$\{encodeURIComponent\(collectionId\)\}/)
   assert.match(apiClient, /summary\.requests_preview/)
 })
-

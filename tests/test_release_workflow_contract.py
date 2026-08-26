@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE = ROOT / ".github" / "workflows" / "release-candidate.yml"
 PROMOTION = ROOT / ".github" / "workflows" / "release.yml"
 STABLE = ROOT / ".github" / "workflows" / "promote-stable.yml"
+CODEQL = ROOT / ".github" / "workflows" / "codeql.yml"
 
 
 def test_candidate_build_cannot_publish_release_or_stable_aliases():
@@ -30,6 +31,16 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert "scripts/certify_release_receipt.py" in text
     assert "INSTALLED_STACK_SMOKE_E2E" in text
     assert "CANDIDATE_IMAGE_DIGEST" in text
+
+
+def test_codeql_matrix_concurrency_is_scoped_to_the_matrix_job():
+    text = CODEQL.read_text(encoding="utf-8")
+    job_marker = "  analyze:\n"
+    job_start = text.index(job_marker)
+
+    assert "concurrency:" not in text[:job_start]
+    assert "    concurrency:\n" in text[job_start:]
+    assert "group: codeql-${{ github.ref }}-${{ matrix.language }}" in text[job_start:]
 
 
 def test_release_promotion_reuses_candidate_digests_without_physical_gate():
