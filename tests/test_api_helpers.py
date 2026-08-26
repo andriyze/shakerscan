@@ -28,7 +28,7 @@ import pytest
 def test_persist_env_updates_is_atomic_and_owner_only(tmp_path):
     env_path = tmp_path / ".env"
 
-    ok, message = api_module._persist_env_updates(env_path, {"OPENAI_API_KEY": "secret-value"})
+    ok, message = settings_router_module._persist_env_updates(env_path, {"OPENAI_API_KEY": "secret-value"})
 
     assert ok is True
     assert "secret-value" not in message
@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from settings_routes import router as settings_router_module  # noqa: E402
 from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
 from ai_targets import router as ai_router_module  # noqa: E402
@@ -15086,7 +15087,7 @@ def test_mass_assignment_template_carries_generic_forbidden_field_candidates():
 
 
 def test_planner_sends_only_the_most_provable_family_template():
-    templates = api_module._research_selected_experiment_templates({
+    templates = settings_router_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [
             {
                 "family": "mass_assignment",
@@ -15104,7 +15105,7 @@ def test_planner_sends_only_the_most_provable_family_template():
     })
     assert set(templates) == {"bola"}
 
-    patch_template = api_module._research_selected_experiment_templates({
+    patch_template = settings_router_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [{
             "family": "mass_assignment",
             "method": "PUT",
@@ -15122,7 +15123,7 @@ def test_planner_sends_only_the_most_provable_family_template():
 def test_create_based_mass_assignment_gets_the_create_template_and_normalizes():
     import workflow_experiment
     # A POST create with a paired object read-back AND delete-cleanup route gets the create template.
-    create = api_module._research_selected_experiment_templates({
+    create = settings_router_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [{
             "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
             "create_based": True, "readback_route": "/api/Users/{id}", "cleanup_route": "/api/Users/{id}",
@@ -15140,7 +15141,7 @@ def test_create_based_mass_assignment_gets_the_create_template_and_normalizes():
     # A create with a read-back but NO discovered cleanup route STILL gets the create template:
     # restoration is best-effort (the template always attempts a DELETE; the two-run proof accepts an
     # unrestorable create). A missing DELETE only leaves a labeled test object, not a soundness gap.
-    no_cleanup = api_module._research_selected_experiment_templates({
+    no_cleanup = settings_router_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [{
             "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
             "create_based": True, "readback_route": "/api/Users/{id}", "provability_score": 8,
@@ -15150,7 +15151,7 @@ def test_create_based_mass_assignment_gets_the_create_template_and_normalizes():
     assert no_cleanup["mass_assignment"]["steps"][0]["label"] == "list_before"
 
     # A POST create WITHOUT a paired read-back still gets nothing -- the read-back is essential.
-    none = api_module._research_selected_experiment_templates({
+    none = settings_router_module._research_selected_experiment_templates({
         "selected_hypothesis_contracts": [{
             "family": "mass_assignment", "method": "POST", "available_methods": ["POST"],
             "provability_score": 2, "provability_blockers": ["readback_route_missing"],
@@ -15265,8 +15266,9 @@ def test_research_provider_probe_exercises_server_bound_action_contract(monkeypa
         "ai_model_fallback": "",
     })
     monkeypatch.setattr(api_module, "_load_research_ai_provider", lambda: fake_provider)
+    monkeypatch.setattr(settings_router_module, "_load_research_ai_provider", lambda: fake_provider)
 
-    result = asyncio.run(api_module.test_ai_settings(
+    result = asyncio.run(settings_router_module.test_ai_settings(
         api_module.AISettingsProbeRequest(scope="research")
     ))
 
@@ -16282,7 +16284,7 @@ def test_research_readiness_exposes_agent_default_without_configured_provider(mo
 
 
 def test_automation_settings_expose_persisted_research_planner_default():
-    payload = api_module._sanitize_automation_settings_response(
+    payload = settings_router_module._sanitize_automation_settings_response(
         automation={
             "default_asm_enabled": True,
             "default_asm_config": {},
@@ -17302,7 +17304,7 @@ def test_research_planner_never_semantically_guesses_active_command():
         "expected_signal": "Active endpoint test results for gaps", "falsifier": "No tests run",
     }
 
-    assert api_module._infer_blank_read_only_command(response, observation) is None
+    assert settings_router_module._infer_blank_read_only_command(response, observation) is None
 
 
 def test_research_planner_rejection_feedback_is_bounded_for_next_observation():

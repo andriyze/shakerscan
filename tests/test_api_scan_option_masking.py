@@ -80,6 +80,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from settings_routes import router as settings_router_module  # noqa: E402
 from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
 from ai_targets import router as ai_router_module  # noqa: E402
@@ -1587,7 +1588,7 @@ def _resolve_auto_shard_policy(options):
 def test_auto_sharding_defaults_disabled_for_fresh_installs(monkeypatch):
     monkeypatch.delenv("AUTO_SHARDING_ENABLED", raising=False)
 
-    settings = api_module._default_scan_execution_settings()
+    settings = settings_router_module._default_scan_execution_settings()
 
     assert settings["auto_sharding_enabled"] is False
 
@@ -1595,7 +1596,7 @@ def test_auto_sharding_defaults_disabled_for_fresh_installs(monkeypatch):
 def test_auto_sharding_env_can_disable_default(monkeypatch):
     monkeypatch.setenv("AUTO_SHARDING_ENABLED", "false")
 
-    settings = api_module._default_scan_execution_settings()
+    settings = settings_router_module._default_scan_execution_settings()
 
     assert settings["auto_sharding_enabled"] is False
 
@@ -1675,8 +1676,9 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(durable_conn))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 5)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 5)
 
-    result = asyncio.run(api_module.update_automation_settings(
+    result = asyncio.run(settings_router_module.update_automation_settings(
         api_module.AutomationSettingsUpdate(
             auto_sharding_enabled=False,
             auto_sharding_strategy="coverage",
@@ -1686,7 +1688,7 @@ def test_update_automation_settings_writes_scan_and_safe_asm_defaults(monkeypatc
         )
     ))
 
-    scan_store = redis_client.store[api_module.SCAN_SETTINGS_KEY]
+    scan_store = redis_client.store[settings_router_module.SCAN_SETTINGS_KEY]
     automation_store = redis_client.store[api_module.AUTOMATION_SETTINGS_KEY]
     stored_asm_config = json.loads(automation_store["default_asm_config"])
     assert scan_store["auto_sharding_enabled"] == "false"
@@ -1726,7 +1728,7 @@ def test_update_automation_settings_merges_partial_asm_config(monkeypatch):
     )
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
 
-    result = asyncio.run(api_module.update_automation_settings(
+    result = asyncio.run(settings_router_module.update_automation_settings(
         api_module.AutomationSettingsUpdate(default_asm_config={"batch_size": 100})
     ))
 
@@ -1745,7 +1747,7 @@ def test_approval_receipt_policy_defaults_to_compatibility_mode(monkeypatch):
     redis_client = _AutomationSettingsRedis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
 
-    response = api_module._sanitize_automation_settings_response()
+    response = settings_router_module._sanitize_automation_settings_response()
 
     assert response["safety_boundaries"]["approval_receipts_required_for_state_changing_actions"] is False
 
@@ -1836,7 +1838,9 @@ def test_approval_receipt_policy_durable_postgres_is_authoritative(monkeypatch):
 
 def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(False))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(False))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
 
     _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
@@ -1848,7 +1852,9 @@ def test_auto_sharding_setting_disabled_keeps_smart_scan_standalone(monkeypatch)
 
 def test_auto_sharding_uses_coverage_for_active_scan_when_enabled(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 6)
 
     _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
@@ -1868,6 +1874,7 @@ def test_auto_sharding_honors_explicit_family_strategy(monkeypatch):
         lambda: _auto_shard_settings(True, auto_sharding_strategy="family"),
     )
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 6)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 6)
 
     _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
@@ -1880,7 +1887,9 @@ def test_auto_sharding_honors_explicit_family_strategy(monkeypatch):
 
 def test_auto_sharding_uses_scope_for_explicit_endpoint_list(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
 
     _, payload, enabled, _ = _resolve_auto_shard_policy(api_module.ScanOptions(
         scan_type="standard",
@@ -1896,7 +1905,9 @@ def test_auto_sharding_uses_scope_for_explicit_endpoint_list(monkeypatch):
 
 def test_explicit_parallel_false_overrides_global_auto_sharding(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
 
     _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough", parallel=False))
 
@@ -1908,7 +1919,9 @@ def test_explicit_parallel_false_overrides_global_auto_sharding(monkeypatch):
 
 def test_explicit_parallel_true_overrides_worker_minimum(monkeypatch):
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 1)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 1)
 
     _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough", parallel=True))
 
@@ -1966,6 +1979,7 @@ def test_auto_sharding_skips_when_known_worker_count_is_below_minimum(monkeypatc
         lambda: _auto_shard_settings(True, auto_sharding_min_workers=2),
     )
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 1)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 1)
 
     _, payload, enabled, worker_count = _resolve_auto_shard_policy(api_module.ScanOptions(budget_profile="thorough"))
 
@@ -3306,7 +3320,7 @@ def test_demo_request_template_preserves_mcp_shape_and_injects_prompt():
 
 
 def test_sanitize_ai_settings_includes_demo_fields():
-    settings = api_module._sanitize_ai_settings_response({
+    settings = settings_router_module._sanitize_ai_settings_response({
         "demo_mode_enabled": True,
         "demo_honey_public_url": "https://honey.example",
         "demo_honey_scanner_url": "http://host.docker.internal:18080",
@@ -3318,7 +3332,7 @@ def test_sanitize_ai_settings_includes_demo_fields():
 
 
 def test_sanitize_ai_settings_leaves_demo_urls_empty_by_default():
-    settings = api_module._sanitize_ai_settings_response({})
+    settings = settings_router_module._sanitize_ai_settings_response({})
 
     assert settings["demo_mode_enabled"] is False
     assert settings["demo_honey_public_url"] == ""
@@ -3671,7 +3685,9 @@ def test_public_huggingface_resolver_failure_cannot_return_forged_complete_manif
 def test_focused_family_runs_direct_without_explicit_parallel(monkeypatch):
     # check_family=sqli, parallel omitted -> NOT auto-sharded into coverage; runs direct.
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
     _, payload, enabled, _ = _resolve_auto_shard_policy(
         api_module.ScanOptions(scan_type="smart", check_family="sqli")
     )
@@ -3683,7 +3699,9 @@ def test_focused_family_explicit_parallel_uses_coverage_family_not_coverage(monk
     # parallel:true + check_family=sqli must fan out as coverage_family (single-family
     # lanes), never broad coverage which dilutes/skips the requested family.
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
     _, payload, enabled, _ = _resolve_auto_shard_policy(
         api_module.ScanOptions(scan_type="smart", check_family="sqli", parallel=True)
     )
@@ -3696,7 +3714,9 @@ def test_focused_family_explicit_coverage_strategy_redirected_to_coverage_family
     # Explicit shard_strategy=coverage + a focused family is redirected so the
     # focused family is not diluted by broad lanes.
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
     _, payload, _, _ = _resolve_auto_shard_policy(
         api_module.ScanOptions(scan_type="smart", check_family="sqli", parallel=True, shard_strategy="coverage")
     )
@@ -3707,7 +3727,9 @@ def test_focused_family_with_endpoint_list_uses_scope_not_coverage(monkeypatch):
     # custom_endpoints partition by scope; each shard still runs the focused family,
     # so this is fine (no dilution) — but it must be scope, not broad coverage.
     monkeypatch.setattr(api_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
+    monkeypatch.setattr(settings_router_module, "_load_effective_scan_execution_settings", lambda: _auto_shard_settings(True))
     monkeypatch.setattr(api_module, "_running_scan_worker_count_best_effort", lambda: 4)
+    monkeypatch.setattr(settings_router_module, "_running_scan_worker_count_best_effort", lambda: 4)
     _, payload, enabled, _ = _resolve_auto_shard_policy(
         api_module.ScanOptions(
             scan_type="smart", check_family="sqli",
