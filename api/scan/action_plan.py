@@ -823,7 +823,7 @@ class ScanActionPlanCompiler:
                     },
                     required=True,
                 )
-        if scope in {"full", "global", "discovery"}:
+        if scope in {"full", "discovery"}:
             add(
                 "discover.web_probe",
                 "discover_surface",
@@ -836,7 +836,7 @@ class ScanActionPlanCompiler:
 
         crawl_required = bool(explicitly_requested) and needs_candidates and not endpoint_ref and not candidate_ref
         if (
-            scope in {"full", "global", "discovery"}
+            scope in {"full", "discovery"}
             and (self._family_enabled(execution_plan, "recon") or needs_candidates)
         ):
             add(
@@ -856,7 +856,7 @@ class ScanActionPlanCompiler:
                     {"target_manifest_ref": endpoint_ref or None},
                     dependencies=("discover.web_probe",),
                 )
-        if scope in {"full", "global", "discovery"} and policy.subdomain_discovery:
+        if scope in {"full", "discovery"} and policy.subdomain_discovery:
             add(
                 "discover.subdomains",
                 "discover_surface",
@@ -865,7 +865,7 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
-        if scope in {"full", "global", "discovery"} and policy.network_discovery:
+        if scope in {"full", "discovery"} and policy.network_discovery:
             add(
                 "discover.ports",
                 "discover_network",
