@@ -35,11 +35,12 @@ FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
 # These packages define the canonical V2 authority and executable capability surface. A worker
 # running stale code in any one of them must never advertise the same build fingerprint.
 V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
+    "ai_targets",
     "capabilities",
     "devices",
     "exposure",
     "finding_exceptions",
-    "findings",
+    "finding_routes",
     "hunt",
     "interactive",
     "policy_profiles",

@@ -80,8 +80,9 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from ai_targets import router as ai_router_module  # noqa: E402
 from targets import router as targets_router_module  # noqa: E402
-from findings import router as findings_router_module  # noqa: E402
+from finding_routes import router as findings_router_module  # noqa: E402
 
 
 def test_request_collection_binding_rejects_cross_target_origins():
@@ -549,7 +550,7 @@ def test_asm_domain_rate_reservation_uses_root_domain_key():
 
 
 def test_ai_production_scan_requires_explicit_confirmation():
-    reason = api_module._ai_production_confirmation_reason
+    reason = ai_router_module._ai_production_confirmation_reason
     # production target OR production environment, without confirmation -> refused
     assert reason(True, "staging", False) is not None
     assert reason(False, "production", False) is not None
@@ -755,8 +756,8 @@ def test_post_scans_policy_applies_registry_scanner_options():
 
 
 def test_ai_ops_router_full_coverage_is_dry_run_by_default():
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Run full coverage on this target",
             target="https://example.test",
         )
@@ -794,8 +795,8 @@ def test_ai_ops_router_full_coverage_is_dry_run_by_default():
 ])
 def test_ai_ops_router_translates_natural_language_to_canonical_scan(scan_type, budget, active):
     target = "http://169.254.169.254/latest/meta-data/"
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt=f"Run a {scan_type} scan",
             target=target,
         )
@@ -819,15 +820,15 @@ def test_ai_ops_router_translates_natural_language_to_canonical_scan(scan_type, 
 
 def test_ai_ops_router_unqualified_scan_defaults_to_quick_without_conflating_deep_hunt():
     target = "http://host.docker.internal:3001"
-    default_plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(prompt="Scan this target", target=target)
+    default_plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(prompt="Scan this target", target=target)
     )
     assert default_plan["intent"] == "run_dast_quick"
     assert default_plan["planned_api_call"]["body"]["budget_profile"] == "fast"
     assert default_plan["planned_api_call"]["body"]["policy"]["active_testing"] is False
 
-    hunt_plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(prompt="Deep Hunt this target", target=target)
+    hunt_plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(prompt="Deep Hunt this target", target=target)
     )
     assert hunt_plan["intent"] == "unknown"
     assert hunt_plan["planned_api_call"] is None
@@ -844,8 +845,8 @@ def test_ai_ops_router_unqualified_scan_defaults_to_quick_without_conflating_dee
 )
 def test_ai_ops_router_scan_word_does_not_shadow_more_specific_intents(prompt, expected_intent):
     target_id = str(uuid.uuid4())
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(prompt=prompt, target_id=target_id)
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(prompt=prompt, target_id=target_id)
     )
 
     assert plan["intent"] == expected_intent
@@ -856,8 +857,8 @@ def test_ai_ops_router_scan_word_does_not_shadow_more_specific_intents(prompt, e
 def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter(monkeypatch):
     monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
     target_id = str(uuid.uuid4())
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Spend more budget on APIs",
             target_id=target_id,
             execute=True,
@@ -884,8 +885,8 @@ def test_ai_ops_router_scopes_api_budget_raise_to_api_endpoint_filter(monkeypatc
 
 def test_ai_ops_router_bola_requires_auth_context_and_high_risk_confirmation():
     target_id = str(uuid.uuid4())
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Only retest BOLA tonight",
             target_id=target_id,
         )
@@ -905,8 +906,8 @@ def test_ai_ops_router_bola_requires_auth_context_and_high_risk_confirmation():
 
 def test_ai_ops_router_sqli_focus_does_not_upgrade_to_lab():
     target_id = str(uuid.uuid4())
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Only retest SQL injection tonight",
             target_id=target_id,
         )
@@ -924,8 +925,8 @@ def test_ai_ops_router_sqli_focus_does_not_upgrade_to_lab():
 
 def test_ai_ops_router_auth_focus_requires_primary_auth_context():
     target_id = str(uuid.uuid4())
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Retest anonymous access and authentication bypasses",
             target_id=target_id,
         )
@@ -944,8 +945,8 @@ def test_ai_ops_router_auth_focus_requires_primary_auth_context():
 
 def test_ai_ops_router_bola_execute_requires_high_risk_confirmation(monkeypatch):
     monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "true")
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Only retest BOLA tonight",
             target_id=str(uuid.uuid4()),
             auth_context={"has_primary_auth": True, "has_second_user_auth": True},
@@ -962,8 +963,8 @@ def test_ai_ops_router_bola_execute_requires_high_risk_confirmation(monkeypatch)
 
 def test_ai_ops_router_execute_respects_explicitly_disabled_feature_flag(monkeypatch):
     monkeypatch.setenv("AI_OPS_ROUTER_EXECUTE_ENABLED", "false")
-    plan = api_module._build_ai_ops_router_plan(
-        api_module.AIOpsRouterRequest(
+    plan = ai_router_module._build_ai_ops_router_plan(
+        ai_router_module.AIOpsRouterRequest(
             prompt="Run full coverage",
             target="https://example.test",
             execute=True,
@@ -996,8 +997,8 @@ def test_ai_ops_router_execute_full_coverage_when_confirmed(monkeypatch):
     monkeypatch.setattr(api_module, "submit_scan", fake_submit_scan)
 
     result = asyncio.run(
-        api_module.ai_ops_route(
-            api_module.AIOpsRouterRequest(
+        ai_router_module.ai_ops_route(
+            ai_router_module.AIOpsRouterRequest(
                 prompt="Run full coverage on this target",
                 target="https://example.test",
                 execute=True,
@@ -1030,8 +1031,8 @@ def test_ai_ops_router_executes_exact_dast_type_when_confirmed(monkeypatch):
     monkeypatch.setattr(api_module, "submit_scan", fake_submit_scan)
 
     result = asyncio.run(
-        api_module.ai_ops_route(
-            api_module.AIOpsRouterRequest(
+        ai_router_module.ai_ops_route(
+            ai_router_module.AIOpsRouterRequest(
                 prompt="Run a deep scan",
                 target="http://host.docker.internal:3001",
                 execute=True,
@@ -1068,8 +1069,8 @@ def test_ai_ops_router_execute_api_budget_when_confirmed(monkeypatch):
     monkeypatch.setattr(targets_router_module, "asm_improve", fake_asm_improve)
 
     result = asyncio.run(
-        api_module.ai_ops_route(
-            api_module.AIOpsRouterRequest(
+        ai_router_module.ai_ops_route(
+            ai_router_module.AIOpsRouterRequest(
                 prompt="Spend more budget on APIs",
                 target_id=target_id,
                 execute=True,
@@ -2615,14 +2616,14 @@ def test_build_ai_worker_options_records_production_confirmation():
         "production_mode": False,
         "metadata_json": {},
     }
-    request = api_module.AITargetScanRequest(
+    request = ai_router_module.AITargetScanRequest(
         probe_pack="shaker-ai-smoke",
         scan_profile="smoke",
         environment="production",
         confirm_production=True,
     )
 
-    worker_options, storage_options = api_module._build_ai_worker_options(
+    worker_options, storage_options = ai_router_module._build_ai_worker_options(
         target=target,
         credential_profile_ref={
             "profile_id": "11111111-1111-4111-8111-111111111111",
@@ -2663,14 +2664,14 @@ def test_build_ai_worker_options_uses_principal_refs_without_secrets():
         "production_mode": False,
         "metadata_json": {},
     }
-    request = api_module.AITargetScanRequest(
+    request = ai_router_module.AITargetScanRequest(
         probe_pack="shaker-rag-lite",
         scan_profile="standard",
         environment="staging",
     )
     principal_id = uuid.uuid4()
 
-    worker_options, storage_options = api_module._build_ai_worker_options(
+    worker_options, storage_options = ai_router_module._build_ai_worker_options(
         target=target,
         credential_profile_ref=None,
         request=request,
@@ -2736,9 +2737,11 @@ def test_ai_gate_credential_admission_freezes_generic_versions_without_secrets(m
         async def get_profile(self, _conn, *, profile_id):
             return profiles[str(profile_id)]
 
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "_generic_credential_store", Store())
+    monkeypatch.setattr(ai_router_module, "_generic_credential_store", Store())
     default_ref, principal_refs = asyncio.run(
-        api_module._resolve_ai_gate_credential_refs(
+        ai_router_module._resolve_ai_gate_credential_refs(
             object(),
             target_id=target_id,
             credential_row={"id": default_id, "auth_kind": "query_param"},
@@ -2842,14 +2845,14 @@ def test_ai_gate_credential_queue_requires_bound_expiring_credential_approval(mo
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
     monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
-    monkeypatch.setattr(api_module, "_resolve_ai_gate_credential_refs", resolve_refs)
+    monkeypatch.setattr(ai_router_module, "_resolve_ai_gate_credential_refs", resolve_refs)
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", validate)
     monkeypatch.setattr(api_module, "_record_command_result", record)
     monkeypatch.setattr(api_module, "enqueue_job", enqueue)
 
-    result = asyncio.run(api_module._queue_ai_target_scan(
+    result = asyncio.run(ai_router_module._queue_ai_target_scan(
         str(target_id),
-        api_module.AITargetScanRequest(
+        ai_router_module.AITargetScanRequest(
             probe_pack="shaker-ai-smoke",
             scan_profile="smoke",
             environment="staging",
@@ -2914,12 +2917,12 @@ class _AIPreflightPool:
     ("endpoint", "payload"),
     [
         (
-            api_module.test_ai_target_connectivity,
-            api_module.AITargetConnectivityTestRequest(),
+            ai_router_module.test_ai_target_connectivity,
+            ai_router_module.AITargetConnectivityTestRequest(),
         ),
         (
-            api_module.test_ai_target_mcp_live_readiness,
-            api_module.AIMCPLiveReadinessRequest(),
+            ai_router_module.test_ai_target_mcp_live_readiness,
+            ai_router_module.AIMCPLiveReadinessRequest(),
         ),
     ],
 )
@@ -2967,15 +2970,15 @@ def test_anonymous_ai_connectivity_preflight_remains_available(monkeypatch):
         captured["kwargs"] = kwargs
         return {"ok": True, "stage": "complete"}
 
-    monkeypatch.setattr(api_module, "_run_ai_target_connectivity_probe", run_probe)
+    monkeypatch.setattr(ai_router_module, "_run_ai_target_connectivity_probe", run_probe)
 
-    result = asyncio.run(api_module.test_ai_target_connectivity(
+    result = asyncio.run(ai_router_module.test_ai_target_connectivity(
         "00000000-0000-4000-8000-000000000001",
-        api_module.AITargetConnectivityTestRequest(prompt="safe probe"),
+        ai_router_module.AITargetConnectivityTestRequest(prompt="safe probe"),
     ))
 
     assert result["ok"] is True
-    assert captured["target"]["credential"] == api_module._anonymous_ai_runtime_credential()
+    assert captured["target"]["credential"] == ai_router_module._anonymous_ai_runtime_credential()
     assert captured["kwargs"]["prompt"] == "safe probe"
 
 
@@ -2998,7 +3001,7 @@ def test_build_ai_finding_retest_options_focuses_original_probe():
     }
     finding_id = uuid.uuid4()
 
-    worker_options, storage_options, replay_plan = api_module._build_ai_finding_retest_scan_options(
+    worker_options, storage_options, replay_plan = ai_router_module._build_ai_finding_retest_scan_options(
         target=target,
         credential_profile_ref=None,
         finding={
@@ -3014,7 +3017,7 @@ def test_build_ai_finding_retest_options_focuses_original_probe():
             "ai_scan_profile": "smoke",
             "ai_environment": "staging",
         },
-        request=api_module.AIFindingRetestRequest(mode="same_probe", requested_by="test"),
+        request=ai_router_module.AIFindingRetestRequest(mode="same_probe", requested_by="test"),
         verification_id=uuid.uuid4(),
     )
 
@@ -3264,7 +3267,7 @@ def test_ai_demo_target_detection_uses_structured_metadata_only():
 
 
 def test_demo_target_url_rewrites_base_and_adds_calibration_query():
-    rewritten = api_module._demo_target_url(
+    rewritten = ai_router_module._demo_target_url(
         "https://honey.shakerscan.com/api/v1/mcp/trace?existing=1",
         "http://host.docker.internal:18080/",
         "demo-123",
@@ -3279,7 +3282,7 @@ def test_demo_target_url_rewrites_base_and_adds_calibration_query():
 
 def test_demo_request_template_preserves_mcp_shape_and_injects_prompt():
     template = {"jsonrpc": "2.0", "id": "fixed", "method": "tools/list", "params": {"scenario_id": "x"}}
-    rewritten = api_module._demo_request_template_with_prompt(template, "mcp")
+    rewritten = ai_router_module._demo_request_template_with_prompt(template, "mcp")
 
     assert rewritten["id"] == "fixed"
     assert rewritten["params"]["scenario_id"] == "x"
@@ -3305,7 +3308,7 @@ def test_sanitize_ai_settings_leaves_demo_urls_empty_by_default():
     assert settings["demo_mode_enabled"] is False
     assert settings["demo_honey_public_url"] == ""
     assert settings["demo_honey_scanner_url"] == ""
-    assert api_module._normalize_demo_base_url("") == ""
+    assert ai_router_module._normalize_demo_base_url("") == ""
 
 
 def test_huggingface_model_info_requests_lfs_blob_metadata(monkeypatch):

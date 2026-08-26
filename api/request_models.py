@@ -382,3 +382,5 @@ class ScanPublicPlacement(BaseModel):
     node_id: Optional[str] = Field(default=None, min_length=1, max_length=160)
     node_scope: Optional[Literal["local", "remote"]] = None
     requires: list[str] = Field(default_factory=list, max_length=32)
+class ScanRequest(_ScanRequestBase):
+    """Canonical secret-free Scan submission using only durable references."""

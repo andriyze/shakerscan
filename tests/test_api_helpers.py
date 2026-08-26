@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from ai_targets import router as ai_router_module  # noqa: E402
 from targets import router as targets_router_module  # noqa: E402
 import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
@@ -3938,7 +3939,7 @@ def test_asm_campaign_timeline_routes_auth_blockers_to_prefilled_session():
 
 
 def test_ai_scan_replay_plan_selects_skipped_probe_ids():
-    plan = api_module._build_ai_scan_replay_plan(
+    plan = ai_router_module._build_ai_scan_replay_plan(
         {
             "ai_gate": {
                 "probe_pack": "shaker-rag-lite",
@@ -3953,7 +3954,7 @@ def test_ai_scan_replay_plan_selects_skipped_probe_ids():
                 },
             }
         },
-        api_module.AIScanReplayRequest(mode="skipped"),
+        ai_router_module.AIScanReplayRequest(mode="skipped"),
     )
 
     assert plan["probe_ids"] == ["rag-1", "mcp-1"]
@@ -3963,7 +3964,7 @@ def test_ai_scan_replay_plan_selects_skipped_probe_ids():
 
 
 def test_ai_scan_replay_plan_selects_errored_family():
-    plan = api_module._build_ai_scan_replay_plan(
+    plan = ai_router_module._build_ai_scan_replay_plan(
         {
             "ai_gate": {
                 "coverage_matrix": {
@@ -3976,7 +3977,7 @@ def test_ai_scan_replay_plan_selects_errored_family():
                 },
             }
         },
-        api_module.AIScanReplayRequest(mode="errors"),
+        ai_router_module.AIScanReplayRequest(mode="errors"),
     )
 
     assert plan["probe_family"] == "mcp"
@@ -3985,7 +3986,7 @@ def test_ai_scan_replay_plan_selects_errored_family():
 
 def test_ai_scan_replay_plan_rejects_unknown_family():
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._build_ai_scan_replay_plan(
+        ai_router_module._build_ai_scan_replay_plan(
             {
                 "ai_gate": {
                     "coverage_matrix": {
@@ -3993,7 +3994,7 @@ def test_ai_scan_replay_plan_rejects_unknown_family():
                     },
                 }
             },
-            api_module.AIScanReplayRequest(mode="family", probe_family="mcp"),
+            ai_router_module.AIScanReplayRequest(mode="family", probe_family="mcp"),
         )
 
     assert exc.value.status_code == 400
@@ -4002,9 +4003,9 @@ def test_ai_scan_replay_plan_rejects_unknown_family():
 
 def test_ai_scan_replay_plan_rejects_non_ai_gate_result():
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._build_ai_scan_replay_plan(
+        ai_router_module._build_ai_scan_replay_plan(
             {"result": {"score": 90}},
-            api_module.AIScanReplayRequest(mode="skipped"),
+            ai_router_module.AIScanReplayRequest(mode="skipped"),
         )
 
     assert exc.value.status_code == 400
@@ -4012,7 +4013,7 @@ def test_ai_scan_replay_plan_rejects_non_ai_gate_result():
 
 
 def test_ai_scan_replay_plan_selects_transcript_by_index():
-    plan = api_module._build_ai_scan_replay_plan(
+    plan = ai_router_module._build_ai_scan_replay_plan(
         {
             "ai_gate": {
                 "coverage_matrix": {"summary": {"planned": 2, "executed": 2}},
@@ -4022,7 +4023,7 @@ def test_ai_scan_replay_plan_selects_transcript_by_index():
                 ],
             }
         },
-        api_module.AIScanReplayRequest(mode="transcript", transcript_index=1),
+        ai_router_module.AIScanReplayRequest(mode="transcript", transcript_index=1),
     )
 
     assert plan["probe_ids"] == ["mcp-1"]
@@ -4033,7 +4034,7 @@ def test_ai_scan_replay_plan_selects_transcript_by_index():
 
 
 def test_ai_scan_replay_plan_selects_transcript_by_probe_id():
-    plan = api_module._build_ai_scan_replay_plan(
+    plan = ai_router_module._build_ai_scan_replay_plan(
         {
             "ai_gate": {
                 "transcripts": [
@@ -4042,7 +4043,7 @@ def test_ai_scan_replay_plan_selects_transcript_by_probe_id():
                 ],
             }
         },
-        api_module.AIScanReplayRequest(mode="transcript", probe_id="rag-1"),
+        ai_router_module.AIScanReplayRequest(mode="transcript", probe_id="rag-1"),
     )
 
     assert plan["probe_ids"] == ["rag-1"]
@@ -4051,9 +4052,9 @@ def test_ai_scan_replay_plan_selects_transcript_by_probe_id():
 
 def test_ai_scan_replay_plan_rejects_transcript_without_probe_context():
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._build_ai_scan_replay_plan(
+        ai_router_module._build_ai_scan_replay_plan(
             {"ai_gate": {"transcripts": [{"probe_family": "rag"}]}},
-            api_module.AIScanReplayRequest(mode="transcript", transcript_index=0),
+            ai_router_module.AIScanReplayRequest(mode="transcript", transcript_index=0),
         )
 
     assert exc.value.status_code == 400
@@ -4166,7 +4167,7 @@ def test_ai_campaign_history_filters_context_and_computes_deltas():
     previous = _ai_history_row("scan-2", executed=2, skipped=2, errors=1, findings_count=1)
     unrelated_pack = _ai_history_row("scan-1", pack="shaker-agent-abuse", executed=4, findings_count=9)
 
-    history = api_module._build_ai_campaign_history(
+    history = ai_router_module._build_ai_campaign_history(
         current,
         [current, previous, unrelated_pack],
         limit=6,
@@ -4191,7 +4192,7 @@ def test_ai_campaign_history_reports_decision_change():
     current = _ai_history_row("scan-4", decision="allow", findings_count=0)
     previous = _ai_history_row("scan-3", decision="block", findings_count=2)
 
-    history = api_module._build_ai_campaign_history(current, [current, previous], limit=6)
+    history = ai_router_module._build_ai_campaign_history(current, [current, previous], limit=6)
 
     assert history["deltas"]["decision_changed"] is True
     assert history["previous_run"]["decision"] == "block"
@@ -4210,7 +4211,7 @@ def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs()
         findings_count=3,
     )
 
-    history = api_module._build_ai_target_campaign_history(
+    history = ai_router_module._build_ai_target_campaign_history(
         "target-ai",
         [latest_rag, previous_rag, latest_agent],
         limit=12,
@@ -4249,13 +4250,13 @@ def test_ai_target_campaign_history_groups_contexts_and_summarizes_latest_runs()
 def test_ai_target_campaign_history_export_is_content_free_with_report_links():
     latest_rag = _ai_history_row("scan-4", decision="allow", executed=4, skipped=0, findings_count=0)
     previous_rag = _ai_history_row("scan-3", decision="block", executed=2, skipped=1, findings_count=2)
-    history = api_module._build_ai_target_campaign_history(
+    history = ai_router_module._build_ai_target_campaign_history(
         "target-ai",
         [latest_rag, previous_rag],
         limit=12,
     )
 
-    export = api_module._build_ai_target_campaign_history_export(
+    export = ai_router_module._build_ai_target_campaign_history_export(
         history,
         generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
     )
@@ -4846,10 +4847,10 @@ def test_state_changing_request_models_accept_approval_receipt_id():
         artifact_url="https://models.example/model.safetensors",
         approval_receipt_id=receipt_id,
     ).approval_receipt_id == receipt_id
-    assert api_module.AITargetScanRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert ai_router_module.AITargetScanRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
     assert api_module.FindingRetestRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
-    assert api_module.AIFindingRetestRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
-    assert api_module.AIScanReplayRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert ai_router_module.AIFindingRetestRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
+    assert ai_router_module.AIScanReplayRequest(approval_receipt_id=receipt_id).approval_receipt_id == receipt_id
     assert api_module.FindingsBulkRetestRequest(
         finding_ids=[receipt_id],
         approval_receipt_id=receipt_id,
@@ -9856,7 +9857,9 @@ def test_arsenal_execute_gated_ai_gate_replay_dispatches_when_allowed(monkeypatc
         return {"operation_id": "op-ai", "scan_id": "scan-ai", "status": "queued"}
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "replay_ai_scan", fake_replay)
+    monkeypatch.setattr(ai_router_module, "replay_ai_scan", fake_replay)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
@@ -9890,7 +9893,9 @@ def test_arsenal_execute_gated_ai_gate_scan_dispatches_when_allowed(monkeypatch)
         return {"operation_id": "op-ai-scan", "scan_id": "scan-ai", "status": "queued"}
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "scan_ai_target", fake_scan)
+    monkeypatch.setattr(ai_router_module, "scan_ai_target", fake_scan)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),

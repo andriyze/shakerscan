@@ -169,3 +169,29 @@ def test_domain_modules_do_not_import_the_app_module():
         "these api submodules import the monolith (api.api), which reintroduces "
         f"the coupling decomposition removes: {offenders}"
     )
+
+
+def test_api_packages_do_not_shadow_flat_runtime_modules():
+    """An api/<pkg>/ name must not collide with a top-level scanner module.
+
+    The release image copies scanner/*.py and api/*.py into the same /app
+    directory, and the dev-source sync copies every api subpackage there too. A
+    package whose name matches a scanner module silently shadows it at runtime:
+    api/findings/ hid scanner/findings.py, which api/worker.py imports in six
+    places, and the break only appears once workers pick up a current image.
+    """
+    root = _ROOT
+    api_packages = {
+        path.name
+        for path in (root / "api").iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    flat_modules = {
+        path.stem
+        for path in list((root / "scanner").glob("*.py")) + list((root / "api").glob("*.py"))
+    }
+    collisions = sorted(api_packages & flat_modules)
+    assert not collisions, (
+        "these api packages shadow a flat module of the same name once both are "
+        f"copied into /app, breaking that module's importers: {collisions}"
+    )

@@ -313,11 +313,12 @@ ENV DEVICE_INTEL_DB_SHA256=d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb
 # is the one mounted at /app/gungnir_worker.py.
 COPY api/*.py /app/
 COPY api/ai_gate /app/ai_gate
+COPY api/ai_targets /app/ai_targets
 COPY api/capabilities /app/capabilities
 COPY api/devices /app/devices
 COPY api/exposure /app/exposure
 COPY api/finding_exceptions /app/finding_exceptions
-COPY api/findings /app/findings
+COPY api/finding_routes /app/finding_routes
 COPY api/hunt /app/hunt
 COPY api/interactive /app/interactive
 COPY api/policy_profiles /app/policy_profiles
