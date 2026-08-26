@@ -1041,20 +1041,14 @@ except ModuleNotFoundError as exc:
 
 try:
     from ai_redteam_artifacts import (
-        build_ai_learning_guide,
         build_ai_redteam_report,
-        build_ai_test_case_catalog,
-        build_ai_test_case_export,
         render_ai_redteam_markdown,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "ai_redteam_artifacts":
         raise
     from api.ai_redteam_artifacts import (
-        build_ai_learning_guide,
         build_ai_redteam_report,
-        build_ai_test_case_catalog,
-        build_ai_test_case_export,
         render_ai_redteam_markdown,
     )
 
@@ -4786,6 +4780,11 @@ configure_scan_read_router(lambda: db_pool)
 app.include_router(scan_read_router)
 configure_request_collection_router(lambda: db_pool)
 app.include_router(request_collection_router)
+try:
+    from ai_gate.catalog_router import router as ai_catalog_router
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.ai_gate.catalog_router import router as ai_catalog_router
+app.include_router(ai_catalog_router)
 
 # CORS for UI.
 #
@@ -13601,42 +13600,6 @@ async def list_ai_test_scenarios(include_demo: bool = Query(False)):
     """Return scenario templates for AI Gate and model-intake workflows."""
     settings = _load_effective_ai_settings()
     return get_ai_test_scenarios(include_demo=bool(include_demo and settings.get("demo_mode_enabled")))
-
-
-@app.get("/ai/learning-guide")
-async def get_ai_learning_guide():
-    """Return a ShakerScan-oriented AI red-team learning and capstone map."""
-    return build_ai_learning_guide()
-
-
-@app.get("/ai/test-cases")
-async def list_ai_test_cases(pack: Optional[str] = Query(None)):
-    """Return AI Gate probe/test-case metadata for eval planning and review."""
-    try:
-        return build_ai_test_case_catalog(pack=pack)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/ai/test-cases/export")
-async def export_ai_test_cases(
-    format: str = Query("json", pattern="^(json|promptfoo|pyrit|garak)$"),
-    pack: Optional[str] = Query(None),
-):
-    """Export AI Gate probes into common red-team/eval seed formats."""
-    try:
-        payload, media_type, extension = build_ai_test_case_export(format, pack=pack)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    filename = f"shakerscan-ai-test-cases.{extension}"
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    if isinstance(payload, (dict, list)):
-        return Response(
-            content=json.dumps(payload, indent=2),
-            media_type=media_type,
-            headers=headers,
-        )
-    return Response(content=payload, media_type=media_type, headers=headers)
 
 
 @app.post("/ai/demo/run")

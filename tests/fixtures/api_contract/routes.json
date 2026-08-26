@@ -1,25 +1,5 @@
 [
   {
-    "path": null,
-    "methods": [],
-    "name": null
-  },
-  {
-    "path": null,
-    "methods": [],
-    "name": null
-  },
-  {
-    "path": null,
-    "methods": [],
-    "name": null
-  },
-  {
-    "path": null,
-    "methods": [],
-    "name": null
-  },
-  {
     "path": "/",
     "methods": [
       "GET"
@@ -676,6 +656,48 @@
       "GET"
     ],
     "name": "asm_check_families"
+  },
+  {
+    "path": "/credential-profiles",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_credential_profiles"
+  },
+  {
+    "path": "/credential-profiles",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "patch_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}/rotate",
+    "methods": [
+      "POST"
+    ],
+    "name": "rotate_credential_profile"
   },
   {
     "path": "/dashboard",
@@ -1366,6 +1388,48 @@
     "name": "health"
   },
   {
+    "path": "/hunts",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_hunts"
+  },
+  {
+    "path": "/hunts",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_hunt"
+  },
+  {
+    "path": "/hunts/contract",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_contract"
+  },
+  {
+    "path": "/hunts/lifecycle-metrics",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_lifecycle_metrics"
+  },
+  {
+    "path": "/hunts/{hunt_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt"
+  },
+  {
+    "path": "/hunts/{hunt_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_hunt"
+  },
+  {
     "path": "/hunts/{hunt_id}/candidates",
     "methods": [
       "POST"
@@ -1387,11 +1451,25 @@
     "name": "execute_hunt_capability"
   },
   {
+    "path": "/hunts/{hunt_id}/finish",
+    "methods": [
+      "POST"
+    ],
+    "name": "finish_hunt"
+  },
+  {
     "path": "/hunts/{hunt_id}/query",
     "methods": [
       "POST"
     ],
     "name": "query_hunt"
+  },
+  {
+    "path": "/hunts/{hunt_id}/resume",
+    "methods": [
+      "POST"
+    ],
+    "name": "resume_hunt"
   },
   {
     "path": "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm",
@@ -1879,6 +1957,76 @@
     "name": "redoc_html"
   },
   {
+    "path": "/request-collections",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_request_collections"
+  },
+  {
+    "path": "/request-collections",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_request_collection"
+  },
+  {
+    "path": "/request-collections/{collection_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_request_collection"
+  },
+  {
+    "path": "/request-collections/{collection_id}/bindings",
+    "methods": [
+      "POST"
+    ],
+    "name": "upsert_request_collection_binding"
+  },
+  {
+    "path": "/request-collections/{collection_id}/environments",
+    "methods": [
+      "POST"
+    ],
+    "name": "upsert_request_collection_environment"
+  },
+  {
+    "path": "/request-collections/{collection_id}/environments/{environment_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_request_collection_environment"
+  },
+  {
+    "path": "/request-collections/{collection_id}/requests",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_request_collection_requests"
+  },
+  {
+    "path": "/request-collections/{collection_id}/select",
+    "methods": [
+      "POST"
+    ],
+    "name": "select_request_collection_index"
+  },
+  {
+    "path": "/request-collections/{collection_id}/selections",
+    "methods": [
+      "POST"
+    ],
+    "name": "upsert_request_collection_selection"
+  },
+  {
+    "path": "/request-collections/{collection_id}/selections/{selection_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_request_collection_selection"
+  },
+  {
     "path": "/research/campaigns/launch",
     "methods": [
       "POST"
@@ -2005,6 +2153,20 @@
     "name": "get_retest"
   },
   {
+    "path": "/scan/contracts",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_public_contract"
+  },
+  {
+    "path": "/scan/contracts/preview",
+    "methods": [
+      "POST"
+    ],
+    "name": "preview_scan_contract"
+  },
+  {
     "path": "/scans",
     "methods": [
       "GET"
@@ -2031,6 +2193,13 @@
       "GET"
     ],
     "name": "get_scan"
+  },
+  {
+    "path": "/scans/{scan_id}/actions",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_actions"
   },
   {
     "path": "/scans/{scan_id}/ai-redteam-report",
@@ -2061,6 +2230,20 @@
     "name": "cancel_scan"
   },
   {
+    "path": "/scans/{scan_id}/capabilities",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_capabilities"
+  },
+  {
+    "path": "/scans/{scan_id}/coverage",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_coverage"
+  },
+  {
     "path": "/scans/{scan_id}/deployment-decision",
     "methods": [
       "GET"
@@ -2080,6 +2263,13 @@
       "GET"
     ],
     "name": "get_scan_logs"
+  },
+  {
+    "path": "/scans/{scan_id}/parity-artifact",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_parity_artifact"
   },
   {
     "path": "/scans/{scan_id}/queue-delivery",

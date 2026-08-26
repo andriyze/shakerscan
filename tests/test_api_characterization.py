@@ -36,12 +36,31 @@ def _app():
     return api_module.app
 
 
+def _iter_effective_routes(routes):
+    """Yield leaf routes, resolving included routers across Starlette versions.
+
+    Older Starlette flattens ``include_router`` into ``app.routes``; Starlette
+    1.6 mounts a lazy ``_IncludedRouter`` wrapper that exposes its child routes
+    through ``original_router``. Resolving both makes the manifest reflect the
+    routes that are actually served regardless of how they are mounted.
+    """
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None and getattr(included, "routes", None) is not None:
+            yield from _iter_effective_routes(included.routes)
+        else:
+            yield route
+
+
 def _normalized_routes(app):
     rows = []
-    for route in app.routes:
+    for route in _iter_effective_routes(app.routes):
+        path = getattr(route, "path", None)
+        if path is None:
+            continue
         methods = sorted(getattr(route, "methods", None) or [])
         rows.append({
-            "path": getattr(route, "path", None),
+            "path": path,
             "methods": methods,
             "name": getattr(route, "name", None),
         })
@@ -69,7 +88,10 @@ def _app_contract(app):
         "exception_handlers": sorted(
             str(getattr(k, "__name__", k)) for k in app.exception_handlers.keys()
         ),
-        "route_count": len([r for r in app.routes if getattr(r, "methods", None)]),
+        "route_count": len([
+            r for r in _iter_effective_routes(app.routes)
+            if getattr(r, "methods", None)
+        ]),
     }
 
 
