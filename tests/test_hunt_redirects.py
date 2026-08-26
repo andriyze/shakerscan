@@ -10,6 +10,7 @@ source-contract pins (the read-the-source pattern from tests/test_agent_ports.py
 import asyncio
 import json
 import os
+import re
 import sys
 import types
 import uuid as uuid_lib
@@ -98,6 +99,7 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 from tests.api_sources import definition_source  # noqa: E402
+from agent_routes import router as agent_router_module  # noqa: E402
 
 HTTP_CAPABILITY_SOURCE = open(
     os.path.join(
@@ -240,10 +242,18 @@ def test_executor_enforces_same_origin_per_hop_with_bounded_cap():
 
 def test_executor_returns_chain_and_records_it_in_the_receipt():
     executor = _executor_source()
-    assert '"redirect_chain": _redact_agent_payload(redirect_chain) if redirect_chain else []' in executor
+    assert re.search(
+        r'"redirect_chain": (?:\w+\.)?_redact_agent_payload\(redirect_chain\)'
+        r" if redirect_chain else \[\]",
+        executor,
+    )
     assert '"hops_followed": hops_followed' in executor
     # receipts must durably record the chain
-    assert '"redirect_chain": _redact_agent_payload(redirect_chain) if redirect_chain else [],' in executor
+    assert re.search(
+        r'"redirect_chain": (?:\w+\.)?_redact_agent_payload\(redirect_chain\)'
+        r" if redirect_chain else \[\],",
+        executor,
+    )
     # request view surfaces the option
     assert '"follow_redirects": follow_redirects,' in executor
 
@@ -526,6 +536,7 @@ def test_reply_loop_charges_one_unit_plus_each_followed_hop(monkeypatch):
         }
 
     monkeypatch.setattr(api_module, "_execute_agent_tool", fake_execute_agent_tool)
+    monkeypatch.setattr(agent_router_module, "_execute_agent_tool", fake_execute_agent_tool)
     reply = json.dumps({"tool_calls": [{
         "name": "http_request",
         "arguments": {"method": "GET", "path": "/old", "follow_redirects": True},
@@ -558,6 +569,7 @@ def test_reply_loop_charges_one_unit_plus_each_followed_hop(monkeypatch):
         return {"ok": True, "request": {"method": "GET", "path": "/x"}, "hops_followed": 99}
 
     monkeypatch.setattr(api_module, "_execute_agent_tool", rogue_execute_agent_tool)
+    monkeypatch.setattr(agent_router_module, "_execute_agent_tool", rogue_execute_agent_tool)
     state = api_module._agent_new_state("clamped budget test", [], [])
     state["wire_request_budget_limit"] = 100
     state["action_budget_limit"] = 12

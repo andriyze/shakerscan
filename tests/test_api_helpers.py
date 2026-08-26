@@ -284,6 +284,7 @@ import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
 from devices import router as devices_router_module  # noqa: E402
 from arsenal_routes import router as arsenal_router_module  # noqa: E402
+from agent_routes import router as agent_router_module  # noqa: E402
 from research_routes import router as research_router_module  # noqa: E402
 from evidence_routes import router as evidence_router_module  # noqa: E402
 from finding_routes import router as finding_routes_module  # noqa: E402
@@ -798,6 +799,7 @@ def test_native_hunt_start_persists_exact_contract_and_capability_allowlist(monk
     monkeypatch.setattr(arsenal_router_module, "_target_web_origins", origins)
     monkeypatch.setattr(api_module, "_generic_collection_refs", collections)
     monkeypatch.setattr(api_module, "_resolve_agent_target_addresses", addresses)
+    monkeypatch.setattr(agent_router_module, "_resolve_agent_target_addresses", addresses)
 
     payload = _hunt_v2_payload()
     payload["target_id"] = str(target_id)
@@ -1266,6 +1268,7 @@ def test_retired_legacy_run_tool_is_rejected_without_execution(monkeypatch):
         raise AssertionError("over-budget scanner reached the executor")
 
     monkeypatch.setattr(api_module, "_execute_agent_tool", should_not_execute)
+    monkeypatch.setattr(agent_router_module, "_execute_agent_tool", should_not_execute)
     reply = json.dumps({"tool_calls": [{
         "name": "run_tool",
         "arguments": {"name": "nuclei", "target": "http://device.test/", "options": {}},

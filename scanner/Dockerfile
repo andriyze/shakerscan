@@ -317,6 +317,7 @@ COPY api/ai_targets /app/ai_targets
 COPY api/arsenal_routes /app/arsenal_routes
 COPY api/evidence_routes /app/evidence_routes
 COPY api/local_agent_routes /app/local_agent_routes
+COPY api/agent_routes /app/agent_routes
 COPY api/research_routes /app/research_routes
 COPY api/capabilities /app/capabilities
 COPY api/devices /app/devices

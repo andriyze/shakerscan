@@ -18,6 +18,8 @@ import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
+from tests.api_sources import api_tree_source, definition_source
+
 import agent_budget
 import agent_loop as al
 
@@ -653,18 +655,17 @@ def test_short_deep_hunts_can_compose_recon_with_one_attack_scanner():
 
 
 def test_hunt_dns_authorization_is_frozen_in_session_state():
-    api_path = os.path.join(os.path.dirname(__file__), "..", "api", "api.py")
-    source = open(api_path, encoding="utf-8").read()
-    seed_start = source.index("async def _agent_seed_state(")
-    apply_start = source.index("async def _agent_apply_reply(")
-    http_start = source.index("async def _agent_tool_http_request(")
-    run_tool_start = source.index("async def _agent_tool_run_tool(")
+    seed = definition_source("_agent_seed_state")
+    http_request = definition_source("_agent_tool_http_request")
     assert (
         'state["authorized_target_addresses"] = await '
         '_resolve_agent_target_addresses(target_url)'
-    ) in source[seed_start:apply_start]
-    assert "await _resolve_agent_target_addresses" not in source[http_start:run_tool_start]
-    assert 'authorized_addresses=state.get("authorized_target_addresses") or []' in source
+    ) in seed
+    assert "await _resolve_agent_target_addresses" not in http_request
+    assert (
+        'authorized_addresses=state.get("authorized_target_addresses") or []'
+        in api_tree_source()
+    )
 
 
 def test_scanner_request_settlement_distinguishes_exact_from_observed():
@@ -752,8 +753,7 @@ def test_nuclei_focused_default_and_progress_counter_contract():
 
 
 def test_partial_scanner_results_are_labeled_in_agent_surface():
-    source = open(os.path.join(os.path.dirname(__file__), "..", "api", "api.py"), encoding="utf-8").read()
-    run_tool = source[source.index("async def _agent_tool_run_tool("):source.index("def _agent_resolve_ref(")]
+    run_tool = definition_source("_agent_tool_run_tool")
     assert '"execution_status": status_label' in run_tool
     assert '"complete": status_label == "success"' in run_tool
     assert '"partial_reason": error if status_label != "success" else None' in run_tool
