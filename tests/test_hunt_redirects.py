@@ -97,9 +97,8 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
-API_SOURCE = open(
-    os.path.join(os.path.dirname(__file__), "..", "api", "api.py"), encoding="utf-8"
-).read()
+from tests.api_sources import definition_source  # noqa: E402
+
 HTTP_CAPABILITY_SOURCE = open(
     os.path.join(
         os.path.dirname(__file__), "..", "api", "capabilities", "http.py"
@@ -133,15 +132,11 @@ def _run_http_request(monkeypatch, handler, args, *, allow_write=False):
 
 
 def _executor_source() -> str:
-    start = API_SOURCE.index("async def _agent_tool_http_request(")
-    end = API_SOURCE.index("async def _agent_tool_query_kb(")
-    return API_SOURCE[start:end] + HTTP_CAPABILITY_SOURCE
+    return definition_source("_agent_tool_http_request") + HTTP_CAPABILITY_SOURCE
 
 
 def _apply_reply_source() -> str:
-    start = API_SOURCE.index("async def _agent_apply_reply(")
-    end = API_SOURCE.index("def _agent_finalize_gate(")
-    return API_SOURCE[start:end]
+    return definition_source("_agent_apply_reply")
 
 
 # ------------------------------------------------------- hop validation (pure) --------

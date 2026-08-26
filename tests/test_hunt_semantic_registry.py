@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+from tests.api_sources import definition_source
 import sys
 
 import pytest
@@ -86,18 +88,13 @@ def test_registry_input_schema_rejects_hallucinated_flags_and_wrong_shapes():
 
 
 def test_hunt_handler_validates_registry_input_before_reservation_or_action_write():
-    route_source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
     service_source = (ROOT / "api" / "hunt" / "action_service.py").read_text(
         encoding="utf-8"
     )
     prepare_start = service_source.index("    def prepare(")
     prepare_end = service_source.index("\n    async def execute(", prepare_start)
     prepare = service_source[prepare_start:prepare_end]
-    route_start = route_source.index("async def execute_hunt_capability(")
-    route_end = route_source.index(
-        "\n\nasync def _execute_hunt_capability_lifecycle(", route_start
-    )
-    route = route_source[route_start:route_end]
+    route = definition_source("execute_hunt_capability")
 
     assert prepare.index("registry.validate_hunt_input") < prepare.index(
         "HuntActionLifecycle("
@@ -108,15 +105,11 @@ def test_hunt_handler_validates_registry_input_before_reservation_or_action_writ
 
 
 def test_hunt_capability_actions_require_retry_safe_idempotency_keys():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
-    model_start = source.index("class HuntCapabilityRequest(BaseModel):")
-    model_end = source.index("\n\nclass HuntCandidateRequest", model_start)
-    request_model = source[model_start:model_end]
-    handler_start = source.index("async def execute_hunt_capability(")
-    handler_end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans', handler_start,
+    request_model = definition_source("HuntCapabilityRequest")
+    handler = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
-    handler = source[handler_start:handler_end]
 
     assert "idempotency_key: str" in request_model
     assert "uuid.uuid5" in handler

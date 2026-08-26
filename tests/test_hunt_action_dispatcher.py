@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+
+from tests.api_sources import definition_source
 import sys
 
 import pytest
@@ -206,13 +208,8 @@ def test_native_device_hunts_never_seed_legacy_agent_state():
 
 
 def test_replay_uses_the_same_dispatcher_and_exact_replay_engine():
-    api_source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
     worker_source = (ROOT / "api" / "worker.py").read_text(encoding="utf-8")
-    api_start = api_source.index("async def _enqueue_hunt_replay_capability(")
-    api_end = api_source.index(
-        "\n\nasync def _validate_hunt_credential_references", api_start
-    )
-    submission = api_source[api_start:api_end]
+    submission = definition_source("_enqueue_hunt_replay_capability")
     worker_start = worker_source.index(
         "async def process_request_collection_replay_job("
     )
@@ -229,10 +226,10 @@ def test_replay_uses_the_same_dispatcher_and_exact_replay_engine():
 
 
 def test_public_hunt_route_returns_the_canonical_action_result_on_first_and_retry():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index('\n\n@app.post("/hunts/{hunt_id}/shell-plans', start)
-    handler = source[start:end]
+    handler = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
+    )
     assert handler.count('"action_result":') == 2
     assert '"schema_version": "hunt-action-result/v2"' in (
         ROOT / "api" / "hunt" / "action_dispatcher.py"

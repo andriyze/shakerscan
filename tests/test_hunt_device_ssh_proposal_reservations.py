@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tests.api_sources import definition_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _handler_source() -> str:
-    source = (ROOT / "api" / "api.py").read_text()
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans',
-        start,
+    return (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
-    return source[start:end]
 
 
 def test_ssh_proposal_reserves_and_starts_before_plan_construction():
@@ -70,15 +68,10 @@ def test_ssh_proposal_does_not_enter_confirmation_executor():
 
 
 def test_ssh_proposal_and_confirmation_accept_canonical_credential_refs():
-    source = (ROOT / "api" / "api.py").read_text()
-    proposal = source[source.index('if name == "propose_ssh_shell":'):]
+    operation = definition_source("_execute_device_capability_operation")
+    proposal = operation[operation.index('if name == "propose_ssh_shell":'):]
     proposal = proposal[:proposal.index('if name == "inspect_capabilities":')]
-    confirmation = source[source.index(
-        '@app.post("/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")'
-    ):]
-    confirmation = confirmation[:confirmation.index(
-        '@app.post("/hunts/{hunt_id}/candidates")'
-    )]
+    confirmation = definition_source("confirm_hunt_shell_plan")
 
     assert '_device_agent_credential_reference(state, "ssh")' in proposal
     assert '_device_agent_credential_reference(state, "ssh")' in confirmation

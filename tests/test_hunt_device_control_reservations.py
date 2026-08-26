@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tests.api_sources import definition_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_device_control_actions_use_atomic_durable_settlement():
-    source = (ROOT / "api" / "api.py").read_text()
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans',
-        start,
-    )
-    handler = source[start:end]
+    handler = definition_source("execute_hunt_capability") + definition_source("_execute_hunt_capability_lifecycle")
 
     assert 'is_device_control = placement == "device_control"' in handler
     assert "DeviceExecutionAdapter(" in handler
@@ -31,10 +26,7 @@ def test_device_control_actions_use_atomic_durable_settlement():
 
 
 def test_device_control_context_merge_is_limited_to_read_only_evidence():
-    source = (ROOT / "api" / "api.py").read_text()
-    start = source.index("def _merge_hunt_device_control_context(")
-    end = source.index("\n\ndef _hunt_ledger_limits", start)
-    helper = source[start:end]
+    helper = definition_source("_merge_hunt_device_control_context")
 
     assert '"evidence": persisted_evidence' in helper
     assert 'persisted_runtime["next_evidence_ref"]' in helper
