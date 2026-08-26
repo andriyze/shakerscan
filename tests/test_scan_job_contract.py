@@ -562,3 +562,52 @@ def test_worker_materialization_rejects_durable_state_drift(mutation, message):
         materialize_canonical_scan_job(
             job.payload(), row, resolved_addresses=("192.0.2.10",),
         )
+
+
+@pytest.mark.parametrize("label", [
+    "work:anonymous[0]",
+    "work:anonymous[0]:xss",
+    # The planner coalesces every candidate family onto one lane when there are
+    # not enough endpoint slots, joining them with "+".
+    "work:anonymous[0]:xss+sqli",
+    "work:anonymous[0]:auth+bola+nuclei+sqli+xss",
+])
+def test_coalesced_family_scope_labels_are_valid_shard_authority(label):
+    parent = _job()
+    options = copy.deepcopy(_persisted_row(parent)["options"])
+    authority = ScanShardAuthority(
+        parent_scan_id=parent.scan_id,
+        parent_execution_plan_digest=parent.execution_plan.digest,
+        options_digest=scan_job_options_digest(options),
+        shard_index=1,
+        shard_count=3,
+        shard_label=label,
+        sub_budget=derive_scan_shard_budget(options, parent.execution_plan.budget),
+    )
+
+    assert authority.shard_label == label
+    assert authority.payload()["shard_label"] == label
+
+
+@pytest.mark.parametrize("label", [
+    "work anonymous",      # whitespace
+    "work/anonymous",      # path separator
+    "+leading",            # must start alphanumeric
+    "",                    # empty
+    "w" * 121,             # over the bound
+])
+def test_unsafe_shard_labels_remain_rejected(label):
+    parent = _job()
+    options = copy.deepcopy(_persisted_row(parent)["options"])
+    with pytest.raises(CanonicalScanJobError, match="shard label"):
+        ScanShardAuthority(
+            parent_scan_id=parent.scan_id,
+            parent_execution_plan_digest=parent.execution_plan.digest,
+            options_digest=scan_job_options_digest(options),
+            shard_index=1,
+            shard_count=3,
+            shard_label=label,
+            sub_budget=derive_scan_shard_budget(
+                options, parent.execution_plan.budget,
+            ),
+        )

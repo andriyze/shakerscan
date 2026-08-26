@@ -12,6 +12,7 @@ from api.scan.continuation import ScanContinuationAllocation
 from api.scan.jobs import derive_scan_shard_budget
 from api.scan.parallel_compiler import (
     ParallelActionPlanCompiler,
+    ParallelPlannedChild,
     ParallelActionPlanError,
     ParallelPlacementCapacity,
     ParallelPrincipalLane,
@@ -1014,3 +1015,149 @@ def test_parallel_coverage_uses_merged_terminal_actions_not_parent_placeholders(
         "reliable": False,
         "reasons": ["adapter_failed", "parallel_child_incomplete"],
     }
+
+
+def _child_scan_id(index):
+    return f"20000000-0000-4000-8000-0000000001{index:02d}"
+
+
+def _discovery_scope_partition(*, discovery_owned_externally):
+    """Plan and compile one partition under an explicit discovery-ownership decision."""
+    execution, parent = _endpoint_authority()
+    compiler = ParallelActionPlanCompiler()
+    planned = compiler.plan_parent(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        endpoint_manifest_entries=(
+            "GET /api/a?id=1", "GET /api/b?id=1", "GET /api/c?id=1",
+        ),
+        placements=(ParallelPlacementCapacity("local", 4, {"node_scope": "local"}),),
+        scheduling_hint="scope",
+        discovery_owned_externally=discovery_owned_externally,
+    )
+    partition = compiler.compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        child_specs=tuple(
+            child.compiler_spec(scan_id=_child_scan_id(child.index))
+            for child in planned.children
+        ),
+        strategy=planned.scheduling_hint,
+    )
+    return execution, parent, planned, partition
+
+
+def _child_plan(execution, scan_id, scope):
+    raw = ScanActionPlanCompiler().compile(
+        scan_id=scan_id,
+        execution_plan=execution,
+        target_binding=_target(),
+        action_scope=scope,
+    )
+    return allocate_scan_action_plan(
+        raw, derive_scan_shard_budget({}, execution.budget),
+        assign_residual_to_finalizer=False,
+    ).plan
+
+
+def test_placed_discovery_stage_owns_discovery_instead_of_the_backbone():
+    """A separate discovery shard already ran, so the backbone must not repeat it."""
+    _execution, parent, planned, partition = _discovery_scope_partition(
+        discovery_owned_externally=True,
+    )
+    backbone = next(item for item in planned.children if item.role == "global")
+    assert backbone.action_scope == "global"
+
+    discovery_ids = {
+        action.action_id for action in parent.actions
+        if action.action_id.startswith("discover.")
+    }
+    baseline_ids = {
+        action.action_id for action in parent.actions
+        if action.action_id.startswith("baseline.")
+    }
+    assert discovery_ids, "fixture must contain discovery actions to be meaningful"
+
+    # Discovery is recorded as stage-owned work, not silently dropped, and it is
+    # excluded from every fan-out authority list so a child carrying one fails.
+    assert set(partition.discovery_stage_action_ids) == discovery_ids
+    assert set(partition.globally_assigned_action_ids) == baseline_ids
+    assert not discovery_ids & set(partition.assigned_parent_action_ids)
+    assert not discovery_ids & set(partition.required_parent_action_ids)
+
+
+def test_backbone_keeps_discovery_when_no_placed_discovery_stage_ran():
+    """Without a discovery stage the backbone is the only owner; never drop it."""
+    _execution, parent, planned, partition = _discovery_scope_partition(
+        discovery_owned_externally=False,
+    )
+    backbone = next(item for item in planned.children if item.role == "global")
+    assert backbone.action_scope == "full"
+
+    discovery_ids = {
+        action.action_id for action in parent.actions
+        if action.action_id.startswith("discover.")
+    }
+    assert partition.discovery_stage_action_ids == ()
+    assert discovery_ids <= set(partition.globally_assigned_action_ids)
+
+
+def test_unset_child_scope_defaults_to_retaining_discovery_coverage():
+    """An absent scope must duplicate discovery, never silently lose it.
+
+    Cross-version in-flight shards can reach this build without the scope key.
+    Duplicated discovery is wasteful; missing discovery is wrong, so the
+    conservative default for a backbone is the discovery-owning ``full`` scope.
+    """
+    planned = ParallelPlannedChild(
+        index=0,
+        label="global",
+        role="global",
+        endpoints=(),
+        request_selection_digests=(),
+        candidate_manifest_refs=(),
+        principal_lane=ParallelPrincipalLane("anonymous"),
+        family_scope=(),
+        placement=ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+    )
+    assert planned.action_scope == "full"
+    assert planned.canonical_dict()["action_scope"] == "full"
+    assert planned.compiler_spec(scan_id=_child_scan_id(0))["action_scope"] == "full"
+
+    endpoint_child = ParallelPlannedChild(
+        index=1,
+        label="work",
+        role="endpoint",
+        endpoints=("GET /api/a?id=1",),
+        request_selection_digests=(),
+        candidate_manifest_refs=(),
+        principal_lane=ParallelPrincipalLane("anonymous"),
+        family_scope=(),
+        placement=ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+    )
+    assert endpoint_child.action_scope == "endpoint"
+
+    # A resolved scope may never be re-pointed at the wrong role.
+    with pytest.raises(ParallelActionPlanError):
+        replace(planned, action_scope="endpoint")
+    with pytest.raises(ParallelActionPlanError):
+        replace(planned, action_scope="nonsense")
+
+
+def test_partition_rejects_a_backbone_that_still_carries_stage_owned_discovery():
+    """Fail closed when the compiled backbone disagrees with recorded ownership."""
+    execution, _parent, planned, partition = _discovery_scope_partition(
+        discovery_owned_externally=True,
+    )
+    plans = {}
+    for child in planned.children:
+        scan_id = _child_scan_id(child.index)
+        # The backbone is compiled at "full", so it still contains discover.*
+        # even though the partition recorded discovery as stage-owned work.
+        plans[scan_id] = _child_plan(
+            execution, scan_id, "full" if child.role == "global" else "endpoint",
+        )
+    with pytest.raises(ParallelActionPlanError):
+        partition.record(plans)

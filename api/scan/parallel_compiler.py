@@ -152,6 +152,11 @@ class ParallelPlannedChild:
     principal_lane: ParallelPrincipalLane
     family_scope: tuple[str, ...]
     placement: ParallelPlacementCapacity
+    # The compiled action scope for this child. The planner owns this decision so
+    # the ownership set it derives cannot drift from what the worker compiles.
+    # Empty resolves to the conservative default for the role: a global child
+    # that is not told discovery ran elsewhere still owns ``discover.*``.
+    action_scope: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.index, bool) or self.index < 0:
@@ -159,6 +164,7 @@ class ParallelPlannedChild:
         role = str(self.role or "").strip().lower()
         if role not in {"global", "endpoint"}:
             raise ParallelActionPlanError("parallel planned child role is invalid")
+        scope = _resolve_child_action_scope(self.action_scope, role=role)
         endpoints = tuple(sorted({
             str(item).strip() for item in self.endpoints if str(item).strip()
         }))
@@ -180,6 +186,7 @@ class ParallelPlannedChild:
                 "global parallel child cannot own endpoint-scoped work"
             )
         object.__setattr__(self, "role", role)
+        object.__setattr__(self, "action_scope", scope)
         object.__setattr__(self, "endpoints", endpoints)
         object.__setattr__(self, "request_selection_digests", requests)
         object.__setattr__(self, "candidate_manifest_refs", refs)
@@ -210,6 +217,7 @@ class ParallelPlannedChild:
             "index": self.index,
             "label": self.label,
             "role": self.role,
+            "action_scope": self.action_scope,
             "endpoint_work_ids": endpoint_ids,
             "request_selection_digests": list(self.request_selection_digests),
             "candidate_manifest_refs": [dict(item) for item in self.candidate_manifest_refs],
@@ -224,6 +232,7 @@ class ParallelPlannedChild:
             "index": self.index,
             "label": self.label,
             "role": self.role,
+            "action_scope": self.action_scope,
             "work_weight": self.work_weight,
             "principal_lane": self.principal_lane.name,
             "placement_name": self.placement.name,
@@ -519,6 +528,38 @@ def _is_global_action(action_id: str) -> bool:
     return action_id.startswith(("baseline.", "discover."))
 
 
+def _is_discovery_action(action_id: str) -> bool:
+    return action_id.startswith("discover.")
+
+
+CHILD_ACTION_SCOPES = frozenset({"full", "global", "endpoint"})
+
+
+def _resolve_child_action_scope(value: Any, *, role: str) -> str:
+    """Resolve the compiled action scope for one planned parallel child.
+
+    ``global`` means the backbone runs baseline posture only because a placed
+    discovery stage already owns ``discover.*``. ``full`` means no separate
+    discovery stage ran, so the backbone must still perform discovery itself.
+    An unset value resolves to the conservative option for the role: never drop
+    discovery coverage unless the planner explicitly said it ran elsewhere.
+    """
+    scope = str(value or "").strip().lower()
+    if not scope:
+        scope = "full" if role == "global" else "endpoint"
+    if scope not in CHILD_ACTION_SCOPES:
+        raise ParallelActionPlanError("parallel child action scope is invalid")
+    if role == "global" and scope not in {"full", "global"}:
+        raise ParallelActionPlanError(
+            "global parallel child requires a backbone action scope"
+        )
+    if role != "global" and scope != "endpoint":
+        raise ParallelActionPlanError(
+            "endpoint parallel child requires the endpoint action scope"
+        )
+    return scope
+
+
 @dataclass(frozen=True)
 class ParallelChildPartition:
     scan_id: str
@@ -530,6 +571,7 @@ class ParallelChildPartition:
     principal_lane: str = "comparison"
     placement_name: str = "local"
     family_scope: tuple[str, ...] = ()
+    action_scope: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -544,6 +586,9 @@ class ParallelChildPartition:
             )
         if self.role not in {"global", "endpoint"}:
             raise ParallelActionPlanError("parallel child role is invalid")
+        object.__setattr__(self, "action_scope", _resolve_child_action_scope(
+            self.action_scope, role=self.role,
+        ))
         if not self.principal_lane or not self.placement_name:
             raise ParallelActionPlanError(
                 "parallel child principal or placement lane is invalid"
@@ -555,6 +600,7 @@ class ParallelChildPartition:
             "index": self.index,
             "label": self.label,
             "role": self.role,
+            "action_scope": self.action_scope,
             "budget": self.budget.payload(),
             "work_partition_digest": self.work_partition_digest,
             "principal_lane": self.principal_lane,
@@ -574,6 +620,7 @@ class ParallelActionPartition:
     children: tuple[ParallelChildPartition, ...]
     parent_owned_action_ids: tuple[str, ...]
     globally_assigned_action_ids: tuple[str, ...]
+    discovery_stage_action_ids: tuple[str, ...]
     assigned_parent_action_ids: tuple[str, ...]
     required_parent_action_ids: tuple[str, ...]
     allowed_parent_capabilities: tuple[str, ...]
@@ -594,6 +641,7 @@ class ParallelActionPartition:
             "children": [item.canonical_dict() for item in self.children],
             "parent_owned_action_ids": list(self.parent_owned_action_ids),
             "globally_assigned_action_ids": list(self.globally_assigned_action_ids),
+            "discovery_stage_action_ids": list(self.discovery_stage_action_ids),
             "assigned_parent_action_ids": list(self.assigned_parent_action_ids),
             "required_parent_action_ids": list(self.required_parent_action_ids),
             "allowed_parent_capabilities": list(self.allowed_parent_capabilities),
@@ -841,6 +889,7 @@ class ParallelActionPartition:
                 self.required_continuation_capabilities
             ),
             "expected_global_action_ids": list(self.globally_assigned_action_ids),
+            "discovery_stage_action_ids": list(self.discovery_stage_action_ids),
             "parent_endpoint_work_ids": expected_parent_work["endpoint_work_ids"],
             "parent_request_work_ids": expected_parent_work["request_work_ids"],
             "children": child_records,
@@ -901,6 +950,7 @@ class ParallelActionPlanCompiler:
         principal_lanes: Sequence[ParallelPrincipalLane] = (),
         placements: Sequence[ParallelPlacementCapacity] = (),
         scheduling_hint: str | None = None,
+        discovery_owned_externally: bool = False,
     ) -> ParallelParentPlan:
         """Plan immutable work slices without consulting compatibility options.
 
@@ -991,6 +1041,10 @@ class ParallelActionPlanCompiler:
             (item for item in placement_lanes if item.name == "local"),
             placement_lanes[0],
         )
+        # A placed discovery stage already executed ``discover.*`` against this
+        # target, so the backbone must not repeat it. Without that stage the
+        # backbone remains the only owner of discovery and keeps ``full`` scope.
+        global_scope = "global" if discovery_owned_externally else "full"
         children: list[ParallelPlannedChild] = [ParallelPlannedChild(
             index=0,
             label="global",
@@ -1001,6 +1055,7 @@ class ParallelActionPlanCompiler:
             principal_lane=global_lane,
             family_scope=(),
             placement=global_placement,
+            action_scope=global_scope,
         )]
 
         has_endpoint_authority = any(
@@ -1129,6 +1184,7 @@ class ParallelActionPlanCompiler:
                 principal_lane=child.principal_lane,
                 family_scope=child.family_scope,
                 placement=child.placement,
+                action_scope=child.action_scope,
             )
             for child in children
         ]
@@ -1279,6 +1335,7 @@ class ParallelActionPlanCompiler:
                     )
                     if str(value).strip() and str(value).strip().lower() != "all"
                 })),
+                action_scope=str(item.get("action_scope") or ""),
             ))
 
         for ledger_name, budget_name in _LEDGER_TO_BUDGET.items():
@@ -1291,19 +1348,33 @@ class ParallelActionPlanCompiler:
             action.action_id for action in parent_action_plan.actions
             if action.action_id == "finalize.report"
         )
+        # The backbone's compiled scope is the single authority for who owns
+        # discovery. When a placed discovery stage already ran it, the fan-out
+        # children own only baseline posture, and ``discover.*`` is recorded as
+        # discovery-stage work rather than silently dropped from the partition.
+        discovery_owned_externally = any(
+            child.role == "global" and child.action_scope == "global"
+            for child in children
+        )
+        discovery_stage = tuple(
+            action.action_id for action in parent_action_plan.actions
+            if _is_discovery_action(action.action_id)
+        ) if discovery_owned_externally else ()
         global_actions = tuple(
             action.action_id for action in parent_action_plan.actions
             if _is_global_action(action.action_id)
+            and action.action_id not in discovery_stage
         )
+        fanout_excluded = set(parent_owned) | set(discovery_stage)
         assigned_parent = tuple(dict.fromkeys(
             _projection_id(action.action_id)
             for action in parent_action_plan.actions
-            if action.action_id not in parent_owned
+            if action.action_id not in fanout_excluded
         ))
         required_parent = tuple(dict.fromkeys(
             _projection_id(action.action_id)
             for action in parent_action_plan.actions
-            if action.required and action.action_id not in parent_owned
+            if action.required and action.action_id not in fanout_excluded
         ))
         return ParallelActionPartition(
             parent_scan_id=parent_action_plan.scan_id,
@@ -1315,6 +1386,7 @@ class ParallelActionPlanCompiler:
             children=tuple(children),
             parent_owned_action_ids=parent_owned,
             globally_assigned_action_ids=global_actions,
+            discovery_stage_action_ids=discovery_stage,
             assigned_parent_action_ids=assigned_parent,
             required_parent_action_ids=required_parent,
             allowed_parent_capabilities=tuple(sorted({
@@ -1388,6 +1460,10 @@ def validate_parallel_partition_record(
         raw.get("allowed_parent_capabilities"),
         raw.get("allowed_continuation_capabilities"),
         raw.get("required_continuation_capabilities"),
+        # Discovery actions owned by a placed discovery stage. They are excluded
+        # from both the global set and the fan-out authority lists, so a child
+        # that still carries one fails the parent-authority check below.
+        raw.get("discovery_stage_action_ids"),
     ) if semantic_authority_v2 else ()
     if any(
         not isinstance(value, list)

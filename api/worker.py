@@ -15147,10 +15147,19 @@ def _compile_parallel_child_action_plan(
         )
     if child_job.shard.parallel_discovery:
         action_scope = "discovery"
-    elif child_options.get("parallel_action_partition_role") == "global":
-        action_scope = "global"
     else:
-        action_scope = "endpoint"
+        # The partition is the single authority for a child's compiled scope.
+        # Deriving it a second time here is what let the backbone drift out of
+        # the ownership set the compiler asserts.
+        action_scope = str(
+            child_options.get("parallel_action_partition_scope") or ""
+        ).strip().lower()
+        if not action_scope:
+            action_scope = (
+                "full"
+                if child_options.get("parallel_action_partition_role") == "global"
+                else "endpoint"
+            )
     credential_refs = [
         dict(item)
         for item in child_options.get("credential_profile_refs") or ()
@@ -15928,6 +15937,10 @@ async def process_scan_plan_job(job_data: dict):
             worker_count=int(job_data.get('parallel_worker_count') or 0),
         ),
         scheduling_hint=requested_strategy,
+        # Fan-out is only reached through the discovery continuation when a
+        # placed discovery stage actually ran. Otherwise the backbone is still
+        # the sole owner of discovery and must keep compiling it.
+        discovery_owned_externally=(plan_stage == 'fanout'),
     )
     credential_refs_by_id = {
         str(item.get("profile_id") or ""): dict(item)
@@ -16142,6 +16155,7 @@ async def process_scan_plan_job(job_data: dict):
                     parallel_action_partition.partition_digest
                 ),
                 "parallel_action_partition_role": child_partition.role,
+                "parallel_action_partition_scope": child_partition.action_scope,
                 "parallel_budget_partition": child_partition.budget.payload(),
                 "skip_global_checks": child_partition.role != "global",
         })

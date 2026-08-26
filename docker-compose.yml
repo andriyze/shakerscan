@@ -386,6 +386,7 @@ services:
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     environment:
       - PYTHONUNBUFFERED=1
+      - ASM_DEFAULT_DOMAIN_RATE_PER_HOUR=${ASM_DEFAULT_DOMAIN_RATE_PER_HOUR:-1000}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
       - RESULTS_DIR=/results

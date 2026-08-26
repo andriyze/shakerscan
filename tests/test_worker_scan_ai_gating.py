@@ -2533,6 +2533,7 @@ def test_parallel_global_backbone_plan_excludes_discovery_actions():
     options = contract.option_metadata()
     options.update({
         "parallel_action_partition_role": "global",
+        "parallel_action_partition_scope": "global",
         "zero_rediscovery": False,
     })
 
@@ -2781,6 +2782,7 @@ def test_parallel_child_budget_refusal_is_an_execution_contract_failure(monkeypa
         child_options={
             **contract.option_metadata(),
             "parallel_action_partition_role": "global",
+            "parallel_action_partition_scope": "global",
         },
         shard_label="global",
         shard_index=0,

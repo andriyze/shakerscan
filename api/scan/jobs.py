@@ -38,7 +38,10 @@ SCAN_SHARD_AUTHORITY_SCHEMA = "scan-shard-authority/v1"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_SHARD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\[\]-]{0,119}$")
+# ``+`` joins a coalesced family scope (e.g. ``work:anonymous[0]:xss+sqli``).
+# The label is display/identity text only; it is never split, resolved as a
+# path, or interpolated into a shell or query.
+_SHARD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+\[\]-]{0,119}$")
 _REPLAY_MODES = frozenset({"discovery_only", "safe_reads", "confirmed_active"})
 _FORBIDDEN_JOB_KEYS = frozenset({
     # Superseded Scan-mode selectors.

@@ -51,6 +51,40 @@ def test_source_manifest_is_complete_and_hashable_from_checkout():
     assert hash_source_files(files, require_all=True)
 
 
+def test_every_api_runtime_package_is_covered_by_the_build_fingerprint():
+    """A packaged-but-unfingerprinted package makes a stale worker look current.
+
+    ``V2_API_RUNTIME_PACKAGES`` and the separately-added ``ai_gate`` tree are two
+    different mechanisms for reaching the same guarantee, so assert the guarantee
+    itself: every importable ``api/<pkg>/`` contributes real files to the source
+    fingerprint. Compare resolved source paths rather than logical keys, because
+    the ``runtime/`` logical root is also used by the auxiliary scanner entries
+    (``runtime/requirements.lock`` and friends) and would mask ``api/runtime``.
+    """
+    root = Path(__file__).resolve().parents[1]
+    files = source_file_map(str(root))
+    fingerprinted = {Path(path).resolve() for path in files.values()}
+
+    api_packages = sorted(
+        path.name
+        for path in (root / "api").iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    )
+    assert api_packages, "no importable api packages were discovered"
+
+    uncovered = [
+        package for package in api_packages
+        if not (
+            {item.resolve() for item in (root / "api" / package).rglob("*.py")}
+            & fingerprinted
+        )
+    ]
+    assert not uncovered, (
+        "api packages are packaged but absent from the build fingerprint, so "
+        f"edits to them cannot invalidate worker freshness: {uncovered}"
+    )
+
+
 def test_worker_handler_package_is_copied_into_release_image():
     root = Path(__file__).resolve().parents[1]
     dockerfile = (root / "scanner" / "Dockerfile").read_text(encoding="utf-8")
