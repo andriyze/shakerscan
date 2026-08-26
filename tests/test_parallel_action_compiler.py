@@ -777,6 +777,57 @@ def test_typed_parent_plan_allocates_exact_subbudgets_without_legacy_options():
     assert "auth_header" not in serialized
 
 
+def test_typed_parent_plan_allows_sequential_fanout_under_one_worker_ceiling():
+    contract = resolve_scan_contract(
+        budget_profile="fast",
+        policy={"exclude_families": ["nuclei"]},
+        advanced={"max_workers": 1},
+    )
+    raw = ScanActionPlanCompiler().compile(
+        scan_id=PARENT_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=_target(),
+        request_collection_refs=({
+            "collection_id": "collection-safe",
+            "selection_id": "selection-safe",
+            "binding_id": "binding-safe",
+            "version": 1,
+            "selection_digest": "a" * 64,
+            "active": False,
+            "max_requests": 1,
+        },),
+        request_manifest_refs={
+            "a" * 64: {
+                "kind": "request",
+                "manifest_id": CHILD_IDS[0],
+                "manifest_digest": "b" * 64,
+                "entry_count": 1,
+                "status": "complete",
+                "schema_version": "scan-work-manifest-reference/v1",
+                "content_schema": "request-manifest/v1",
+            },
+        },
+    )
+    parent = allocate_scan_action_plan(raw, contract.budget).plan
+
+    planned = ParallelActionPlanCompiler().plan_parent(
+        parent_execution_plan=contract.execution_plan,
+        parent_action_plan=parent,
+        target_binding=_target(),
+        endpoint_manifest_entries=("GET /", "GET /rest/products/search?q=apple"),
+        request_work=(ParallelRequestWork("a" * 64, "anonymous"),),
+        principal_lanes=(ParallelPrincipalLane("anonymous"),),
+        placements=(
+            ParallelPlacementCapacity("local", 2, {"node_scope": "local"}),
+        ),
+        scheduling_hint="scope",
+    )
+
+    assert contract.budget.max_workers == 1
+    assert [child.role for child in planned.children] == ["global", "endpoint"]
+    assert planned.children[1].request_selection_digests == ("a" * 64,)
+
+
 def test_typed_parent_plan_refuses_to_collapse_principal_lanes_for_capacity():
     execution, parent = _endpoint_authority()
     with pytest.raises(ParallelActionPlanError, match="principal isolation"):

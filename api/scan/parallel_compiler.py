@@ -1017,10 +1017,12 @@ class ParallelActionPlanCompiler:
             family_groups = tuple((item,) for item in family_candidates)
 
         endpoint_lanes = tuple(lanes)
-        max_children = min(
-            parent_execution_plan.budget.max_workers,
-            sum(item.capacity for item in placement_lanes),
-        )
+        # ``max_workers`` bounds concurrent execution, not the number of durable
+        # child partitions. A one-worker scan can still preserve the global and
+        # endpoint authority split by running those children sequentially. The
+        # placement capacities bound the committed child set; worker admission
+        # enforces the execution-plan concurrency ceiling when children run.
+        max_children = sum(item.capacity for item in placement_lanes)
         available_endpoint_slots = max(0, max_children - 1)
         if available_endpoint_slots < len(endpoint_lanes):
             raise ParallelActionPlanError(
