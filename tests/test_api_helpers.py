@@ -275,6 +275,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 import operator_auth as operator_auth_module  # noqa: E402
+from interactive import router as interactive_router_module  # noqa: E402
 from hunt import run_router as hunt_run_router_module  # noqa: E402
 from hunt.start_contract import (  # noqa: E402
     MAX_HUNT_BODY_BYTES,
@@ -5938,9 +5939,17 @@ def test_session_managed_profile_binding_is_server_asserted(monkeypatch):
         def acquire(self):
             return _Acquire()
 
-    monkeypatch.setattr(api_module, "InteractiveSessionManager", _InteractiveSessionManager)
-    monkeypatch.setattr(api_module, "db_pool", _Pool())
-    monkeypatch.setattr(api_module, "decrypt_secret", lambda value: "Bearer managed-token")
+    # session_action now lives in the interactive router, which resolves these
+    # names in its own module, so patch them where they are resolved.
+    monkeypatch.setattr(
+        interactive_router_module, "InteractiveSessionManager", _InteractiveSessionManager
+    )
+    monkeypatch.setattr(
+        interactive_router_module, "decrypt_secret", lambda value: "Bearer managed-token"
+    )
+    pool = _Pool()
+    monkeypatch.setattr(api_module, "db_pool", pool)
+    monkeypatch.setattr(interactive_router_module, "_pool_provider", lambda: pool)
 
     result = asyncio.run(api_module.session_action(
         "session-1",
