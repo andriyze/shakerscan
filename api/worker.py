@@ -15258,6 +15258,7 @@ def _compile_parallel_child_work_manifests(
         }
         collection_refs: list[dict[str, Any]] = []
         request_refs: dict[str, dict[str, Any]] = {}
+        projected_request_manifests: dict[str, ScanWorkManifest] = {}
         for selection_digest, request_manifest in sorted(
             child_request_manifests.items()
         ):
@@ -15266,7 +15267,34 @@ def _compile_parallel_child_work_manifests(
                 raise ParallelScanInputError(
                     "parallel child request manifest lost its collection selection"
                 )
-            request_count = len(request_manifest.entries)
+            if request_manifest.kind is not ScanWorkManifestKind.REQUEST:
+                raise ParallelScanInputError(
+                    "parallel child request manifest has the wrong kind"
+                )
+            if request_manifest.target_binding_digest != parent_job.target.digest:
+                raise ParallelScanInputError(
+                    "parallel child request manifest escaped its target binding"
+                )
+            # Parent request manifests are the immutable selection authority, but
+            # a child action may load only manifests owned by that exact child
+            # scan. Project the value-free request references onto the child and
+            # stamp the selected shard instead of reusing the parent reference.
+            child_request_manifest = ScanWorkManifest(
+                scan_id=child_scan_id,
+                kind=ScanWorkManifestKind.REQUEST,
+                target_binding_digest=request_manifest.target_binding_digest,
+                source_action_ids=request_manifest.source_action_ids,
+                entries=tuple({
+                    **dict(entry),
+                    "selected_shard": selected_shard,
+                } for entry in request_manifest.entries),
+                status=request_manifest.status,
+                reason_code=request_manifest.reason_code,
+            )
+            projected_request_manifests[selection_digest] = (
+                child_request_manifest
+            )
+            request_count = len(child_request_manifest.entries)
             if request_count < 1:
                 raise ParallelScanInputError(
                     "parallel child request manifest is empty"
@@ -15279,25 +15307,25 @@ def _compile_parallel_child_work_manifests(
             original["selected_requests"] = request_count
             original["selected_mutating_requests"] = sum(
                 not bool(entry["safe_method"])
-                for entry in request_manifest.entries
+                for entry in child_request_manifest.entries
             )
             collection_refs.append(original)
             request_refs[selection_digest] = (
-                request_manifest.reference().canonical_dict()
+                child_request_manifest.reference().canonical_dict()
             )
-            manifests.append(request_manifest)
+            manifests.append(child_request_manifest)
         options["request_collections"] = collection_refs
         options["request_manifest_refs"] = request_refs
         if sub_budget.max_state_changing_requests > 0:
             request_candidate_manifest = build_request_candidate_manifest(
                 tuple(
-                    child_request_manifests[key]
-                    for key in sorted(child_request_manifests)
+                    projected_request_manifests[key]
+                    for key in sorted(projected_request_manifests)
                 ),
                 source_action_ids=tuple(
                     action_id
-                    for key in sorted(child_request_manifests)
-                    for action_id in child_request_manifests[key].source_action_ids
+                    for key in sorted(projected_request_manifests)
+                    for action_id in projected_request_manifests[key].source_action_ids
                 ),
                 maximum=max(
                     1, min(2_000, sub_budget.max_state_changing_requests),

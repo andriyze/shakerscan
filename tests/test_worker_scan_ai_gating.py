@@ -2567,11 +2567,12 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
     from scan.work_manifests import build_request_manifest
 
     child_scan_id = "22222222-2222-4222-8222-222222222225"
+    parent_scan_id = "11111111-1111-4111-8111-111111111125"
     selection_digest = "d" * 64
     contract = resolve_scan_contract(budget_profile="balanced")
     parent = CanonicalScanJob.create(
         job_id="parent-job",
-        scan_id="parent-scan",
+        scan_id=parent_scan_id,
         target=TargetBinding(
             target_id="target-1",
             target_kind="web",
@@ -2583,7 +2584,7 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
         execution_plan=contract.execution_plan,
     )
     request_manifest = build_request_manifest(
-        scan_id=child_scan_id,
+        scan_id=parent_scan_id,
         target_binding_digest=parent.target.digest,
         source_action_ids=("inputs.collection_00",),
         requests=({
@@ -2640,10 +2641,17 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
     assert collection.requested_budget["http_requests"] == 1
     assert options["request_collections"][0]["selected_requests"] == 1
     assert options["request_collections"][0]["selector"]["max_requests"] == 1
+    child_request_manifest = next(
+        manifest for manifest in manifests
+        if manifest.kind.value == "request"
+    )
+    assert child_request_manifest.scan_id == child_scan_id
+    assert child_request_manifest.manifest_id != request_manifest.manifest_id
+    assert child_request_manifest.entries[0]["selected_shard"] == 1
     assert options["request_manifest_refs"] == {
-        selection_digest: request_manifest.reference().canonical_dict()
+        selection_digest: child_request_manifest.reference().canonical_dict()
     }
-    assert request_manifest in manifests
+    assert request_manifest not in manifests
     assert "opaque-request-1" not in json.dumps(options)
     assert "private-body-canary" not in json.dumps(options)
 
