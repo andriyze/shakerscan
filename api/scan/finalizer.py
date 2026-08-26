@@ -30,12 +30,29 @@ _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
     "xss.request_verify", "sqli.request_verify", "browser.proof",
     "xss.request_verify_batch", "sqli.request_verify_batch", "sqli.prove_batch",
-    "xss.browser_prove_batch",
+    "xss.browser_prove_batch", "exposure.verify_batch", "nosqli.verify_batch",
+    "authz_surface.verify_batch",
 })
 _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
 })
+# Every selected-family capability collapsed to the canonical family it serves,
+# so coverage and grade reliability are reported per resolved family.
+_FAMILY_BY_CAPABILITY = {
+    "xss.verify_batch": "xss",
+    "xss.request_verify_batch": "xss",
+    "xss.browser_prove_batch": "xss",
+    "sqli.verify_batch": "sqli",
+    "sqli.request_verify_batch": "sqli",
+    "sqli.prove_batch": "sqli",
+    "templates.passive_batch": "nuclei_passive",
+    "templates.active_batch": "nuclei_active",
+    "exposure.verify_batch": "sensitive_exposure",
+    "nosqli.verify_batch": "nosqli",
+    "authz_surface.verify_batch": "authz_surface",
+    "authz.verify": "bola",
+}
 
 
 class ScanFinalizationError(ValueError):
@@ -801,6 +818,82 @@ def finalize_scan_report(
         })
     findings = list(findings_by_id.values())
     score, grade = _score(findings)
+
+    # Family-aware coverage: every selected family (one that produced a batch or
+    # verifier action) is reported with attempts, findings, budget, and a status.
+    # A selected family that attempted nothing while candidates existed, or whose
+    # required action did not complete, makes the grade unreliable — a scan can no
+    # longer report a reliable grade while a chosen family did no work.
+    family_coverage: dict[str, dict[str, Any]] = {}
+    for action in expected_actions:
+        family = _FAMILY_BY_CAPABILITY.get(action.capability_name)
+        if family is None:
+            continue
+        result = action_results[action.action_id]
+        raw_slice = action.capability_args.get("slice")
+        planned = (
+            int(raw_slice.get("count") or 0)
+            if isinstance(raw_slice, Mapping) else 0
+        )
+        attempts = {
+            str(item.get("attempt_id") or "")
+            for item in observations.get(action.action_id, ())
+            if isinstance(item, Mapping)
+            and item.get("kind") == "candidate_attempt"
+            and str(item.get("attempt_id") or "")
+        }
+        row = family_coverage.setdefault(family, {
+            "family": family, "selected": True, "required": False,
+            "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
+            "verified_findings": 0, "suspected_findings": 0,
+            "budget_reserved": {}, "budget_consumed": {}, "_statuses": [],
+        })
+        row["batch_actions"] += 1
+        row["required"] = row["required"] or bool(action.required)
+        row["planned_candidates"] += planned
+        row["attempted_candidates"] += len(attempts)
+        row["_statuses"].append(result.status.value)
+        for name, amount in result.budget_reserved.items():
+            row["budget_reserved"][name] = row["budget_reserved"].get(name, 0) + int(amount)
+        for name, amount in result.budget_consumed.items():
+            row["budget_consumed"][name] = row["budget_consumed"].get(name, 0) + int(amount)
+    for finding in findings:
+        capability = str(
+            (finding.get("evidence") or {}).get("canonical_capability") or ""
+        )
+        family = _FAMILY_BY_CAPABILITY.get(capability)
+        row = family_coverage.get(family) if family else None
+        if row is None:
+            continue
+        if finding.get("verified") is True:
+            row["verified_findings"] += 1
+        elif finding.get("suspected") is True:
+            row["suspected_findings"] += 1
+    selected_family_gaps: list[str] = []
+    for family, row in family_coverage.items():
+        statuses = row.pop("_statuses")
+        row["unattempted_candidates"] = max(
+            0, row["planned_candidates"] - row["attempted_candidates"],
+        )
+        action_incomplete = any(
+            status not in {"success", "partial"} for status in statuses
+        )
+        zero_attempts = (
+            row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
+        )
+        if action_incomplete or zero_attempts:
+            row["coverage_status"] = "partial"
+            row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif row["unattempted_candidates"] > 0:
+            row["coverage_status"] = "partial"
+            row["reason"] = "candidates_unattempted"
+        else:
+            row["coverage_status"] = "complete"
+            row["reason"] = None
+    selected_family_gaps.sort()
+
     required_rows = [
         (action, action_results[action.action_id])
         for action in expected_actions if action.required
@@ -868,6 +961,7 @@ def finalize_scan_report(
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"placement_unavailable"} if placement_gaps else set())
+      | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set()))
     grade_reliable = not reliability_reasons
     rendered_grade = grade if grade_reliable else f"{grade}*"
@@ -987,6 +1081,10 @@ def finalize_scan_report(
             "optional_gaps": optional_gaps,
             "active_zero_attempt_actions": zero_attempt_actions,
             "candidate_coverage": candidate_coverage,
+            "family_coverage": sorted(
+                family_coverage.values(), key=lambda row: row["family"],
+            ),
+            "selected_family_gaps": selected_family_gaps,
         },
         "verification_summary": {
             "verified": verified,

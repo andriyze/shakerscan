@@ -786,6 +786,13 @@ def build_scan_execution_explanation(
             "active_zero_attempt_actions": [
                 item["action_id"] for item in zero_attempt_verifiers
             ],
+            "family_coverage": [
+                dict(item) for item in _array(report_coverage.get("family_coverage"))
+                if isinstance(item, Mapping)
+            ],
+            "selected_family_gaps": [
+                str(item) for item in _array(report_coverage.get("selected_family_gaps"))
+            ],
             "work_manifests": work_manifests,
         },
         "transport_parity": transport_parity,
