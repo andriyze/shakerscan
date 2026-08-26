@@ -171,6 +171,17 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
     assert 'SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000"' in installed_smoke
 
 
+def test_full_release_e2e_accepts_only_exact_v2_candidates():
+    text = (ROOT / ".github" / "workflows" / "e2e.yml").read_text(
+        encoding="utf-8",
+    )
+
+    assert 'description: "Exact approved commit SHA on v2"' in text
+    assert "refs/heads/v2:refs/remotes/origin/v2" in text
+    assert 'git merge-base --is-ancestor "$candidate_sha" origin/v2' in text
+    assert "origin/main" not in text
+
+
 def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     text = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
         encoding="utf-8",

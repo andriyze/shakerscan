@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: "Exact approved commit SHA on main"
+        description: "Exact approved commit SHA on v2"
         required: true
 
 permissions:
@@ -54,9 +54,9 @@ jobs:
             echo "Candidate mismatch: requested=$REQUESTED_CANDIDATE_SHA checked_out=$candidate_sha" >&2
             exit 1
           fi
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$candidate_sha" origin/main || {
-            echo "Approved candidate is not reachable from origin/main" >&2
+          git fetch --no-tags origin +refs/heads/v2:refs/remotes/origin/v2
+          git merge-base --is-ancestor "$candidate_sha" origin/v2 || {
+            echo "Approved candidate is not reachable from origin/v2" >&2
             exit 1
           }
 
