@@ -1,0 +1,1 @@
+"""Exposure graph domain."""

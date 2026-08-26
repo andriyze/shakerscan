@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any
+import urllib.parse
 import uuid
 
 from fastapi import HTTPException
@@ -99,7 +100,15 @@ def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list
 
 
 __all__ = [
+    "SEVERITY_ORDER",
+    "extract_root_domain",
     "_clean_string_list",
+    "_graph_get",
+    "_graph_list",
+    "_parse_graph_json",
+    "_scan_completion_flags",
+    "_severity_sort_value",
+    "_short_url_label",
     "_content_free_hash",
     "_direct_query_value",
     "_int_or_none",
@@ -109,3 +118,85 @@ __all__ = [
     "_row_value",
     "_uuid_or_400",
 ]
+def _severity_sort_value(value: Any) -> int:
+    return SEVERITY_ORDER.get(str(value or "").lower(), 0)
+
+
+def _parse_graph_json(value: Any) -> dict[str, Any]:
+    decoded = _decode_json_value(value)
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _short_url_label(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    try:
+        parsed = urllib.parse.urlparse(value if "://" in value else f"https://{value}")
+        host = parsed.hostname or parsed.path
+        path = parsed.path if parsed.netloc else ""
+        label = f"{host}{path}" if path and path != "/" else host
+        return label[:90] if label else value[:90]
+    except Exception:
+        return str(value)[:90]
+
+
+def _graph_list(value: Any) -> list[Any]:
+    decoded = _decode_json_value(value)
+    if isinstance(decoded, list):
+        return decoded
+    if isinstance(decoded, tuple):
+        return list(decoded)
+    return []
+
+
+def _scan_completion_flags(completion_status: Any, top_coverage_status: Any = None) -> dict[str, Any]:
+    """Build scan-coverage flags from the small ``scan_completion_status`` object.
+
+    Callers extract only that sub-object (and the top-level coverage string) in
+    SQL so the multi-hundred-KB scan ``result`` blob is never shipped per asset.
+    """
+    status = _parse_graph_json(completion_status)
+    complete = status.get("complete")
+    limited = bool(status.get("limited") or status.get("budget_exhausted"))
+    return {
+        "scan_complete": complete if complete is not None else (False if limited else None),
+        "scan_limited": limited,
+        "coverage_status": status.get("coverage_status") or top_coverage_status,
+        "skipped_modules_count": len(status.get("skipped_modules") or []) if isinstance(status.get("skipped_modules"), list) else 0,
+        "capped_lists_count": len(status.get("capped_lists") or {}) if isinstance(status.get("capped_lists"), dict) else 0,
+    }
+SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
+def extract_root_domain(url: str) -> str:
+    """Extract root domain from URL."""
+    from urllib.parse import urlparse
+    import ipaddress
+    try:
+        parsed = urlparse(url if '://' in url else f'https://{url}')
+        host = parsed.hostname or parsed.netloc or parsed.path.split('/')[0]
+        # Note: parsed.hostname already strips ports and IPv6 brackets
+        # Return IPs as-is (no root domain)
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+            return host.strip("[]")
+        except ValueError:
+            pass
+        # Get root domain (last 2 parts)
+        parts = host.split('.')
+        if len(parts) >= 2:
+            return '.'.join(parts[-2:])
+        return host
+    except Exception:
+        return url
+def _graph_get(container: dict[str, Any], *path: str) -> Any:
+    cursor: Any = container
+    for key in path:
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(key)
+    return cursor
