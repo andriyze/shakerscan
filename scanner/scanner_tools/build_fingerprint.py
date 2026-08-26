@@ -41,6 +41,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "exposure",
     "finding_exceptions",
     "finding_routes",
+    "fleet_routes",
     "hunt",
     "interactive",
     "policy_profiles",

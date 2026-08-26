@@ -319,6 +319,7 @@ COPY api/devices /app/devices
 COPY api/exposure /app/exposure
 COPY api/finding_exceptions /app/finding_exceptions
 COPY api/finding_routes /app/finding_routes
+COPY api/fleet_routes /app/fleet_routes
 COPY api/hunt /app/hunt
 COPY api/interactive /app/interactive
 COPY api/policy_profiles /app/policy_profiles

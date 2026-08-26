@@ -80,6 +80,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from fleet_routes import router as fleet_router_module  # noqa: E402
 from ai_targets import router as ai_router_module  # noqa: E402
 from targets import router as targets_router_module  # noqa: E402
 from finding_routes import router as findings_router_module  # noqa: E402
@@ -263,6 +264,7 @@ def test_scan_collection_replay_freezes_exact_origins_and_addresses(monkeypatch)
         return ["192.0.2.10", "2001:db8::10"]
 
     monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)
+    monkeypatch.setattr(fleet_router_module, "_resolve_runtime_target_addresses", resolve)
     guard = asyncio.run(api_module._freeze_scan_collection_target_binding(
         target_id=target_id,
         target_kind="api",
@@ -2067,6 +2069,7 @@ def test_canonical_scan_target_binding_freezes_dns_and_both_inferred_origins(mon
         return ["192.0.2.10"]
 
     monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)
+    monkeypatch.setattr(fleet_router_module, "_resolve_runtime_target_addresses", resolve)
     guard = asyncio.run(api_module._freeze_scan_target_binding(
         target_id="00000000-0000-4000-8000-000000000001",
         target_kind="web",
@@ -2158,9 +2161,9 @@ def test_scan_options_reject_unknown_fleet_placement_key():
 
 def test_fleet_desired_state_requires_digest_pinned_rollout_image():
     with pytest.raises(Exception, match="digest-pinned"):
-        api_module.FleetDesiredStateRequest(worker_image_digest="registry/shakerscan:latest")
+        fleet_router_module.FleetDesiredStateRequest(worker_image_digest="registry/shakerscan:latest")
     digest = "registry/shakerscan@sha256:" + "a" * 64
-    assert api_module.FleetDesiredStateRequest(worker_image_digest=digest).worker_image_digest == digest
+    assert fleet_router_module.FleetDesiredStateRequest(worker_image_digest=digest).worker_image_digest == digest
 
 
 def test_fleet_desired_state_uses_a_heartbeat_independent_timestamp(monkeypatch):
@@ -2204,11 +2207,15 @@ def test_fleet_desired_state_uses_a_heartbeat_independent_timestamp(monkeypatch)
         }
 
     monkeypatch.setattr(api_module, "db_pool", Pool(Conn()))
-    monkeypatch.setattr(api_module, "_require_fleet_https", lambda _request: None)
+    monkeypatch.setattr(fleet_router_module, "_require_fleet_https", lambda _request: None)
+    # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "_fleet_bearer_credential", lambda _request: "node-secret")
+    monkeypatch.setattr(fleet_router_module, "_fleet_bearer_credential", lambda _request: "node-secret")
+    # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "_authenticate_fleet_node", authenticate)
+    monkeypatch.setattr(fleet_router_module, "_authenticate_fleet_node", authenticate)
 
-    state = asyncio.run(api_module.get_fleet_node_state(str(node_id), object()))
+    state = asyncio.run(fleet_router_module.get_fleet_node_state(str(node_id), object()))
     assert state["desired_state_changed_at"] == desired_changed_at.isoformat()
 
 
@@ -2269,13 +2276,17 @@ def test_fleet_rollout_update_advances_desired_state_timestamp(monkeypatch):
 
     conn = Conn()
     monkeypatch.setattr(api_module, "db_pool", Pool(conn))
+    # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "_require_fleet_operator", lambda _request: None)
+    monkeypatch.setattr(fleet_router_module, "_require_fleet_operator", lambda _request: None)
+    # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "_record_fleet_node_event", record_event)
+    monkeypatch.setattr(fleet_router_module, "_record_fleet_node_event", record_event)
 
     asyncio.run(
-        api_module.update_fleet_node_state(
+        fleet_router_module.update_fleet_node_state(
             str(node_id),
-            api_module.FleetDesiredStateRequest(worker_image_digest=digest),
+            fleet_router_module.FleetDesiredStateRequest(worker_image_digest=digest),
             object(),
         )
     )
@@ -2298,16 +2309,16 @@ def test_parallel_plan_runs_locally_but_preserves_remote_shard_placement():
 
 
 def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
-    lease = api_module.BrokerLeaseRequest(worker_id="node-1:worker.2", wait_seconds=30)
+    lease = fleet_router_module.BrokerLeaseRequest(worker_id="node-1:worker.2", wait_seconds=30)
     assert lease.wait_seconds == 30
     with pytest.raises(Exception):
-        api_module.BrokerLeaseRequest(worker_id="bad worker", wait_seconds=31)
+        fleet_router_module.BrokerLeaseRequest(worker_id="bad worker", wait_seconds=31)
     with pytest.raises(Exception):
-        api_module.BrokerLeaseHeartbeatRequest(
+        fleet_router_module.BrokerLeaseHeartbeatRequest(
             lease_token="x" * 40,
             log_lines=["line"] * 21,
         )
-    authority = api_module.BrokerActionAuthorityRequest(
+    authority = fleet_router_module.BrokerActionAuthorityRequest(
         job_lease_token="j" * 40,
         worker_id="broker:node-1:worker.2",
         plan_digest="a" * 64,
@@ -2315,7 +2326,7 @@ def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
         action_digest="b" * 64,
     )
     assert authority.action_id == "baseline.http"
-    continuation = api_module.BrokerScanContinuationRequest(
+    continuation = fleet_router_module.BrokerScanContinuationRequest(
         job_lease_token="j" * 40,
         worker_id="broker:node-1:worker.2",
         plan_digest="a" * 64,
@@ -2323,11 +2334,11 @@ def test_broker_lease_models_bound_worker_and_heartbeat_payloads():
     )
     assert continuation.allocation_digest == "c" * 64
     with pytest.raises(Exception):
-        api_module.BrokerActionAuthorityRequest(
+        fleet_router_module.BrokerActionAuthorityRequest(
             **authority.model_dump(), injected="not-allowed",
         )
     with pytest.raises(Exception):
-        api_module.BrokerScanContinuationRequest(
+        fleet_router_module.BrokerScanContinuationRequest(
             **continuation.model_dump(), injected="not-allowed",
         )
 
@@ -2342,7 +2353,7 @@ def test_broker_work_manifest_request_and_action_authority_are_exact():
         "entry_count": 2,
         "status": "complete",
     }
-    body = api_module.BrokerActionWorkManifestRequest(
+    body = fleet_router_module.BrokerActionWorkManifestRequest(
         job_lease_token="j" * 40,
         worker_id="broker:node-1:worker.2",
         plan_digest="a" * 64,
@@ -2355,12 +2366,12 @@ def test_broker_work_manifest_request_and_action_authority_are_exact():
         "nested_manifest_ref": {**reference, "manifest_digest": "d" * 64},
     })
 
-    authorized = api_module._broker_action_work_manifest_references(action)
+    authorized = fleet_router_module._broker_action_work_manifest_references(action)
 
     assert body.manifest_ref == reference
     assert [item.manifest_digest for item in authorized] == ["c" * 64, "d" * 64]
     with pytest.raises(Exception):
-        api_module.BrokerActionWorkManifestRequest(
+        fleet_router_module.BrokerActionWorkManifestRequest(
             **body.model_dump(), injected="not-allowed",
         )
 
@@ -2374,18 +2385,18 @@ def test_broker_plan_identifies_actions_that_require_sealed_inputs():
         types.SimpleNamespace(capability_name="auth.session.establish"),
     ))
 
-    assert not api_module._broker_action_plan_requires_local_private_inputs(public_plan)
-    assert api_module._broker_action_plan_requires_local_private_inputs(private_plan)
+    assert not fleet_router_module._broker_action_plan_requires_local_private_inputs(public_plan)
+    assert fleet_router_module._broker_action_plan_requires_local_private_inputs(private_plan)
     request_verifier_plan = types.SimpleNamespace(actions=(
         types.SimpleNamespace(capability_name="xss.request_verify"),
     ))
-    assert api_module._broker_action_plan_requires_local_private_inputs(
+    assert fleet_router_module._broker_action_plan_requires_local_private_inputs(
         request_verifier_plan
     )
 
 
 def test_broker_private_option_split_keeps_public_job_secret_free():
-    public, private = api_module._split_broker_private_options({
+    public, private = fleet_router_module._split_broker_private_options({
         "budget_profile": "balanced",
         "auth_header": "Bearer canary-secret",
         "login_password": "canary-password",
@@ -2415,16 +2426,16 @@ def test_cli_v1_scan_is_historical_read_only():
 
 
 def test_legacy_broker_jobs_with_private_inputs_are_detected_for_local_routing():
-    assert api_module._broker_job_has_private_inputs({
+    assert fleet_router_module._broker_job_has_private_inputs({
         "options": {"auth_cookies": "session=canary-secret"},
     })
-    assert api_module._broker_job_has_private_inputs({
+    assert fleet_router_module._broker_job_has_private_inputs({
         "options": {"credential_profile_refs": [{"profile_id": "profile-1"}]},
     })
-    assert api_module._broker_job_has_private_inputs({
+    assert fleet_router_module._broker_job_has_private_inputs({
         "options": {"request_collections": [{"replay_policy": "safe_reads"}]},
     })
-    assert not api_module._broker_job_has_private_inputs({
+    assert not fleet_router_module._broker_job_has_private_inputs({
         "options": {"budget_profile": "balanced"},
     })
 
@@ -2443,7 +2454,7 @@ def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):
         "scan_id": "11111111-1111-4111-8111-111111111111",
         "options": {"scan_type": "standard", "custom_budget": {"request_max": 50}},
     }
-    receipt = asyncio.run(api_module._broker_reserve_request_budget(Conn(), object(), payload))
+    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload))
     assert receipt["granted"] == 25
     assert payload["options"]["request_budget_mode"] == "enforce"
     assert payload["options"]["custom_budget"]["request_max"] == 25
@@ -2484,7 +2495,7 @@ def test_broker_immutable_action_plan_requires_all_or_nothing_domain_budget(monk
     }
 
     receipt = asyncio.run(
-        api_module._broker_reserve_request_budget(Conn(), object(), payload)
+        fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload)
     )
 
     assert receipt["granted"] == 50
@@ -2524,7 +2535,7 @@ def test_broker_request_budget_fairly_partitions_parallel_siblings(monkeypatch):
         "options": {"scan_type": "standard", "custom_budget": {"request_max": 80}},
     }
 
-    receipt = asyncio.run(api_module._broker_reserve_request_budget(Conn(), object(), payload))
+    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload))
 
     assert receipt["requested"] == 80
     assert receipt["reservation_request"] == 25
@@ -2565,7 +2576,7 @@ def test_broker_request_budget_zero_pending_race_still_partitions_running_siblin
         "options": {"scan_type": "standard", "custom_budget": {"request_max": 80}},
     }
 
-    receipt = asyncio.run(api_module._broker_reserve_request_budget(Conn(), object(), payload))
+    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload))
 
     assert receipt["pending_sibling_count"] == 4
     assert receipt["granted"] == 25
@@ -2574,7 +2585,7 @@ def test_broker_request_budget_zero_pending_race_still_partitions_running_siblin
 
 def test_broker_request_budget_explicit_off_preserves_operator_control():
     payload = {"options": {"request_budget_mode": "off"}}
-    assert asyncio.run(api_module._broker_reserve_request_budget(None, None, payload)) == {}
+    assert asyncio.run(fleet_router_module._broker_reserve_request_budget(None, None, payload)) == {}
 
 
 def test_broker_budget_deferral_exposes_waiting_phase():
@@ -2585,7 +2596,7 @@ def test_broker_budget_deferral_exposes_waiting_phase():
             calls.append((query, args))
 
     scan_id = "11111111-1111-4111-8111-111111111111"
-    asyncio.run(api_module._mark_broker_budget_wait(Conn(), {"scan_id": scan_id}))
+    asyncio.run(fleet_router_module._mark_broker_budget_wait(Conn(), {"scan_id": scan_id}))
 
     assert "waiting_for_request_budget" in calls[0][0]
     assert str(calls[0][1][0]) == scan_id
@@ -2848,7 +2859,9 @@ def test_ai_gate_credential_queue_requires_bound_expiring_credential_approval(mo
     monkeypatch.setattr(ai_router_module, "_resolve_ai_gate_credential_refs", resolve_refs)
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", validate)
     monkeypatch.setattr(api_module, "_record_command_result", record)
+    # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "enqueue_job", enqueue)
+    monkeypatch.setattr(fleet_router_module, "enqueue_job", enqueue)
 
     result = asyncio.run(ai_router_module._queue_ai_target_scan(
         str(target_id),

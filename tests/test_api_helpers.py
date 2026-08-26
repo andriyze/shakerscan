@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from fleet_routes import router as fleet_router_module  # noqa: E402
 from ai_targets import router as ai_router_module  # noqa: E402
 from targets import router as targets_router_module  # noqa: E402
 import operator_auth as operator_auth_module  # noqa: E402
@@ -1504,7 +1505,7 @@ def test_server_side_fleet_lease_probe_reclaims_and_acknowledges_once(monkeypatc
     monkeypatch.setattr(api_module, "get_redis", lambda: fake)
     monkeypatch.setattr(api_module.time, "sleep", lambda _seconds: None)
 
-    result = api_module._fleet_acceptance_lease_probe()
+    result = fleet_router_module._fleet_acceptance_lease_probe()
 
     assert result == {
         "reclaimed": True,
@@ -1520,7 +1521,7 @@ def test_server_side_fleet_lease_probe_rejects_unauthenticated_remote_call(monke
     monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
     with pytest.raises(api_module.HTTPException) as exc:
-        asyncio.run(api_module.run_fleet_acceptance_lease_probe(
+        asyncio.run(fleet_router_module.run_fleet_acceptance_lease_probe(
             _fleet_request(host="192.168.65.1", scheme="http")
         ))
     assert exc.value.status_code == 403
@@ -1578,10 +1579,10 @@ def test_broker_result_ingest_drops_remote_execution_placement():
         },
     }
 
-    ingest = api_module._control_plane_broker_ingest_payload(original)
+    ingest = fleet_router_module._control_plane_broker_ingest_payload(original)
 
     assert "placement" not in ingest
-    assert ingest["_base_queue_name"] == api_module.BROKER_INGEST_QUEUE_NAME
+    assert ingest["_base_queue_name"] == fleet_router_module.BROKER_INGEST_QUEUE_NAME
     assert "placement" not in ingest["options"]
     assert ingest["options"]["scan_type"] == "quick"
     assert ingest["options"]["custom_budget"] == {"max_requests": 100}
@@ -1601,7 +1602,7 @@ def test_broker_execution_projection_keeps_worker_inputs_but_drops_queue_transpo
         "_canonical_scan_job_digest": "a" * 64,
     }
 
-    projected = api_module._broker_execution_projection(materialized)
+    projected = fleet_router_module._broker_execution_projection(materialized)
 
     assert projected == {
         "job_id": "job-1",
@@ -1612,9 +1613,9 @@ def test_broker_execution_projection_keeps_worker_inputs_but_drops_queue_transpo
 
 
 def test_broker_canonical_queue_retries_never_serialize_materialized_options():
-    lease_source = inspect.getsource(api_module.lease_broker_job)
-    heartbeat_source = inspect.getsource(api_module.heartbeat_broker_job)
-    result_source = inspect.getsource(api_module.submit_broker_job_result)
+    lease_source = inspect.getsource(fleet_router_module.lease_broker_job)
+    heartbeat_source = inspect.getsource(fleet_router_module.heartbeat_broker_job)
+    result_source = inspect.getsource(fleet_router_module.submit_broker_job_result)
 
     assert "queued_payload = copy.deepcopy(payload)" in lease_source
     assert "canonical_materialized = await _materialize_control_plane_scan_job_v2(payload)" in lease_source
@@ -1687,37 +1688,37 @@ def test_route_capacity_maps_to_actionable_rate_limit_response():
 def test_insecure_fleet_enrollment_escape_hatch_is_loopback_only(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
     monkeypatch.setenv("FLEET_ALLOW_INSECURE_ENROLLMENT", "true")
-    assert api_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is True
-    assert api_module._fleet_request_is_https(_fleet_request(host="203.0.113.2", scheme="http")) is False
-    assert api_module._fleet_request_is_https(_fleet_request(host="203.0.113.2", scheme="https")) is True
+    assert fleet_router_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is True
+    assert fleet_router_module._fleet_request_is_https(_fleet_request(host="203.0.113.2", scheme="http")) is False
+    assert fleet_router_module._fleet_request_is_https(_fleet_request(host="203.0.113.2", scheme="https")) is True
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "127.0.0.1")
-    assert api_module._fleet_request_is_https(_fleet_request(host="192.168.65.1", scheme="http")) is True
+    assert fleet_router_module._fleet_request_is_https(_fleet_request(host="192.168.65.1", scheme="http")) is True
     monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "100.64.0.10")
-    assert api_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is False
+    assert fleet_router_module._fleet_request_is_https(_fleet_request(host="127.0.0.1", scheme="http")) is False
 
 
 def test_fleet_https_trusts_only_secret_bound_gateway_forwarding(monkeypatch):
     monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "g" * 48)
     monkeypatch.setenv("FLEET_ALLOW_INSECURE_ENROLLMENT", "false")
     forwarded = {"x-forwarded-proto": "https", "x-shakerscan-gateway-secret": "g" * 48}
-    assert api_module._fleet_request_is_https(
+    assert fleet_router_module._fleet_request_is_https(
         _fleet_request(host="172.20.0.8", scheme="http", headers=forwarded)
     ) is True
-    assert api_module._fleet_request_is_https(
+    assert fleet_router_module._fleet_request_is_https(
         _fleet_request(
             host="172.20.0.8",
             scheme="http",
             headers={**forwarded, "x-shakerscan-gateway-secret": "wrong"},
         )
     ) is False
-    assert api_module._fleet_request_is_https(
+    assert fleet_router_module._fleet_request_is_https(
         _fleet_request(
             host="172.20.0.8",
             scheme="http",
             headers={**forwarded, "x-shakerscan-gateway-secret": "nön-ascii"},
         )
     ) is False
-    assert api_module._fleet_request_is_https(
+    assert fleet_router_module._fleet_request_is_https(
         _fleet_request(
             host="172.20.0.8",
             scheme="http",
@@ -1749,10 +1750,10 @@ def test_fleet_join_rate_limit_uses_trusted_forwarded_identity_and_rejects_exces
             },
         )
 
-    api_module._require_fleet_join_rate_limit(request("198.51.100.1"))
-    api_module._require_fleet_join_rate_limit(request("198.51.100.2"))
+    fleet_router_module._require_fleet_join_rate_limit(request("198.51.100.1"))
+    fleet_router_module._require_fleet_join_rate_limit(request("198.51.100.2"))
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._require_fleet_join_rate_limit(request("198.51.100.3"))
+        fleet_router_module._require_fleet_join_rate_limit(request("198.51.100.3"))
     assert exc.value.status_code == 429
     assert exc.value.headers == {"Retry-After": "60"}
     assert len(counts) == 1
@@ -1772,14 +1773,14 @@ def test_fleet_join_rate_limit_ignores_invalid_trusted_forwarding_metadata(monke
     monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "g" * 48)
     monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
     monkeypatch.setattr(api_module.time, "time", lambda: 120.0)
-    api_module._require_fleet_join_rate_limit(_fleet_request(
+    fleet_router_module._require_fleet_join_rate_limit(_fleet_request(
         host="172.20.0.8",
         headers={
             "x-shakerscan-gateway-secret": "g" * 48,
             "x-forwarded-for": "attacker-selected-bucket",
         },
     ))
-    api_module._require_fleet_join_rate_limit(_fleet_request(
+    fleet_router_module._require_fleet_join_rate_limit(_fleet_request(
         host="172.20.0.8",
         headers={
             "x-shakerscan-gateway-secret": "g" * 48,
@@ -1794,14 +1795,14 @@ def test_default_fleet_budget_profiles_are_supported_but_tools_are_bounded():
         {"id": uuid.uuid4(), "region": "us-east", "labels": {}},
         {"requires": ["invented-tool"]},
     )
-    assert set(labels["budget_profiles"]) == api_module.SCAN_BUDGET_PROFILES
+    assert set(labels["budget_profiles"]) == fleet_router_module.SCAN_BUDGET_PROFILES
     assert "nuclei" in labels["tools"]
     assert "invented-tool" not in labels["tools"]
 
 
 def test_broker_worker_placement_labels_include_selectable_node_identity():
     node_id = uuid.uuid4()
-    labels = api_module._broker_node_labels({
+    labels = fleet_router_module._broker_node_labels({
         "id": node_id,
         "region": "eu-west",
         "labels": {"transport": "broker", "network": "lab"},
@@ -1823,7 +1824,7 @@ def test_public_fleet_health_omits_build_and_worker_telemetry(monkeypatch):
         }
 
     monkeypatch.setattr(api_module, "health", fake_health)
-    assert asyncio.run(api_module.fleet_public_health()) == {"status": "healthy"}
+    assert asyncio.run(fleet_router_module.fleet_public_health()) == {"status": "healthy"}
 
 
 def test_fleet_ca_certificate_loader_is_bounded_and_validated(tmp_path, monkeypatch):
@@ -1833,11 +1834,11 @@ def test_fleet_ca_certificate_loader_is_bounded_and_validated(tmp_path, monkeypa
         encoding="utf-8",
     )
     monkeypatch.setenv("FLEET_CA_CERT_PATH", str(certificate))
-    assert api_module._fleet_ca_certificate_pem().endswith("\n")
+    assert fleet_router_module._fleet_ca_certificate_pem().endswith("\n")
 
     certificate.write_text("not a certificate", encoding="utf-8")
     with pytest.raises(api_module.FleetConfigurationError, match="invalid"):
-        api_module._fleet_ca_certificate_pem()
+        fleet_router_module._fleet_ca_certificate_pem()
 
 
 def test_fleet_connection_bundle_prefers_bounded_file(tmp_path, monkeypatch):
@@ -1849,7 +1850,7 @@ def test_fleet_connection_bundle_prefers_bounded_file(tmp_path, monkeypatch):
     bundle.chmod(0o600)
     monkeypatch.setenv("FLEET_CONNECTION_BUNDLE_PATH", str(bundle))
     monkeypatch.setenv("FLEET_CONNECTION_BUNDLE_JSON", "not-json")
-    assert api_module._fleet_connection_bundle()["redis_url"] == "redis://10.77.0.1"
+    assert fleet_router_module._fleet_connection_bundle()["redis_url"] == "redis://10.77.0.1"
 
 
 def test_current_scanner_version_prefers_the_stamped_deployment_label(monkeypatch):
@@ -20427,7 +20428,9 @@ def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeyp
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
     monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
+    # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "enqueue_job", lambda _redis, _queue, job: captured.update({"job": job}))
+    monkeypatch.setattr(fleet_router_module, "enqueue_job", lambda _redis, _queue, job: captured.update({"job": job}))
     monkeypatch.setattr(api_module, "_enrich_model_intake_scan_request", unchanged)
     monkeypatch.setattr(api_module, "_expand_model_intake_policy_profile_requirements", unchanged)
     monkeypatch.setattr(api_module, "_expand_model_intake_saved_trust_anchors", unchanged)
@@ -20885,7 +20888,7 @@ def test_broker_early_failure_reconciles_terminal_shard_parent(monkeypatch):
     redis_client = object()
     monkeypatch.setattr(api_module.parallel_scan, "reconcile_parallel_parent", reconcile)
 
-    asyncio.run(api_module._fail_broker_scan_and_reconcile_parent(
+    asyncio.run(fleet_router_module._fail_broker_scan_and_reconcile_parent(
         conn,
         scan_id=scan_id,
         phase="scope_revalidation_failed",

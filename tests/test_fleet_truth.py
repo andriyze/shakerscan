@@ -54,6 +54,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from fleet_routes import router as fleet_router_module  # noqa: E402
 
 
 def _w(name, current, fp="abc", status="running"):
@@ -207,7 +208,7 @@ def test_local_build_remote_node_is_schedulable_but_not_image_current():
         "active_worker_count": 2,
     }
 
-    assert api_module._fleet_node_is_schedulable(node) is True
+    assert fleet_router_module._fleet_node_is_schedulable(node) is True
     assert api_module.compute_execution_capacity(
         {"count": 1, "current_count": 1},
         [node],
@@ -255,10 +256,10 @@ def test_broker_concurrency_uses_remote_workers_not_control_plane_capacity():
         },
     ]
 
-    assert api_module._compute_broker_active_scan_cap(nodes) == 5
-    assert api_module._compute_broker_active_scan_cap(nodes, override="3") == 3
-    assert api_module._compute_broker_active_scan_cap(nodes, override="20") == 5
-    assert api_module._compute_broker_active_scan_cap([], override="20") == 1
+    assert fleet_router_module._compute_broker_active_scan_cap(nodes) == 5
+    assert fleet_router_module._compute_broker_active_scan_cap(nodes, override="3") == 3
+    assert fleet_router_module._compute_broker_active_scan_cap(nodes, override="20") == 5
+    assert fleet_router_module._compute_broker_active_scan_cap([], override="20") == 1
 
 
 def test_unexplained_image_drift_remote_node_is_not_schedulable():
@@ -272,7 +273,7 @@ def test_unexplained_image_drift_remote_node_is_not_schedulable():
         "active_worker_count": 2,
     }
 
-    assert api_module._fleet_node_is_schedulable(node) is False
+    assert fleet_router_module._fleet_node_is_schedulable(node) is False
 
 
 def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
