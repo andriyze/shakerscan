@@ -5,11 +5,9 @@
 name: honey
 target_url: https://honey.shakerscan.com
 scan_options:
-  scan_type: smart
   parallel: true
   shard_strategy: coverage
   budget_profile: thorough
-  no_early_stop: true
 
 gates:
   min_categories_found: 3            # broad category coverage

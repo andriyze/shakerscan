@@ -4,11 +4,8 @@
 name: crapi
 target_url: http://host.docker.internal:8888
 scan_options:
-  scan_type: smart
   parallel: false
   budget_profile: thorough
-  exploit_depth: true            # BOLA is gated behind exploit_depth + two users
-  no_early_stop: true
 auth:
   # crAPI auth is self-serviceable: signup + login mint JWTs (see memory
   # crapi-juiceshop-validation-setup). benchmark_targets.py --auth crapi handles it.

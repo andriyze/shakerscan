@@ -81,6 +81,21 @@ FOCUSED_FAMILY_FOR_BENCHMARK_MISS = {
     "broken_access_control": "auth",
 }
 AUTH_REQUIRED_FAMILIES = {"bola", "broken_access_control"}
+PUBLIC_SCAN_OPTION_FIELDS = frozenset({
+    "custom_endpoints",
+    "require_current_workers",
+    "placement",
+    "parallel",
+    "shards",
+    "shard_strategy",
+    "auth_state_shards",
+})
+BENCHMARK_CREDENTIAL_CAPABILITIES = [
+    "http.request", "web.probe", "web.crawl", "web.content_discover",
+    "templates.passive_scan", "templates.scan", "collections.replay_safe",
+    "collections.replay_active", "xss.verify", "sqli.verify",
+    "xss.request_verify", "sqli.request_verify", "authz.verify",
+]
 
 
 def _get(url, timeout=30):
@@ -226,9 +241,14 @@ def check_fleet(api):
     }
 
 
-def _post(url, body, timeout=30):
+def _write_json(method, url, body, timeout=30):
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
@@ -258,8 +278,16 @@ def _post(url, body, timeout=30):
             safe_detail = str(detail or "request rejected")[:500]
         path = urllib.parse.urlsplit(url).path or "/"
         raise RuntimeError(
-            f"HTTP {exc.code} POST {path}: {json.dumps(safe_detail, sort_keys=True)}"
+            f"HTTP {exc.code} {method} {path}: {json.dumps(safe_detail, sort_keys=True)}"
         ) from None
+
+
+def _post(url, body, timeout=30):
+    return _write_json("POST", url, body, timeout=timeout)
+
+
+def _patch(url, body, timeout=30):
+    return _write_json("PATCH", url, body, timeout=timeout)
 
 
 def _canonical_benchmark_authority(api, target_url, *, credential_risk):
@@ -300,21 +328,65 @@ def _canonical_benchmark_authority(api, target_url, *, credential_risk):
 
 
 def _create_benchmark_bearer_profile(api, *, target_id, token, lane):
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    name = f"Ephemeral benchmark {lane}"
+    listing = _get(
+        f"{api}/credential-profiles?{urllib.parse.urlencode({
+            'target_kind': 'web',
+            'target_id': target_id,
+            'include_inactive': 'true',
+        })}",
+        timeout=30,
+    )
+    existing = next(
+        (
+            item for item in listing.get("profiles", [])
+            if isinstance(item, dict) and item.get("name") == name
+        ),
+        None,
+    )
+    if existing is not None:
+        if (
+            existing.get("auth_kind") != "bearer_token"
+            or existing.get("principal_slot") != lane
+        ):
+            raise RuntimeError(
+                f"existing benchmark {lane} credential profile has incompatible metadata"
+            )
+        profile_id = str(existing.get("id") or "")
+        if not profile_id:
+            raise RuntimeError(f"existing benchmark {lane} credential profile has no id")
+        patched = _patch(f"{api}/credential-profiles/{profile_id}", {
+            "expected_record_version": existing.get("record_version"),
+            "name": name,
+            "principal_label": f"benchmark-{lane}",
+            "principal_slot": lane,
+            "expires_at": expires_at,
+            "is_active": True,
+            "allowed_capabilities": BENCHMARK_CREDENTIAL_CAPABILITIES,
+        })
+        patched_profile = patched.get("profile") or {}
+        rotated = _post(f"{api}/credential-profiles/{profile_id}/rotate", {
+            "expected_record_version": patched_profile.get("record_version"),
+            "secret": token,
+            "expires_at": expires_at,
+            "created_by": "benchmark_targets.py",
+        })
+        rotated_id = str((rotated.get("profile") or {}).get("id") or "")
+        if rotated_id != profile_id:
+            raise RuntimeError(f"benchmark {lane} credential rotation returned the wrong id")
+        return rotated_id
+
     created = _post(f"{api}/credential-profiles", {
         "target_kind": "web",
         "target_id": target_id,
-        "name": f"Ephemeral benchmark {lane}",
+        "name": name,
         "auth_kind": "bearer_token",
         "principal_label": f"benchmark-{lane}",
         "principal_slot": lane,
         "secret": token,
-        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
-        "allowed_capabilities": [
-            "http.request", "web.probe", "web.crawl", "web.content_discover",
-            "templates.passive_scan", "templates.scan", "collections.replay_safe",
-            "collections.replay_active", "xss.verify", "sqli.verify",
-            "xss.request_verify", "sqli.request_verify", "authz.verify",
-        ],
+        "expires_at": expires_at,
+        "allowed_capabilities": BENCHMARK_CREDENTIAL_CAPABILITIES,
         "created_by": "benchmark_targets.py",
     })
     profile_id = str((created.get("profile") or {}).get("id") or "")
@@ -764,8 +836,13 @@ def submit_target(name, api, do_auth):
     """Submit one benchmark scan and return a content-free queue receipt."""
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     opts = dict(fx.get("scan_options") or {})
-    opts.pop("scan_type", None)
     budget_profile = str(opts.pop("budget_profile", "thorough"))
+    unsupported_options = sorted(set(opts).difference(PUBLIC_SCAN_OPTION_FIELDS))
+    if unsupported_options:
+        raise RuntimeError(
+            "benchmark fixture uses unsupported public V2 scan option(s): "
+            + ", ".join(unsupported_options)
+        )
     opts["require_current_workers"] = True
     two_user = False
     principal_validation = {

@@ -5,14 +5,11 @@
 # should prove on this app; matching is by class + route token, not app secrets.
 name: juice-shop
 target_url: http://host.docker.internal:3001
-# Single Smart scan runs the global+browser checks where Juice Shop's crit/highs
-# live (coverage mode fragments them — see coverage-mode-loses-global-checks).
+# One deterministic Scan runs serially so global and browser proof remain in the
+# same immutable workload. The thorough preset is the production verifier budget.
 scan_options:
-  scan_type: smart
   parallel: false
   budget_profile: thorough
-  exploit_depth: true
-  no_early_stop: true
 # auth: optional bearer tokens minted at runtime (see benchmark_targets.py --auth).
 auth:
   user1_login: { url: /rest/user/login, email_field: email, password_field: password }

@@ -183,6 +183,7 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     calls = []
 
     monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
+    monkeypatch.setattr(b, "_get", lambda *args, **kwargs: {"profiles": []})
 
     def fake_post(url, body, timeout=30):
         calls.append((url, body))
@@ -271,6 +272,47 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
         b._principal_identity_fingerprint("email:bench.u2.run123@shaker.test"),
     ]
     assert "run123" not in str(receipt)
+
+
+def test_benchmark_profile_retry_reuses_and_rotates_existing_identity(monkeypatch):
+    writes = []
+    monkeypatch.setattr(b, "_get", lambda *args, **kwargs: {
+        "profiles": [{
+            "id": "profile-primary",
+            "name": "Ephemeral benchmark primary",
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "record_version": 7,
+            "is_active": True,
+        }],
+    })
+
+    def fake_patch(url, body, timeout=30):
+        writes.append(("PATCH", url, body))
+        return {"profile": {"id": "profile-primary", "record_version": 8}}
+
+    def fake_post(url, body, timeout=30):
+        writes.append(("POST", url, body))
+        assert url.endswith("/credential-profiles/profile-primary/rotate")
+        return {"profile": {"id": "profile-primary", "record_version": 9}}
+
+    monkeypatch.setattr(b, "_patch", fake_patch)
+    monkeypatch.setattr(b, "_post", fake_post)
+
+    profile_id = b._create_benchmark_bearer_profile(
+        "http://scanner.test",
+        target_id="target-1",
+        token="rotated-secret",
+        lane="primary",
+    )
+
+    assert profile_id == "profile-primary"
+    assert [method for method, _url, _body in writes] == ["PATCH", "POST"]
+    assert writes[0][2]["expected_record_version"] == 7
+    assert writes[0][2]["is_active"] is True
+    assert writes[0][2]["allowed_capabilities"] == b.BENCHMARK_CREDENTIAL_CAPABILITIES
+    assert writes[1][2]["expected_record_version"] == 8
+    assert writes[1][2]["secret"] == "rotated-secret"
 
 
 def _verified_bola_report(server_distinct: bool):
