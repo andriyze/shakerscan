@@ -220,6 +220,26 @@ def test_execution_explanation_marks_required_partial_grade_unreliable():
     assert explanation["transport_parity"]["broker_eligible"] is True
 
 
+def test_running_required_action_is_progress_not_missing_terminal_failure():
+    rows = _rows()
+    rows[0].update({"status": "running", "reason_code": None, "result_json": {}})
+
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="running",
+        plan_payload=_plan(),
+        action_rows=rows,
+    )
+
+    assert explanation["coverage"]["status"] == "in_progress"
+    assert explanation["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["scan_in_progress"],
+        "reason_labels": ["Required actions are still running"],
+        "warning": "The grade will be finalized after required actions finish.",
+    }
+
+
 def test_terminal_scan_labels_never_started_stages_not_run():
     explanation = build_scan_execution_explanation(
         scan_id=SCAN_ID,

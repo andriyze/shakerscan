@@ -75,6 +75,24 @@ test('non-device score presentation is unchanged', () => {
 })
 
 
+test('unreliable DAST grade is explicitly provisional and never displayed as A star', () => {
+  const presentation = deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A*',
+    score: 100,
+    result: {
+      result: { grade: 'A*', score: 100, grade_reliable: false },
+      coverage: { status: 'partial', grade_reliability: { reliable: false } },
+    },
+  })
+
+  assert.equal(presentation.status, 'provisional')
+  assert.equal(presentation.grade, 'A')
+  assert.equal(presentation.score, 100)
+  assert.match(presentation.note, /not a pass verdict/)
+})
+
+
 test('device activity becomes readable content-free report logs', () => {
   assert.deepEqual(deviceActivityLogLines({ events: [
     {

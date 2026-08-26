@@ -22,3 +22,10 @@ test('worker labels stay grammatical and completed shards show useful attributio
   assert.match(scanDetail, /rawPhase \|\| \(shard\.executing_node_id/)
   assert.match(scanDetail, /`node \$\{String\(shard\.executing_node_id\)\.slice\(0, 8\)\}`/)
 })
+
+test('dashboard distinguishes logical scans, worker jobs, and worker processes', () => {
+  assert.match(dashboard, /Scan and work queue/)
+  assert.match(dashboard, /work unit\{workRunning === 1 \? '' : 's'\} running/)
+  assert.match(dashboard, /workers · limit/)
+  assert.doesNotMatch(dashboard, /\{workerCount\} running · max/)
+})

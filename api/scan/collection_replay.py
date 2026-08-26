@@ -197,8 +197,20 @@ def scan_replay_selector(
 
 
 def scan_replay_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
-    """Map the canonical Scan budget into shared reservation dimensions."""
-    return scan_budget_ledger_limits(budget)
+    """Map the canonical Scan budget into shared reservation dimensions.
+
+    A parallel child receives zero for dimensions it cannot execute. Exact HTTP
+    replay still requires positive request/time authority, but it must not reject
+    a child merely because browser, network, or host-discovery capacity is zero.
+    """
+    limits = scan_budget_ledger_limits(budget, allow_zero=True)
+    _positive_integer(
+        limits.get("http_requests"), name="Scan max_http_requests",
+    )
+    _positive_integer(
+        limits.get("tool_wall_seconds"), name="Scan max_tool_wall_seconds",
+    )
+    return limits
 
 
 def scan_replay_runtime_http_ceiling(

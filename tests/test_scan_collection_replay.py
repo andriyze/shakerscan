@@ -377,6 +377,32 @@ def test_scan_capacity_reserves_a_minimal_baseline_and_honors_runtime_grant():
     assert limits["http_requests"] == 100
 
 
+def test_scan_replay_accepts_zero_unrelated_parallel_child_dimensions():
+    budget = {
+        **_budget(),
+        "max_browser_actions": 0,
+        "max_tcp_ports": 0,
+        "max_hosts": 0,
+    }
+
+    assert scan_replay_ledger_limits(budget) == {
+        "http_requests": 100,
+        "state_changing_requests": 6,
+        "browser_actions": 0,
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": 0,
+        "tool_wall_seconds": 60,
+    }
+
+
+@pytest.mark.parametrize("field", ["max_http_requests", "max_tool_wall_seconds"])
+def test_scan_replay_requires_positive_http_and_time_authority(field):
+    budget = {**_budget(), field: 0}
+
+    with pytest.raises(ScanCollectionReplayContractError, match="positive integer"):
+        scan_replay_ledger_limits(budget)
+
+
 def test_scan_replay_does_not_treat_compatibility_active_grant_as_http_budget():
     options = {
         "custom_budget": {"request_max": 10},

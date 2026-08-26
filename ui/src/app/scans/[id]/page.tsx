@@ -1376,6 +1376,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const planRevision = explanation?.plan_revision || {}
   const completed = Number(matrix.completed || 0)
   const total = Number(matrix.total || Math.max(0, actions.length - 1))
+  const scanTerminal = ['completed', 'failed', 'cancelled'].includes(String(scan?.status || ''))
   const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) + Number(matrix.pending || 0) > 0
   const apiRecordUrl = `${API_URL}/scans/${scan.id}/actions`
 
@@ -1386,7 +1387,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
           <h2 className="text-sm font-semibold text-gray-200">What this scan ran</h2>
           <p className="mt-1 text-xs text-gray-500">
             {completed} of {total} planned security actions completed
-            {hasGap ? ' · coverage gaps are explained below' : ''}.
+            {hasGap ? (scanTerminal ? ' · coverage gaps are explained below' : ' · remaining work is shown below') : ''}.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

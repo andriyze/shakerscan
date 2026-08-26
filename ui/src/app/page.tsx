@@ -233,6 +233,8 @@ export default function Dashboard() {
 
   const queuePending = queue ? queue.pending : '--'
   const queueRunning = queue ? queue.running : '--'
+  const workPending = queue ? (queue.work_pending ?? queue.pending) : '--'
+  const workRunning = queue ? (queue.work_running ?? queue.running) : '--'
   const workerCount = workers?.count
   const workersKnown = workerCount !== undefined && workerCount >= 0
   const executionCapacity = workers?.execution_capacity
@@ -256,7 +258,7 @@ export default function Dashboard() {
           <p className="text-gray-400 mt-1">What changed, what is proven, and what needs attention</p>
         </div>
         <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
-          <div className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5" aria-label="Scan queue">
+          <div className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5" aria-label="Scan and work queue">
             <ListTodo className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             {queueError ? (
               <span className="flex items-center gap-1.5 text-xs text-red-300" title={queueError}>
@@ -271,7 +273,7 @@ export default function Dashboard() {
                 >
                   <span className={`h-2 w-2 rounded-full bg-amber-400 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queuePending}</span>
-                  <span className="hidden text-gray-500 sm:inline">pending</span>
+                  <span className="hidden text-gray-500 sm:inline">scans pending</span>
                 </Link>
                 <Link
                   href="/scans?status=running"
@@ -280,8 +282,16 @@ export default function Dashboard() {
                 >
                   <span className={`h-2 w-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queueRunning}</span>
-                  <span className="hidden text-gray-500 sm:inline">running</span>
+                  <span className="hidden text-gray-500 sm:inline">scan{queueRunning === 1 ? '' : 's'} running</span>
                 </Link>
+                {(workPending !== queuePending || workRunning !== queueRunning) && (
+                  <span
+                    className="hidden rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 lg:inline"
+                    title={`${workPending} queued and ${workRunning} running worker jobs, including parallel shards`}
+                  >
+                    {workRunning} work unit{workRunning === 1 ? '' : 's'} running
+                  </span>
+                )}
               </>
             )}
             <button
@@ -300,13 +310,13 @@ export default function Dashboard() {
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
             title={workersError || (fleetEnabled
               ? `${totalAvailable} available: ${localAvailable} local, ${remoteAvailable} remote`
-              : `${localAvailable} workers available`)}
+              : `${localAvailable} current-build workers are schedulable`)}
           >
             <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
               {workersKnown ? totalAvailable : '--'}
             </span>
-            <span className="hidden text-xs text-gray-500 sm:inline">available</span>
+            <span className="hidden text-xs text-gray-500 sm:inline">{fleetEnabled ? 'schedulable' : 'current'}</span>
             {fleetEnabled && (
               <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local ${(workerCount ?? 0) === 1 ? 'worker' : 'workers'} running`}>
                 {localAvailable} local
@@ -319,7 +329,7 @@ export default function Dashboard() {
             )}
             {!fleetEnabled && workersKnown && (
               <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`Worker safety limit: ${maxWorkers}`}>
-                {workerCount} running · max {maxWorkers}
+                {workerCount} workers · limit {maxWorkers}
               </span>
             )}
             <span className="h-5 w-px bg-gray-800" aria-hidden="true" />

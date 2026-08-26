@@ -12,6 +12,7 @@ test('scan detail explains stages, placement, budgets, evidence, and grade relia
   assert.match(detail, /What this scan ran/)
   assert.match(detail, /Same local \/ fleet contract/)
   assert.match(detail, /Grade is provisional/)
+  assert.match(detail, /remaining work is shown below/)
   assert.match(detail, /Reserved:/)
   assert.match(detail, /Used:/)
   assert.match(detail, /Evidence observations:/)

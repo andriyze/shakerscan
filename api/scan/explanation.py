@@ -57,6 +57,7 @@ _REASON_LABELS = {
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",
+    "scan_in_progress": "Required actions are still running",
     "missing_terminal_result": "A required capability has no terminal result",
     "parallel_child_incomplete": "At least one parallel shard completed with partial coverage",
 }
@@ -560,8 +561,16 @@ def build_scan_execution_explanation(
         else _object(report_payload.get("coverage"))
     )
     report_reliability = _object(report_coverage.get("grade_reliability"))
+    scan_terminal = str(scan_status) in {"completed", "failed", "cancelled"}
+    required_nonterminal = [
+        item for item in required_incomplete if item["status"] not in _TERMINAL
+    ]
     reliability_reasons = sorted({
-        str(item.get("reason_code") or "missing_terminal_result")
+        (
+            "scan_in_progress"
+            if item["status"] not in _TERMINAL and not scan_terminal
+            else str(item.get("reason_code") or "missing_terminal_result")
+        )
         for item in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_verifiers else set()) | {
         str(item)[:100]
@@ -574,6 +583,8 @@ def build_scan_execution_explanation(
             coverage_status = "cancelled"
         elif counts.get("failed") or counts.get("blocked"):
             coverage_status = "failed"
+        elif required_nonterminal and not scan_terminal:
+            coverage_status = "in_progress"
         elif required_incomplete or zero_attempt_verifiers:
             coverage_status = "partial"
         elif any(item["status"] not in _TERMINAL for item in capability_rows):
@@ -699,9 +710,13 @@ def build_scan_execution_explanation(
                     None
                     if grade_reliable
                     else (
-                        "The grade is provisional because required coverage did not complete cleanly."
-                        if coverage_status != "complete"
-                        else "The grade is provisional until the listed verification conditions are resolved."
+                        "The grade will be finalized after required actions finish."
+                        if coverage_status == "in_progress"
+                        else (
+                            "The grade is provisional because required coverage did not complete cleanly."
+                            if coverage_status != "complete"
+                            else "The grade is provisional until the listed verification conditions are resolved."
+                        )
                     )
                 ),
             },

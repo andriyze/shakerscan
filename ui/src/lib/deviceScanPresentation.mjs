@@ -23,12 +23,36 @@ export function deviceScorePresentation(scan) {
     || Object.keys(posture).length > 0
   )
   const gradeValue = scanRecord.grade ?? resultSummary.grade
-  const grade = gradeValue === null || gradeValue === undefined || gradeValue === ''
+  const storedGrade = gradeValue === null || gradeValue === undefined || gradeValue === ''
     ? null
     : String(gradeValue)
+  const grade = storedGrade?.replace(/\*+$/, '') || null
   const score = finiteScore(scanRecord.score ?? resultSummary.score)
 
   if (!isDevice) {
+    const coverage = record(scanResult.coverage)
+    const executionCoverage = record(record(scanRecord.execution_explanation).coverage)
+    const reliability = record(
+      Object.keys(record(coverage.grade_reliability)).length
+        ? coverage.grade_reliability
+        : executionCoverage.grade_reliability,
+    )
+    const coverageStatus = String(coverage.status || executionCoverage.status || '').toLowerCase()
+    const provisional = (
+      storedGrade?.endsWith('*')
+      || resultSummary.grade_reliable === false
+      || reliability.reliable === false
+      || ['partial', 'failed', 'cancelled', 'in_progress'].includes(coverageStatus)
+    )
+    if (provisional) {
+      return {
+        isDevice: false,
+        status: 'provisional',
+        grade,
+        score,
+        note: 'Observed-finding score only; incomplete or unresolved coverage means this is not a pass verdict.',
+      }
+    }
     return { isDevice: false, status: 'final', grade, score, note: null }
   }
 
