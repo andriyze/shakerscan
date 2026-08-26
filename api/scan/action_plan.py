@@ -58,6 +58,7 @@ _BATCH_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
     "exposure.verify_batch",
     "nosqli.verify_batch",
+    "authz_surface.verify_batch",
 })
 _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     "fast": {
@@ -71,6 +72,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
         "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
         "nosqli.verify_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
+        "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
     },
     "balanced": {
         "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
@@ -83,6 +85,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
         "exposure.verify_batch": (60, {"http_requests": 400, "tool_wall_seconds": 180}),
         "nosqli.verify_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
+        "authz_surface.verify_batch": (20, {"http_requests": 200, "tool_wall_seconds": 150}),
     },
     "thorough": {
         "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
@@ -95,6 +98,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
         "exposure.verify_batch": (80, {"http_requests": 600, "tool_wall_seconds": 240}),
         "nosqli.verify_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
+        "authz_surface.verify_batch": (40, {"http_requests": 400, "tool_wall_seconds": 180}),
     },
 }
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -760,6 +764,7 @@ class ScanActionPlanCompiler:
         bola = active and enabled("bola")
         sensitive_exposure = active and enabled("sensitive_exposure")
         nosqli = active and enabled("nosqli")
+        authz_surface = active and enabled("authz_surface")
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
@@ -1020,6 +1025,7 @@ class ScanActionPlanCompiler:
                     "xss.browser_prove_batch": 50,
                     "exposure.verify_batch": 15,
                     "nosqli.verify_batch": 20,
+                    "authz_surface.verify_batch": 15,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1415,6 +1421,29 @@ class ScanActionPlanCompiler:
                 manifest_ref=candidate_ref,
                 dependencies=active_dependencies,
                 required="nosqli" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        authz_surface_will_run = (
+            scope in {"full", "endpoint"}
+            and authz_surface
+            and "primary" in lane_refs
+            and not defer_manifest_actions
+        )
+        if authz_surface_will_run:
+            # BFLA proof needs an authenticated principal to contrast against the
+            # anonymous lane; without primary auth the family cannot run.
+            add_manifest_batches(
+                "verify.authz_surface",
+                "verify_candidates",
+                "authz_surface.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=tuple(dict.fromkeys((
+                    *primary_dependency,
+                    *(() if endpoint_ref else discovery_dependencies),
+                ))),
+                required="authz_surface" in explicitly_requested,
                 minimum_batches=1,
                 reserve_dependency_slots=int(authz_will_run),
             )

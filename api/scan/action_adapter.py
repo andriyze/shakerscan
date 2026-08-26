@@ -33,6 +33,13 @@ try:
     from capabilities.request_mutation import RequestMutationVerificationAdapter
     from capabilities.sqli_proof import SQLiProofAdapter
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
+    from capabilities.authz_surface import (
+        AUTHZ_SURFACE_PARSER_VERSION,
+        PrincipalProbe,
+        RouteComparison,
+        bfla_finding,
+        boundary_established,
+    )
     from capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -83,6 +90,13 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
     from ..capabilities.sqli_proof import SQLiProofAdapter
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
+    from ..capabilities.authz_surface import (
+        AUTHZ_SURFACE_PARSER_VERSION,
+        PrincipalProbe,
+        RouteComparison,
+        bfla_finding,
+        boundary_established,
+    )
     from ..capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -1811,6 +1825,177 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    async def _authz_surface_batch(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """Prove BFLA by contrasting anonymous and authenticated route access."""
+        endpoints = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if endpoints is None:
+            return self._skip(action, "manifest_unavailable")
+        raw_slice = action.capability_args.get("slice")
+        if not isinstance(raw_slice, Mapping):
+            raise ScanActionAdapterError("authz surface batch slice is invalid")
+        start, count = raw_slice.get("start"), raw_slice.get("count")
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(count, bool) or not isinstance(count, int)
+            or not 1 <= count <= 100
+        ):
+            raise ScanActionAdapterError("authz surface batch slice is invalid")
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
+        if not primary.authenticated:
+            return self._skip(action, "no_primary_principal")
+        load_attempts = getattr(self.backend, "load_batch_attempts", None)
+        checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
+        if not callable(load_attempts) or not callable(checkpoint_attempt):
+            raise ScanActionAdapterError("authz surface backend lacks durable checkpoints")
+        completed = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in await load_attempts(action.action_id)
+            if isinstance(item, Mapping)
+        }
+        manifest_digest = endpoints.reference().manifest_digest
+        window = tuple(enumerate(
+            endpoints.entries[start:min(len(endpoints.entries), start + count)],
+            start=start,
+        ))
+        transport = PinnedAiohttpReplayTransport()
+        started_at = datetime.now(timezone.utc).isoformat()
+        consumed = {name: 0 for name in action.requested_budget}
+        http_ceiling = int(action.requested_budget.get("http_requests") or 0)
+        wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
+        errors: list[str] = []
+        attempted = resumed = 0
+
+        def probe_of(result: Any) -> PrincipalProbe:
+            content_type = next((
+                str(value).lower() for name, value in result.response_headers.items()
+                if str(name).lower() == "content-type"
+            ), "")
+            return PrincipalProbe(
+                status=result.status_code,
+                body_sha256=hashlib.sha256(result.response_body).hexdigest(),
+                body_len=len(result.response_body),
+                is_json="json" in content_type,
+                error=bool(result.error_code),
+            )
+
+        async def send(url: str, headers: tuple, ordinal: int) -> Any:
+            nonlocal consumed
+            request = ReplayRequest(
+                request_id=f"authz:{ordinal}", ordinal=ordinal,
+                name="authz surface probe", folder="", method="GET", url=url,
+                headers=headers, body=b"", body_mode="none",
+                auth_type="broker_session" if headers else "none",
+                has_sensitive_material=bool(headers),
+            )
+            remaining = max(1, http_ceiling - consumed["http_requests"])
+            result = await transport.send(
+                request, target=self.target,
+                timeout_seconds=max(0.5, min(15.0, wall_ceiling / remaining)),
+                follow_redirects=False,
+            )
+            consumed["http_requests"] = min(http_ceiling, consumed["http_requests"] + 1)
+            await heartbeat()
+            return result
+
+        comparisons: list[RouteComparison] = []
+        primary_headers = tuple(primary.headers().items())
+        ordinal = start * 1000
+        for manifest_index, entry in window:
+            route_id = str(entry.get("route_id") or "")
+            attempt_id = hashlib.sha256(
+                f"{manifest_digest}:authz_surface:{route_id}".encode()
+            ).hexdigest()
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                comparisons.append(RouteComparison(
+                    route_id=route_id, url=str(prior.get("url") or ""),
+                    anonymous=tuple(
+                        PrincipalProbe(**probe) for probe in prior.get("anonymous") or ()
+                    ),
+                    authenticated=tuple(
+                        PrincipalProbe(**probe) for probe in prior.get("authenticated") or ()
+                    ),
+                ))
+                continue
+            if self.cancelled() or consumed["http_requests"] + 4 > http_ceiling:
+                break
+            try:
+                url = execution_url_for_endpoint(entry)
+            except (ScanWorkManifestError, KeyError):
+                continue
+            anon_probes: list[PrincipalProbe] = []
+            authed_probes: list[PrincipalProbe] = []
+            for _repeat in range(2):
+                ordinal += 1
+                anon_result = await send(url, (), ordinal)
+                if anon_result.error_code:
+                    errors.append(str(anon_result.error_code))
+                anon_probes.append(probe_of(anon_result))
+                ordinal += 1
+                authed_result = await send(url, primary_headers, ordinal)
+                if authed_result.error_code:
+                    errors.append(str(authed_result.error_code))
+                authed_probes.append(probe_of(authed_result))
+            comparison = RouteComparison(
+                route_id=route_id, url=url,
+                anonymous=tuple(anon_probes), authenticated=tuple(authed_probes),
+            )
+            comparisons.append(comparison)
+            checkpoint = {
+                "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                "route_id": route_id, "url": url,
+                "anonymous": [vars(probe) for probe in anon_probes],
+                "authenticated": [vars(probe) for probe in authed_probes],
+                "budget_consumed": {"http_requests": 4},
+            }
+            if not self.cancelled():
+                await checkpoint_attempt(action.action_id, checkpoint)
+            attempted += 1
+
+        # A finding needs proof the app gates function access somewhere; without an
+        # established boundary a fully-public app yields nothing.
+        boundary = boundary_established(comparisons)
+        observations: list[Mapping[str, Any]] = []
+        for comparison in comparisons:
+            proven = bfla_finding(comparison) if boundary else None
+            observations.append({
+                "kind": "candidate_attempt",
+                "attempt_id": hashlib.sha256(
+                    f"{manifest_digest}:authz_surface:{comparison.route_id}".encode()
+                ).hexdigest(),
+                "candidate_id": comparison.route_id,
+                "family": "authz_surface",
+                "status": "success",
+                "proof_state": "verified" if proven else "not_proven",
+            })
+            if proven is not None:
+                observations.append(proven)
+        unattempted = max(0, len(window) - attempted)
+        return self._receipt(
+            action, status="partial" if unattempted else "success",
+            parser_version=AUTHZ_SURFACE_PARSER_VERSION,
+            started_at=started_at, observations=tuple(observations),
+            errors=tuple(errors[:20]), consumed=consumed,
+            partial=bool(unattempted), timed_out=False,
+            redacted_execution={
+                "action_id": action.action_id, "manifest_digest": manifest_digest,
+                "slice": {"start": start, "count": count},
+                "route_count": len(window), "attempted_count": attempted,
+                "resumed_count": resumed, "unattempted_count": unattempted,
+                "boundary_established": boundary,
+                "checkpoint_mode": "after_each_route",
+                "secret_values_visible": False,
+            },
+        )
+
     async def _external(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         tool_by_capability = {
             "web.probe": "httpx",
@@ -2308,6 +2493,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._exposure_probe_batch(action, heartbeat)
         if action.capability_name == "nosqli.verify_batch":
             return await self._nosqli_verify_batch(action, heartbeat)
+        if action.capability_name == "authz_surface.verify_batch":
+            return await self._authz_surface_batch(action, heartbeat)
         if action.capability_name == "authz.verify":
             return await self._authz(action, heartbeat)
         raise ScanActionAdapterError(

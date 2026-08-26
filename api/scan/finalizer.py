@@ -94,6 +94,7 @@ def _findings_for_action(
         "xss.browser_prove_batch": {"candidate_attempt", "xss_browser_proof"},
         "exposure.verify_batch": {"candidate_attempt", "sensitive_exposure_proof"},
         "nosqli.verify_batch": {"candidate_attempt", "nosqli_proof"},
+        "authz_surface.verify_batch": {"candidate_attempt", "authz_surface_proof"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
@@ -455,6 +456,47 @@ def _findings_for_action(
                 "proof_state": "verified",
                 "verification_reason": (
                     "Repeated deterministic NoSQL operator differential satisfied"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "authz_surface_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("authz_surface_")
+            and item.get("boundary_established") is True
+            and str(item.get("request_url") or "")
+            and int(item.get("repetitions") or 0) >= 2
+        ):
+            finding = _base_finding(
+                tool="shakerscan_authz_surface",
+                title="Verified broken function-level authorization",
+                severity="high",
+                cwe="CWE-862",
+                url=item.get("request_url"),
+                evidence={
+                    "route_id": item.get("route_id"),
+                    "request_url": item.get("request_url"),
+                    "technique": item.get("technique"),
+                    "proof_contract": item.get("proof_contract"),
+                    "anonymous_status": item.get("anonymous_status"),
+                    "authenticated_status": item.get("authenticated_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "boundary_established": item.get("boundary_established"),
+                    "repetitions": item.get("repetitions"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "principal_access_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "verification_reason": (
+                    "Anonymous access matched authenticated access on a gated app"
                 ),
             })
             findings.append(finding)
@@ -881,6 +923,7 @@ def finalize_scan_report(
         "xss.browser_prove_batch": "xss_browser_proof",
         "exposure.verify_batch": "sensitive_exposure",
         "nosqli.verify_batch": "nosqli",
+        "authz_surface.verify_batch": "authz_surface",
     }
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:

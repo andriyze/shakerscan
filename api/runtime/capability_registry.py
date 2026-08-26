@@ -839,6 +839,33 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "authz_surface.verify_batch",
+            "Prove broken function-level authorization by comparing anonymous and "
+            "authenticated access across a bounded route slice.",
+            "internal", "active", _HTTP_TARGETS, "authz_surface.verify_batch", "1",
+            "active_testing",
+            {"http_requests": 300, "tool_wall_seconds": 180},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "deterministic_proof_contract": True,
+                "requires_primary_principal": True,
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "endpoint_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=("endpoint_manifest_ref", "slice", "profile", "proof_policy")),
+            "authz-surface-batch/v1",
+            ("candidate_attempt", "authz_surface_proof"),
+            arsenal_status="wired",
+            retest_contract="rerun-exact-authz-surface-differential",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "service.fingerprint", "Bounded connection-based service/version fingerprint.",
             "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
             "network_discovery", {"tcp_ports_attempted": 60, "tool_wall_seconds": 90},

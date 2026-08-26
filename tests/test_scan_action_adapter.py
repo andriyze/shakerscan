@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import urllib.parse
 import uuid
 
 import pytest
@@ -782,6 +783,160 @@ def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monk
     second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
     assert len(transport.sent) == sent_first  # fully resumed from durable attempts
     assert second.redacted_execution["resumed_count"] >= 1
+
+
+def test_authz_surface_batch_proves_bfla_only_with_an_established_boundary(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https", "host": "app.example.test",
+                    "port": 443, "normalized_path": "/admin", "concrete_path": "/admin",
+                    "query_keys": [], "source": "web.crawl",
+                },
+                {
+                    "method": "GET", "scheme": "https", "host": "app.example.test",
+                    "port": 443, "normalized_path": "/api/Users",
+                    "concrete_path": "/api/Users", "query_keys": [], "source": "web.crawl",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    users_body = b'[{"id":1,"email":"a@b.test"},{"id":2,"email":"c@d.test"}]'
+
+    class PrincipalTransport:
+        async def send(self, request, **_kwargs):
+            authed = any(name.lower() == "authorization" for name, _ in request.headers)
+            path = urllib.parse.urlsplit(request.url).path
+            if path == "/admin" and not authed:
+                return ReplayTransportResult(
+                    status_code=401, connected_address="192.0.2.10",
+                    final_url=request.url, response_headers={"Content-Type": "application/json"},
+                    response_body=b'{"error":"unauthorized"}', elapsed_ms=5,
+                )
+            if path == "/admin":
+                return ReplayTransportResult(
+                    status_code=200, connected_address="192.0.2.10",
+                    final_url=request.url, response_headers={"Content-Type": "application/json"},
+                    response_body=b'{"panel":true}', elapsed_ms=5,
+                )
+            # /api/Users serves the identical authenticated user list to anyone.
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": "application/json"},
+                response_body=users_body, elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", PrincipalTransport,
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action(
+        "verify.authz_surface", "authz_surface.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    first = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    proofs = [
+        item for item in first.observations
+        if item.get("kind") == "authz_surface_proof"
+    ]
+    assert len(proofs) == 1
+    assert proofs[0]["route_id"].endswith("/api/users") or "users" in proofs[0]["request_url"].lower()
+    assert first.redacted_execution["boundary_established"] is True
+
+    # Resume replays no request and reproduces the same single finding.
+    second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert second.redacted_execution["resumed_count"] == 2
+    assert len([
+        item for item in second.observations
+        if item.get("kind") == "authz_surface_proof"
+    ]) == 1
+
+
+def test_authz_surface_batch_makes_no_claim_on_a_fully_public_app(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https", "host": "app.example.test",
+                "port": 443, "normalized_path": "/api/Users",
+                "concrete_path": "/api/Users", "query_keys": [], "source": "web.crawl",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+
+    class PublicTransport:
+        async def send(self, request, **_kwargs):
+            # Everything is 200 identical to everyone: no auth boundary exists.
+            return ReplayTransportResult(
+                status_code=200, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": "application/json"},
+                response_body=b'[{"id":1},{"id":2}]', elapsed_ms=5,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", PublicTransport,
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action(
+        "verify.authz_surface", "authz_surface.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    backend = Backend(manifests={endpoint_manifest.manifest_id: endpoint_manifest})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert result.redacted_execution["boundary_established"] is False
+    assert not [
+        item for item in result.observations
+        if item.get("kind") == "authz_surface_proof"
+    ]
 
 
 def test_safe_authentication_body_batch_needs_no_general_mutation_permission(monkeypatch):

@@ -279,6 +279,18 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "requires_active_testing": true,
       "requires_credentials": false,
       "risk_level": "high"
+    },
+    {
+      "capabilities": [
+        "authz_surface.verify_batch"
+      ],
+      "default_enabled": false,
+      "description": "Deterministic BFLA proof via anonymous vs authenticated route access differential.",
+      "label": "Function-Level Authorization",
+      "name": "authz_surface",
+      "requires_active_testing": true,
+      "requires_credentials": true,
+      "risk_level": "high"
     }
   ],
   "family_presets": {
