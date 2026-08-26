@@ -39,6 +39,14 @@ test('canonical Hunt history has durable exact-run links and audit details', () 
   assert.match(hunt, /Audit identifiers/)
 })
 
+test('a newly started Hunt immediately becomes a reload-safe exact-run URL', () => {
+  assert.match(hunt, /window\.history\.pushState\(/)
+  assert.match(
+    hunt,
+    /`\/hunt\?target=\$\{encodeURIComponent\(created\.target_id\)\}&run=\$\{encodeURIComponent\(created\.hunt_id\)\}`/,
+  )
+})
+
 test('open Hunt sessions do not imply background network execution', () => {
   assert.match(hunt, /if \(status === 'active'\) return 'open for planner'/)
   assert.match(hunt, /It is not running background traffic/)

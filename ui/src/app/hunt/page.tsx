@@ -496,6 +496,11 @@ function HuntContent() {
         requestCollectionIds,
       })
       setHunt(created)
+      window.history.pushState(
+        null,
+        '',
+        `/hunt?target=${encodeURIComponent(created.target_id)}&run=${encodeURIComponent(created.hunt_id)}`,
+      )
       toast.success('Hunt started through the V2 policy contract')
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Failed to start Hunt'
