@@ -15,6 +15,7 @@ progress; it is lowered by each extraction, never raised.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -194,4 +195,48 @@ def test_api_packages_do_not_shadow_flat_runtime_modules():
     assert not collisions, (
         "these api packages shadow a flat module of the same name once both are "
         f"copied into /app, breaking that module's importers: {collisions}"
+    )
+
+
+def test_extracted_routers_register_routes_on_their_own_router():
+    """No module under api/ outside the composition root may decorate with ``@app.``.
+
+    A route handler carries its decorator when it is moved. If an extraction
+    drags one out of api.py and the destination happens to bind some name ``app``
+    -- an extraction tool once resolved it to the model-intake admission
+    webhook's separate FastAPI instance -- the route silently disappears from the
+    public API and reappears on an unrelated app. The route manifest catches the
+    disappearance, but this names the cause directly.
+    """
+    offenders: list[str] = []
+    for path in sorted((_ROOT / "api").rglob("*.py")):
+        if path == _ROOT / "api" / "api.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # A standalone service module that builds its own FastAPI instance is
+        # allowed to decorate with it; the bug is decorating with an `app` the
+        # module imported from somewhere else.
+        owns_app = any(
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "app" for t in node.targets)
+            for node in tree.body
+        )
+        if owns_app:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                call = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if (
+                    isinstance(call, ast.Attribute)
+                    and isinstance(call.value, ast.Name)
+                    and call.value.id == "app"
+                ):
+                    offenders.append(
+                        f"{path.relative_to(_ROOT)}:{node.lineno} {node.name}"
+                    )
+    assert not offenders, (
+        "these handlers register on an `app` object instead of their module's "
+        f"APIRouter, so they are not on the public API: {offenders}"
     )

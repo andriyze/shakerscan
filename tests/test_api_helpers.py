@@ -284,6 +284,7 @@ import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
 from devices import router as devices_router_module  # noqa: E402
 from arsenal_routes import router as arsenal_router_module  # noqa: E402
+from research_routes import router as research_router_module  # noqa: E402
 from evidence_routes import router as evidence_router_module  # noqa: E402
 from finding_routes import router as finding_routes_module  # noqa: E402
 from finding_exceptions import router as finding_exceptions_module  # noqa: E402
@@ -15388,6 +15389,25 @@ def test_research_command_views_hide_actions_that_exceed_remaining_budget(monkey
             "request_cost": 1,
         },
     })
+    monkeypatch.setattr(research_router_module, "_research_command_catalog", lambda: {
+        "target.get": {
+            "name": "target.get",
+            "status": "read_only",
+            "risk_tier": "read_only",
+            "description": "Read one target.",
+            "parameters_schema": {"target_id": {"type": "string"}},
+            "timeout_seconds": 10,
+        },
+        "finding.retest": {
+            "name": "finding.retest",
+            "status": "gated",
+            "risk_tier": "active",
+            "description": "Retest one finding.",
+            "parameters_schema": {"finding_id": {"type": "string"}},
+            "timeout_seconds": 30,
+            "request_cost": 1,
+        },
+    })
     episode = {
         "execution_mode": "gated",
         "max_risk_tier": "active",
@@ -15424,6 +15444,15 @@ def test_research_command_views_hide_actions_that_exceed_remaining_budget(monkey
 
 def test_research_command_views_hide_read_only_actions_when_step_budget_is_spent(monkeypatch):
     monkeypatch.setattr(api_module, "_research_command_catalog", lambda: {
+        "target.get": {
+            "name": "target.get",
+            "status": "read_only",
+            "risk_tier": "read_only",
+            "parameters_schema": {"target_id": {"type": "string"}},
+            "timeout_seconds": 10,
+        },
+    })
+    monkeypatch.setattr(research_router_module, "_research_command_catalog", lambda: {
         "target.get": {
             "name": "target.get",
             "status": "read_only",
@@ -16366,6 +16395,7 @@ def test_automation_settings_expose_persisted_research_planner_default():
 
 def test_configured_campaign_fails_before_db_when_provider_is_missing(monkeypatch):
     monkeypatch.setattr(api_module, "_research_configured_planner_ready", lambda: False)
+    monkeypatch.setattr(research_router_module, "_research_configured_planner_ready", lambda: False)
     request = api_module.ResearchCampaignLaunchRequest(
         target_id="11111111-1111-4111-8111-111111111111",
         planner_mode="configured_ai",
@@ -16452,8 +16482,10 @@ def test_switching_episode_planner_persists_mode_to_campaign(monkeypatch):
     conn = Conn()
     monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
     monkeypatch.setattr(api_module, "_research_configured_planner_ready", lambda: True)
+    monkeypatch.setattr(research_router_module, "_research_configured_planner_ready", lambda: True)
     monkeypatch.setattr(api_module, "_record_research_event", fake_event)
     monkeypatch.setattr(api_module, "_research_episode_detail", fake_detail)
+    monkeypatch.setattr(research_router_module, "_research_episode_detail", fake_detail)
 
     result = asyncio.run(api_module.set_research_episode_autopilot(
         str(episode_id),
@@ -16540,9 +16572,13 @@ def test_deep_campaign_bootstraps_principals_before_readiness_repair(monkeypatch
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
     monkeypatch.setattr(api_module, "_research_maybe_auto_provision_principals", fake_bootstrap)
+    monkeypatch.setattr(research_router_module, "_research_maybe_auto_provision_principals", fake_bootstrap)
     monkeypatch.setattr(api_module, "_research_campaign_self_repair", fake_repair)
+    monkeypatch.setattr(research_router_module, "_research_campaign_self_repair", fake_repair)
     monkeypatch.setattr(api_module, "_materialize_research_invariant_hypotheses", lambda *args: asyncio.sleep(0, result=0))
+    monkeypatch.setattr(research_router_module, "_materialize_research_invariant_hypotheses", lambda *args: asyncio.sleep(0, result=0))
     monkeypatch.setattr(api_module, "launch_research_episode", fake_launch)
+    monkeypatch.setattr(research_router_module, "launch_research_episode", fake_launch)
 
     asyncio.run(api_module.launch_research_campaign(api_module.ResearchCampaignLaunchRequest(
         target_id=str(target_id),
@@ -16849,6 +16885,7 @@ def test_research_cancel_reaches_scan_correlated_before_command_receipt(monkeypa
     monkeypatch.setattr(api_module, "cancel_scan", fake_cancel)
     monkeypatch.setattr(api_module, "_record_research_event", fake_event)
     monkeypatch.setattr(api_module, "_research_episode_detail", fake_detail)
+    monkeypatch.setattr(research_router_module, "_research_episode_detail", fake_detail)
 
     try:
         result = asyncio.run(api_module.cancel_research_episode(str(episode_id)))
