@@ -80,6 +80,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
 from ai_targets import router as ai_router_module  # noqa: E402
 from targets import router as targets_router_module  # noqa: E402
@@ -2861,6 +2862,7 @@ def test_ai_gate_credential_queue_requires_bound_expiring_credential_approval(mo
     monkeypatch.setattr(api_module, "_record_command_result", record)
     # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "enqueue_job", enqueue)
+    monkeypatch.setattr(mi_router_module, "enqueue_job", enqueue)
     monkeypatch.setattr(fleet_router_module, "enqueue_job", enqueue)
 
     result = asyncio.run(ai_router_module._queue_ai_target_scan(
@@ -3331,27 +3333,28 @@ def test_huggingface_model_info_requests_lfs_blob_metadata(monkeypatch):
         captured.update({"url": url, "timeout": timeout, "max_bytes": max_bytes, "policy": policy})
         return b'{"siblings":[]}', {"status": 200}
 
-    monkeypatch.setattr(api_module, "_model_download_http", fake_download)
+    monkeypatch.setattr(mi_router_module, "_model_download_http", fake_download)
+    monkeypatch.setattr(mi_router_module, "_model_download_http", fake_download)
 
-    result = api_module._hf_api_model_info("acme/ranker", "abc123", 7)
+    result = mi_router_module._hf_api_model_info("acme/ranker", "abc123", 7)
 
     assert result == {"siblings": []}
     assert captured["timeout"] == 7
-    assert captured["max_bytes"] == api_module.HF_MODEL_INFO_MAX_BYTES + 1
+    assert captured["max_bytes"] == mi_router_module.HF_MODEL_INFO_MAX_BYTES + 1
     assert captured["policy"]["allowed_hosts"] == ["huggingface.co"]
     assert captured["url"] == "https://huggingface.co/api/models/acme/ranker/revision/abc123?blobs=true"
 
 
 def test_huggingface_model_info_rejects_oversized_payload(monkeypatch):
-    monkeypatch.setattr(api_module, "HF_MODEL_INFO_MAX_BYTES", 10)
+    monkeypatch.setattr(mi_router_module, "HF_MODEL_INFO_MAX_BYTES", 10)
     monkeypatch.setattr(
-        api_module,
+        mi_router_module,
         "_model_download_http",
         lambda url, max_bytes, timeout, headers=None, policy=None: (b"x" * max_bytes, {"status": 200}),
     )
 
     try:
-        api_module._hf_api_model_info("acme/ranker", "main", 7)
+        mi_router_module._hf_api_model_info("acme/ranker", "main", 7)
     except RuntimeError as exc:
         assert "exceeded 10 byte cap" in str(exc)
     else:
@@ -3359,7 +3362,7 @@ def test_huggingface_model_info_rejects_oversized_payload(monkeypatch):
 
 
 def test_model_intake_capabilities_endpoint_is_provider_neutral():
-    result = asyncio.run(api_module.model_intake_capabilities())
+    result = asyncio.run(mi_router_module.model_intake_capabilities())
     adapters = {item["id"]: item for item in result["adapters"]}
 
     assert result["schema_version"] == "model-intake-source-adapters/v1"
@@ -3371,7 +3374,7 @@ def test_model_intake_capabilities_endpoint_is_provider_neutral():
 
 def test_model_intake_provider_readiness_separates_non_scanner_capabilities(monkeypatch):
     monkeypatch.setattr(
-        api_module,
+        mi_router_module,
         "_model_provider_readiness",
         lambda: {
             "schema_version": "model-intake-provider-readiness/v1",
@@ -3380,7 +3383,7 @@ def test_model_intake_provider_readiness_separates_non_scanner_capabilities(monk
         },
     )
 
-    result = asyncio.run(api_module.model_intake_provider_readiness())
+    result = asyncio.run(mi_router_module.model_intake_provider_readiness())
 
     assert result["providers"][0]["kind"] == "evaluation_provider"
 
@@ -3411,10 +3414,10 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
             {"rfilename": "README.md", "size": 256, "blobId": "blob-readme"},
         ],
     }
-    monkeypatch.setattr(api_module, "_hf_api_model_info", lambda repo_id, revision, timeout_seconds: model_info)
+    monkeypatch.setattr(mi_router_module, "_hf_api_model_info", lambda repo_id, revision, timeout_seconds: model_info)
 
-    resolved = api_module._resolve_huggingface_model_intake(
-        api_module.ModelIntakeResolveRequest(
+    resolved = mi_router_module._resolve_huggingface_model_intake(
+        mi_router_module.ModelIntakeResolveRequest(
             platform="huggingface",
             ref="https://huggingface.co/acme/ranker",
             timeout_seconds=5,
@@ -3446,8 +3449,8 @@ def test_huggingface_resolver_prefills_hash_license_and_dependency_inventory(mon
     }
     assert any("custom executable model code" in warning for warning in resolved["warnings"])
 
-    resolved_file_url = api_module._resolve_huggingface_model_intake(
-        api_module.ModelIntakeResolveRequest(
+    resolved_file_url = mi_router_module._resolve_huggingface_model_intake(
+        mi_router_module.ModelIntakeResolveRequest(
             platform="huggingface",
             ref="https://huggingface.co/acme/ranker/resolve/abc123/vision/vit.safetensors",
             timeout_seconds=5,
@@ -3468,7 +3471,7 @@ def test_huggingface_repository_manifest_rejects_unsafe_and_colliding_paths():
         ],
     }
 
-    manifest = api_module._hf_repository_manifest(model_info, "acme/model", "commit-sha")
+    manifest = mi_router_module._hf_repository_manifest(model_info, "acme/model", "commit-sha")
 
     assert manifest["complete"] is False
     assert manifest["files_discovered"] == 4
@@ -3484,8 +3487,8 @@ def test_huggingface_repository_manifest_digest_is_order_independent():
         {"rfilename": "a.safetensors", "size": 2, "lfs": {"sha256": "a" * 64, "size": 2}},
     ]
 
-    first = api_module._hf_repository_manifest({"sha": "abc", "siblings": siblings}, "acme/model", "abc")
-    second = api_module._hf_repository_manifest({"sha": "abc", "siblings": list(reversed(siblings))}, "acme/model", "abc")
+    first = mi_router_module._hf_repository_manifest({"sha": "abc", "siblings": siblings}, "acme/model", "abc")
+    second = mi_router_module._hf_repository_manifest({"sha": "abc", "siblings": list(reversed(siblings))}, "acme/model", "abc")
 
     assert first["manifest_sha256"] == second["manifest_sha256"]
 
@@ -3494,10 +3497,10 @@ def test_huggingface_resolver_does_not_emit_scan_payload_without_metadata_or_fil
     def unavailable_model_info(repo_id, revision, timeout_seconds):
         raise RuntimeError("hub unavailable")
 
-    monkeypatch.setattr(api_module, "_hf_api_model_info", unavailable_model_info)
+    monkeypatch.setattr(mi_router_module, "_hf_api_model_info", unavailable_model_info)
 
-    resolved = api_module._resolve_huggingface_model_intake(
-        api_module.ModelIntakeResolveRequest(
+    resolved = mi_router_module._resolve_huggingface_model_intake(
+        mi_router_module.ModelIntakeResolveRequest(
             platform="huggingface",
             ref="https://huggingface.co/acme/ranker",
             timeout_seconds=5,
@@ -3510,7 +3513,7 @@ def test_huggingface_resolver_does_not_emit_scan_payload_without_metadata_or_fil
 
 
 def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):
-    monkeypatch.setattr(api_module, "_resolve_huggingface_model_intake", lambda request: {
+    monkeypatch.setattr(mi_router_module, "_resolve_huggingface_model_intake", lambda request: {
         "scan_payload": {
             "artifact_url": "https://huggingface.co/acme/ranker/resolve/abc123/model.safetensors",
             "name": "Hugging Face: acme/ranker",
@@ -3525,8 +3528,8 @@ def test_direct_huggingface_scan_request_is_auto_enriched(monkeypatch):
         },
     })
 
-    request = api_module.ModelIntakeScanRequest(artifact_url="acme/ranker")
-    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+    request = mi_router_module.ModelIntakeScanRequest(artifact_url="acme/ranker")
+    enriched = asyncio.run(mi_router_module._enrich_model_intake_scan_request(request))
 
     assert enriched.artifact_url.endswith("/resolve/abc123/model.safetensors")
     assert enriched.expected_sha256 == "a" * 64
@@ -3544,7 +3547,7 @@ def test_direct_huggingface_scan_cannot_override_resolved_manifest_or_subject(mo
             {"path": "modeling.py"},
         ],
     }
-    monkeypatch.setattr(api_module, "_resolve_huggingface_model_intake", lambda request: {
+    monkeypatch.setattr(mi_router_module, "_resolve_huggingface_model_intake", lambda request: {
         "scan_payload": {
             "artifact_url": f"https://huggingface.co/acme/ranker/resolve/{'a' * 40}/model.safetensors",
             "metadata_json": {
@@ -3555,7 +3558,7 @@ def test_direct_huggingface_scan_cannot_override_resolved_manifest_or_subject(mo
             },
         },
     })
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="acme/ranker",
         metadata_json={
             "huggingface_repo": "attacker/other",
@@ -3565,7 +3568,7 @@ def test_direct_huggingface_scan_cannot_override_resolved_manifest_or_subject(mo
         },
     )
 
-    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+    enriched = asyncio.run(mi_router_module._enrich_model_intake_scan_request(request))
 
     assert enriched.metadata_json["huggingface_repo"] == "acme/ranker"
     assert enriched.metadata_json["huggingface_file"] == "model.safetensors"
@@ -3575,14 +3578,14 @@ def test_direct_huggingface_scan_cannot_override_resolved_manifest_or_subject(mo
 
 def test_real_huggingface_enrichment_does_not_relabel_caller_manifest_as_provider_resolved(monkeypatch):
     revision = "a" * 40
-    monkeypatch.setattr(api_module, "_hf_api_model_info", lambda *_args, **_kwargs: {
+    monkeypatch.setattr(mi_router_module, "_hf_api_model_info", lambda *_args, **_kwargs: {
         "sha": revision,
         "siblings": [
             {"rfilename": "model.safetensors", "size": 8, "lfs": {"sha256": "1" * 64, "size": 8}},
             {"rfilename": "modeling_evil.py", "size": 12, "blobId": "git-blob"},
         ],
     })
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="acme/ranker",
         metadata_json={
             "custom_code_required": False,
@@ -3594,7 +3597,7 @@ def test_real_huggingface_enrichment_does_not_relabel_caller_manifest_as_provide
         },
     )
 
-    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+    enriched = asyncio.run(mi_router_module._enrich_model_intake_scan_request(request))
 
     manifest = enriched.metadata_json["repository_manifest"]
     assert manifest["custom_code_required"] is True
@@ -3606,8 +3609,8 @@ def test_huggingface_enrichment_failure_discards_caller_inventory_authority(monk
     def fail_resolution(_request):
         raise TimeoutError("provider unavailable")
 
-    monkeypatch.setattr(api_module, "_resolve_huggingface_model_intake", fail_resolution)
-    request = api_module.ModelIntakeScanRequest(
+    monkeypatch.setattr(mi_router_module, "_resolve_huggingface_model_intake", fail_resolution)
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="acme/ranker",
         metadata_json={
             "license": "apache-2.0",
@@ -3622,7 +3625,7 @@ def test_huggingface_enrichment_failure_discards_caller_inventory_authority(monk
         },
     )
 
-    enriched = asyncio.run(api_module._enrich_model_intake_scan_request(request))
+    enriched = asyncio.run(mi_router_module._enrich_model_intake_scan_request(request))
 
     assert enriched.metadata_json["license"] == "apache-2.0"
     assert "huggingface_repo" not in enriched.metadata_json
@@ -3641,8 +3644,8 @@ def test_public_huggingface_resolver_failure_cannot_return_forged_complete_manif
     def fail_model_info(*_args, **_kwargs):
         raise TimeoutError("provider unavailable")
 
-    monkeypatch.setattr(api_module, "_hf_api_model_info", fail_model_info)
-    resolved = api_module._resolve_huggingface_model_intake(api_module.ModelIntakeResolveRequest(
+    monkeypatch.setattr(mi_router_module, "_hf_api_model_info", fail_model_info)
+    resolved = mi_router_module._resolve_huggingface_model_intake(mi_router_module.ModelIntakeResolveRequest(
         platform="huggingface",
         ref="https://huggingface.co/acme/ranker",
         revision="main",

@@ -1323,8 +1323,10 @@ def test_api_owns_loopback_session_signing_and_ui_never_receives_the_operator_se
     # loopback session. Assert it against the api/ tree rather than one file, so
     # module decomposition cannot silently move signing out of the API or make
     # this gate vacuous.
+    # Key by the relative path: every extracted domain has a router.py, so
+    # keying by bare filename would silently keep only one of them.
     api_sources = {
-        path.name: path.read_text(encoding="utf-8")
+        str(path.relative_to(ROOT)): path.read_text(encoding="utf-8")
         for path in (ROOT / "api").rglob("*.py")
     }
     assert any(

@@ -84,10 +84,10 @@ def test_list_results_tolerates_null_and_mixed_legacy_timestamps(tmp_path, monke
 
 
 def test_model_intake_platform_detection_requires_exact_provider_hosts():
-    assert api_module._detect_model_intake_platform("https://acct.blob.core.windows.net/c/m") == "azure"
-    assert api_module._detect_model_intake_platform("https://acct.blob.core.windows.net.evil.test/c/m") == "http"
-    assert api_module._detect_model_intake_platform("https://bucket.s3.amazonaws.com/m") == "s3"
-    assert api_module._detect_model_intake_platform("https://bucket.s3.amazonaws.com.evil.test/m") == "http"
+    assert mi_router_module._detect_model_intake_platform("https://acct.blob.core.windows.net/c/m") == "azure"
+    assert mi_router_module._detect_model_intake_platform("https://acct.blob.core.windows.net.evil.test/c/m") == "http"
+    assert mi_router_module._detect_model_intake_platform("https://bucket.s3.amazonaws.com/m") == "s3"
+    assert mi_router_module._detect_model_intake_platform("https://bucket.s3.amazonaws.com.evil.test/m") == "http"
 
 
 def test_worker_capacity_uses_one_gb_budget_after_platform_reserve(monkeypatch):
@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
 from ai_targets import router as ai_router_module  # noqa: E402
 from targets import router as targets_router_module  # noqa: E402
@@ -1302,14 +1303,14 @@ def test_model_intake_stage_manifest_is_bound_to_guest_build_inputs(tmp_path, mo
         },
     }
     (stage / "stage-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    monkeypatch.setattr(api_module, "MODEL_INTAKE_GUEST_KERNEL_SHA256", kernel_sha)
+    monkeypatch.setattr(mi_router_module, "MODEL_INTAKE_GUEST_KERNEL_SHA256", kernel_sha)
     monkeypatch.setattr(
         api_module,
         "_model_intake_guest_rootfs_inputs_sha256",
         lambda: "new-inputs",
     )
 
-    assert api_module._model_intake_stage_manifest(stage) is None
+    assert mi_router_module._model_intake_stage_manifest(stage) is None
 
 
 def test_stage_manifest_records_the_prebuild_guest_input_snapshot(tmp_path, monkeypatch):
@@ -1318,7 +1319,7 @@ def test_stage_manifest_records_the_prebuild_guest_input_snapshot(tmp_path, monk
         "_model_intake_guest_rootfs_inputs_sha256",
         lambda: "b" * 64,
     )
-    api_module._write_model_intake_stage_manifest(
+    mi_router_module._write_model_intake_stage_manifest(
         tmp_path,
         {
             "kernel": {"sha256": "a" * 64, "bytes": 1},
@@ -1413,7 +1414,7 @@ def test_model_intake_operator_actions_require_explicit_token_even_on_loopback(m
 
 
 def test_model_intake_rescan_strips_stale_authority_and_forces_preflight():
-    options, approval_id, authority_bearing = api_module._prepare_model_intake_rescan_options({
+    options, approval_id, authority_bearing = mi_router_module._prepare_model_intake_rescan_options({
         "intake_mode": "admission",
         "require_signed_admission": True,
         "approval_receipt_id": "approval-id",
@@ -1438,7 +1439,7 @@ def test_model_intake_rescan_requires_operator_before_database_access(monkeypatc
     monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
     monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
     with pytest.raises(api_module.HTTPException) as caught:
-        asyncio.run(api_module.rescan_model_intake_target(
+        asyncio.run(mi_router_module.rescan_model_intake_target(
             str(uuid.uuid4()),
             _fleet_request(host="127.0.0.1", scheme="http"),
         ))
@@ -4362,12 +4363,12 @@ def test_deployment_decision_model_intake_policy_anchor_gap():
 
 
 def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         signature_trusted_key_sha256=["a" * 64],
         metadata_json={"license": "apache-2.0"},
     )
-    merged = api_module._merge_model_intake_trust_anchor_material(
+    merged = mi_router_module._merge_model_intake_trust_anchor_material(
         request,
         [{
             "id": "anchor-1",
@@ -4394,14 +4395,14 @@ def test_model_intake_trust_anchor_merge_adds_saved_material_and_audit_metadata(
 def test_model_intake_policy_profile_requirements_uses_only_server_required_anchor_ids():
     explicit = "11111111-1111-4111-8111-111111111111"
     required = "22222222-2222-4222-8222-222222222222"
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         policy_profile="production",
         trust_anchor_ids=[explicit],
         metadata_json={"license": "apache-2.0"},
     )
 
-    updated = api_module._apply_model_intake_policy_profile_requirements(
+    updated = mi_router_module._apply_model_intake_policy_profile_requirements(
         request,
         {
             "name": "Production strict",
@@ -4449,7 +4450,7 @@ def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
     monkeypatch.delenv("MODEL_INTAKE_ADMISSION_POLICY_PROFILE", raising=False)
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="hf://acme/ranker/model.safetensors",
         intake_mode="admission",
         policy_profile="development",
@@ -4458,7 +4459,7 @@ def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening
         run_generated_scanners=False,
     )
 
-    updated = asyncio.run(api_module._expand_model_intake_policy_profile_requirements(request))
+    updated = asyncio.run(mi_router_module._expand_model_intake_policy_profile_requirements(request))
 
     assert updated.intake_mode == "admission"
     assert updated.policy_profile == "production"
@@ -4487,14 +4488,14 @@ def test_model_intake_admission_uses_server_policy_and_discards_caller_weakening
     ],
 )
 def test_model_intake_admission_rejects_requester_authority(field, value):
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         intake_mode="admission",
         **{field: value},
     )
 
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._validate_model_intake_admission_request_authority(request)
+        mi_router_module._validate_model_intake_admission_request_authority(request)
 
     assert exc.value.status_code == 422
     assert field in exc.value.detail["fields"]
@@ -4502,21 +4503,21 @@ def test_model_intake_admission_rejects_requester_authority(field, value):
 
 
 def test_model_intake_admission_rejects_nested_approval_metadata():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         intake_mode="admission",
         metadata_json={"governance": {"approved_by": "requester"}},
     )
 
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._validate_model_intake_admission_request_authority(request)
+        mi_router_module._validate_model_intake_admission_request_authority(request)
 
     assert exc.value.status_code == 422
     assert "metadata_json.governance.approved_by" in exc.value.detail["fields"]
 
 
 def test_model_intake_preflight_marks_and_strips_declared_authority():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         intake_mode="preflight",
         signature_trusted_keys=["requester-key"],
@@ -4526,7 +4527,7 @@ def test_model_intake_preflight_marks_and_strips_declared_authority():
         metadata_json={"governance": {"approved_by": "requester"}, "license": "MIT"},
     )
 
-    updated = api_module._sanitize_model_intake_preflight_authority(request)
+    updated = mi_router_module._sanitize_model_intake_preflight_authority(request)
 
     assert updated.signature_trusted_keys is None
     assert updated.trust_anchor_ids is None
@@ -4542,14 +4543,14 @@ def test_model_intake_preflight_marks_and_strips_declared_authority():
 
 
 def test_model_intake_preflight_is_explicitly_non_admissible():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         intake_mode="preflight",
         policy_profile="development",
         require_signed_admission=True,
     )
 
-    updated = asyncio.run(api_module._expand_model_intake_policy_profile_requirements(request))
+    updated = asyncio.run(mi_router_module._expand_model_intake_policy_profile_requirements(request))
 
     assert updated.policy_profile == "development"
     assert updated.require_signed_admission is False
@@ -4583,11 +4584,11 @@ def test_policy_profile_mutation_requires_model_intake_operator(monkeypatch):
 
 
 def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_products():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         policy_profile="production",
     )
-    other_product = api_module._apply_model_intake_policy_profile_requirements(
+    other_product = mi_router_module._apply_model_intake_policy_profile_requirements(
         request,
         {
             "product_area": "ai_gate",
@@ -4595,7 +4596,7 @@ def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_pro
             "required_trust_anchor_ids": ["22222222-2222-4222-8222-222222222222"],
         },
     )
-    non_strict = api_module._apply_model_intake_policy_profile_requirements(
+    non_strict = mi_router_module._apply_model_intake_policy_profile_requirements(
         request,
         {
             "product_area": "model_intake",
@@ -4610,14 +4611,14 @@ def test_model_intake_policy_profile_requirements_ignore_non_strict_or_other_pro
 
 def test_model_intake_complete_acquisition_rejects_conflicting_byte_limits():
     with pytest.raises(ValueError, match="max_artifact_bytes must be greater"):
-        api_module.ModelIntakeScanRequest(
+        mi_router_module.ModelIntakeScanRequest(
             artifact_url="https://models.example/model.safetensors",
             complete_artifact_download=True,
             max_download_bytes=20_000,
             max_artifact_bytes=10_000,
         )
 
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         complete_artifact_download=True,
         max_download_bytes=20_000,
@@ -4670,11 +4671,12 @@ def test_static_scan_attachment_rejects_a_different_model_source(monkeypatch):
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
     monkeypatch.setattr(api_module, "_model_intake_authenticated_subject", lambda _request: "operator:test")
+    monkeypatch.setattr(mi_router_module, "_model_intake_authenticated_subject", lambda _request: "operator:test")
 
     with pytest.raises(api_module.HTTPException, match="source does not match") as exc:
-        asyncio.run(api_module.attach_model_intake_static_run(
+        asyncio.run(mi_router_module.attach_model_intake_static_run(
             str(submission_id),
-            api_module.ModelSubmissionStaticRunRequest(scan_id=str(scan_id)),
+            mi_router_module.ModelSubmissionStaticRunRequest(scan_id=str(scan_id)),
             _fleet_request(host="127.0.0.1", scheme="http"),
         ))
 
@@ -4682,12 +4684,12 @@ def test_static_scan_attachment_rejects_a_different_model_source(monkeypatch):
 
 
 def test_custom_named_strict_model_intake_profile_enables_strict_governance_without_anchors():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         policy_profile="mi-prod-v2",
     )
 
-    updated = api_module._apply_model_intake_policy_profile_requirements(
+    updated = mi_router_module._apply_model_intake_policy_profile_requirements(
         request,
         {
             "name": "MI production v2",
@@ -4708,7 +4710,7 @@ def test_custom_named_strict_model_intake_profile_enables_strict_governance_with
 
 
 def test_strict_huggingface_profile_forces_complete_snapshot_and_ignores_weaker_request():
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="hf://acme/ranker/model.safetensors",
         policy_profile="production",
         complete_artifact_download=False,
@@ -4720,7 +4722,7 @@ def test_strict_huggingface_profile_forces_complete_snapshot_and_ignores_weaker_
         require_signed_admission=False,
     )
 
-    updated = api_module._apply_model_intake_policy_profile_requirements(request, {
+    updated = mi_router_module._apply_model_intake_policy_profile_requirements(request, {
         "name": "Production strict",
         "product_area": "model_intake",
         "environment": "production",
@@ -4815,7 +4817,7 @@ def test_model_intake_evidence_export_is_content_free():
         },
     }
 
-    export = api_module._model_intake_evidence_export(
+    export = mi_router_module._model_intake_evidence_export(
         payload,
         generated_at=datetime(2026, 7, 6, tzinfo=timezone.utc),
     )
@@ -4844,7 +4846,7 @@ def test_model_intake_evidence_export_is_content_free():
 def test_state_changing_request_models_accept_approval_receipt_id():
     receipt_id = "11111111-1111-4111-8111-111111111111"
 
-    assert api_module.ModelIntakeScanRequest(
+    assert mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         approval_receipt_id=receipt_id,
     ).approval_receipt_id == receipt_id
@@ -9825,6 +9827,7 @@ def test_arsenal_execute_gated_model_intake_scan_dispatches_when_allowed(monkeyp
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
     monkeypatch.setattr(api_module, "scan_model_intake", fake_model_intake)
+    monkeypatch.setattr(mi_router_module, "scan_model_intake", fake_model_intake)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
@@ -10111,6 +10114,7 @@ def test_arsenal_execute_returns_persisted_command_result_refs(monkeypatch):
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
     monkeypatch.setattr(api_module, "scan_model_intake", fake_model_intake)
+    monkeypatch.setattr(mi_router_module, "scan_model_intake", fake_model_intake)
 
     result = asyncio.run(api_module._arsenal_execute(
         _CommandResultLookupConn(),
@@ -11872,8 +11876,8 @@ def test_policy_profile_required_anchor_ids_must_be_valid_uuids():
 
 def test_model_intake_trust_anchor_request_requires_material():
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._validate_model_intake_trust_anchor_request(
-            api_module.ModelIntakeTrustAnchorRequest(name="empty")
+        mi_router_module._validate_model_intake_trust_anchor_request(
+            mi_router_module.ModelIntakeTrustAnchorRequest(name="empty")
         )
 
     assert exc.value.status_code == 422
@@ -11882,8 +11886,8 @@ def test_model_intake_trust_anchor_request_requires_material():
 
 def test_model_intake_trust_anchor_request_validates_fingerprint():
     with pytest.raises(api_module.HTTPException) as exc:
-        api_module._validate_model_intake_trust_anchor_request(
-            api_module.ModelIntakeTrustAnchorRequest(name="bad", public_key_sha256="not-a-sha")
+        mi_router_module._validate_model_intake_trust_anchor_request(
+            mi_router_module.ModelIntakeTrustAnchorRequest(name="bad", public_key_sha256="not-a-sha")
         )
 
     assert exc.value.status_code == 422
@@ -20209,13 +20213,14 @@ def test_model_admission_endpoint_fails_closed_without_deployment_trust_roots(mo
     token = "model-intake-test-operator-token-that-is-long-enough"
     monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
     monkeypatch.setattr(api_module, "_model_admission_trusted_keys", lambda: [])
-    request = api_module.ModelIntakeAdmissionVerifyRequest(
+    monkeypatch.setattr(mi_router_module, "_model_admission_trusted_keys", lambda: [])
+    request = mi_router_module.ModelIntakeAdmissionVerifyRequest(
         admission_package={"statement": {}},
         expected_artifact_sha256="a" * 64,
     )
 
     with pytest.raises(api_module.HTTPException) as exc_info:
-        asyncio.run(api_module.verify_model_intake_admission(
+        asyncio.run(mi_router_module.verify_model_intake_admission(
             request,
             _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
         ))
@@ -20259,15 +20264,17 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
             return Acquire()
 
     monkeypatch.setattr(api_module, "_model_admission_trusted_keys", lambda: ["trusted-pem"])
+    monkeypatch.setattr(mi_router_module, "_model_admission_trusted_keys", lambda: ["trusted-pem"])
     monkeypatch.setattr(api_module, "_verify_model_admission_package", verify)
+    monkeypatch.setattr(mi_router_module, "_verify_model_admission_package", verify)
     monkeypatch.setattr(api_module, "db_pool", Pool())
-    request = api_module.ModelIntakeAdmissionVerifyRequest(
+    request = mi_router_module.ModelIntakeAdmissionVerifyRequest(
         admission_package={"statement": {"subject": {}}},
         expected_artifact_sha256="A" * 64,
         expected_repository_snapshot_sha256="B" * 64,
     )
 
-    result = asyncio.run(api_module.verify_model_intake_admission(
+    result = asyncio.run(mi_router_module.verify_model_intake_admission(
         request,
         _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
     ))
@@ -20283,7 +20290,7 @@ def test_model_admission_endpoint_passes_exact_deployment_subjects(monkeypatch):
 
 def test_model_admission_endpoint_registry_requirement_cannot_be_disabled():
     with pytest.raises(Exception):
-        api_module.ModelIntakeAdmissionVerifyRequest(
+        mi_router_module.ModelIntakeAdmissionVerifyRequest(
             admission_package={"statement": {}},
             expected_artifact_sha256="a" * 64,
             require_registered_active_admission=False,
@@ -20294,33 +20301,33 @@ def test_model_reassessment_event_requires_known_trigger_and_explicit_scope(monk
     token = "model-intake-test-operator-token-that-is-long-enough"
     monkeypatch.setenv("MODEL_INTAKE_OPERATOR_TOKEN", token)
     with pytest.raises(Exception):
-        api_module.ModelIntakeReassessmentEventRequest(
+        mi_router_module.ModelIntakeReassessmentEventRequest(
             trigger_type="unknown",
             actor="security",
             reason="test trigger",
             all_active=True,
         )
-    request = api_module.ModelIntakeReassessmentEventRequest(
+    request = mi_router_module.ModelIntakeReassessmentEventRequest(
         trigger_type="CVE_UPDATE",
         actor="security",
         reason="new runtime vulnerability",
     )
     assert request.trigger_type == "cve_update"
     with pytest.raises(api_module.HTTPException) as exc_info:
-        asyncio.run(api_module.create_model_intake_reassessment_event(
+        asyncio.run(mi_router_module.create_model_intake_reassessment_event(
             request,
             _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
         ))
     assert exc_info.value.status_code == 400
 
-    global_request = api_module.ModelIntakeReassessmentEventRequest(
+    global_request = mi_router_module.ModelIntakeReassessmentEventRequest(
         trigger_type="cve_update",
         actor="security",
         reason="new runtime vulnerability",
         all_active=True,
     )
     with pytest.raises(api_module.HTTPException) as exc_info:
-        asyncio.run(api_module.create_model_intake_reassessment_event(
+        asyncio.run(mi_router_module.create_model_intake_reassessment_event(
             global_request,
             _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
         ))
@@ -20359,12 +20366,12 @@ def test_model_admission_revocation_audits_actual_previous_status(monkeypatch):
             return Acquire()
 
     monkeypatch.setattr(api_module, "db_pool", Pool())
-    request = api_module.ModelIntakeAdmissionRevokeRequest(
+    request = mi_router_module.ModelIntakeAdmissionRevokeRequest(
         actor="security",
         reason="new critical runtime CVE",
     )
 
-    result = asyncio.run(api_module.revoke_model_intake_admission(
+    result = asyncio.run(mi_router_module.revoke_model_intake_admission(
         "00000000-0000-4000-8000-000000000001",
         request,
         _fleet_request(host="127.0.0.1", scheme="http", authorization=f"Bearer {token}"),
@@ -20378,7 +20385,7 @@ def test_model_admission_revocation_audits_actual_previous_status(monkeypatch):
 def test_model_intake_retention_execution_requires_operator_auth(monkeypatch):
     monkeypatch.delenv("MODEL_INTAKE_OPERATOR_TOKEN", raising=False)
     monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
-    request = api_module.ModelIntakeRetentionCleanupRequest(
+    request = mi_router_module.ModelIntakeRetentionCleanupRequest(
         dry_run=False,
         confirm_delete=True,
         actor="security",
@@ -20386,7 +20393,7 @@ def test_model_intake_retention_execution_requires_operator_auth(monkeypatch):
     )
 
     with pytest.raises(api_module.HTTPException) as exc_info:
-        asyncio.run(api_module.cleanup_model_intake_quarantine(
+        asyncio.run(mi_router_module.cleanup_model_intake_quarantine(
             request,
             _fleet_request(host="203.0.113.2", scheme="https"),
         ))
@@ -20430,27 +20437,29 @@ def test_model_intake_queue_persists_content_free_evaluation_not_vectors(monkeyp
     monkeypatch.setattr(api_module, "get_redis", lambda: Redis())
     # resolved in both the api module and the fleet router.
     monkeypatch.setattr(api_module, "enqueue_job", lambda _redis, _queue, job: captured.update({"job": job}))
+    monkeypatch.setattr(mi_router_module, "enqueue_job", lambda _redis, _queue, job: captured.update({"job": job}))
     monkeypatch.setattr(fleet_router_module, "enqueue_job", lambda _redis, _queue, job: captured.update({"job": job}))
-    monkeypatch.setattr(api_module, "_enrich_model_intake_scan_request", unchanged)
-    monkeypatch.setattr(api_module, "_expand_model_intake_policy_profile_requirements", unchanged)
-    monkeypatch.setattr(api_module, "_expand_model_intake_saved_trust_anchors", unchanged)
+    monkeypatch.setattr(mi_router_module, "_enrich_model_intake_scan_request", unchanged)
+    monkeypatch.setattr(mi_router_module, "_expand_model_intake_policy_profile_requirements", unchanged)
+    monkeypatch.setattr(mi_router_module, "_expand_model_intake_saved_trust_anchors", unchanged)
     monkeypatch.setattr(api_module, "_require_approval_receipt_if_policy_enabled", no_approval)
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", no_approval)
     monkeypatch.setattr(api_module, "_record_command_result", no_approval)
-    monkeypatch.setattr(api_module, "_evaluate_model_intake_request", lambda _spec, artifact_sha256: {
+    # imported by the model-intake router, so patch it where it is resolved.
+    monkeypatch.setattr(mi_router_module, "_evaluate_model_intake_request", lambda _spec, artifact_sha256: {
         "schema_version": "model-intake-evaluation/v1",
         "status": "PASS",
         "artifact_sha256": artifact_sha256,
         "evidence_sha256": "c" * 64,
     })
-    request = api_module.ModelIntakeScanRequest(
+    request = mi_router_module.ModelIntakeScanRequest(
         artifact_url="https://models.example/model.safetensors",
         expected_sha256="a" * 64,
         run_generated_evaluation=True,
         evaluation_spec_json={"documents": [{"vector": [0.123456789], "source_text": "synthetic secret"}]},
     )
 
-    asyncio.run(api_module.scan_model_intake(request))
+    asyncio.run(mi_router_module.scan_model_intake(request))
 
     serialized = json.dumps(captured)
     assert "0.123456789" not in serialized
@@ -21001,7 +21010,7 @@ def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypa
 
 
 def test_model_intake_report_summary_preserves_only_safe_file_identity():
-    manifest = api_module._model_intake_repository_manifest_summary({
+    manifest = mi_router_module._model_intake_repository_manifest_summary({
         "complete": True,
         "repository": "example/model",
         "revision": "abc123",
@@ -21026,7 +21035,7 @@ def test_model_intake_report_summary_preserves_only_safe_file_identity():
             "findings": [],
         }],
     }
-    scanner = api_module._model_intake_scanner_result_summaries(generated)[0]
+    scanner = mi_router_module._model_intake_scanner_result_summaries(generated)[0]
 
     assert manifest["total_files"] == 3
     assert manifest["reported_files"] == 1
