@@ -422,6 +422,7 @@ from retest_contract import (
 )
 try:
     from serialization import (
+        _str_list,
         row_to_dict,
         _decode_json_value,
         _json_object,
@@ -429,6 +430,7 @@ try:
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from api.serialization import (
+        _str_list,
         row_to_dict,
         _decode_json_value,
         _json_object,
@@ -4757,6 +4759,30 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from api.ai_gate.catalog_router import router as ai_catalog_router
 app.include_router(ai_catalog_router)
+try:
+    from policy_profiles.router import (
+        PolicyProfileRequest,
+        _validate_policy_profile_required_anchor_ids,
+        configure_policy_profile_router,
+        create_policy_profile,
+        delete_policy_profile,
+        list_policy_profiles,
+        router as policy_profile_router,
+        update_policy_profile,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.policy_profiles.router import (
+        PolicyProfileRequest,
+        _validate_policy_profile_required_anchor_ids,
+        configure_policy_profile_router,
+        create_policy_profile,
+        delete_policy_profile,
+        list_policy_profiles,
+        router as policy_profile_router,
+        update_policy_profile,
+    )
+configure_policy_profile_router(lambda: db_pool)
+app.include_router(policy_profile_router)
 
 # CORS for UI.
 #
@@ -7110,6 +7136,10 @@ def _require_fleet_https(request: Request) -> None:
         raise HTTPException(status_code=400, detail="fleet enrollment and node secrets require HTTPS")
 
 
+try:
+    from model_intake_authority import _invalidate_model_intake_authority_change
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.model_intake_authority import _invalidate_model_intake_authority_change
 try:
     from operator_auth import (
         _MODEL_INTAKE_APPROVAL_ROLES,
@@ -14476,12 +14506,6 @@ def _detect_model_intake_platform(ref: str, metadata: dict[str, Any] | None = No
     return "http"
 
 
-def _str_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return [str(value).strip()] if str(value).strip() else []
 
 
 MODEL_INTAKE_ADMISSION_FORBIDDEN_FIELDS = {
@@ -15467,70 +15491,6 @@ async def _reset_model_intake_for_new_evidence(
         "deployment_bindings_staled": stale_bindings,
     }
 
-
-async def _invalidate_model_intake_authority_change(
-    conn: Any,
-    *,
-    actor: str,
-    trigger_type: str,
-    reason: str,
-    environments: list[str] | None = None,
-    policy_profiles: list[str] | None = None,
-) -> dict[str, int]:
-    """Fail active admissions closed after a server-owned trust or policy mutation."""
-    if trigger_type not in REASSESSMENT_TRIGGERS:
-        raise ValueError("unsupported Model Intake authority-change trigger")
-    normalized_environments = sorted({str(item).strip().lower() for item in environments or [] if str(item).strip()})
-    normalized_profiles = sorted({str(item).strip() for item in policy_profiles or [] if str(item).strip()})
-    invalidated = await conn.fetch(
-        """
-        UPDATE model_intake_admissions
-        SET status='reassessment_required',updated_at=NOW()
-        WHERE status='active'
-          AND ($1::text[] = '{}'::text[] OR COALESCE(target_environment,'') = ANY($1::text[]))
-          AND ($2::text[] = '{}'::text[] OR COALESCE(policy_profile,'') = ANY($2::text[]))
-        RETURNING id,statement_sha256
-        """,
-        normalized_environments,
-        normalized_profiles,
-    )
-    admission_ids = [item["id"] for item in invalidated]
-    for admission in invalidated:
-        await conn.execute(
-            """
-            INSERT INTO model_intake_admission_events
-                (admission_id,event_type,trigger_type,actor,reason,previous_status,new_status,
-                 evidence_digest,metadata_json)
-            VALUES ($1,'authority_changed',$2,$3,$4,'active','reassessment_required',$5,$6::jsonb)
-            """,
-            admission["id"],
-            trigger_type,
-            actor,
-            reason,
-            admission["statement_sha256"],
-            json.dumps({
-                "environments": normalized_environments,
-                "policy_profiles": normalized_profiles,
-            }),
-        )
-    stale_bindings = 0
-    if admission_ids:
-        binding_result = await conn.execute(
-            """
-            UPDATE model_intake_deployment_bindings
-            SET verifier_status='STALE',observed_bundle_sha256=NULL,observed_at=NULL
-            WHERE admission_id = ANY($1::uuid[]) AND verifier_status <> 'STALE'
-            """,
-            admission_ids,
-        )
-        try:
-            stale_bindings = int(str(binding_result).rsplit(" ", 1)[-1])
-        except ValueError:
-            stale_bindings = 0
-    return {
-        "admissions_invalidated": len(invalidated),
-        "deployment_bindings_staled": stale_bindings,
-    }
 
 
 @app.post("/model-intake/submissions")
@@ -30991,18 +30951,6 @@ async def get_scan_deployment_decision(scan_id: str):
 # POLICY PROFILES + FINDING EXCEPTIONS (durable registry, R4)
 # ============================================================
 
-class PolicyProfileRequest(BaseModel):
-    name: str
-    product_area: str = "ai_gate"
-    environment: str = "production"
-    minimum_block_severity: str = "high"
-    expires_days: int = 30
-    strict_model_intake: bool = False
-    allow_active_exceptions: bool = True
-    required_trust_anchor_ids: list[str] = Field(default_factory=list)
-    owner: Optional[str] = None
-    version: Optional[str] = None
-    is_active: bool = True
 
 
 class FindingExceptionRequest(BaseModel):
@@ -31025,124 +30973,6 @@ class FindingExceptionLifecycleSweepRequest(BaseModel):
     limit: int = Field(default=200, ge=1, le=500)
     approval_receipt_id: Optional[str] = None
 
-
-async def _validate_policy_profile_required_anchor_ids(conn, req: PolicyProfileRequest) -> list[str]:
-    try:
-        required_anchor_ids = [str(uuid.UUID(item)) for item in _str_list(req.required_trust_anchor_ids)]
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="required_trust_anchor_ids must contain valid UUIDs")
-    required_anchor_ids = list(dict.fromkeys(required_anchor_ids))
-    if not required_anchor_ids:
-        return []
-    if req.product_area != "model_intake" or not req.strict_model_intake:
-        return []
-    rows = await conn.fetch(
-        """
-        SELECT id FROM model_intake_trust_anchors
-        WHERE id = ANY($1::uuid[]) AND is_active = true
-        """,
-        [uuid.UUID(item) for item in required_anchor_ids],
-    )
-    found = {str(row["id"]) for row in rows}
-    if found != set(required_anchor_ids):
-        raise HTTPException(status_code=422, detail="required_trust_anchor_ids must reference active Model Intake trust anchors")
-    return required_anchor_ids
-
-
-@app.get("/policy-profiles")
-async def list_policy_profiles():
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM policy_profiles ORDER BY created_at DESC")
-    return {"policy_profiles": [row_to_dict(r) for r in rows]}
-
-
-@app.post("/policy-profiles")
-async def create_policy_profile(req: PolicyProfileRequest, http_request: Request):
-    _model_intake_authenticated_subject(http_request)
-    async with db_pool.acquire() as conn:
-        required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
-        try:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO policy_profiles
-                    (name, product_area, environment, minimum_block_severity, expires_days,
-                     strict_model_intake, allow_active_exceptions, required_trust_anchor_ids,
-                     owner, version, is_active)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                RETURNING *
-                """,
-                req.name, req.product_area, req.environment.strip().lower(),
-                req.minimum_block_severity, req.expires_days, req.strict_model_intake,
-                req.allow_active_exceptions, json.dumps(required_anchor_ids),
-                req.owner, req.version, req.is_active,
-            )
-        except asyncpg.UniqueViolationError:
-            raise HTTPException(status_code=409, detail="Policy profile name already exists")
-    return row_to_dict(row)
-
-
-@app.patch("/policy-profiles/{profile_id}")
-async def update_policy_profile(profile_id: str, req: PolicyProfileRequest, http_request: Request):
-    actor = _model_intake_authenticated_subject(http_request)
-    async with db_pool.acquire() as conn, conn.transaction():
-        previous = await conn.fetchrow(
-            "SELECT * FROM policy_profiles WHERE id=$1 FOR UPDATE",
-            uuid.UUID(profile_id),
-        )
-        if not previous:
-            raise HTTPException(status_code=404, detail="Policy profile not found")
-        required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
-        row = await conn.fetchrow(
-            """
-            UPDATE policy_profiles SET
-                name=$2, product_area=$3, environment=$4, minimum_block_severity=$5,
-                expires_days=$6, strict_model_intake=$7, allow_active_exceptions=$8,
-                required_trust_anchor_ids=$9, owner=$10, version=$11, is_active=$12, updated_at=NOW()
-            WHERE id=$1 RETURNING *
-            """,
-            uuid.UUID(profile_id), req.name, req.product_area, req.environment.strip().lower(),
-            req.minimum_block_severity, req.expires_days, req.strict_model_intake,
-            req.allow_active_exceptions, json.dumps(required_anchor_ids),
-            req.owner, req.version, req.is_active,
-        )
-        affected = previous["product_area"] == "model_intake" or row["product_area"] == "model_intake"
-        invalidation = (
-            await _invalidate_model_intake_authority_change(
-                conn,
-                actor=actor,
-                trigger_type="policy_change",
-                reason=f"Changed Model Intake policy profile {profile_id}",
-                environments=[str(previous["environment"]), str(row["environment"])],
-                policy_profiles=[str(previous["name"]), str(row["name"])],
-            )
-            if affected else {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
-        )
-    return {**row_to_dict(row), "downstream_invalidation": invalidation}
-
-
-@app.delete("/policy-profiles/{profile_id}")
-async def delete_policy_profile(profile_id: str, http_request: Request):
-    actor = _model_intake_authenticated_subject(http_request)
-    async with db_pool.acquire() as conn, conn.transaction():
-        previous = await conn.fetchrow(
-            "DELETE FROM policy_profiles WHERE id=$1 RETURNING *",
-            uuid.UUID(profile_id),
-        )
-        if not previous:
-            raise HTTPException(status_code=404, detail="Policy profile not found")
-        invalidation = (
-            await _invalidate_model_intake_authority_change(
-                conn,
-                actor=actor,
-                trigger_type="policy_change",
-                reason=f"Deleted Model Intake policy profile {profile_id}",
-                environments=[str(previous["environment"])],
-                policy_profiles=[str(previous["name"])],
-            )
-            if previous["product_area"] == "model_intake"
-            else {"admissions_invalidated": 0, "deployment_bindings_staled": 0}
-        )
-    return {"deleted": True, "id": profile_id, "downstream_invalidation": invalidation}
 
 
 @app.get("/finding-exceptions")

@@ -1,4 +1,4 @@
-"""Shared row/JSON serialization helpers for the API layer.
+"""Shared row, JSON, and value-coercion helpers for the API layer.
 
 These pure helpers convert asyncpg records and JSON/JSONB column values into
 JSON-serializable Python objects. They were defined inside the api.py monolith
@@ -57,8 +57,17 @@ def _decode_jsonb_scalar(value: Any) -> Any:
     return value
 
 
+def _str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
 __all__ = [
     "row_to_dict",
+    "_str_list",
     "_decode_json_value",
     "_json_object",
     "_decode_jsonb_scalar",

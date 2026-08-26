@@ -83,10 +83,16 @@ sync_dev_sources() {
     [ -d /app/_src/scanner/wordlists ] && cp -rf /app/_src/scanner/wordlists/. /app/wordlists/ 2>/dev/null || true
     [ -d /app/_src/scanner/payloads ] && cp -rf /app/_src/scanner/payloads/. /app/payloads/ 2>/dev/null || true
     [ -d /app/_src/api/ai_gate ] && cp -rf /app/_src/api/ai_gate/. /app/ai_gate/ 2>/dev/null || true
-    for package in capabilities hunt runtime scan; do
-        [ -d "/app/_src/api/$package" ] || continue
+    # Sync EVERY importable api subpackage, not a hardcoded list: the api module
+    # is being decomposed into api/<domain>/ packages, and a hardcoded list means
+    # each new package silently fails to reach /app until this baked file is
+    # rebuilt (the container runs the image's copy of this script, not the host's).
+    for package_dir in /app/_src/api/*/; do
+        [ -d "$package_dir" ] || continue
+        [ -f "$package_dir/__init__.py" ] || continue
+        package="$(basename "$package_dir")"
         mkdir -p "/app/$package"
-        cp -rf "/app/_src/api/$package/." "/app/$package/"
+        cp -rf "$package_dir." "/app/$package/"
     done
 }
 sync_dev_sources

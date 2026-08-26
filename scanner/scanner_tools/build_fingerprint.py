@@ -37,6 +37,7 @@ FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
 V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "capabilities",
     "hunt",
+    "policy_profiles",
     "runtime",
     "scan",
     "worker_handlers",

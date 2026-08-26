@@ -315,6 +315,7 @@ COPY api/*.py /app/
 COPY api/ai_gate /app/ai_gate
 COPY api/capabilities /app/capabilities
 COPY api/hunt /app/hunt
+COPY api/policy_profiles /app/policy_profiles
 COPY api/runtime /app/runtime
 COPY api/scan /app/scan
 COPY api/worker_handlers /app/worker_handlers

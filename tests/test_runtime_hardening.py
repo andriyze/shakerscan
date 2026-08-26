@@ -445,9 +445,21 @@ def test_worker_image_and_dev_sync_package_canonical_runtime_modules():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     entrypoint = (ROOT / "scanner" / "entrypoint.sh").read_text()
 
-    for package in ("capabilities", "hunt", "runtime", "scan"):
+    # Every importable api package must be baked into the image, so a domain
+    # extracted out of api.py cannot be missing from the runtime.
+    api_packages = sorted(
+        path.name
+        for path in (ROOT / "api").iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    )
+    for package in api_packages:
         assert f"COPY api/{package} /app/{package}" in dockerfile
-    assert "for package in capabilities hunt runtime scan" in entrypoint
+    # The dev-source sync must cover every api package generically. A hardcoded
+    # list silently drops each newly extracted package until the baked
+    # entrypoint is rebuilt, which is a restart-time ImportError.
+    assert "for package_dir in /app/_src/api/*/" in entrypoint
+    assert '[ -f "$package_dir/__init__.py" ] || continue' in entrypoint
+    assert 'cp -rf "$package_dir." "/app/$package/"' in entrypoint
 
 
 def test_worker_preflight_checks_scanner_subprocess_modules_and_symbols():
