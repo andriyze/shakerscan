@@ -219,7 +219,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
     assert "legacy_capability" not in contract["credentials"]
     assert "http.request" in contract["credentials"]["semantic_capabilities"]
     assert contract["request_collections"]["replay_policies"] == [
-        "confirmed_active", "discovery_only", "safe_reads",
+        "confirmed_active", "discovery_only", "safe_authentication", "safe_reads",
     ]
     state_limit = next(
         item for item in contract["advanced_limits"]

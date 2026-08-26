@@ -134,7 +134,8 @@ def test_large_manifest_compiles_to_bounded_batch_graph():
     assert len(plan.actions) < 100
     assert {action.capability_name for action in batches} == {
         "templates.passive_batch", "templates.active_batch",
-        "xss.verify_batch", "sqli.verify_batch",
+        "xss.verify_batch", "xss.browser_prove_batch",
+        "sqli.verify_batch", "sqli.prove_batch",
     }
     assert all(1 <= action.capability_args["slice"]["count"] <= 50 for action in batches)
     assert sum(action.required for action in batches if action.capability_name == "xss.verify_batch") == 2
@@ -569,7 +570,7 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     )
     endpoint_by_id = {action.action_id: action for action in endpoint.actions}
     assert set(endpoint_by_id) == {
-        "inputs.auth_primary", "verify.xss", "finalize.report",
+        "inputs.auth_primary", "verify.xss", "prove.xss", "finalize.report",
     }
     xss_actions = [
         action for action in endpoint.actions

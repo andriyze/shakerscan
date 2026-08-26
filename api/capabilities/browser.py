@@ -114,7 +114,107 @@ class PreparedBrowserInteraction:
     redacted_execution: Mapping[str, Any]
 
 
-PreparedBrowserAction = PreparedBrowserNavigation | PreparedBrowserInteraction
+@dataclass(frozen=True)
+class PreparedXSSBrowserProof:
+    capability_name: str
+    adapter_name: str
+    adapter_version: str
+    parser_version: str
+    target: TargetBinding
+    url: str
+    origin: str
+    pinned_address: str
+    wait_until: str
+    timeout_ms: int
+    max_requests: int
+    marker: str
+    marker_sha256: str
+    payload_sha256: str
+    candidate_id: str
+    parameter_name: str
+    input_digest: str
+    estimated_budget: Mapping[str, int]
+    redacted_execution: Mapping[str, Any]
+
+
+PreparedBrowserAction = (
+    PreparedBrowserNavigation | PreparedBrowserInteraction | PreparedXSSBrowserProof
+)
+
+
+class XSSBrowserProofAdapter:
+    """Execute one server-derived XSS payload in the pinned browser runtime."""
+
+    capability_name = "xss.browser_prove_batch"
+    adapter_name = "playwright"
+    adapter_version = "1"
+    parser_version = "xss-browser-proof/v1"
+    manages_cancellation = True
+
+    def __init__(self, prepared: PreparedXSSBrowserProof):
+        self.prepared = prepared
+
+    @classmethod
+    def prepare(
+        cls, *, target: TargetBinding, execution_url: str,
+        candidate_id: str, parameter_name: str,
+    ) -> PreparedXSSBrowserProof:
+        origin = _origin(execution_url)
+        if origin not in target.allowed_origins or _origin_key(origin)[1] != target.canonical_host:
+            raise BrowserCapabilityInputError("XSS proof URL differs from target binding")
+        if not target.allowed_addresses:
+            raise BrowserCapabilityInputError("XSS proof target has no frozen address")
+        parsed = urllib.parse.urlsplit(execution_url)
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=50)
+        matches = [index for index, (name, _value) in enumerate(pairs) if name == parameter_name]
+        if len(matches) != 1:
+            raise BrowserCapabilityInputError("XSS proof parameter authority is ambiguous")
+        marker = f"shakerscan_xss_{candidate_id[:12]}"
+        payload = (
+            '<img src=x onerror="document.documentElement.setAttribute('
+            f"'data-shakerscan-proof','{marker}');console.log('{marker}')\">"
+        )
+        index = matches[0]
+        pairs[index] = (pairs[index][0], payload)
+        url = urllib.parse.urlunsplit((
+            parsed.scheme, parsed.netloc, parsed.path,
+            urllib.parse.urlencode(pairs, doseq=True), parsed.fragment,
+        ))
+        if _origin_key(url) != _origin_key(origin):
+            raise BrowserCapabilityInputError("XSS proof URL escaped target origin")
+        socket_factory = FrozenTargetSocketFactory(
+            hostname=target.canonical_host,
+            port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+            frozen_addresses=target.allowed_addresses,
+        )
+        normalized = {
+            "target_id": target.target_id, "candidate_id": candidate_id,
+            "parameter_name": parameter_name, "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
+        }
+        return PreparedXSSBrowserProof(
+            capability_name=cls.capability_name, adapter_name=cls.adapter_name,
+            adapter_version=cls.adapter_version, parser_version=cls.parser_version,
+            target=target, url=url, origin=origin,
+            pinned_address=socket_factory.primary_address,
+            wait_until="domcontentloaded", timeout_ms=20_000, max_requests=50,
+            marker=marker, marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
+            payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+            candidate_id=candidate_id, parameter_name=parameter_name,
+            input_digest=PreparedExecution.digest_input(normalized),
+            estimated_budget={"browser_actions": 2, "http_requests": 50, "tool_wall_seconds": 30},
+            redacted_execution={
+                "candidate_id": candidate_id, "parameter_name": parameter_name,
+                "payload_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+                "marker_sha256": hashlib.sha256(marker.encode()).hexdigest(),
+                "address_policy": socket_factory.policy_receipt,
+                "secret_values_visible": False,
+            },
+        )
+
+    async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
+        return await _execute_browser_action(
+            self.prepared, heartbeat=heartbeat, cancelled=cancelled,
+        )
 
 
 def _prepare_browser_base(
@@ -581,6 +681,27 @@ async def _execute_browser_action(
         await context.route("**/*", route_request)
         context.on("response", record_response)
         page = await context.new_page()
+        proof_events: list[dict[str, Any]] = []
+        if isinstance(prepared, PreparedXSSBrowserProof):
+            async def proof_dialog(dialog) -> None:
+                message = str(dialog.message or "")
+                proof_events.append({
+                    "signal": "dialog",
+                    "marker_match": message == prepared.marker,
+                    "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+                })
+                await dialog.dismiss()
+
+            def proof_console(message) -> None:
+                text = str(message.text or "")
+                proof_events.append({
+                    "signal": "console",
+                    "marker_match": text == prepared.marker,
+                    "message_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                })
+
+            page.on("dialog", proof_dialog)
+            page.on("console", proof_console)
         browser_actions = 1
         navigation = asyncio.create_task(page.goto(
             prepared.url,
@@ -620,6 +741,63 @@ async def _execute_browser_action(
             "request_count": request_count,
             "blocked_request_count": len(blocked),
         }
+        if isinstance(prepared, PreparedXSSBrowserProof):
+            browser_actions = 2
+            await asyncio.sleep(1.5)
+            await heartbeat()
+            dom_marker = await page.get_attribute(
+                "html", "data-shakerscan-proof",
+            )
+            dom_match = str(dom_marker or "") == prepared.marker
+            matched = [item for item in proof_events if item["marker_match"]]
+            proven = bool(matched or dom_match)
+            screenshot_sha256 = None
+            if proven:
+                # Replace target content before capture so the proof image cannot
+                # retain user data, credentials, or application response text.
+                await page.evaluate(
+                    "marker => { document.body.replaceChildren(); const node = "
+                    "document.createElement('div'); node.id='shakerscan-proof'; "
+                    "node.textContent='ShakerScan deterministic XSS execution proof'; "
+                    "node.setAttribute('data-marker-sha256', marker); "
+                    "document.body.appendChild(node); }",
+                    prepared.marker_sha256,
+                )
+                screenshot = await page.screenshot(full_page=False)
+                screenshot_sha256 = hashlib.sha256(bytes(screenshot)).hexdigest()
+            proof_observation = {
+                "kind": "xss_browser_proof",
+                "candidate_id": prepared.candidate_id,
+                "parameter_name": prepared.parameter_name,
+                "proof_state": "verified" if proven else "not_proven",
+                "finding_verdict": "verified" if proven else "not_proven",
+                "proof_producer": "shakerscan",
+                "evidence_type": "dom_execution" if proven else None,
+                "technique": (
+                    "headless_xss_dialog" if any(
+                        item["signal"] == "dialog" for item in matched
+                    ) else "headless_xss_console" if matched
+                    else "headless_xss_dom" if dom_match else None
+                ),
+                "payload_sha256": prepared.payload_sha256,
+                "marker_sha256": prepared.marker_sha256,
+                "event_transcript": proof_events[:20],
+                "dom_marker_executed": dom_match,
+                "sanitized_screenshot_sha256": screenshot_sha256,
+                "browser_build": str(getattr(browser, "version", "unknown")),
+                "same_origin": True,
+                "secret_values_visible": False,
+            }
+            return _browser_result(
+                prepared,
+                status="partial" if blocked else "success",
+                request_count=request_count,
+                browser_actions=browser_actions,
+                started=started,
+                observations=[navigation_observation, proof_observation, *responses],
+                blocked=blocked,
+                errors=("browser_requests_blocked",) if blocked else (),
+            )
         if isinstance(prepared, PreparedBrowserInteraction):
             locator = page.locator(prepared.selector)
             match_count = await locator.count()

@@ -30017,8 +30017,10 @@ def _compile_scan_admission_action_authority(
     }
     if "xss" in enabled_families:
         allowed_capabilities.add("xss.request_verify_batch")
+        allowed_capabilities.add("xss.browser_prove_batch")
     if "sqli" in enabled_families:
         allowed_capabilities.add("sqli.request_verify_batch")
+        allowed_capabilities.add("sqli.prove_batch")
     required_holds = (*required_capabilities, "scan.finalize")
     reserved_budget: dict[str, int] = {}
     for capability_name in required_holds:

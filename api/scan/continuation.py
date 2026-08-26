@@ -38,6 +38,7 @@ _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_ACTIONS = 512
 _LEGACY_CONTINUATION_CAPABILITIES = (
     "authz.verify",
+    "sqli.prove_batch",
     "sqli.request_verify",
     "sqli.verify",
     "sqli.verify_batch",
@@ -45,6 +46,7 @@ _LEGACY_CONTINUATION_CAPABILITIES = (
     "templates.scan",
     "templates.passive_batch",
     "templates.active_batch",
+    "xss.browser_prove_batch",
     "xss.request_verify",
     "xss.verify",
     "xss.verify_batch",

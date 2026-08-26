@@ -164,16 +164,22 @@ class FakeBackend:
         if action.action_id in self.terminal_races:
             raise ActionAlreadyTerminal(action.action_id)
         self.acquired.append(action.action_id)
+        # Model hybrid placement: single-worker batch actions are local-only, so a
+        # broker run leases them to the local adapter rather than rejecting them.
+        eligible = tuple(action.placement.get("eligible_backends") or ())
+        chosen = self.backend_name if self.backend_name in eligible else (
+            eligible[0] if eligible else self.backend_name
+        )
         return ActionLease(
-            lease_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"lease:{self.backend_name}:{action.action_id}")),
+            lease_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"lease:{chosen}:{action.action_id}")),
             lease_token="0123456789abcdef0123456789abcdef",
             scan_id=self.plan.scan_id,
             plan_digest=self.plan.plan_digest,
             execution_plan_digest=self.plan.execution_plan_digest,
             target_binding_digest=self.plan.target_binding_digest,
             action=action,
-            backend=self.backend_name,
-            worker_id=f"{self.backend_name}-worker-1",
+            backend=chosen,
+            worker_id=f"{chosen}-worker-1",
             lease_seconds=30,
             attempt=1,
         )

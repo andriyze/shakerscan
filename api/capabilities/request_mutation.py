@@ -226,6 +226,56 @@ def mutate_private_request(
     return replace(request, body=body), field_path[:300], marker, encoding
 
 
+def replace_private_request_field(
+    request: ReplayRequest, *, field_path: str, replacement: str,
+) -> tuple[ReplayRequest, str]:
+    """Replace one authorized scalar field while preserving the exact request encoding."""
+    content_type = _content_type(request)
+    if content_type == "application/json" or content_type.endswith("+json"):
+        try:
+            document = json.loads(request.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RequestMutationVerificationError(
+                "private JSON request body is invalid"
+            ) from exc
+        fields = {
+            ".".join(str(part) for part in path): path
+            for path, _value in _json_paths(document)
+        }
+        path = fields.get(str(field_path))
+        if path is None:
+            raise RequestMutationVerificationError(
+                "private JSON request lacks the authorized mutation field"
+            )
+        _set_json_path(document, path, replacement)
+        return replace(request, body=json.dumps(
+            document, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")), "json"
+    if content_type == "application/x-www-form-urlencoded":
+        try:
+            pairs = urllib.parse.parse_qsl(
+                request.body.decode("utf-8"), keep_blank_values=True,
+                strict_parsing=False, max_num_fields=MAX_MUTATION_FIELDS,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RequestMutationVerificationError(
+                "private form request body is invalid"
+            ) from exc
+        matches = [index for index, (name, _value) in enumerate(pairs) if name == field_path]
+        if len(matches) != 1:
+            raise RequestMutationVerificationError(
+                "private form request field authority is ambiguous"
+            )
+        index = matches[0]
+        pairs[index] = (pairs[index][0], replacement)
+        return replace(
+            request, body=urllib.parse.urlencode(pairs, doseq=True).encode("utf-8"),
+        ), "form"
+    raise RequestMutationVerificationError(
+        "private request body is not JSON or URL-encoded form data"
+    )
+
+
 def _body_sha256(result: ReplayTransportResult) -> str:
     return hashlib.sha256(result.response_body).hexdigest()
 
@@ -444,4 +494,5 @@ __all__ = [
     "RequestMutationVerificationAdapter",
     "RequestMutationVerificationError",
     "mutate_private_request",
+    "replace_private_request_field",
 ]

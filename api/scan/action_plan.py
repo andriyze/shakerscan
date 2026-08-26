@@ -54,6 +54,8 @@ _BATCH_CAPABILITIES = frozenset({
     "templates.active_batch",
     "xss.request_verify_batch",
     "sqli.request_verify_batch",
+    "sqli.prove_batch",
+    "xss.browser_prove_batch",
 })
 _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     "fast": {
@@ -63,6 +65,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
         "xss.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
         "sqli.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
+        "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
+        "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
     },
     "balanced": {
         "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
@@ -71,6 +75,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
         "sqli.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
+        "sqli.prove_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
+        "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
     },
     "thorough": {
         "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
@@ -79,6 +85,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
+        "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
+        "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
     },
 }
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -998,6 +1006,8 @@ class ScanActionPlanCompiler:
                     "sqli.verify_batch": 20,
                     "xss.request_verify_batch": 10,
                     "sqli.request_verify_batch": 10,
+                    "sqli.prove_batch": 20,
+                    "xss.browser_prove_batch": 50,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1009,8 +1019,14 @@ class ScanActionPlanCompiler:
                 if (
                     blueprint.capability_name in {
                         "xss.request_verify_batch", "sqli.request_verify_batch",
+                        "sqli.prove_batch",
                     }
                     and not policy.allow_state_changing_http
+                ):
+                    budget.pop("state_changing_requests", None)
+                if (
+                    blueprint.capability_name == "sqli.prove_batch"
+                    and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)
                 return budget
@@ -1273,6 +1289,7 @@ class ScanActionPlanCompiler:
                 ),
             )
         if scope in {"full", "endpoint"} and xss and not defer_manifest_actions:
+            xss_verify_start = len(blueprints)
             add_manifest_batches(
                 "verify.xss",
                 "verify_candidates",
@@ -1289,10 +1306,40 @@ class ScanActionPlanCompiler:
                 ),
                 reserve_dependency_slots=(
                     int(has_manifest_work(sqli, candidate_ref))
-                    + int(authz_will_run)
+                    + int(authz_will_run) + 1
                 ),
             )
+            xss_verify_dependencies = tuple(
+                row.action_id for row in blueprints[xss_verify_start:]
+                if row.capability_name == "xss.verify_batch"
+            )
+            if xss_verify_dependencies:
+                add_manifest_batches(
+                    "prove.xss",
+                    "prove_candidates",
+                    "xss.browser_prove_batch",
+                    {
+                        "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                        "endpoint_manifest_ref": endpoint_ref or None,
+                    },
+                    manifest_ref=candidate_ref,
+                    dependencies=xss_verify_dependencies,
+                    # Browser proof consumes ``browser_actions``, a backbone-only
+                    # budget: parallel endpoint shards structurally carry none, so a
+                    # strictly-required browser proof would make every sharded active
+                    # XSS scan un-plannable. It stays a best-effort escalation that
+                    # still compiles and runs whenever browser budget exists (always
+                    # in the single-worker authoritative path), and degrades to a
+                    # coverage gap in a shard that cannot fund a browser.
+                    required=False,
+                    minimum_batches=1,
+                    reserve_dependency_slots=(
+                        int(has_manifest_work(sqli, candidate_ref))
+                        + int(authz_will_run)
+                    ),
+                )
         if scope in {"full", "endpoint"} and sqli and not defer_manifest_actions:
+            sqli_verify_start = len(blueprints)
             add_manifest_batches(
                 "verify.sqli",
                 "verify_candidates",
@@ -1307,8 +1354,27 @@ class ScanActionPlanCompiler:
                 minimum_batches=(
                     2 if execution_plan.budget_profile == "thorough" else 1
                 ),
-                reserve_dependency_slots=int(authz_will_run),
+                reserve_dependency_slots=int(authz_will_run) + 1,
             )
+            sqli_verify_dependencies = tuple(
+                row.action_id for row in blueprints[sqli_verify_start:]
+                if row.capability_name == "sqli.verify_batch"
+            )
+            if sqli_verify_dependencies:
+                add_manifest_batches(
+                    "prove.sqli",
+                    "prove_candidates",
+                    "sqli.prove_batch",
+                    {
+                        "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                        "endpoint_manifest_ref": endpoint_ref or None,
+                    },
+                    manifest_ref=candidate_ref,
+                    dependencies=sqli_verify_dependencies,
+                    required="sqli" in explicitly_requested,
+                    minimum_batches=1,
+                    reserve_dependency_slots=int(authz_will_run),
+                )
         private_request_dependencies = tuple(
             row.action_id for row in blueprints
             if row.action_id.startswith("inputs.collection_")
@@ -1333,6 +1399,7 @@ class ScanActionPlanCompiler:
                     reserve_dependency_slots=int(sqli),
                 )
             if sqli:
+                request_sqli_start = len(blueprints)
                 add_manifest_batches(
                     "verify.request_sqli",
                     "verify_candidates",
@@ -1343,7 +1410,25 @@ class ScanActionPlanCompiler:
                         *primary_dependency, *private_request_dependencies,
                     ))),
                     required=False,
+                    reserve_dependency_slots=1,
                 )
+                request_sqli_dependencies = tuple(
+                    row.action_id for row in blueprints[request_sqli_start:]
+                    if row.capability_name == "sqli.request_verify_batch"
+                )
+                if request_sqli_dependencies:
+                    add_manifest_batches(
+                        "prove.request_sqli",
+                        "prove_candidates",
+                        "sqli.prove_batch",
+                        {"request_candidate_manifest_ref": request_candidate_ref},
+                        manifest_ref=request_candidate_ref,
+                        dependencies=tuple(dict.fromkeys((
+                            *private_request_dependencies,
+                            *request_sqli_dependencies,
+                        ))),
+                        required=False,
+                    )
         if authz_will_run and not defer_manifest_actions:
             add(
                 "verify.authz",
@@ -1371,7 +1456,7 @@ class ScanActionPlanCompiler:
             name: index for index, name in enumerate((
                 "bind_target", "resolve_inputs", "discover_surface", "discover_network",
                 "deterministic_baseline", "deterministic_active", "verify_candidates",
-                "finalize_evidence",
+                "prove_candidates", "finalize_evidence",
             ))
         }
         blueprints.sort(key=lambda row: stage_order[row.stage])

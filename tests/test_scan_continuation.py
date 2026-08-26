@@ -94,7 +94,9 @@ def _plans():
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
         required_capabilities=("templates.passive_batch", "xss.verify_batch"),
-        allowed_capabilities=("templates.passive_batch", "xss.verify_batch"),
+        allowed_capabilities=(
+            "templates.passive_batch", "xss.verify_batch", "xss.browser_prove_batch",
+        ),
     )
     endpoints = build_endpoint_manifest(
         scan_id=SCAN_ID,
@@ -314,6 +316,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         required_capabilities=("xss.request_verify_batch",),
         allowed_capabilities=(
             "templates.passive_batch", "xss.request_verify_batch", "xss.verify_batch",
+            "xss.browser_prove_batch",
         ),
     )
     continuation_raw = ScanActionPlanCompiler().compile(

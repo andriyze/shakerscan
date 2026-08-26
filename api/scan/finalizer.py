@@ -29,7 +29,8 @@ _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
     "xss.request_verify", "sqli.request_verify", "browser.proof",
-    "xss.request_verify_batch", "sqli.request_verify_batch",
+    "xss.request_verify_batch", "sqli.request_verify_batch", "sqli.prove_batch",
+    "xss.browser_prove_batch",
 })
 _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
@@ -89,6 +90,8 @@ def _findings_for_action(
         "sqli.request_verify": {"request_body_verification"},
         "xss.request_verify_batch": {"candidate_attempt", "request_body_verification"},
         "sqli.request_verify_batch": {"candidate_attempt", "request_body_verification"},
+        "sqli.prove_batch": {"candidate_attempt", "sqli_proof"},
+        "xss.browser_prove_batch": {"candidate_attempt", "xss_browser_proof"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
@@ -186,6 +189,44 @@ def _findings_for_action(
                 "verification_reason": "Deterministic alert execution proof satisfied",
             })
             findings.append(finding)
+        elif (
+            kind == "xss_browser_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and item.get("proof_producer") == "shakerscan"
+            and item.get("evidence_type") in {"dom_execution", "browser_execution"}
+            and str(item.get("technique") or "").startswith("headless_xss_")
+        ):
+            finding = _base_finding(
+                tool="shakerscan_browser_proof",
+                title="Verified cross-site scripting",
+                severity="high",
+                cwe="CWE-79",
+                url=None,
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "parameter_name": item.get("parameter_name"),
+                    "payload_sha256": item.get("payload_sha256"),
+                    "marker_sha256": item.get("marker_sha256"),
+                    "proof_producer": "shakerscan",
+                    "evidence_type": item.get("evidence_type"),
+                    "technique": item.get("technique"),
+                    "event_transcript": list(item.get("event_transcript") or ()),
+                    "dom_marker_executed": item.get("dom_marker_executed"),
+                    "sanitized_screenshot_sha256": item.get(
+                        "sanitized_screenshot_sha256"
+                    ),
+                    "browser_build": item.get("browser_build"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True, "suspected": False,
+                "needs_verification": False, "proof_state": "verified",
+                "verification_reason": "Canonical headless browser execution proof satisfied",
+            })
+            findings.append(finding)
         elif kind == "request_body_verification":
             family = str(item.get("family") or "").strip().lower()
             proof_status = str(item.get("proof_status") or "").strip().lower()
@@ -271,6 +312,56 @@ def _findings_for_action(
                 "needs_verification": True,
                 "proof_state": "likely_vulnerable",
                 "verification_reason": "Payload/control differential is missing",
+            })
+            findings.append(finding)
+        elif (
+            kind == "sqli_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("sqli_")
+            and int(item.get("repetitions") or 0) >= 2
+        ):
+            auth_bypass = item.get("proof_contract") == "sqli_authentication_bypass/v1"
+            finding = _base_finding(
+                tool="shakerscan_sqli_proof",
+                title=(
+                    "Verified SQL injection authentication bypass"
+                    if auth_bypass else "Verified SQL injection"
+                ),
+                severity="critical" if auth_bypass else "high",
+                cwe="CWE-89",
+                url=None,
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    "method": item.get("method"),
+                    "field_path": item.get("field_path"),
+                    "request_class": item.get("request_class"),
+                    "proof_contract": item.get("proof_contract"),
+                    "technique": item.get("technique"),
+                    "repetitions": item.get("repetitions"),
+                    "response_pairs": list(item.get("response_pairs") or ()),
+                    "database_error_signatures": list(
+                        item.get("database_error_signatures") or ()
+                    ),
+                    "redacted_excerpt": item.get("redacted_excerpt"),
+                    "session_state_discarded": item.get(
+                        "session_state_discarded"
+                    ),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "verification_reason": (
+                    "Repeated deterministic SQL injection differential satisfied"
+                ),
             })
             findings.append(finding)
         elif (
@@ -692,6 +783,8 @@ def finalize_scan_report(
         "templates.active_batch": "nuclei_active",
         "xss.request_verify_batch": "xss_body",
         "sqli.request_verify_batch": "sqli_body",
+        "sqli.prove_batch": "sqli_proof",
+        "xss.browser_prove_batch": "xss_browser_proof",
     }
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:

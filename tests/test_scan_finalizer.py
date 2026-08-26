@@ -411,6 +411,82 @@ def test_finalizer_retains_request_verifier_candidates_as_suspected_findings():
     ] == "sqli.request_verify"
 
 
+def test_finalizer_promotes_only_repeated_deterministic_sqli_proof():
+    prove = _action(
+        "prove.sqli.0", 0, capability_name="sqli.prove_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observations = {prove.action_id: ({
+        "kind": "sqli_proof",
+        "candidate_id": "candidate-sqli",
+        "request_ref_id": "request-sqli",
+        "method": "POST",
+        "field_path": "email",
+        "request_class": "safe_authentication",
+        "proof_state": "verified",
+        "finding_verdict": "verified",
+        "proof_contract": "sqli_authentication_bypass/v1",
+        "technique": "authentication_bypass_repeated",
+        "repetitions": 2,
+        "response_pairs": [{
+            "control_response_sha256": "c" * 64,
+            "payload_response_sha256": "d" * 64,
+        }],
+        "session_state_discarded": True,
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+    assert finding["tool"] == "shakerscan_sqli_proof"
+    assert finding["severity"] == "critical"
+    assert finding["verified"] is True
+    assert finding["evidence"]["canonical_capability"] == "sqli.prove_batch"
+
+
+def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
+    prove = _action(
+        "prove.xss", 0, capability_name="xss.browser_prove_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(prove.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(prove, final),
+    )
+    results = {prove.action_id: _result_with_observation_count(prove, 1)}
+    observations = {prove.action_id: ({
+        "kind": "xss_browser_proof", "candidate_id": "candidate-xss",
+        "parameter_name": "q", "proof_state": "verified",
+        "finding_verdict": "verified", "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution", "technique": "headless_xss_dom",
+        "payload_sha256": "c" * 64, "marker_sha256": "d" * 64,
+        "event_transcript": [{"signal": "console", "marker_match": True}],
+        "dom_marker_executed": True,
+        "sanitized_screenshot_sha256": "e" * 64,
+        "browser_build": "Chromium test",
+    },)}
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+    finding = report["findings"][0]
+    assert finding["tool"] == "shakerscan_browser_proof"
+    assert finding["verified"] is True
+    assert finding["evidence"]["proof_producer"] == "shakerscan"
+    assert finding["evidence"]["sanitized_screenshot_sha256"] == "e" * 64
+
+
 def test_finalizer_explains_required_action_degradation():
     plan = _plan()
     results = _results(plan)

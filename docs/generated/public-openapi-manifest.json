@@ -135,7 +135,7 @@
     "RequestCollectionCreate": "10f877194304c9c36a40164f8034e92ba608af4ad284101f162bf2b0080fb308",
     "RequestCollectionEnvironmentCreate": "4ac96d282e56c2101376826e2644edf3b1bc36d275a7c4b79d57ef96d4f7b72d",
     "RequestCollectionSelect": "156abc088232440812107d33c50796ffe4d3a92cd5522d6b4107244a9656017c",
-    "RequestCollectionSelectionUpsert": "86d5463897986269859f9213c2a0b0d36cb2649812dbe94ab932060e680037b1",
+    "RequestCollectionSelectionUpsert": "fdb3fc9eb6ce4340877b171bfa3beb10b5cacde2428174ddaa32b031f7bb43bd",
     "ResearchAutopilotRequest": "f5b1513509816aa4bd134b3ab6c866348432c59dad2d26fee33c273dc2559419",
     "ResearchCampaignControlRequest": "3c052fbab9bc4cb6683dafddc6e14fc842e74011479ae425807dc858049dc050",
     "ResearchCampaignLaunchRequest": "0dbe567fb067e4b5d8a79d6e333a4176fcbee2773da3427f5d178110845b161e",
@@ -177,7 +177,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "26b7e0c55d0c140ddcdc889a35daec629379e9009d2c9f15e450bb1f04ec70e3",
+  "contract_sha256": "144af3faf58012b44711b0ea975e79a0640d8ca04c71621b09c2b1deaab7c98b",
   "openapi": "3.1.0",
   "operation_count": 388,
   "operations": {
