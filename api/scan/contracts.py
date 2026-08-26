@@ -55,8 +55,8 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": ("web.probe", "web.crawl", "web.content_discover"),
     "nuclei_passive": ("templates.passive_batch",),
     "nuclei_active": ("templates.active_batch",),
-    "xss": ("xss.verify_batch", "xss.request_verify"),
-    "sqli": ("sqli.verify_batch", "sqli.request_verify"),
+    "xss": ("xss.verify_batch", "xss.request_verify_batch"),
+    "sqli": ("sqli.verify_batch", "sqli.request_verify_batch"),
     "bola": ("authz.verify",),
 }
 _SCAN_V2_BASELINE_CAPABILITIES = (
@@ -85,6 +85,7 @@ _BUDGET_CEILINGS = {
 SCAN_AUTHENTICATION_KEYS = frozenset({
     "auth_cookies", "auth_header", "auth_headers_json", "auth_scenario_json",
     "login_url", "login_username", "login_password", "login_extra_fields", "auto_auth",
+    "disposable_login_credentials",
     "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
     "oauth_username", "oauth_password", "user2_cookies", "user2_header",
     "user2_login_url", "user2_login_username", "user2_login_password",

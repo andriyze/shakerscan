@@ -20596,7 +20596,9 @@ def test_active_scan_admission_freezes_discovery_then_residual_continuation():
     assert continuation is not None
     assert continuation.parent_plan_digest == parent.plan_digest
     assert continuation.required_capabilities == ("xss.verify_batch",)
-    assert continuation.allowed_capabilities == ("xss.verify_batch",)
+    assert continuation.allowed_capabilities == (
+        "xss.request_verify_batch", "xss.verify_batch",
+    )
     assert "finalize.report" not in {
         action.action_id for action in parent.actions
     }

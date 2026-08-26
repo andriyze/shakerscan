@@ -273,7 +273,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
     request_ref = ScanWorkManifestReference(
         manifest_id="70000000-0000-4000-8000-000000000080",
         kind="request",
-        content_schema="request-manifest/v1",
+        content_schema="request-manifest/v2",
         manifest_digest="b" * 64,
         entry_count=1,
         status="complete",
@@ -281,7 +281,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
     candidate_ref = ScanWorkManifestReference(
         manifest_id="70000000-0000-4000-8000-000000000081",
         kind="request_candidate",
-        content_schema="request-candidate-manifest/v1",
+        content_schema="request-candidate-manifest/v2",
         manifest_digest="c" * 64,
         entry_count=1,
         status="complete",
@@ -311,9 +311,9 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         budget_ceiling=parent_allocation.residual_scan_execute_budget,
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
-        required_capabilities=("xss.request_verify",),
+        required_capabilities=("xss.request_verify_batch",),
         allowed_capabilities=(
-            "templates.passive_batch", "xss.request_verify", "xss.verify_batch",
+            "templates.passive_batch", "xss.request_verify_batch", "xss.verify_batch",
         ),
     )
     continuation_raw = ScanActionPlanCompiler().compile(
@@ -343,7 +343,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
     )
     verifier = next(
         action for action in amended.actions
-        if action.capability_name == "xss.request_verify"
+        if action.capability_name == "xss.request_verify_batch"
     )
 
     assert verifier.dependencies == ("inputs.collection_00",)
@@ -416,7 +416,7 @@ def test_continuation_cannot_change_existing_private_input_authority():
     request_ref = ScanWorkManifestReference(
         manifest_id="70000000-0000-4000-8000-000000000090",
         kind="request",
-        content_schema="request-manifest/v1",
+        content_schema="request-manifest/v2",
         manifest_digest="d" * 64,
         entry_count=1,
         status="complete",
@@ -424,7 +424,7 @@ def test_continuation_cannot_change_existing_private_input_authority():
     candidate_ref = ScanWorkManifestReference(
         manifest_id="70000000-0000-4000-8000-000000000091",
         kind="request_candidate",
-        content_schema="request-candidate-manifest/v1",
+        content_schema="request-candidate-manifest/v2",
         manifest_digest="f" * 64,
         entry_count=1,
         status="complete",

@@ -52,6 +52,8 @@ _BATCH_CAPABILITIES = frozenset({
     "sqli.verify_batch",
     "templates.passive_batch",
     "templates.active_batch",
+    "xss.request_verify_batch",
+    "sqli.request_verify_batch",
 })
 _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     "fast": {
@@ -59,18 +61,24 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.verify_batch": (5, {"http_requests": 400, "tool_wall_seconds": 120}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
+        "xss.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
+        "sqli.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
     },
     "balanced": {
         "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
         "sqli.verify_batch": (10, {"http_requests": 800, "tool_wall_seconds": 180}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
+        "xss.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
+        "sqli.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
     },
     "thorough": {
         "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
         "sqli.verify_batch": (25, {"http_requests": 1_800, "tool_wall_seconds": 300}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
+        "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
+        "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
     },
 }
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -247,7 +255,9 @@ def request_collection_action_refs(
         binding_id = str(raw.get("binding_id") or "").strip()
         selection_digest = str(raw.get("selection_digest") or "").strip().lower()
         replay_policy = str(raw.get("replay_policy") or "").strip().lower()
-        if replay_policy not in {"safe_reads", "confirmed_active"}:
+        if replay_policy not in {
+            "safe_reads", "safe_authentication", "confirmed_active",
+        }:
             continue
         try:
             selected = int(raw.get("selected_requests") or 0)
@@ -274,6 +284,7 @@ def request_collection_action_refs(
             "version": 1,
             "selection_digest": selection_digest,
             "active": replay_policy == "confirmed_active",
+            "replay_policy": replay_policy,
             "max_requests": min(2_000, selected, selector_limit),
         })
     return tuple(result)
@@ -622,6 +633,7 @@ class ScanActionPlanCompiler:
             allowed_keys=frozenset({
                 "collection_id", "selection_id", "binding_id", "version",
                 "selection_digest", "principal_ref", "active", "max_requests",
+                "replay_policy",
             }),
             required_keys=frozenset({
                 "collection_id", "selection_id", "binding_id", "version",
@@ -930,6 +942,8 @@ class ScanActionPlanCompiler:
             capability_name = (
                 "collections.replay_active"
                 if reference.get("active") is True and policy.allow_state_changing_http
+                else "collections.replay_authentication"
+                if reference.get("replay_policy") == "safe_authentication"
                 else "collections.replay_safe"
             )
             add(
@@ -982,14 +996,24 @@ class ScanActionPlanCompiler:
                     "templates.active_batch": 30,
                     "xss.verify_batch": 10,
                     "sqli.verify_batch": 20,
+                    "xss.request_verify_batch": 10,
+                    "sqli.request_verify_batch": 10,
                 }[blueprint.capability_name]
-                return {
+                budget = {
                     name: max(
                         wall_floor if name == "tool_wall_seconds" else 1,
                         (int(amount) * slice_count + batch_size - 1) // batch_size,
                     )
                     for name, amount in maximum.items()
                 }
+                if (
+                    blueprint.capability_name in {
+                        "xss.request_verify_batch", "sqli.request_verify_batch",
+                    }
+                    and not policy.allow_state_changing_http
+                ):
+                    budget.pop("state_changing_requests", None)
+                return budget
             specification = self._registry.require(blueprint.capability_name)
             requested = dict(specification.budget_cost)
             if (
@@ -1000,7 +1024,8 @@ class ScanActionPlanCompiler:
                     blueprint.capability_args.get("max_redirects") or 0
                 )
             if blueprint.capability_name in {
-                "collections.replay_safe", "collections.replay_active",
+                "collections.replay_safe", "collections.replay_authentication",
+                "collections.replay_active",
             }:
                 reference = blueprint.capability_args.get("request_collection_ref")
                 if isinstance(reference, Mapping):
@@ -1290,38 +1315,34 @@ class ScanActionPlanCompiler:
         )
         if (
             scope in {"full", "endpoint"}
-            and policy.allow_state_changing_http
+            and policy.active_testing
             and not defer_manifest_actions
             and request_candidate_ref
         ):
             if xss:
-                add_manifest_breadth(
+                add_manifest_batches(
                     "verify.request_xss",
                     "verify_candidates",
-                    "xss.request_verify",
+                    "xss.request_verify_batch",
                     {"request_candidate_manifest_ref": request_candidate_ref},
                     manifest_ref=request_candidate_ref,
-                    index_name="request_candidate_index",
                     dependencies=tuple(dict.fromkeys((
                         *primary_dependency, *private_request_dependencies,
                     ))),
                     required=False,
                     reserve_dependency_slots=int(sqli),
-                    minimum_count=1,
                 )
             if sqli:
-                add_manifest_breadth(
+                add_manifest_batches(
                     "verify.request_sqli",
                     "verify_candidates",
-                    "sqli.request_verify",
+                    "sqli.request_verify_batch",
                     {"request_candidate_manifest_ref": request_candidate_ref},
                     manifest_ref=request_candidate_ref,
-                    index_name="request_candidate_index",
                     dependencies=tuple(dict.fromkeys((
                         *primary_dependency, *private_request_dependencies,
                     ))),
                     required=False,
-                    minimum_count=1,
                 )
         if authz_will_run and not defer_manifest_actions:
             add(

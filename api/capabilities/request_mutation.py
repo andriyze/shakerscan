@@ -147,6 +147,7 @@ def mutate_private_request(
     *,
     family: str,
     candidate_id: str,
+    field_path: str | None = None,
 ) -> tuple[ReplayRequest, str, str, str]:
     """Return one deterministic mutation while keeping exact wire values private."""
     if family not in {"xss", "sqli"}:
@@ -168,6 +169,11 @@ def mutate_private_request(
         fields = sorted(
             _json_paths(document), key=lambda item: _field_rank(item[0], family=family),
         )
+        if field_path:
+            fields = [
+                item for item in fields
+                if ".".join(str(part) for part in item[0]) == str(field_path)
+            ]
         if not fields:
             raise RequestMutationVerificationError(
                 "private JSON request has no scalar mutation field"
@@ -196,10 +202,15 @@ def mutate_private_request(
             raise RequestMutationVerificationError(
                 "private form request has no mutation field"
             )
-        index = min(
-            range(len(pairs)),
-            key=lambda item: _field_rank((pairs[item][0],), family=family),
-        )
+        eligible = [
+            index for index, (name, _value) in enumerate(pairs)
+            if not field_path or name == str(field_path)
+        ]
+        if not eligible:
+            raise RequestMutationVerificationError(
+                "private form request lacks the authorized mutation field"
+            )
+        index = min(eligible, key=lambda item: _field_rank((pairs[item][0],), family=family))
         name, original = pairs[index]
         replacement, marker = _mutation_value(
             family=family, original=original, candidate_id=candidate_id,
@@ -241,8 +252,11 @@ class RequestMutationVerificationAdapter:
         transport: ReplayTransport,
         requested_budget: Mapping[str, int],
     ) -> None:
-        family = "xss" if specification.name == "xss.request_verify" else "sqli"
-        if specification.name not in {"xss.request_verify", "sqli.request_verify"}:
+        family = "xss" if specification.name.startswith("xss.") else "sqli"
+        if specification.name not in {
+            "xss.request_verify", "sqli.request_verify",
+            "xss.request_verify_batch", "sqli.request_verify_batch",
+        }:
             raise RequestMutationVerificationError(
                 "request mutation capability is unsupported"
             )
@@ -258,9 +272,15 @@ class RequestMutationVerificationAdapter:
             raise RequestMutationVerificationError(
                 "request candidate does not authorize this family"
             )
-        if int(requested_budget.get("http_requests") or 0) < 2 or int(
-            requested_budget.get("state_changing_requests") or 0
-        ) < 2:
+        request_class = str(candidate.get("request_class") or "confirmed_mutation")
+        if request_class not in {"safe_authentication", "confirmed_mutation"}:
+            raise RequestMutationVerificationError(
+                "request candidate safety class is not executable"
+            )
+        if int(requested_budget.get("http_requests") or 0) < 2 or (
+            request_class == "confirmed_mutation"
+            and int(requested_budget.get("state_changing_requests") or 0) < 2
+        ):
             raise RequestMutationVerificationError(
                 "request verifier requires two HTTP and mutation reservations"
             )
@@ -275,6 +295,18 @@ class RequestMutationVerificationAdapter:
         self.requested_budget = {
             str(name): int(amount) for name, amount in requested_budget.items()
         }
+        self.request_class = request_class
+
+    def _actual_budget(self, *, attempted: int, wall_seconds: int) -> dict[str, int]:
+        actual = {
+            "http_requests": attempted,
+            "tool_wall_seconds": wall_seconds,
+        }
+        if "state_changing_requests" in self.requested_budget:
+            actual["state_changing_requests"] = (
+                attempted if self.request_class == "confirmed_mutation" else 0
+            )
+        return actual
 
     async def execute(
         self,
@@ -292,6 +324,7 @@ class RequestMutationVerificationAdapter:
         try:
             mutated, field_path, marker, encoding = mutate_private_request(
                 self.request, family=self.family, candidate_id=candidate_id,
+                field_path=str(self.candidate.get("field_path") or "") or None,
             )
         except RequestMutationVerificationError as exc:
             return CapabilityAdapterResult(
@@ -319,11 +352,10 @@ class RequestMutationVerificationAdapter:
             return CapabilityAdapterResult(
                 status="cancelled",
                 errors=("cancelled_after_control",),
-                actual_budget={
-                    "http_requests": 1,
-                    "state_changing_requests": 1,
-                    "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
-                },
+                actual_budget=self._actual_budget(
+                    attempted=1,
+                    wall_seconds=max(1, math.ceil(time.monotonic() - started)),
+                ),
                 partial=True,
                 execution_started=True,
                 parser_version=REQUEST_MUTATION_PARSER_VERSION,
@@ -363,6 +395,7 @@ class RequestMutationVerificationAdapter:
             "candidate_id": candidate_id,
             "request_ref_id": self.request.request_id,
             "method": self.request.method,
+            "request_class": self.request_class,
             "body_encoding": encoding,
             "field_path": field_path,
             "control_status": control.status_code,
@@ -385,11 +418,10 @@ class RequestMutationVerificationAdapter:
             status="partial" if partial else "success",
             observations=(observation,),
             errors=errors,
-            actual_budget={
-                "http_requests": attempted,
-                "state_changing_requests": attempted,
-                "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
-            },
+            actual_budget=self._actual_budget(
+                attempted=attempted,
+                wall_seconds=max(1, math.ceil(time.monotonic() - started)),
+            ),
             partial=partial,
             timed_out=bool(control.timed_out or changed.timed_out),
             execution_started=True,
@@ -398,6 +430,7 @@ class RequestMutationVerificationAdapter:
                 "candidate_id": candidate_id,
                 "request_ref_id": self.request.request_id,
                 "method": self.request.method,
+                "request_class": self.request_class,
                 "body_encoding": encoding,
                 "field_path": field_path,
                 "follow_redirects": False,

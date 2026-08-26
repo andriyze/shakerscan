@@ -320,6 +320,9 @@ def test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(mon
             "selected_shard": None,
             "safe_method": False,
             "body_schema_digest": "b" * 64,
+            "content_type": "application/json",
+            "body_field_names": ["name"],
+            "selection_digest": "c" * 64,
         },),
     )
     candidates = build_request_candidate_manifest(
@@ -675,6 +678,101 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     }
     assert second.redacted_execution["resumed_count"] == 2
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
+
+
+def test_safe_authentication_body_batch_needs_no_general_mutation_permission(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    route_id = "d" * 64
+    request = build_replay_plan(
+        ({
+            "id": "credential-login:primary",
+            "method": "POST",
+            "url": "https://app.example.test/rest/user/login",
+            "headers": {"Content-Type": "application/json"},
+            "body": '{"email":"disposable@example.test","password":"private"}',
+            "body_mode": "application/json",
+            "auth_type": "none",
+            "has_sensitive_material": True,
+        },),
+        allowed_origins=TARGET.allowed_origins,
+        authorization=ReplayAuthorization(
+            active_testing=True,
+            allow_state_changing_http=True,
+            approval_receipt_id="credential-workflow",
+        ),
+    ).requests[0]
+    request_manifest = build_request_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        source_action_ids=("inputs.auth_primary",),
+        requests=({
+            "request_ref_id": request.request_id,
+            "route_id": route_id,
+            "method": "POST",
+            "auth_lane": "primary",
+            "selected_shard": None,
+            "request_class": "safe_authentication",
+            "content_type": "application/json",
+            "body_field_names": ["email", "password"],
+            "selection_digest": "e" * 64,
+            "body_schema_digest": "f" * 64,
+        },),
+    )
+    candidates = build_request_candidate_manifest(
+        (request_manifest,),
+        source_action_ids=("inputs.auth_primary",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.request_sqli", "sqli.request_verify_batch", 0,
+        capability_args={
+            "request_candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+            "profile": "balanced_batch_v1",
+            "proof_policy": "deterministic_differential_required",
+        },
+    )
+    action = ScanAction(
+        **{
+            **action.digest_material(),
+            "requested_budget": {"http_requests": 4, "tool_wall_seconds": 20},
+        }
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+
+    class Transport:
+        async def send(self, exact_request, **_kwargs):
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=exact_request.url,
+                response_body=b"normal",
+            )
+
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", Transport)
+    backend = Backend(manifests={candidates.manifest_id: candidates})
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+    dispatcher._private_requests[request.request_id] = request
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert receipt.budget_consumed == {"http_requests": 4, "tool_wall_seconds": 2}
+    assert all(
+        item.get("request_class") == "safe_authentication"
+        for item in receipt.observations if item.get("kind") == "candidate_attempt"
+    )
+    public = json.dumps(receipt.public_dict())
+    assert "disposable@example.test" not in public
+    assert '"password":"private"' not in public
 
 
 def test_database_neutral_finalizer_reads_only_durable_results_and_observations():

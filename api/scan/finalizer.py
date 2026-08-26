@@ -29,6 +29,7 @@ _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
     "xss.request_verify", "sqli.request_verify", "browser.proof",
+    "xss.request_verify_batch", "sqli.request_verify_batch",
 })
 _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
@@ -86,6 +87,8 @@ def _findings_for_action(
         },
         "xss.request_verify": {"request_body_verification"},
         "sqli.request_verify": {"request_body_verification"},
+        "xss.request_verify_batch": {"candidate_attempt", "request_body_verification"},
+        "sqli.request_verify_batch": {"candidate_attempt", "request_body_verification"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
@@ -187,7 +190,9 @@ def _findings_for_action(
             family = str(item.get("family") or "").strip().lower()
             proof_status = str(item.get("proof_status") or "").strip().lower()
             expected_family = (
-                "xss" if result.capability_name == "xss.request_verify"
+                "xss" if result.capability_name in {
+                    "xss.request_verify", "xss.request_verify_batch",
+                }
                 else "sqli"
             )
             expected_proof = (
@@ -685,6 +690,8 @@ def finalize_scan_report(
         "sqli.verify_batch": "sqli",
         "templates.passive_batch": "nuclei_passive",
         "templates.active_batch": "nuclei_active",
+        "xss.request_verify_batch": "xss_body",
+        "sqli.request_verify_batch": "sqli_body",
     }
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:

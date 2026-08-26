@@ -24,8 +24,8 @@ SCAN_WORK_MANIFEST_REFERENCE_SCHEMA = "scan-work-manifest-reference/v1"
 WORK_MANIFEST_CONTENT_SCHEMAS = MappingProxyType({
     "endpoint": "endpoint-manifest/v2",
     "candidate": "candidate-manifest/v1",
-    "request_candidate": "request-candidate-manifest/v1",
-    "request": "request-manifest/v1",
+    "request_candidate": "request-candidate-manifest/v2",
+    "request": "request-manifest/v2",
     "template": "template-manifest/v1",
 })
 CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT = (
@@ -101,6 +101,9 @@ _METHOD_RE = re.compile(r"^[A-Z]{3,12}$")
 _SENSITIVE_KEYS = frozenset({
     "authorization", "cookie", "password", "secret", "token", "api_key",
     "private_key", "credential", "header_value", "body_value", "query_value",
+})
+REQUEST_CLASSES = frozenset({
+    "safe_read", "safe_authentication", "confirmed_mutation", "forbidden",
 })
 
 
@@ -181,6 +184,22 @@ def _string_list(value: Any, *, name: str, maximum: int) -> tuple[str, ...]:
     if len(set(normalized)) != len(normalized):
         raise ScanWorkManifestError(f"{name} contains duplicates")
     return normalized
+
+
+def _body_field_list(value: Any, *, name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > 128:
+        raise ScanWorkManifestError(f"{name} must be a bounded list")
+    rows: list[str] = []
+    for item in value:
+        field = str(item or "").strip()
+        if (
+            not field or len(field) > 300
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in field)
+        ):
+            raise ScanWorkManifestError(f"{name} contains an invalid field path")
+        if field not in rows:
+            rows.append(field)
+    return tuple(rows)
 
 
 def _integer(value: Any, *, name: str, minimum: int, maximum: int) -> int:
@@ -362,13 +381,19 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
 def _request_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = {
         "request_ref_id", "route_id", "method", "auth_lane", "selected_shard",
-        "safe_method", "body_schema_digest",
+        "request_class", "content_type", "body_field_names",
+        "selection_digest", "body_schema_digest",
     }
     if set(value) != expected:
         raise ScanWorkManifestError("request manifest entry fields are invalid")
     method = str(value["method"] or "").strip().upper()
-    if not _METHOD_RE.fullmatch(method) or not isinstance(value["safe_method"], bool):
+    request_class = str(value["request_class"] or "").strip().lower()
+    if not _METHOD_RE.fullmatch(method) or request_class not in REQUEST_CLASSES:
         raise ScanWorkManifestError("request method contract is invalid")
+    if method in {"GET", "HEAD", "OPTIONS"} and request_class != "safe_read":
+        raise ScanWorkManifestError("safe HTTP methods must use safe_read")
+    if method not in {"GET", "HEAD", "OPTIONS"} and request_class == "safe_read":
+        raise ScanWorkManifestError("unsafe HTTP methods cannot use safe_read")
     lane = _token(value["auth_lane"], name="auth_lane", optional=True)
     if lane not in {None, "primary", "secondary", "service", "anonymous"}:
         raise ScanWorkManifestError("request auth_lane is invalid")
@@ -381,7 +406,16 @@ def _request_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "selected_shard": _optional_integer(
             value["selected_shard"], name="selected_shard", minimum=0, maximum=16_383,
         ),
-        "safe_method": value["safe_method"],
+        "request_class": request_class,
+        "content_type": _token(
+            value["content_type"], name="content_type", optional=True,
+        ),
+        "body_field_names": list(_body_field_list(
+            value["body_field_names"], name="body_field_names",
+        )),
+        "selection_digest": _hex(
+            value["selection_digest"], name="selection_digest",
+        ),
         "body_schema_digest": (
             _hex(body_digest, name="body_schema_digest") if body_digest is not None else None
         ),
@@ -392,14 +426,19 @@ def _request_candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = {
         "candidate_id", "route_id", "request_ref_id", "method",
         "family_hints", "auth_lane", "selected_shard", "score",
-        "ranking_rationale",
+        "ranking_rationale", "request_class", "content_type", "field_path",
+        "selection_digest",
     }
     if set(value) != expected:
         raise ScanWorkManifestError(
             "request candidate manifest entry fields are invalid"
         )
     method = str(value["method"] or "").strip().upper()
-    if not _METHOD_RE.fullmatch(method) or method in {"GET", "HEAD", "OPTIONS"}:
+    request_class = str(value["request_class"] or "").strip().lower()
+    if (
+        not _METHOD_RE.fullmatch(method) or method in {"GET", "HEAD", "OPTIONS"}
+        or request_class not in {"safe_authentication", "confirmed_mutation"}
+    ):
         raise ScanWorkManifestError(
             "request candidate requires a state-changing HTTP method"
         )
@@ -416,6 +455,7 @@ def _request_candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "route_id": route,
         "request_ref_id": request_ref,
         "method": method,
+        "field_path": str(value["field_path"]),
     })
     if _hex(value["candidate_id"], name="candidate_id") != expected_id:
         raise ScanWorkManifestError(
@@ -429,6 +469,14 @@ def _request_candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "route_id": route,
         "request_ref_id": request_ref,
         "method": method,
+        "request_class": request_class,
+        "content_type": str(_token(value["content_type"], name="content_type")),
+        "field_path": str(_body_field_list(
+            [value["field_path"]], name="field_path",
+        )[0]),
+        "selection_digest": _hex(
+            value["selection_digest"], name="selection_digest",
+        ),
         "family_hints": list(family_hints),
         "auth_lane": lane,
         "selected_shard": _optional_integer(
@@ -932,7 +980,24 @@ def build_request_manifest(
 ) -> ScanWorkManifest:
     """Freeze an admitted saved-request selection without any secret values."""
     limit = _integer(maximum, name="request maximum", minimum=1, maximum=2_000)
-    selected = list(requests[:limit])
+    selected = []
+    for raw in requests[:limit]:
+        item = dict(raw)
+        if "request_class" not in item:
+            item["request_class"] = (
+                "safe_read" if bool(item.pop("safe_method", False))
+                else "confirmed_mutation"
+            )
+        else:
+            item.pop("safe_method", None)
+        item.setdefault("content_type", None)
+        item.setdefault("body_field_names", [])
+        item.setdefault("selection_digest", _digest({
+            "scan_id": scan_id,
+            "request_ref_id": item.get("request_ref_id"),
+            "source_action_ids": list(source_action_ids),
+        }))
+        selected.append(item)
     truncated = len(requests) > limit
     return ScanWorkManifest(
         scan_id=scan_id,
@@ -951,7 +1016,7 @@ def build_request_candidate_manifest(
     source_action_ids: Sequence[str],
     maximum: int,
 ) -> ScanWorkManifest:
-    """Freeze state-changing exact-request candidates without body values.
+    """Freeze exact private body-field candidates without body values.
 
     The manifest authorizes only an opaque request reference. The executing
     worker must resolve and validate the encrypted request, then select bounded
@@ -978,36 +1043,43 @@ def build_request_candidate_manifest(
     candidates: dict[str, dict[str, Any]] = {}
     for manifest in request_manifests:
         for request in manifest.entries:
-            if bool(request["safe_method"]):
+            request_class = str(request["request_class"])
+            if request_class not in {"safe_authentication", "confirmed_mutation"}:
                 continue
             request_ref = str(request["request_ref_id"])
             method = str(request["method"])
             route = str(request["route_id"])
-            candidate_id = _digest({
-                "route_id": route,
-                "request_ref_id": request_ref,
-                "method": method,
-            })
-            score = 76
-            rationale = [
-                "exact_private_request_reference",
-                "state_changing_method",
-                "worker_private_body_required",
-            ]
-            if request["auth_lane"] not in {None, "anonymous"}:
-                score += 12
-                rationale.append("authenticated_lane")
-            candidates[candidate_id] = {
-                "candidate_id": candidate_id,
-                "route_id": route,
-                "request_ref_id": request_ref,
-                "method": method,
-                "family_hints": ["xss", "sqli"],
-                "auth_lane": request["auth_lane"],
-                "selected_shard": request["selected_shard"],
-                "score": min(100, score),
-                "ranking_rationale": rationale,
-            }
+            for field_path in request["body_field_names"]:
+                candidate_id = _digest({
+                    "route_id": route,
+                    "request_ref_id": request_ref,
+                    "method": method,
+                    "field_path": str(field_path),
+                })
+                score = 82 if request_class == "safe_authentication" else 76
+                rationale = [
+                    "exact_private_request_reference",
+                    request_class,
+                    "worker_private_body_required",
+                ]
+                if request["auth_lane"] not in {None, "anonymous"}:
+                    score += 12
+                    rationale.append("authenticated_lane")
+                candidates[candidate_id] = {
+                    "candidate_id": candidate_id,
+                    "route_id": route,
+                    "request_ref_id": request_ref,
+                    "method": method,
+                    "request_class": request_class,
+                    "content_type": request["content_type"],
+                    "field_path": field_path,
+                    "selection_digest": request["selection_digest"],
+                    "family_hints": ["xss", "sqli"],
+                    "auth_lane": request["auth_lane"],
+                    "selected_shard": request["selected_shard"],
+                    "score": min(100, score),
+                    "ranking_rationale": rationale,
+                }
     ranked = sorted(
         candidates.values(), key=lambda item: (-int(item["score"]), item["candidate_id"]),
     )

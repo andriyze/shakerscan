@@ -68,7 +68,7 @@ def _request_manifest_ref(manifest_id: str, digest: str, count: int = 1):
     return ScanWorkManifestReference(
         manifest_id=manifest_id,
         kind="request",
-        content_schema="request-manifest/v1",
+        content_schema="request-manifest/v2",
         manifest_digest=digest,
         entry_count=count,
         status="complete",
@@ -79,7 +79,7 @@ def _request_candidate_manifest_ref(count: int = 1):
     return ScanWorkManifestReference(
         manifest_id="10000000-0000-4000-8000-000000000090",
         kind="request_candidate",
-        content_schema="request-candidate-manifest/v1",
+        content_schema="request-candidate-manifest/v2",
         manifest_digest="9" * 64,
         entry_count=count,
         status="complete",
@@ -141,7 +141,7 @@ def test_large_manifest_compiles_to_bounded_batch_graph():
     assert sum(action.required for action in batches if action.capability_name == "sqli.verify_batch") == 2
 
 
-def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_authority():
+def test_compiler_adds_exact_request_batches_with_class_aware_mutation_budget():
     compiler = ScanActionPlanCompiler()
     disabled = compiler.compile(
         scan_id=SCAN_ID,
@@ -149,10 +149,14 @@ def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_autho
         target_binding=_target(),
         request_candidate_manifest_ref=_request_candidate_manifest_ref(),
     )
-    assert not any(
-        action.capability_name in {"xss.request_verify", "sqli.request_verify"}
-        for action in disabled.actions
-    )
+    disabled_actions = [
+        action for action in disabled.actions
+        if action.capability_name in {
+            "xss.request_verify_batch", "sqli.request_verify_batch",
+        }
+    ]
+    assert len(disabled_actions) == 2
+    assert all("state_changing_requests" not in action.requested_budget for action in disabled_actions)
 
     enabled = compiler.compile(
         scan_id=SCAN_ID,
@@ -162,15 +166,17 @@ def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_autho
     )
     request_actions = [
         action for action in enabled.actions
-        if action.capability_name in {"xss.request_verify", "sqli.request_verify"}
+        if action.capability_name in {
+            "xss.request_verify_batch", "sqli.request_verify_batch",
+        }
     ]
 
     assert [action.capability_name for action in request_actions] == [
-        "xss.request_verify", "sqli.request_verify",
+        "xss.request_verify_batch", "sqli.request_verify_batch",
     ]
-    assert all(action.requested_budget["http_requests"] == 2 for action in request_actions)
+    assert all(action.requested_budget["http_requests"] == 4 for action in request_actions)
     assert all(
-        action.requested_budget["state_changing_requests"] == 2
+        action.requested_budget["state_changing_requests"] == 4
         for action in request_actions
     )
     assert all(
@@ -736,6 +742,7 @@ def test_admitted_private_inputs_reduce_to_versioned_content_free_plan_refs():
         "version": 1,
         "selection_digest": "a" * 64,
         "active": True,
+        "replay_policy": "confirmed_active",
         "max_requests": 8,
     },)
 

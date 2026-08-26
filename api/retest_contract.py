@@ -2958,6 +2958,9 @@ async def run_schema_migrations(pool) -> None:
                     normalized_path TEXT,
                     body_mode TEXT,
                     auth_type TEXT,
+                    tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    content_type TEXT,
+                    body_field_names_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                     safe_method BOOLEAN NOT NULL DEFAULT false,
                     supported BOOLEAN NOT NULL DEFAULT true,
                     PRIMARY KEY (collection_id, request_id)

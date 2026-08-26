@@ -40,6 +40,8 @@ _FORBIDDEN_WIRE_HEADERS = frozenset({
     "host", "content-length", "connection", "transfer-encoding",
     "proxy-authorization", "proxy-connection", "keep-alive", "te", "trailer", "upgrade",
 })
+_MAX_PUBLIC_BODY_FIELDS = 128
+_MAX_PUBLIC_JSON_DEPTH = 8
 
 
 class RequestReplayError(ValueError):
@@ -172,14 +174,80 @@ def _body_bytes(value: Any) -> bytes:
     return body
 
 
+def _request_content_type(
+    headers: tuple[tuple[str, str], ...], body_mode: str, body: bytes,
+) -> str | None:
+    for name, value in headers:
+        if name.lower() == "content-type":
+            return value.split(";", 1)[0].strip().lower()[:200] or None
+    mode = str(body_mode or "").lower()
+    if "json" in mode or body.lstrip().startswith((b"{", b"[")):
+        return "application/json"
+    if "urlencoded" in mode or "form" in mode:
+        return "application/x-www-form-urlencoded"
+    return None
+
+
+def _json_body_fields(
+    value: Any, *, prefix: tuple[str | int, ...] = (), depth: int = 0,
+) -> list[str]:
+    if depth > _MAX_PUBLIC_JSON_DEPTH:
+        return []
+    rows: list[str] = []
+    if isinstance(value, Mapping):
+        for key in sorted(value, key=lambda item: str(item)):
+            rows.extend(_json_body_fields(
+                value[key], prefix=(*prefix, str(key)), depth=depth + 1,
+            ))
+            if len(rows) >= _MAX_PUBLIC_BODY_FIELDS:
+                break
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:_MAX_PUBLIC_BODY_FIELDS]):
+            rows.extend(_json_body_fields(
+                item, prefix=(*prefix, index), depth=depth + 1,
+            ))
+            if len(rows) >= _MAX_PUBLIC_BODY_FIELDS:
+                break
+    elif prefix and isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        rows.append(".".join(str(item) for item in prefix)[:300])
+    return rows[:_MAX_PUBLIC_BODY_FIELDS]
+
+
+def _request_body_field_names(body: bytes, content_type: str | None) -> tuple[str, ...]:
+    if not body:
+        return ()
+    try:
+        if content_type and (content_type == "application/json" or content_type.endswith("+json")):
+            fields = _json_body_fields(json.loads(body.decode("utf-8")))
+        elif content_type == "application/x-www-form-urlencoded":
+            fields = [
+                str(name)[:300] for name, _value in urllib.parse.parse_qsl(
+                    body.decode("utf-8"), keep_blank_values=True,
+                    max_num_fields=_MAX_PUBLIC_BODY_FIELDS,
+                )
+            ]
+        else:
+            fields = []
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        fields = []
+    return tuple(dict.fromkeys(field for field in fields if field))[:_MAX_PUBLIC_BODY_FIELDS]
+
+
 @dataclass(frozen=True)
 class ReplayAuthorization:
     active_testing: bool = False
     allow_state_changing_http: bool = False
     approval_receipt_id: str | None = None
+    safe_authentication_only: bool = False
 
     def authorize(self, method: str) -> None:
         if method in SAFE_METHODS:
+            return
+        if self.safe_authentication_only:
+            if method != "POST":
+                raise RequestReplayError(
+                    "safe authentication replay permits exact POST requests only"
+                )
             return
         if method not in STATE_CHANGING_METHODS:
             raise RequestReplayError(f"unsupported replay method: {method}")
@@ -191,11 +259,14 @@ class ReplayAuthorization:
             raise RequestReplayError("state-changing replay requires an approval receipt")
 
     def public_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "active_testing": self.active_testing,
             "allow_state_changing_http": self.allow_state_changing_http,
             "approval_bound": bool(str(self.approval_receipt_id or "").strip()),
         }
+        if self.safe_authentication_only:
+            result["safe_authentication_only"] = True
+        return result
 
 
 @dataclass(frozen=True)
@@ -229,6 +300,7 @@ class ReplayRequest:
         }
 
     def digest_dict(self) -> dict[str, Any]:
+        content_type = _request_content_type(self.headers, self.body_mode, self.body)
         return {
             "request_id": self.request_id,
             "ordinal": self.ordinal,
@@ -239,11 +311,14 @@ class ReplayRequest:
                 for name, value in self.headers
             ],
             "body_sha256": _sha256(self.body),
+            "content_type": content_type,
+            "body_field_names": list(_request_body_field_names(self.body, content_type)),
             "body_mode": self.body_mode,
             "auth_type": self.auth_type,
         }
 
     def public_dict(self) -> dict[str, Any]:
+        content_type = _request_content_type(self.headers, self.body_mode, self.body)
         return {
             "request_id": self.request_id,
             "ordinal": self.ordinal,
@@ -256,6 +331,8 @@ class ReplayRequest:
             "body_mode": self.body_mode,
             "body_length": len(self.body),
             "body_sha256": _sha256(self.body),
+            "content_type": content_type,
+            "body_field_names": list(_request_body_field_names(self.body, content_type)),
             "auth_type": self.auth_type,
             "safe_method": self.method in SAFE_METHODS,
             "state_changing": self.method in STATE_CHANGING_METHODS,
@@ -280,6 +357,13 @@ class ReplayPlan:
             raise RequestReplayError(
                 f"replay plan exceeds the {REQUEST_REPLAY_HARD_MAX}-request hard limit"
             )
+        if self.authorization.safe_authentication_only and (
+            len(self.requests) > 5
+            or any(request.method != "POST" for request in self.requests)
+        ):
+            raise RequestReplayError(
+                "safe authentication replay exceeds its exact POST ceiling"
+            )
 
     @property
     def estimated_budget(self) -> dict[str, int]:
@@ -288,7 +372,7 @@ class ReplayPlan:
             request.method in STATE_CHANGING_METHODS for request in self.requests
         )
         budget = {"http_requests": len(self.requests)}
-        if state_changing:
+        if state_changing and not self.authorization.safe_authentication_only:
             budget["state_changing_requests"] = int(state_changing)
         return budget
 

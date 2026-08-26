@@ -15,6 +15,7 @@ REQUEST_COLLECTION_RUNTIME_MIGRATION = "v2_request_collection_runtime_v1"
 REPLAY_POLICIES = frozenset({
     "discovery_only",
     "safe_reads",
+    "safe_authentication",
     "confirmed_active",
 })
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -23,6 +24,10 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 REQUEST_COLLECTION_RUNTIME_SCHEMA_SQL = r"""
 ALTER TABLE request_collection_requests
 ADD COLUMN IF NOT EXISTS tags_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE request_collection_requests
+ADD COLUMN IF NOT EXISTS content_type TEXT;
+ALTER TABLE request_collection_requests
+ADD COLUMN IF NOT EXISTS body_field_names_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS request_collection_environments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -72,7 +77,7 @@ CREATE TABLE IF NOT EXISTS request_collection_selections (
     binding_id UUID NOT NULL,
     name TEXT NOT NULL,
     replay_policy TEXT NOT NULL CHECK (
-        replay_policy IN ('discovery_only','safe_reads','confirmed_active')
+        replay_policy IN ('discovery_only','safe_reads','safe_authentication','confirmed_active')
     ),
     selector_json JSONB NOT NULL CHECK (jsonb_typeof(selector_json) = 'object'),
     selection_digest TEXT NOT NULL CHECK (selection_digest ~ '^[0-9a-f]{64}$'),
@@ -87,6 +92,12 @@ CREATE TABLE IF NOT EXISTS request_collection_selections (
         FOREIGN KEY (binding_id, collection_id)
         REFERENCES request_collection_bindings(id, collection_id)
         ON DELETE CASCADE
+);
+ALTER TABLE request_collection_selections
+DROP CONSTRAINT IF EXISTS request_collection_selections_replay_policy_check;
+ALTER TABLE request_collection_selections
+ADD CONSTRAINT request_collection_selections_replay_policy_check CHECK (
+    replay_policy IN ('discovery_only','safe_reads','safe_authentication','confirmed_active')
 );
 CREATE INDEX IF NOT EXISTS idx_request_collection_selections_active
 ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
@@ -189,6 +200,7 @@ class RequestCollectionSelection:
     tags: tuple[str, ...] = ()
     safe_methods_only: bool = True
     max_requests: int = 500
+    disposable_credentials: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_ids", _bounded_strings(
@@ -230,6 +242,10 @@ class RequestCollectionSelection:
             raise RequestCollectionContractError(
                 "selection safe_methods_only must be a boolean"
             )
+        if not isinstance(self.disposable_credentials, bool):
+            raise RequestCollectionContractError(
+                "selection disposable_credentials must be a boolean"
+            )
         try:
             maximum = int(self.max_requests)
         except (TypeError, ValueError) as exc:
@@ -248,6 +264,7 @@ class RequestCollectionSelection:
         unknown = set(item) - {
             "request_ids", "folders", "methods", "path_regex", "tags",
             "safe_methods_only", "max_requests", "limit",
+            "disposable_credentials",
         }
         if unknown:
             raise RequestCollectionContractError(
@@ -261,6 +278,7 @@ class RequestCollectionSelection:
             tags=tuple(item.get("tags") or ()),
             safe_methods_only=item.get("safe_methods_only", True),
             max_requests=item.get("max_requests", item.get("limit", 500)),
+            disposable_credentials=item.get("disposable_credentials", False),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -272,6 +290,7 @@ class RequestCollectionSelection:
             "tags": list(self.tags),
             "safe_methods_only": self.safe_methods_only,
             "max_requests": self.max_requests,
+            "disposable_credentials": self.disposable_credentials,
         }
 
 
@@ -294,9 +313,19 @@ def request_collection_selection_digest(
     environment_digest = str(environment_sha256 or "").strip().lower() or None
     if environment_digest is not None and not _DIGEST_RE.fullmatch(environment_digest):
         raise RequestCollectionContractError("collection environment digest is invalid")
-    if policy != "confirmed_active" and not selector.safe_methods_only:
+    if policy not in {"confirmed_active", "safe_authentication"} and not selector.safe_methods_only:
         raise RequestCollectionContractError(
             "only confirmed_active selections may include state-changing methods"
+        )
+    if policy == "safe_authentication" and (
+        not selector.disposable_credentials
+        or selector.safe_methods_only
+        or selector.max_requests > 5
+        or selector.methods != ("POST",)
+        or not selector.request_ids
+    ):
+        raise RequestCollectionContractError(
+            "safe_authentication requires exact POST request IDs, disposable credentials, and a five-request ceiling"
         )
     material = {
         "schema_version": "request-collection-selection/v2",

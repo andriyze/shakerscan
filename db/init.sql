@@ -779,6 +779,8 @@ CREATE TABLE request_collection_requests (
     body_mode TEXT,
     auth_type TEXT,
     tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    content_type TEXT,
+    body_field_names_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     safe_method BOOLEAN NOT NULL DEFAULT false,
     supported BOOLEAN NOT NULL DEFAULT true,
     PRIMARY KEY (collection_id, request_id)
@@ -825,7 +827,9 @@ CREATE TABLE request_collection_selections (
     collection_id UUID NOT NULL REFERENCES request_collections(id) ON DELETE CASCADE,
     binding_id UUID NOT NULL,
     name TEXT NOT NULL,
-    replay_policy TEXT NOT NULL CHECK (replay_policy IN ('discovery_only','safe_reads','confirmed_active')),
+    replay_policy TEXT NOT NULL CHECK (
+        replay_policy IN ('discovery_only','safe_reads','safe_authentication','confirmed_active')
+    ),
     selector_json JSONB NOT NULL CHECK (jsonb_typeof(selector_json) = 'object'),
     selection_digest TEXT NOT NULL CHECK (selection_digest ~ '^[0-9a-f]{64}$'),
     selected_request_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_request_count >= 0),

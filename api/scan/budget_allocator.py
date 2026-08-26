@@ -74,6 +74,8 @@ _ACTIVE_VERIFIER_CAPABILITIES = {
     "xss.verify",
     "sqli.request_verify",
     "xss.request_verify",
+    "sqli.request_verify_batch",
+    "xss.request_verify_batch",
     "authz.verify",
 }
 

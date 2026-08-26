@@ -850,7 +850,7 @@ def test_typed_parent_plan_allows_sequential_fanout_under_one_worker_ceiling():
                 "entry_count": 1,
                 "status": "complete",
                 "schema_version": "scan-work-manifest-reference/v1",
-                "content_schema": "request-manifest/v1",
+                "content_schema": "request-manifest/v2",
             },
         },
     )

@@ -121,6 +121,40 @@ def test_tags_are_redacted_index_metadata_and_filter_worker_selection():
     assert all("smoke" in item["tags"] for item in selected)
 
 
+def test_json_and_form_indexes_publish_field_paths_without_values():
+    document = {
+        "info": {"name": "Body metadata", "schema": "v2.1"},
+        "item": [
+            {"name": "json", "request": {
+                "method": "POST", "url": "https://api.example.test/login",
+                "body": {
+                    "mode": "raw", "raw": '{"user":{"email":"person@example.test"},"password":"top-secret"}',
+                    "options": {"raw": {"language": "json"}},
+                },
+            }},
+            {"name": "form", "request": {
+                "method": "POST", "url": "https://api.example.test/token",
+                "body": {"mode": "urlencoded", "urlencoded": [
+                    {"key": "client_id", "value": "private-client"},
+                    {"key": "client_secret", "value": "private-secret"},
+                ]},
+            }},
+        ],
+    }
+
+    _payload, _summary, rows = validate_and_index(document)
+
+    assert rows[0]["content_type"] == "application/json"
+    assert rows[0]["body_field_names"] == ["user", "user.email", "password"]
+    assert rows[1]["content_type"] == "application/x-www-form-urlencoded"
+    assert rows[1]["body_field_names"] == ["client_id", "client_secret"]
+    serialized = repr(rows)
+    assert "person@example.test" not in serialized
+    assert "top-secret" not in serialized
+    assert "private-client" not in serialized
+    assert "private-secret" not in serialized
+
+
 def test_page_and_regex_guards_fail_closed():
     with pytest.raises(ValueError):
         page_index([], limit=REQUEST_COLLECTION_PAGE_MAX + 1)

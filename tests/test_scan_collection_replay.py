@@ -180,6 +180,26 @@ def test_safe_scan_forces_read_only_even_if_stored_selector_is_tampered():
     }
 
 
+def test_safe_authentication_requires_active_approval_without_state_permission():
+    with pytest.raises(ScanCollectionReplayContractError, match="active_testing"):
+        scan_replay_authorization(
+            "safe_authentication", {}, approval_receipt_id="approval-1",
+        )
+    with pytest.raises(ScanCollectionReplayContractError, match="target-bound approval"):
+        scan_replay_authorization(
+            "safe_authentication", {"active_testing": True},
+        )
+
+    authorization = scan_replay_authorization(
+        "safe_authentication",
+        {"active_testing": True, "allow_state_changing_http": False},
+        approval_receipt_id="approval-1",
+    )
+    assert authorization.safe_authentication_only is True
+    assert authorization.allow_state_changing_http is False
+    assert authorization.approval_receipt_id == "approval-1"
+
+
 @pytest.mark.parametrize(
     ("policy", "approval", "message"),
     [

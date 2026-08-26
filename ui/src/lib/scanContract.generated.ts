@@ -146,9 +146,11 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "auth.session.establish",
       "authz.verify",
       "collections.replay_active",
+      "collections.replay_authentication",
       "collections.replay_safe",
       "http.request",
       "sqli.request_verify",
+      "sqli.request_verify_batch",
       "sqli.verify",
       "sqli.verify_batch",
       "templates.active_batch",
@@ -159,6 +161,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "web.crawl",
       "web.probe",
       "xss.request_verify",
+      "xss.request_verify_batch",
       "xss.verify",
       "xss.verify_batch"
     ],
@@ -218,7 +221,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     {
       "capabilities": [
         "xss.verify_batch",
-        "xss.request_verify"
+        "xss.request_verify_batch"
       ],
       "default_enabled": false,
       "description": "Reflected, stored, and DOM XSS probes.",
@@ -231,7 +234,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     {
       "capabilities": [
         "sqli.verify_batch",
-        "sqli.request_verify"
+        "sqli.request_verify_batch"
       ],
       "default_enabled": false,
       "description": "SQL injection probes and proof/extraction depth.",
@@ -285,6 +288,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "replay_policies": [
       "confirmed_active",
       "discovery_only",
+      "safe_authentication",
       "safe_reads"
     ]
   },
@@ -293,7 +297,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
 
 export type ScanBudgetProfile = "fast" | "balanced" | "thorough"
 export type ScanCredentialAuthKind = "api_key_header" | "authorization_header" | "basic_auth" | "bearer_token" | "cookie" | "custom_headers" | "form_login" | "oauth_client_credentials" | "oauth_password"
-export type ScanReplayPolicy = "confirmed_active" | "discovery_only" | "safe_reads"
+export type ScanReplayPolicy = "confirmed_active" | "discovery_only" | "safe_authentication" | "safe_reads"
 export type ScanTargetKind = 'web' | 'api'
 
 export type { SubmitScanScansPostRequest as ScanStartRequest } from './publicApi.generated'

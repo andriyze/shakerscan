@@ -310,7 +310,10 @@ def test_request_candidate_manifest_authorizes_only_private_state_changing_refs(
                 "auth_lane": "primary",
                 "selected_shard": 3,
                 "safe_method": False,
-                "body_schema_digest": None,
+                "body_schema_digest": "c" * 64,
+                "content_type": "application/json",
+                "body_field_names": ["productId", "quantity"],
+                "selection_digest": "d" * 64,
             },
         ),
     )
@@ -321,11 +324,13 @@ def test_request_candidate_manifest_authorizes_only_private_state_changing_refs(
         maximum=10,
     )
 
-    assert candidates.content_schema == "request-candidate-manifest/v1"
-    assert len(candidates.entries) == 1
+    assert candidates.content_schema == "request-candidate-manifest/v2"
+    assert len(candidates.entries) == 2
     entry = candidates.entries[0]
     assert entry["request_ref_id"] == "create-order"
     assert entry["method"] == "POST"
+    assert entry["request_class"] == "confirmed_mutation"
+    assert entry["field_path"] in {"productId", "quantity"}
     assert entry["family_hints"] == ("xss", "sqli")
     encoded = json.dumps(candidates.canonical_dict(), sort_keys=True)
     assert "safe-read" not in encoded

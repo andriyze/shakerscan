@@ -115,7 +115,9 @@ class RequestCollectionSelectionUpsert(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=160)
     binding_id: str
-    replay_policy: Literal["discovery_only", "safe_reads", "confirmed_active"] = (
+    replay_policy: Literal[
+        "discovery_only", "safe_reads", "safe_authentication", "confirmed_active",
+    ] = (
         "safe_reads"
     )
     request_ids: list[str] = Field(default_factory=list, max_length=2000)
@@ -125,6 +127,7 @@ class RequestCollectionSelectionUpsert(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=200)
     safe_methods_only: bool = True
     max_requests: int = Field(default=500, ge=1, le=2000)
+    disposable_credentials: bool = False
 
 
 def _uuid_or_400(value: str, name: str) -> uuid.UUID:
@@ -246,6 +249,9 @@ def request_collection_selector(value: Any) -> RequestCollectionSelection:
 def _request_collection_index_item(row: Any) -> dict[str, Any]:
     item = _row_to_dict(row)
     item["tags"] = list(_decode_json_value(item.pop("tags_json", None)) or [])
+    item["body_field_names"] = list(
+        _decode_json_value(item.pop("body_field_names_json", None)) or []
+    )
     return item
 
 
@@ -430,14 +436,16 @@ async def create_request_collection(request: RequestCollectionCreate):
                     """INSERT INTO request_collection_requests (
                            collection_id, request_id, ordinal, folder, name, method,
                            redacted_url, normalized_path, body_mode, auth_type, tags_json,
-                           safe_method, supported
-                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+                           content_type, body_field_names_json, safe_method, supported
+                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)""",
                     [(
                         row["id"], item["request_id"], item["ordinal"],
                         item.get("folder"), item.get("name"), item["method"],
                         item.get("redacted_url"), item.get("normalized_path"),
                         item.get("body_mode"), item.get("auth_type"),
                         json.dumps(item.get("tags") or []),
+                        item.get("content_type"),
+                        json.dumps(item.get("body_field_names") or []),
                         item.get("safe_method", False), item.get("supported", True),
                     ) for item in index],
                 )
@@ -585,7 +593,7 @@ async def list_request_collection_requests(
         rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url,
                       normalized_path, body_mode, auth_type, tags_json, safe_method,
-                      supported
+                      supported, content_type, body_field_names_json
                FROM request_collection_requests WHERE collection_id=$1
                ORDER BY ordinal LIMIT $2 OFFSET $3""",
             collection_uuid, limit, offset,
@@ -620,7 +628,7 @@ async def select_request_collection_index(
         rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url,
                       normalized_path, body_mode, auth_type, tags_json, safe_method,
-                      supported
+                      supported, content_type, body_field_names_json
                FROM request_collection_requests
                WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
             collection_uuid,
@@ -880,7 +888,7 @@ async def upsert_request_collection_selection(
         rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url,
                       normalized_path, body_mode, auth_type, tags_json,
-                      safe_method, supported
+                      safe_method, supported, content_type, body_field_names_json
                FROM request_collection_requests
                WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
             collection_uuid,
@@ -890,6 +898,47 @@ async def upsert_request_collection_selection(
             raise HTTPException(
                 status_code=422, detail="request collection selection is empty",
             )
+        if request.replay_policy == "safe_authentication":
+            auth_path = re.compile(
+                r"/(?:login|signin|authenticate|token|session)/?$", re.IGNORECASE,
+            )
+            if any(
+                str(item.get("method") or "").upper() != "POST"
+                or item.get("supported") is not True
+                or not auth_path.search(str(item.get("normalized_path") or ""))
+                or not any(marker in str(item.get("body_mode") or "").lower()
+                           for marker in ("json", "form", "urlencoded", "raw"))
+                for item in selected
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "safe_authentication accepts only supported exact POST "
+                        "login/token requests with JSON or form bodies"
+                    ),
+                )
+            identifier_fields = {"user", "username", "email", "login", "client_id"}
+            secret_fields = {"password", "pass", "passwd", "secret", "client_secret", "token"}
+            if any(
+                not (
+                    {
+                        str(field).lower().rsplit(".", 1)[-1].removesuffix("[]")
+                        for field in item.get("body_field_names") or []
+                    }.intersection(identifier_fields)
+                    and {
+                        str(field).lower().rsplit(".", 1)[-1].removesuffix("[]")
+                        for field in item.get("body_field_names") or []
+                    }.intersection(secret_fields)
+                )
+                for item in selected
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "safe_authentication requests must expose credential field "
+                        "names in their redacted body metadata"
+                    ),
+                )
         try:
             digest = request_collection_selection_digest(
                 collection_id=collection_uuid,

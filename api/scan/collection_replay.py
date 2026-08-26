@@ -26,7 +26,9 @@ from .capability_execution import scan_budget_ledger_limits
 from .work_manifests import ScanWorkManifest
 
 
-EXECUTABLE_REPLAY_POLICIES = frozenset({"safe_reads", "confirmed_active"})
+EXECUTABLE_REPLAY_POLICIES = frozenset({
+    "safe_reads", "safe_authentication", "confirmed_active",
+})
 
 
 class ScanCollectionReplayContractError(ValueError):
@@ -42,7 +44,7 @@ def validate_scan_replay_request_manifest(
         (
             str(item["request_ref_id"]),
             str(item["method"]),
-            bool(item["safe_method"]),
+            str(item["request_class"]),
         )
         for item in manifest.entries
     )
@@ -50,7 +52,13 @@ def validate_scan_replay_request_manifest(
         (
             request.request_id,
             request.method,
-            request.method in {"GET", "HEAD", "OPTIONS"},
+            (
+                "safe_read"
+                if request.method in {"GET", "HEAD", "OPTIONS"}
+                else "safe_authentication"
+                if plan.authorization.safe_authentication_only
+                else "confirmed_mutation"
+            ),
         )
         for request in plan.requests
     )
@@ -137,7 +145,6 @@ def scan_replay_authorization(
         )
     if policy == "safe_reads":
         return ReplayAuthorization()
-
     active_testing = scan_policy.get("active_testing") is True
     allow_state_changing = scan_policy.get("allow_state_changing_http") is True
     approval = str(
@@ -145,6 +152,21 @@ def scan_replay_authorization(
         or scan_policy.get("approval_receipt_id")
         or ""
     ).strip()
+    if policy == "safe_authentication":
+        if not active_testing:
+            raise ScanCollectionReplayContractError(
+                "safe_authentication collection replay requires active_testing"
+            )
+        if not approval:
+            raise ScanCollectionReplayContractError(
+                "safe_authentication collection replay requires a target-bound approval receipt"
+            )
+        return ReplayAuthorization(
+            active_testing=True,
+            approval_receipt_id=approval,
+            safe_authentication_only=True,
+        )
+
     if not active_testing:
         raise ScanCollectionReplayContractError(
             "confirmed_active collection replay requires active_testing"

@@ -4218,6 +4218,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     target_binding=target_binding,
                     collection_refs=scheduled_executable_refs,
                     selection_requests=scheduled_manifest_requests,
+                    options=scan_options,
                 )
                 if scheduled_request_manifest_refs:
                     scan_options["request_manifest_refs"] = (
@@ -5018,6 +5019,7 @@ class ScanOptions(BaseModel):
     login_password: Optional[str] = None
     login_extra_fields: Optional[str] = None     # Extra form fields as JSON: '{"remember": "true"}'
     auto_auth: bool = False                      # Attempt API login with provided credentials
+    disposable_login_credentials: bool = False  # Permit bounded safe-authentication verification
 
     # Multi-user auth for BOLA/IDOR testing
     user2_cookies: Optional[str] = None          # Second user session cookies
@@ -11159,6 +11161,8 @@ async def _broker_private_replay_plan(
     capability_name = (
         "collections.replay_active"
         if replay_policy == "confirmed_active"
+        else "collections.replay_authentication"
+        if replay_policy == "safe_authentication"
         else "collections.replay_safe"
     )
     if capability_name != action.capability_name:
@@ -11376,7 +11380,8 @@ async def _build_broker_private_scan_payload(
     replay_plans: dict[str, Any] = {}
     for action in plan.actions:
         if action.capability_name in {
-            "collections.replay_safe", "collections.replay_active",
+            "collections.replay_safe", "collections.replay_authentication",
+            "collections.replay_active",
         }:
             replay_plans[action.action_id] = await _broker_private_replay_plan(
                 conn,
@@ -11617,9 +11622,12 @@ async def _broker_active_scan_cap() -> int:
 _BROKER_PRIVATE_INPUT_CAPABILITIES = frozenset({
     "auth.session.establish",
     "collections.replay_safe",
+    "collections.replay_authentication",
     "collections.replay_active",
     "xss.request_verify",
     "sqli.request_verify",
+    "xss.request_verify_batch",
+    "sqli.request_verify_batch",
 })
 
 
@@ -29516,7 +29524,7 @@ async def _generic_collection_refs(
         index_rows = await conn.fetch(
             """SELECT request_id, ordinal, folder, name, method, redacted_url,
                       normalized_path, body_mode, auth_type, tags_json,
-                      safe_method, supported
+                      safe_method, supported, content_type, body_field_names_json
                FROM request_collection_requests
                WHERE collection_id=$1 AND supported=true
                ORDER BY ordinal LIMIT 20000""",
@@ -29536,6 +29544,10 @@ async def _generic_collection_refs(
                 "normalized_path": str(item.get("normalized_path") or "/"),
                 "auth_type": str(item.get("auth_type") or "none"),
                 "body_mode": str(item.get("body_mode") or "none"),
+                "content_type": str(item.get("content_type") or "none"),
+                "body_field_names": list(
+                    _decode_json_value(item.get("body_field_names_json")) or []
+                ),
                 "safe_method": bool(item.get("safe_method")),
                 "allowed_origins": list(
                     _decode_json_value(binding.get("allowed_origins")) or []
@@ -29717,6 +29729,7 @@ def _compile_scan_request_work_manifests(
     target_binding: TargetBinding,
     collection_refs: Sequence[Mapping[str, Any]],
     selection_requests: Mapping[str, Sequence[Mapping[str, Any]]],
+    options: Mapping[str, Any] | None = None,
 ) -> tuple[
     tuple[ScanWorkManifest, ...],
     dict[str, dict[str, Any]],
@@ -29732,6 +29745,7 @@ def _compile_scan_request_work_manifests(
     references: dict[str, dict[str, Any]] = {}
     for index, action_ref in enumerate(action_refs):
         selection_digest = str(action_ref["selection_digest"])
+        replay_policy = str(action_ref.get("replay_policy") or "")
         raw_requests = list(selection_requests.get(selection_digest) or ())
         maximum = int(action_ref.get("max_requests") or 0)
         if not raw_requests or maximum < 1:
@@ -29795,8 +29809,22 @@ def _compile_scan_request_work_manifests(
                     else "anonymous"
                 ),
                 "selected_shard": None,
-                "safe_method": bool(raw.get("safe_method")),
-                "body_schema_digest": None,
+                "request_class": (
+                    "safe_read" if bool(raw.get("safe_method"))
+                    else "safe_authentication"
+                    if replay_policy == "safe_authentication"
+                    else "confirmed_mutation"
+                ),
+                "content_type": raw.get("content_type"),
+                "body_field_names": list(raw.get("body_field_names") or ()),
+                "selection_digest": selection_digest,
+                "body_schema_digest": (
+                    hashlib.sha256(json.dumps({
+                        "content_type": raw.get("content_type"),
+                        "body_field_names": sorted(raw.get("body_field_names") or ()),
+                    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    if raw.get("body_field_names") else None
+                ),
             })
         manifest = build_request_manifest(
             scan_id=scan_id,
@@ -29804,6 +29832,75 @@ def _compile_scan_request_work_manifests(
             source_action_ids=(f"inputs.collection_{index:02d}",),
             requests=entries,
             maximum=maximum,
+        )
+        manifests.append(manifest)
+        references[selection_digest] = manifest.reference().canonical_dict()
+    private_options = dict(options or {})
+    if (
+        private_options.get("auto_auth") is True
+        and private_options.get("disposable_login_credentials") is True
+        and private_options.get("login_url")
+        and private_options.get("login_username")
+        and private_options.get("login_password")
+    ):
+        login_url = urllib.parse.urljoin(
+            target_binding.allowed_origins[0].rstrip("/") + "/",
+            str(private_options["login_url"]),
+        )
+        parsed = urllib.parse.urlsplit(login_url)
+        origin = canonical_collection_origin(urllib.parse.urlunsplit((
+            parsed.scheme, parsed.netloc, "", "", "",
+        )))
+        if origin not in target_binding.allowed_origins or (
+            parsed.hostname or ""
+        ).lower().rstrip(".") != target_binding.canonical_host:
+            raise ScanActionPlanError(
+                "safe authentication workflow exceeds the frozen target"
+            )
+        field_names = ["email", "password"]
+        selection_digest = hashlib.sha256(json.dumps({
+            "schema_version": "safe-authentication-selection/v1",
+            "target_binding_digest": target_binding.digest,
+            "method": "POST",
+            "path": parsed.path or "/",
+            "query_names": sorted(name for name, _value in urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True,
+            )),
+            "content_type": "application/json",
+            "body_field_names": field_names,
+            "credential_class": "disposable",
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        request_id = "credential-login:primary"
+        manifest = build_request_manifest(
+            scan_id=scan_id,
+            target_binding_digest=target_binding.digest,
+            source_action_ids=("inputs.auth_primary",),
+            requests=({
+                "request_ref_id": request_id,
+                "route_id": scan_manifest_route_id(
+                    target_binding_digest=target_binding.digest,
+                    method="POST",
+                    scheme=parsed.scheme,
+                    host=str(parsed.hostname or ""),
+                    port=int(parsed.port or (443 if parsed.scheme == "https" else 80)),
+                    canonical_path=parsed.path or "/",
+                    query_parameter_names=sorted(
+                        name for name, _value in urllib.parse.parse_qsl(
+                            parsed.query, keep_blank_values=True,
+                        )
+                    ),
+                ),
+                "method": "POST",
+                "auth_lane": "primary",
+                "selected_shard": None,
+                "request_class": "safe_authentication",
+                "content_type": "application/json",
+                "body_field_names": field_names,
+                "selection_digest": selection_digest,
+                "body_schema_digest": hashlib.sha256(
+                    b'application/json:["email","password"]'
+                ).hexdigest(),
+            },),
         )
         manifests.append(manifest)
         references[selection_digest] = manifest.reference().canonical_dict()
@@ -29918,11 +30015,10 @@ def _compile_scan_admission_action_authority(
     allowed_capabilities = {
         allowed_by_family[family] for family in enabled_families
     }
-    if scan_contract.policy.allow_state_changing_http:
-        if "xss" in enabled_families:
-            allowed_capabilities.add("xss.request_verify")
-        if "sqli" in enabled_families:
-            allowed_capabilities.add("sqli.request_verify")
+    if "xss" in enabled_families:
+        allowed_capabilities.add("xss.request_verify_batch")
+    if "sqli" in enabled_families:
+        allowed_capabilities.add("sqli.request_verify_batch")
     required_holds = (*required_capabilities, "scan.finalize")
     reserved_budget: dict[str, int] = {}
     for capability_name in required_holds:
@@ -30528,6 +30624,7 @@ async def _submit_scan(
                 target_binding=target_binding,
                 collection_refs=executable_collection_refs,
                 selection_requests=collection_manifest_requests,
+                options=options_payload,
             )
         except (ScanActionPlanError, ScanWorkManifestError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

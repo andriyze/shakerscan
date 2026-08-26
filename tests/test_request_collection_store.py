@@ -93,6 +93,39 @@ def test_selection_contract_rejects_unbounded_or_unknown_inputs():
         ])
 
 
+def test_safe_authentication_selection_requires_exact_disposable_posts():
+    selector = RequestCollectionSelection(
+        request_ids=("login-request",),
+        methods=("POST",),
+        safe_methods_only=False,
+        max_requests=5,
+        disposable_credentials=True,
+    )
+    arguments = {
+        "collection_id": "00000000-0000-4000-8000-000000000001",
+        "payload_sha256": PAYLOAD_DIGEST,
+        "binding_id": "00000000-0000-4000-8000-000000000002",
+        "allowed_origins": ["https://api.example.test"],
+        "selector": selector,
+        "replay_policy": "safe_authentication",
+    }
+    assert len(request_collection_selection_digest(**arguments)) == 64
+
+    for replacement in (
+        RequestCollectionSelection(methods=("POST",), safe_methods_only=False,
+                                   max_requests=5, disposable_credentials=True),
+        RequestCollectionSelection(request_ids=("login-request",), methods=("GET",),
+                                   max_requests=5, disposable_credentials=True),
+        RequestCollectionSelection(request_ids=("login-request",), methods=("POST",),
+                                   safe_methods_only=False, max_requests=6,
+                                   disposable_credentials=True),
+        RequestCollectionSelection(request_ids=("login-request",), methods=("POST",),
+                                   safe_methods_only=False, max_requests=5),
+    ):
+        with pytest.raises(RequestCollectionContractError, match="safe_authentication"):
+            request_collection_selection_digest(**{**arguments, "selector": replacement})
+
+
 def test_runtime_schema_is_installed_by_startup_and_new_database_init():
     root = Path(__file__).resolve().parents[1]
     init_sql = (root / "db" / "init.sql").read_text()

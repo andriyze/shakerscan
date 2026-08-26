@@ -7,6 +7,7 @@ the target-agnostic redacted inventory contract used by Scan and Hunt.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
@@ -27,6 +28,61 @@ REQUEST_COLLECTION_AGENT_PREVIEW_MAX = 200
 REQUEST_COLLECTION_PAGE_MAX = 500
 REQUEST_COLLECTION_DOCUMENT_DEFAULT_BYTES = 25 * 1024 * 1024
 REQUEST_COLLECTION_DOCUMENT_HARD_MAX_BYTES = HARD_MAX_COLLECTION_BYTES
+
+
+def _flatten_body_field_names(value: Any, *, prefix: str = "", depth: int = 0) -> list[str]:
+    if depth > 8:
+        return []
+    names: list[str] = []
+    if isinstance(value, Mapping):
+        for raw_key, child in list(value.items())[:128]:
+            key = str(raw_key).strip()[:160]
+            if not key:
+                continue
+            path = f"{prefix}.{key}" if prefix else key
+            names.append(path)
+            names.extend(_flatten_body_field_names(child, prefix=path, depth=depth + 1))
+            if len(names) >= 128:
+                break
+    elif isinstance(value, list) and value:
+        path = f"{prefix}[]" if prefix else "[]"
+        names.append(path)
+        names.extend(_flatten_body_field_names(value[0], prefix=path, depth=depth + 1))
+    return list(dict.fromkeys(names))[:128]
+
+
+def _public_body_metadata(request: Mapping[str, Any]) -> tuple[str, list[str]]:
+    """Extract only encoding and field paths from one worker-private request body."""
+    content_type = str(request.get("body_mode") or "none").strip().lower()[:160]
+    body = request.get("body")
+    if isinstance(body, str):
+        raw = body.encode("utf-8", errors="replace")
+    elif isinstance(body, (bytes, bytearray)):
+        raw = bytes(body)
+    else:
+        raw = b""
+    if not raw or len(raw) > 512 * 1024:
+        return content_type, []
+    fields: list[str] = []
+    try:
+        if "json" in content_type:
+            fields = _flatten_body_field_names(json.loads(raw.decode("utf-8")))
+        elif "x-www-form-urlencoded" in content_type or content_type == "urlencoded":
+            fields = [
+                str(name).strip()[:160]
+                for name, _value in urllib.parse.parse_qsl(
+                    raw.decode("utf-8", errors="replace"), keep_blank_values=True,
+                )[:128]
+                if str(name).strip()
+            ]
+        elif "multipart/form-data" in content_type:
+            fields = [
+                match.decode("utf-8", errors="replace")[:160]
+                for match in re.findall(br'name="([^"\r\n]{1,160})"', raw[:512 * 1024])[:128]
+            ]
+    except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+        fields = []
+    return content_type, list(dict.fromkeys(fields))[:128]
 
 
 def _canonical_index_path(value: Any) -> str:
@@ -194,7 +250,22 @@ def validate_and_index(
     )
     summary = dict(summary)
     summary["schema_version"] = "request-collection/v2"
-    rows = redacted_index(summary.get("requests") or [])
+    private_requests = resolve_imported_requests(
+        dict(payload), max_requests=int(import_limit),
+    )
+    private_by_id = {
+        str(item.get("id") or ""): item for item in private_requests if item.get("id")
+    }
+    public_requests = []
+    for request in summary.get("requests") or []:
+        enriched = dict(request)
+        private = private_by_id.get(str(request.get("id") or ""))
+        if private is not None:
+            content_type, body_field_names = _public_body_metadata(private)
+            enriched["content_type"] = content_type
+            enriched["body_field_names"] = body_field_names
+        public_requests.append(enriched)
+    rows = redacted_index(public_requests)
     summary["requests"] = rows
     return payload, summary, rows
 
@@ -220,6 +291,14 @@ def redacted_index(requests: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
             "redacted_url": redacted_url,
             "normalized_path": _canonical_index_path(redacted_url),
             "body_mode": str(request.get("body_mode") or "none")[:80],
+            "content_type": str(
+                request.get("content_type") or request.get("body_mode") or "none"
+            )[:160],
+            "body_field_names": [
+                str(name).strip()[:160]
+                for name in list(request.get("body_field_names") or [])[:128]
+                if str(name).strip()
+            ],
             "auth_type": str(request.get("auth_type") or "none")[:160],
             "tags": [
                 str(tag).strip()[:120]

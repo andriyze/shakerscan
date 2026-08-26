@@ -27,6 +27,7 @@ SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
     "templates.passive_batch",
     "templates.active_batch",
     "collections.replay_safe",
+    "collections.replay_authentication",
     "collections.replay_active",
     "xss.verify",
     "sqli.verify",
@@ -35,6 +36,8 @@ SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
     "authz.verify",
     "xss.request_verify",
     "sqli.request_verify",
+    "xss.request_verify_batch",
+    "sqli.request_verify_batch",
 })
 _INTERACTIVE_HTTP_KINDS = frozenset({
     "form_login", "oauth_client_credentials", "oauth_password",
