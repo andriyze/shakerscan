@@ -12,7 +12,7 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from .execution import ScanExecutionPlan
+from .execution import SCAN_EXECUTION_PLAN_CANONICAL_FIELDS, ScanExecutionPlan
 from .jobs import (
     ScanShardAuthority,
     ScanShardBudget,
@@ -436,9 +436,12 @@ def validate_native_scan_execution_payload(value: Any) -> dict[str, Any]:
     plan = raw.get("execution_plan")
     if not isinstance(plan, Mapping):
         raise NativeScanExecutionError("native Scan execution plan is invalid")
-    if set(plan) != {
-        "schema_version", "generation", "engine", "budget_profile", "policy", "budget",
-    }:
+    # Derived from the plan's own canonical representation, not a literal key
+    # list. The literal fell behind when explicit family presets added
+    # family_preset/requested_families/resolved_families, so every current
+    # envelope was rejected and `scanner.py --canonical-scan` aborted with
+    # "invalid native Scan execution envelope" before any work began.
+    if set(plan) != set(SCAN_EXECUTION_PLAN_CANONICAL_FIELDS):
         raise NativeScanExecutionError("native Scan execution-plan fields are invalid")
     if (
         plan.get("schema_version") != "scan-execution-plan/v1"

@@ -35,6 +35,15 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+# The exact key set canonical_dict() emits. Validators must derive from this
+# rather than restating it, so a new plan field cannot silently invalidate every
+# execution envelope.
+SCAN_EXECUTION_PLAN_CANONICAL_FIELDS: tuple[str, ...] = (
+    "schema_version", "generation", "engine", "budget_profile", "family_preset",
+    "requested_families", "resolved_families", "policy", "budget",
+)
+
+
 @dataclass(frozen=True)
 class ScanExecutionPlan:
     """Immutable, reproducible authority for one deterministic Scan run."""

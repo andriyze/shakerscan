@@ -1436,7 +1436,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 |---|---|---|
 | Public REST operations | 398 | `api/**/*.py` FastAPI decorators |
 | Unique REST paths | 335 | `api/**/*.py` |
-| Check families | 15 | `api/check_registry.py` |
+| Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
@@ -1445,7 +1445,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 18 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 355 | Python sources + Compose manifests |
+| Runtime environment keys | 357 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -1862,6 +1862,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Name | Phase | Family | Active | Risk | Runnable | Adapter | Telemetry | Description |
 |---|---|---|---|---|---|---|---|---|
 | `auth` | active | access_control | True | medium | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Read-only authenticated-vs-anonymous access checks for focused ASM endpoint batches. |
+| `authz_surface` | active | access_control | True | high | False | `authz_surface_verify_batch` | `active_endpoint_attempt_v1` | Deterministic BFLA proof via anonymous vs authenticated route access differential. |
 | `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts. |
 | `business_logic` | active | workflow | True | high | False | `none` | `planned_workflow_attempt` | Workflow/business-logic testing. Planned for AI/manual-assisted campaigns. |
 | `endpoint_security` | passive | endpoint_surface | False | low | True | `endpoint_scoped_surface` | `endpoint_surface_attempt_v1` | Target-wide API data exposure, webhook signature, and approval/authorization checks over the discovered endpoint inventory. |
@@ -1869,10 +1870,12 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `jwt` | active | authentication | True | medium | True | `legacy_advanced_jwt` | `jwt_probe_attempt_v1` | JWT algorithm, signature, key, and claim mutation checks with acceptance proof. |
 | `lfi` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | File inclusion and path traversal checks. Planned and permission-gated. |
 | `mass_assignment` | active | access_control | True | medium | True | `legacy_phase4_mass_assignment` | `mass_assignment_attempt_v1` | Bounded privileged-field mutation with baseline-vs-response effect proof. |
+| `nosqli` | active | injection | True | high | False | `nosqli_verify_batch` | `active_endpoint_attempt_v1` | Deterministic Mongo-style operator injection proof over query and JSON candidates. |
 | `nuclei_active` | template | nuclei | True | medium | True | `legacy_nuclei_template` | `nuclei_template` | Explicit active Nuclei templates, scheduled after deterministic verifier quotas. |
 | `nuclei_passive` | template | nuclei | False | low | True | `none` | `nuclei_template` | Reviewed read-only Nuclei templates included in passive Scan presets. |
 | `rce` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Command/code execution checks. Planned and permission-gated. |
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
+| `sensitive_exposure` | active | disclosure | True | high | False | `exposure_probe_batch` | `active_endpoint_attempt_v1` | Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups. |
 | `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |
 | `ssrf` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Server-side request forgery checks. Planned and permission-gated. |
 | `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected, stored, and DOM XSS probes. |
@@ -2188,8 +2191,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `AI_OPS_ROUTER_EXECUTE_ENABLED` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_REASONING_RETRY_MAX_TOKENS` | `scanner/scanner_tools/ai_classifier.py` |
 | `AI_SCAN_CLASSIFICATION_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
-| `AI_SETTINGS_KEY` | `api/api.py`, `api/worker.py` |
-| `AI_TRANSCRIPT_ALLOW_SENSITIVE` | `api/api.py` |
+| `AI_SETTINGS_KEY` | `api/settings_routes/router.py`, `api/worker.py` |
+| `AI_TRANSCRIPT_ALLOW_SENSITIVE` | `api/ai_targets/router.py` |
 | `AI_URL` | `api/ai_gate_scan.py`, `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner.py` |
 | `AI_VERIFY_ENABLED` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AI_VERIFY_MAX_PER_SCAN` | `api/worker.py` |
@@ -2220,43 +2223,43 @@ Only key names and declaring sources are documented; secret values are never rea
 | `ASM_SOFT404_DETECT` | `api/asm_inventory.py` |
 | `ASM_SOFT404_SIZE_TOL_BYTES` | `api/asm_inventory.py` |
 | `ASM_VALIDATE_REACHABILITY` | `api/asm_inventory.py` |
-| `AUTOMATION_SETTINGS_KEY` | `api/api.py` |
+| `AUTOMATION_SETTINGS_KEY` | `api/settings_routes/router.py` |
 | `AUTO_FP_MIN_CONFIDENCE` | `api/api.py`, `api/retest_contract.py`, `api/worker.py` |
 | `AUTO_FP_ON_RETEST` | `api/api.py`, `api/retest_contract.py`, `api/worker.py` |
-| `AUTO_RETEST_MAX_ATTEMPTS` | `api/api.py`, `api/worker.py` |
+| `AUTO_RETEST_MAX_ATTEMPTS` | `api/targets/router.py`, `api/worker.py` |
 | `AUTO_RETEST_MAX_PER_SCAN` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AUTO_RETEST_MIN_SEVERITY` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `AUTO_RETEST_ON_SCAN_COMPLETE` | `api/api.py`, `api/retest_contract.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `AUTO_SHARDING_ENABLED` | `api/api.py` |
-| `AUTO_SHARDING_MAX_SHARDS` | `api/api.py` |
-| `AUTO_SHARDING_MIN_WORKERS` | `api/api.py` |
-| `AUTO_SHARDING_STRATEGY` | `api/api.py` |
+| `AUTO_SHARDING_ENABLED` | `api/settings_routes/router.py` |
+| `AUTO_SHARDING_MAX_SHARDS` | `api/settings_routes/router.py` |
+| `AUTO_SHARDING_MIN_WORKERS` | `api/settings_routes/router.py` |
+| `AUTO_SHARDING_STRATEGY` | `api/settings_routes/router.py` |
 | `AWS_ACCESS_KEY_ID` | `api/evidence_storage.py` |
 | `AWS_ENDPOINT_URL_S3` | `api/evidence_storage.py` |
 | `AWS_REGION` | `api/evidence_storage.py` |
 | `AWS_SECRET_ACCESS_KEY` | `api/evidence_storage.py` |
 | `AWS_SESSION_TOKEN` | `api/evidence_storage.py` |
-| `BROKER_INGEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
+| `BROKER_INGEST_QUEUE_NAME` | `api/fleet_routes/router.py`, `api/worker.py` |
 | `BUDGET_RESERVATION_SWEEP_BATCH_SIZE` | `api/worker.py` |
 | `BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS` | `api/worker.py` |
 | `BUILD_FINGERPRINT` | `api/worker.py` |
 | `COMPOSE_PROJECT_NAME` | `api/api.py`, `scripts/fleet_cli.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
-| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
+| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
-| `DEVICE_INTEL_DB_PATH` | `api/api.py`, `api/device_agent.py`, `api/worker.py` |
-| `DEVICE_INTEL_DB_SHA256` | `api/api.py`, `api/device_agent.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/worker.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
-| `DEVICE_POSTURE_ENABLED` | `api/api.py`, `api/worker_handlers/device.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `DEVICE_QUEUE_NAME` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `DEVICE_POSTURE_ENABLED` | `api/devices/router.py`, `api/worker_handlers/device.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `DEVICE_QUEUE_NAME` | `api/api.py`, `api/devices/router.py`, `api/operations/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_SCAN_WORKER_ENABLED` | `api/worker.py` |
 | `DEVICE_SSH_AUTH_COOLDOWN_SECONDS` | `api/worker.py` |
 | `DEVICE_SSH_AUTH_DAILY_FAILURE_CAP` | `api/worker.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `ENV` | `scanner/scanner_tools/remediation_kb.py` |
 | `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |
-| `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` | `api/api.py` |
+| `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` | `api/evidence_routes/router.py` |
 | `EVIDENCE_S3_ACCESS_KEY_ID` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `EVIDENCE_S3_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `EVIDENCE_S3_ENDPOINT_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2268,81 +2271,82 @@ Only key names and declaring sources are documented; secret values are never rea
 | `EVIDENCE_STORAGE_BACKEND` | `api/artifact_storage.py`, `api/evidence_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES` | `api/api.py` |
 | `FLEET_AGENT_INTERVAL_SECONDS` | `api/fleet_agent.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
-| `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_ALLOW_INSECURE_ENROLLMENT` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_BROKER_STATE_PATH` | `api/broker_worker.py` |
-| `FLEET_CA_CERT_PATH` | `api/api.py` |
+| `FLEET_CA_CERT_PATH` | `api/fleet_routes/router.py` |
 | `FLEET_COMPOSE_PROJECT_NAME` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
-| `FLEET_CONNECTION_BUNDLE_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_CONNECTION_BUNDLE_PATH` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CONNECTION_BUNDLE_JSON` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CONNECTION_BUNDLE_PATH` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_CONTROL_PLANE_OVERLAY_URL` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DESIRED_WORKER_COUNT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_DRAIN_GRACE_SECONDS` | `api/fleet_agent.py` |
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_EXPECTED_WORKER_IMAGE_DIGEST` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_GATEWAY_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_GATEWAY_PROXY_SECRET` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_GATEWAY_PROXY_SECRET` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_HEARTBEAT_TIMEOUT_MINUTES` | `api/fleet_routes/router.py`, `api/operations/router.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_NETWORK_BACKEND` | `scripts/fleet_cli.py` |
 | `FLEET_NODE_ID` | `api/worker.py`, `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
-| `FLEET_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
-| `FLEET_OVERLAY_CIDR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_RECONCILE_MODE` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_OPERATOR_TOKEN` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scripts/fleet_acceptance.py` |
+| `FLEET_OVERLAY_CIDR` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_RECONCILE_MODE` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_RESULTS_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_RUNTIME_DIR` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_STATE_PATH` | `api/fleet_agent.py` |
 | `FLEET_TLS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_WIREGUARD_ENDPOINT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_WIREGUARD_PUBLIC_KEY` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WIREGUARD_ENDPOINT` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WIREGUARD_PUBLIC_KEY` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WORKER_CPU_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_WORKER_ENV_FILE` | `docker-compose.worker.yml` |
 | `FLEET_WORKER_IMAGE` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
-| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_routes/router.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
-| `GIT_COMMIT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
+| `GIT_COMMIT` | `api/api.py`, `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |
 | `HF_TOKEN` | `scanner/scanner_tools/model_intake.py` |
 | `HIBP_API_KEY` | `scanner/scanner.py` |
-| `HOSTNAME` | `api/api.py`, `api/broker_worker.py`, `api/worker.py` |
+| `HOSTNAME` | `api/api.py`, `api/broker_worker.py`, `api/hunt/interaction_router.py`, `api/worker.py` |
 | `HOST_RESULTS_PATH` | `api/api.py` |
-| `LOCAL_ENV_FILE` | `api/api.py` |
+| `LOCAL_ENV_FILE` | `api/settings_routes/router.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_USER` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_ADMISSION_BUILDER_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_ADMISSION_POLICY_PROFILE` | `api/api.py` |
+| `MODEL_INTAKE_ADMISSION_POLICY_PROFILE` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM` | `scanner/scanner_tools/model_intake_admission.py` |
 | `MODEL_INTAKE_ADMISSION_TRUSTED_PUBLIC_KEYS` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_admission.py` |
-| `MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_ADMISSION_V2_TRUSTED_BUILDERS` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_ADMISSION_V2_TRUSTED_PUBLIC_KEYS` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_ALLOWED_HOSTS` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_ALLOWED_PORTS` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_ALLOW_INSECURE_HTTP` | `scanner/scanner_tools/model_intake_acquisition.py` |
-| `MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION` | `api/api.py` |
+| `MODEL_INTAKE_ALLOW_LEGACY_V1_VERIFICATION` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_ALLOW_LOCAL_FILES` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_ALLOW_PRIVATE_NETWORKS` | `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_AUTO_MAX_MEMORY_MIB` | `api/api.py` |
 | `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
-| `MODEL_INTAKE_LOCAL_SESSION_SECRET` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_LOCAL_SESSION_SECRET` | `api/model_intake/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
-| `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_OPERATOR_ROLES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_OPERATOR_TOKEN` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/api.py` |
-| `MODEL_INTAKE_QUARANTINE_DIR` | `api/api.py`, `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_OPERATOR_ROLES` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_OPERATOR_TOKEN` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/model_intake/router.py` |
+| `MODEL_INTAKE_QUARANTINE_DIR` | `api/model_intake/router.py`, `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_RUNNER_AUTO_CLEANUP` | `api/model_intake_runner_service.py` |
-| `MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_RUNNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_runner_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_RUNNER_INTERNAL_TOKEN` | `api/model_intake/router.py`, `api/model_intake_runner_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_JOB_ROOT` | `api/model_intake_runner_service.py` |
-| `MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_RUNNER_MAX_INPUT_BYTES` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_MAX_OUTPUT_BYTES` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
-| `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/api.py` |
-| `MODEL_INTAKE_RUNNER_URL` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/model_intake/router.py` |
+| `MODEL_INTAKE_RUNNER_URL` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
@@ -2357,9 +2361,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_BACKEND` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_DATABASE_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SIGNER_INTERNAL_TOKEN` | `api/api.py`, `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SIGNER_INTERNAL_TOKEN` | `api/model_intake/router.py`, `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_POSTGRES_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SIGNER_URL` | `api/api.py` |
+| `MODEL_INTAKE_SIGNER_URL` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
 | `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
@@ -2378,7 +2382,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
+| `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
 | `RESULTS_DIR` | `api/api.py`, `api/secret_store.py`, `api/worker.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2390,10 +2394,10 @@ Only key names and declaring sources are documented; secret values are never rea
 | `RETEST_INCONCLUSIVE_RETRY_AFTER_HOURS` | `api/worker.py` |
 | `RETEST_MAX_PARALLEL` | `api/worker.py` |
 | `RETEST_QUEUE_MAX_RETRIES` | `api/worker.py` |
-| `RETEST_QUEUE_NAME` | `api/api.py`, `api/worker.py` |
+| `RETEST_QUEUE_NAME` | `api/api.py`, `api/finding_routes/router.py`, `api/operations/router.py`, `api/worker.py` |
 | `RETEST_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `RETEST_RUNNING_STALE_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `RETEST_RUNNING_TIMEOUT_MINUTES` | `api/api.py` |
+| `RETEST_RUNNING_TIMEOUT_MINUTES` | `api/operations/router.py` |
 | `RETEST_SLOT_KEY` | `api/worker.py` |
 | `RETEST_SLOT_TTL_SECONDS` | `api/worker.py` |
 | `RETEST_SLOT_WAIT_MAX_SECONDS` | `api/worker.py` |
@@ -2415,7 +2419,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCANNER_RELEASE_VERSION` | `docker-compose.release.yml` |
 | `SCANNER_SUBPROCESS_ARTIFACT_MAX_BYTES` | `scanner/scanner_tools/common.py` |
 | `SCANNER_SUBPROCESS_RECEIPT_LIMIT` | `scanner/scanner_tools/common.py` |
-| `SCANNER_VERSION` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
+| `SCANNER_VERSION` | `api/api.py`, `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `SCAN_CANCEL_POLL_SECONDS` | `api/worker.py` |
 | `SCAN_CHECKPOINT_FILE` | `scanner/manifests.py`, `scanner/scanner.py` |
 | `SCAN_COOPERATIVE_CANCEL_GRACE_SECONDS` | `api/worker.py` |
@@ -2430,7 +2434,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_PHASE4_LOGS` | `scanner/scanner.py` |
 | `SCAN_PHASE4_MAX_SECONDS` | `scanner/scanner.py` |
 | `SCAN_PHASE4_TRACE` | `scanner/scanner.py` |
-| `SCAN_SETTINGS_KEY` | `api/api.py` |
+| `SCAN_QUEUE_NAME` | `api/ai_targets/router.py`, `api/fleet_routes/router.py`, `api/model_intake/router.py`, `api/operations/router.py`, `api/targets/router.py` |
+| `SCAN_SETTINGS_KEY` | `api/settings_routes/router.py` |
 | `SCAN_SHUTDOWN_GRACE_SECONDS` | `scanner/scanner.py` |
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
@@ -2438,12 +2443,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
-| `SHAKERSCAN_BIND_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BIND_HOST` | `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
-| `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/api.py` |
-| `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/api.py` |
-| `SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES` | `api/api.py` |
-| `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/api.py` |
+| `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/fleet_routes/router.py` |
+| `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/fleet_routes/router.py` |
+| `SHAKERSCAN_BROKER_MAX_ARTIFACT_BYTES` | `api/fleet_routes/router.py` |
+| `SHAKERSCAN_BROKER_MAX_RESULT_BYTES` | `api/fleet_routes/router.py` |
 | `SHAKERSCAN_BUILD_NETWORK` | `docker-compose.yml` |
 | `SHAKERSCAN_CALIBRATION_IMPORT_ROOT` | `scripts/device_posture_calibration.py` |
 | `SHAKERSCAN_CANCEL_FILE` | `scanner/scanner_tools/cancellation.py`, `scanner/scanner_tools/common.py`, `scanner/scanner_tools/discovery.py` |
@@ -2467,7 +2472,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
-| `SHAKERSCAN_INSTALL_KIND` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_INSTALL_KIND` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
@@ -2480,11 +2485,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/api.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/fleet_routes/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_ROUTE_MAX` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_RELEASE_MANIFEST` | `scanner/release_identity.py` |
@@ -2492,13 +2497,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_REQUEST_BUDGET_LIMIT` | `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_MODE` | `api/worker.py`, `scanner/scanner.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_RESERVED` | `scanner/scanner.py` |
-| `SHAKERSCAN_RUNTIME_DIR` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_RUNTIME_DIR` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
-| `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |

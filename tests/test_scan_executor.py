@@ -248,3 +248,29 @@ def test_native_scan_envelope_reuses_plan_ceiling_validation():
     changed["execution_digest"] = payload["execution_digest"]
     with pytest.raises(NativeScanExecutionError, match="digest"):
         validate_native_scan_execution_payload(changed)
+
+
+def test_execution_plan_validator_tracks_the_plan_schema():
+    """The native execution validator must accept exactly what the plan emits.
+
+    These drifted apart when explicit family presets added family_preset,
+    requested_families, and resolved_families to the plan: the validator still
+    demanded the original six keys, so every current envelope was rejected and
+    `scanner.py --canonical-scan` exited with "invalid native Scan execution
+    envelope" before running any work. Nothing in api/ calls the validator, so
+    only the scanner entrypoint exercised it.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+    from scan.contracts import resolve_scan_contract
+    from scan.execution import SCAN_EXECUTION_PLAN_CANONICAL_FIELDS
+
+    for policy in ({"active_testing": False}, {"active_testing": True}):
+        contract = resolve_scan_contract(budget_profile="balanced", policy=policy)
+        emitted = set(contract.execution_plan.canonical_dict())
+        assert emitted == set(SCAN_EXECUTION_PLAN_CANONICAL_FIELDS), (
+            "the plan emits fields the native execution validator does not accept: "
+            f"{sorted(emitted ^ set(SCAN_EXECUTION_PLAN_CANONICAL_FIELDS))}"
+        )
