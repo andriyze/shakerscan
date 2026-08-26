@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 import api  # noqa: E402
+from targets import router as targets_router_module  # noqa: E402
 import target_dedupe  # noqa: E402
 
 
@@ -169,6 +170,7 @@ def test_dedupe_api_accepts_json_body_and_resolves_conflicts_to_dry_run(monkeypa
 
     monkeypatch.setattr(api, "db_pool", _Pool(object()))
     monkeypatch.setattr(api, "plan_canonical_merges", empty_plan)
+    monkeypatch.setattr(targets_router_module, "plan_canonical_merges", empty_plan)
 
     body_result = asyncio.run(api.dedupe_targets(
         payload=api.DedupeTargetsRequest(dry_run=False),
@@ -205,7 +207,9 @@ def test_dedupe_api_returns_clear_409_for_executing_retention_preview(monkeypatc
 
     monkeypatch.setattr(api, "db_pool", _Pool(object()))
     monkeypatch.setattr(api, "plan_canonical_merges", fake_plan)
+    monkeypatch.setattr(targets_router_module, "plan_canonical_merges", fake_plan)
     monkeypatch.setattr(api, "_ensure_target_merge_safe", block_merge)
+    monkeypatch.setattr(targets_router_module, "_ensure_target_merge_safe", block_merge)
 
     with pytest.raises(api.HTTPException) as exc:
         asyncio.run(api.dedupe_targets(dry_run=False))

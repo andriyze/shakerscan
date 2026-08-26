@@ -1,6 +1,10 @@
 import asyncio
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 import pytest
 
 from api.hunt.action_service import (
@@ -66,14 +70,8 @@ def test_process_global_service_has_content_free_metrics():
 
 
 def test_public_route_delegates_to_service_and_never_persists_device_state():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / "api" / "api.py").read_text(encoding="utf-8")
-    route = source.split(
-        "async def execute_hunt_capability(", 1
-    )[1].split("\n\nasync def _execute_hunt_capability_lifecycle(", 1)[0]
-    implementation = source.split(
-        "async def _execute_hunt_capability_lifecycle(", 1
-    )[1].split('\n\n@app.post("/hunts/{hunt_id}/shell-plans/', 1)[0]
+    route = definition_source("execute_hunt_capability")
+    implementation = definition_source("_execute_hunt_capability_lifecycle")
 
     assert "HUNT_ACTION_SERVICE.execute(" in route
     assert "lifecycle.advance(\"revalidated\")" in implementation

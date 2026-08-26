@@ -60,3 +60,61 @@ def defining_file(name: str) -> Path:
 def api_tree_source() -> str:
     """Concatenate every api-tree module, for whole-tree text assertions."""
     return "\n".join(_read(path) for path in api_files())
+
+
+_ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
+
+
+@lru_cache(maxsize=1)
+def _route_index() -> dict[tuple[str, str], tuple[str, str]]:
+    """Map (METHOD, path) -> (defining file, handler source) across the api tree.
+
+    Route handlers are found by their decorator, whatever object it hangs off:
+    ``@app.post(...)`` in the composition root and ``@router.post(...)`` in an
+    extracted domain router are the same public contract. Assertions written
+    against this index survive a handler moving between modules, which a literal
+    ``'@app.post("/x")' in api_py_source`` check cannot.
+    """
+    index: dict[tuple[str, str], tuple[str, str]] = {}
+    for path in api_files():
+        text = _read(path)
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                func = decorator.func
+                if not isinstance(func, ast.Attribute) or func.attr not in _ROUTE_METHODS:
+                    continue
+                if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
+                    continue
+                route = str(decorator.args[0].value)
+                key = (func.attr.upper(), route)
+                index[key] = (str(path), ast.get_source_segment(text, node) or "")
+    return index
+
+
+def route_is_declared(method: str, path: str) -> bool:
+    """True when the api tree declares a handler for this method and path."""
+    return (method.upper(), path) in _route_index()
+
+
+def route_source(method: str, path: str) -> str:
+    """Return the handler source for one route, wherever it is declared."""
+    key = (method.upper(), path)
+    entry = _route_index().get(key)
+    assert entry is not None, f"no handler under api/ declares {method.upper()} {path}"
+    return entry[1]
+
+
+def route_defining_file(method: str, path: str) -> Path:
+    """Return the api-tree file declaring this route."""
+    key = (method.upper(), path)
+    entry = _route_index().get(key)
+    assert entry is not None, f"no handler under api/ declares {method.upper()} {path}"
+    return Path(entry[0])

@@ -79,6 +79,10 @@ if "fastapi" not in sys.modules:
 
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
@@ -211,7 +215,7 @@ def test_auto_verify_limit_is_raised_to_eight():
 
 
 def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_surface():
-    source = (ROOT / "api" / "api.py").read_text()
+    source = api_tree_source()
     endpoint = source[source.index('@app.get("/findings")'):]
     endpoint = endpoint[:endpoint.index('def _public_evidence_object_row')]
 
@@ -242,9 +246,8 @@ def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_sur
 
 
 def test_dashboard_counts_open_candidates_with_a_single_bounded_query():
-    source = (ROOT / "api" / "api.py").read_text()
-    dashboard = source[source.index('@app.get("/dashboard")'):]
-    dashboard = dashboard[:dashboard.index('@app.get("/exposure/graph")')]
+    source = api_tree_source()
+    dashboard = route_source("GET", "/dashboard")
 
     assert "suspected_candidates_count" in dashboard
     assert "SELECT COUNT(*) FROM investigation_candidates" in dashboard

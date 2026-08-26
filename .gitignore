@@ -62,3 +62,6 @@ Thumbs.db
 
 # Audit evidence artifacts (screenshots, harness, matrices) — durable record is docs/AUDIT-2026-07.md
 audit-results/
+
+# Test-runner XML output from scripts/run_complete_python_suite.py
+artifacts/v2-*.xml

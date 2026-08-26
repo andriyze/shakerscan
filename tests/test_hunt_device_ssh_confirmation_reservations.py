@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from api.hunt.contracts import capability_manifest
 from api.hunt.start_contract import normalize_hunt_start_payload
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
@@ -11,17 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _api_source() -> str:
-    return (ROOT / "api" / "api.py").read_text()
+    return api_tree_source()
 
 
 def _handler_source() -> str:
-    source = _api_source()
-    start = source.index("async def confirm_hunt_shell_plan(")
-    end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/candidates")',
-        start,
-    )
-    return source[start:end]
+    return definition_source("confirm_hunt_shell_plan")
 
 
 def test_confirmed_ssh_is_registry_owned_but_never_planner_callable():
@@ -92,8 +90,7 @@ def test_confirmation_recovers_an_accepted_job_before_settlement():
     source = _api_source()
     handler = _handler_source()
 
-    dispatch = source[source.index("async def _hunt_confirmed_shell_dispatch("):]
-    dispatch = dispatch[:dispatch.index("\n\ndef _redact_hunt_path_query")]
+    dispatch = definition_source("_hunt_confirmed_shell_dispatch")
     assert "options->'hunt_dispatch'->>'hunt_action_id'" in dispatch
     assert "options->'hunt_dispatch'->>'budget_reservation_id'" in dispatch
     assert "options->'hunt_dispatch'->>'action_digest'" in dispatch

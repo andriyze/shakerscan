@@ -1,4 +1,8 @@
 from pathlib import Path
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import hashlib
 import inspect
 import os
@@ -137,7 +141,7 @@ def test_conversion_profile_is_narrow_digest_bound_and_model_agnostic():
 
 def test_api_exposes_conversion_profile_without_turning_runtime_pickle_on():
     source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    assert '@app.post("/model-intake/conversion-profiles/resolve")' in source
+    assert route_is_declared("POST", "/model-intake/conversion-profiles/resolve")
     assert "_resolve_model_conversion_profile" in source
     runtime = resolve_loader_profile(
         {"library_name": "transformers"},

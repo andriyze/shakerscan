@@ -5,6 +5,10 @@ import json
 import sys
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
@@ -91,8 +95,8 @@ def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
     product = (root / "docs" / "product-model.md").read_text()
 
     assert "app.add_middleware(LegacyHuntIsolationMiddleware)" in api
-    assert '@app.post("/agent/hunt/{target_id}")' in api
-    assert '@app.post("/devices/{device_id}/agent/session")' in api
-    assert '@app.post("/research/launch")' in api
+    assert route_is_declared("POST", "/agent/hunt/{target_id}")
+    assert route_is_declared("POST", "/devices/{device_id}/agent/session")
+    assert route_is_declared("POST", "/research/launch")
     assert "It is not a Hunt launcher" in product
     assert "A Hunt request creates one `/hunts` run" in product

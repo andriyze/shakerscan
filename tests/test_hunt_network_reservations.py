@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import re
 
 from api.hunt.capability_reservations import terminalize_hunt_capability
@@ -85,15 +89,11 @@ def test_partial_network_receipt_preserves_typed_observations_and_timeout():
 
 
 def test_api_admits_network_hold_before_queue_and_never_double_settles():
-    source = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    enqueue_start = source.index("async def _enqueue_canonical_network_capability(")
-    enqueue_end = source.index("\n\nasync def _agent_tool_run_tool", enqueue_start)
-    enqueue = source[enqueue_start:enqueue_end]
-    handler_start = source.index("async def execute_hunt_capability(")
-    handler_end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans', handler_start
+    enqueue = definition_source("_enqueue_canonical_network_capability")
+    handler = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
-    handler = source[handler_start:handler_end]
 
     for field in (
         '"hunt_id"',

@@ -18,7 +18,9 @@ import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
-from tests.api_sources import api_tree_source, definition_source
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 
 import agent_budget
 import agent_loop as al

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 import pytest
 
 from scanner.scanner_tools.request_collections import (
@@ -177,12 +181,12 @@ def test_generic_storage_and_scan_hunt_api_contracts_are_wired():
     assert "CREATE TABLE request_collections" in schema
     assert "CREATE TABLE request_collection_requests" in schema
     assert "app.include_router(request_collection_router)" in api
-    assert '@router.post("/request-collections")' in router
-    assert '@router.get("/request-collections/{collection_id}/requests")' in router
-    assert '@router.post("/request-collections/{collection_id}/select")' in router
-    assert '@router.post("/request-collections/{collection_id}/environments")' in router
-    assert '@router.post("/request-collections/{collection_id}/bindings")' in router
-    assert '@router.post("/request-collections/{collection_id}/selections")' in router
+    assert route_is_declared("POST", "/request-collections")
+    assert route_is_declared("GET", "/request-collections/{collection_id}/requests")
+    assert route_is_declared("POST", "/request-collections/{collection_id}/select")
+    assert route_is_declared("POST", "/request-collections/{collection_id}/environments")
+    assert route_is_declared("POST", "/request-collections/{collection_id}/bindings")
+    assert route_is_declared("POST", "/request-collections/{collection_id}/selections")
     assert "import api" not in router
     assert "collection_manifest_requests," in api
     assert ") = await _generic_collection_refs" in api

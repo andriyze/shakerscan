@@ -43,7 +43,29 @@ jobs:
             base_sha="$BEFORE_SHA"
           fi
           if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
-            base_sha="$(git rev-parse HEAD^)"
+            base_sha="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+          # Fail closed. This classifier decides whether the substantive jobs run at
+          # all, so any base it cannot diff against must mean "run everything", never
+          # "nothing changed". A missing-object error here previously classified both
+          # products as unchanged and skipped every real check, reporting green.
+          if [[ -z "$base_sha" ]] || ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            echo "::warning::cannot resolve diff base '${base_sha:-<empty>}'; running all V2 jobs"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "ui=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! changed_files="$(git diff --name-only "$base_sha" HEAD)"; then
+            echo "::warning::cannot diff ${base_sha}..HEAD; running all V2 jobs"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "ui=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$changed_files" ]]; then
+            echo "no files changed between ${base_sha} and HEAD"
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+            echo "ui=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           backend=false
           ui=false
@@ -56,7 +78,7 @@ jobs:
               ui/*|scripts/generate_scan_contract.py|scripts/generate_hunt_contract.py|tests/test_ui_*|tests/test_scan_contract_generation.py)
                 ui=true
                 ;;
-              api/api.py|api/scan/contracts.py|tests/test_scan_openapi_contract.py|.github/workflows/v2-contracts.yml)
+              api/api.py|api/*/router.py|api/*/*_router.py|api/scan/contracts.py|tests/test_scan_openapi_contract.py|.github/workflows/v2-contracts.yml)
                 backend=true
                 ui=true
                 ;;
@@ -64,7 +86,7 @@ jobs:
                 backend=true
                 ;;
             esac
-          done < <(git diff --name-only "$base_sha" HEAD)
+          done <<< "$changed_files"
           echo "backend=$backend" >> "$GITHUB_OUTPUT"
           echo "ui=$ui" >> "$GITHUB_OUTPUT"
 

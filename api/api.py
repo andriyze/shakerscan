@@ -5357,6 +5357,7 @@ app.include_router(targets_router)
 try:
     from devices.router import (
         DEVICE_QUEUE_NAME,
+        _change_device_primary_locator,
         DeviceAgentReplyRequest,
         DeviceAgentShellConfirmRequest,
         DevicePolicyCreate,
@@ -5393,6 +5394,7 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from api.devices.router import (
         DEVICE_QUEUE_NAME,
+        _change_device_primary_locator,
         DeviceAgentReplyRequest,
         DeviceAgentShellConfirmRequest,
         DevicePolicyCreate,

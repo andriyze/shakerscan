@@ -1,3 +1,6 @@
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import asyncio
 import os
 import uuid
@@ -135,9 +138,9 @@ def test_terminal_upsert_is_immutable_and_every_sighting_appends_an_observation(
 
 def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():
     root = os.path.join(os.path.dirname(__file__), "..")
-    api_source = open(os.path.join(root, "api", "api.py"), encoding="utf-8").read()
-    assert '@app.get("/investigation/candidates")' in api_source
-    assert '@app.get("/investigation/candidates/{candidate_id}")' in api_source
+    api_source = api_tree_source()
+    assert route_is_declared("GET", "/investigation/candidates")
+    assert route_is_declared("GET", "/investigation/candidates/{candidate_id}")
     assert 'payload["authoritative"] = False' in api_source
     assert "FROM finding_verifications WHERE candidate_id=$1" in api_source
     assert "FROM evidence_instances WHERE candidate_id=$1" in api_source
@@ -150,24 +153,17 @@ def test_candidate_verification_is_an_approval_bound_canonical_capability():
     assert specification.target_kinds == frozenset({"web", "api", "device"})
     assert specification.budget_cost == {"tool_wall_seconds": 180}
 
-    root = os.path.join(os.path.dirname(__file__), "..")
-    api_source = open(os.path.join(root, "api", "api.py"), encoding="utf-8").read()
-    route_start = api_source.index(
-        '@app.post("/hunts/{hunt_id}/candidates/{candidate_id}/verify")'
+    verify_handler = route_source(
+        "POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify"
     )
-    route_end = api_source.index("\n@app.", route_start)
-    route_source = api_source[route_start:route_end]
-    assert '"candidate.verify"' in route_source
-    assert "execute_hunt_capability(" in route_source
-    assert "_execute_hunt_candidate_verification(" not in route_source
+    assert '"candidate.verify"' in verify_handler
+    assert "execute_hunt_capability(" in verify_handler
+    assert "_execute_hunt_candidate_verification(" not in verify_handler
 
 
 def test_deep_hunt_claim_persistence_is_candidate_only_and_legacy_rows_are_migrated():
     root = os.path.join(os.path.dirname(__file__), "..")
-    api_source = open(os.path.join(root, "api", "api.py"), encoding="utf-8").read()
-    start = api_source.index("async def _persist_agent_suspected_finding")
-    end = api_source.index("\ndef _agent_new_state", start)
-    persistence_source = api_source[start:end]
+    persistence_source = definition_source("_persist_agent_suspected_finding")
     assert "upsert_candidate" in persistence_source
     assert "INSERT INTO findings" not in persistence_source
 

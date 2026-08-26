@@ -3,6 +3,10 @@ from __future__ import annotations
 import ast
 import os
 from pathlib import Path
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import sys
 
 import pytest
@@ -227,7 +231,7 @@ def test_worker_behavior_rejects_indirectly_constructed_legacy_authority(
 
 
 def test_normal_scheduler_has_no_digestless_queue_fallback():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
+    source = api_tree_source()
     scheduler = source[
         source.index("async def run_due_schedules"):
         source.index("async def schedule_runner")

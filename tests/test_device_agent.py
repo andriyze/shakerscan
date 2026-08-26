@@ -1,3 +1,6 @@
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import os
 import sys
 import json
@@ -190,11 +193,11 @@ def test_protocol_playbook_never_infers_unknown_service_from_port_alone():
 
 
 def test_device_agent_api_and_schema_preserve_the_device_boundary():
-    api_source = open(os.path.join(ROOT, "api", "api.py"), encoding="utf-8").read()
+    api_source = api_tree_source()
     migration_source = open(os.path.join(ROOT, "api", "retest_contract.py"), encoding="utf-8").read()
-    assert '@app.post("/devices/{device_id}/agent/session")' in api_source
-    assert '@app.post("/device-agent/session/{run_id}/reply")' in api_source
-    assert '@app.post("/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")' in api_source
+    assert route_is_declared("POST", "/devices/{device_id}/agent/session")
+    assert route_is_declared("POST", "/device-agent/session/{run_id}/reply")
+    assert route_is_declared("POST", "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")
     assert "confirm_exact_commands" in api_source
     assert "confirm_remote_device_effects" in api_source
     assert "_DEVICE_AGENT_APPROVED_SHELL_PLAN" in api_source
@@ -263,7 +266,7 @@ def test_device_http_request_path_and_method_validation_blocks_target_escape():
 
 
 def test_device_http_request_server_side_budgets_are_enforced_in_the_executor():
-    api_source = open(os.path.join(ROOT, "api", "api.py"), encoding="utf-8").read()
+    api_source = api_tree_source()
     assert "device_http_requests_used" in api_source
     assert "observe_only cannot send device HTTP requests" in api_source
     assert "reserve_device_http_attempt" in api_source

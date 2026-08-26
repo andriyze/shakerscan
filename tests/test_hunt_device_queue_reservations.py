@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
@@ -9,17 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _api_source() -> str:
-    return (ROOT / "api" / "api.py").read_text()
+    return api_tree_source()
 
 
 def _handler_source() -> str:
-    source = _api_source()
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans',
-        start,
+    return (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
-    return source[start:end]
 
 
 def test_device_queue_actions_reserve_before_downstream_submission():

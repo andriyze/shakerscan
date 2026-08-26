@@ -1,5 +1,9 @@
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 import pytest
 
 from api.hunt.start_contract import (
@@ -54,7 +58,7 @@ def test_client_scope_must_match_the_scope_linked_to_the_approval():
 
 def test_runtime_uses_validated_scope_and_independent_network_permission():
     root = Path(__file__).resolve().parents[1]
-    native_api = (root / "api" / "api.py").read_text()
+    native_api = api_tree_source()
     worker = (root / "api" / "worker.py").read_text()
 
     assert "approval_context = await _validate_approval_receipt_for_action" in native_api

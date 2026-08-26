@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from api.hunt.capability_reservations import (
     hunt_capability_action_digest,
     hunt_capability_lease_seconds,
@@ -178,10 +182,10 @@ def test_failed_inline_hunt_capability_keeps_measured_usage_and_receipt():
 
 def test_real_hunt_route_uses_transactional_durable_inline_reservations():
     root = Path(__file__).resolve().parents[1]
-    source = (root / "api" / "api.py").read_text()
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index("\n\n@app.post(\"/hunts/{hunt_id}/shell-plans", start)
-    handler = source[start:end]
+    handler = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
+    )
     migrations = (root / "api" / "retest_contract.py").read_text()
 
     assert 'spec.hunt_executor in {' in handler

@@ -5,6 +5,10 @@ from pathlib import Path
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -56,12 +60,7 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
 
 
 def test_control_plane_queue_contains_no_decrypted_session_or_profile_material():
-    source = (ROOT / "api/api.py").read_text()
-    enqueue = _slice(
-        source,
-        "async def _enqueue_canonical_http_capability(",
-        "\n\nasync def _enqueue_canonical_browser_capability(",
-    )
+    enqueue = definition_source("_enqueue_canonical_http_capability")
     assert '"type": "canonical_http_capability"' in enqueue
     assert '"capability_input": dict(capability_input)' in enqueue
     for forbidden in (
@@ -72,11 +71,9 @@ def test_control_plane_queue_contains_no_decrypted_session_or_profile_material()
 
 
 def test_authz_session_use_requires_fresh_credential_approval():
-    source = (ROOT / "api/api.py").read_text()
-    handler = _slice(
-        source,
-        "async def execute_hunt_capability(",
-        "\n\n@app.post(\"/hunts/{hunt_id}/shell-plans/",
+    handler = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
     assert 'name == "authz.verify"' in handler
     assert 'request.input.get("primary_session_ref")' in handler

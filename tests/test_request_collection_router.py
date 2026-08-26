@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import sys
 import uuid
 
@@ -38,7 +42,7 @@ def test_request_collection_router_is_not_a_monolith_wrapper():
     source = (ROOT / "api" / "request_collection_api.py").read_text(
         encoding="utf-8"
     )
-    primary = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
+    primary = api_tree_source()
 
     assert "import api" not in source
     assert "from api import" not in source

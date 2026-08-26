@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import sys
 import types
 
@@ -637,13 +641,7 @@ def test_browser_queue_and_worker_rebuild_authority_and_settle_atomically():
     api_source = (root / "api" / "api.py").read_text()
     worker_source = (root / "api" / "worker.py").read_text()
 
-    enqueue_start = api_source.index(
-        "async def _enqueue_canonical_browser_capability("
-    )
-    enqueue_end = api_source.index(
-        "\n\nasync def _enqueue_canonical_scanner_capability(", enqueue_start
-    )
-    enqueue = api_source[enqueue_start:enqueue_end]
+    enqueue = definition_source("_enqueue_canonical_browser_capability")
     assert '"hunt_id"' in enqueue
     assert '"action_id"' in enqueue
     assert '"budget_reservation_id"' in enqueue
@@ -653,11 +651,10 @@ def test_browser_queue_and_worker_rebuild_authority_and_settle_atomically():
     assert '"target"' not in enqueue
     assert "allowed_addresses" not in enqueue
 
-    route_start = api_source.index("async def execute_hunt_capability(")
-    route_end = api_source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans', route_start
+    route = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
-    route = api_source[route_start:route_end]
     assert route.index("create_requested") < route.index(
         "await _enqueue_canonical_browser_capability("
     )

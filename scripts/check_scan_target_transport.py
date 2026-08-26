@@ -57,14 +57,21 @@ REVIEWED_CALLS = {
 # Each direct non-target egress seam is reviewed by exact caller and authority class.
 # Target credentials and target routing are forbidden for every entry. New provider,
 # control-plane, storage, update, or local-IPC clients must be added deliberately here.
+#
+# The first element is the seam's canonical OWNER SCOPE, not a fixed file: a path
+# prefix that the defining module must sit under. Extraction moves a reviewed seam
+# between modules inside its own domain, and the review is of the caller and its
+# authority class, not of the file it currently occupies. The scope still pins the
+# domain, so a control-plane seam cannot drift into a capability or scanner module,
+# and a seam defined in more than one file is rejected as duplicate egress authority.
 NON_TARGET_EGRESS_ALLOWLIST = (
     ("api/ai_gate_scan.py", "_rubric_judge_findings", "ai_provider"),
     ("api/ai_gate_scan.py", "_semantic_judge_probe_transcripts", "ai_provider"),
     ("api/ai_verifier.py", "_call_llm", "ai_provider"),
-    ("api/api.py", "_fetch_json_url", "control_plane"),
-    ("api/api.py", "_model_intake_runner_http", "control_plane"),
-    ("api/api.py", "_call_model_intake_signer", "control_plane"),
-    ("api/api.py", "_model_intake_stage_run", "package_update"),
+    ("api/ai_targets", "_fetch_json_url", "control_plane"),
+    ("api/model_intake", "_model_intake_runner_http", "control_plane"),
+    ("api/model_intake", "_call_model_intake_signer", "control_plane"),
+    ("api/model_intake", "_model_intake_stage_run", "package_update"),
     ("api/api.py", "get_workers", "local_ipc"),
     ("api/broker_worker.py", "api_request", "control_plane"),
     ("api/broker_worker.py", "upload_artifact", "object_storage"),
@@ -223,36 +230,56 @@ def find_target_transport_anchor_violations() -> tuple[str, ...]:
     return tuple(violations)
 
 
+def _modules_defining(function_name: str, owner_scope: str) -> list[str]:
+    """Return every module under ``owner_scope`` that defines ``function_name``."""
+    root = REPOSITORY_ROOT / owner_scope
+    candidates = sorted(root.rglob("*.py")) if root.is_dir() else [root]
+    found: list[str] = []
+    for path in candidates:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError):
+            continue
+        if any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+            for node in ast.walk(tree)
+        ):
+            found.append(_relative(path))
+    return found
+
+
 def find_non_target_egress_allowlist_violations() -> tuple[str, ...]:
     """Prove the reviewed non-target callers still exist as separately named seams."""
     violations: list[str] = []
     seen: set[tuple[str, str]] = set()
-    for relative_path, function_name, egress_class in NON_TARGET_EGRESS_ALLOWLIST:
-        identity = (relative_path, function_name)
+    for owner_scope, function_name, egress_class in NON_TARGET_EGRESS_ALLOWLIST:
+        identity = (owner_scope, function_name)
         if identity in seen:
             violations.append(
-                f"{relative_path}:{function_name}: duplicate non-target egress authority"
+                f"{owner_scope}:{function_name}: duplicate non-target egress authority"
             )
             continue
         seen.add(identity)
         if egress_class not in NON_TARGET_EGRESS_CLASSES:
             violations.append(
-                f"{relative_path}:{function_name}: invalid non-target egress class"
+                f"{owner_scope}:{function_name}: invalid non-target egress class"
             )
             continue
-        path = REPOSITORY_ROOT / relative_path
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, SyntaxError) as exc:
-            violations.append(f"{relative_path}: cannot inspect egress authority: {exc}")
-            continue
-        if not any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == function_name
-            for node in ast.walk(tree)
-        ):
+        if not (REPOSITORY_ROOT / owner_scope).exists():
             violations.append(
-                f"{relative_path}:{function_name}: reviewed non-target egress caller is missing"
+                f"{owner_scope}: reviewed non-target egress owner scope is missing"
+            )
+            continue
+        defining = _modules_defining(function_name, owner_scope)
+        if not defining:
+            violations.append(
+                f"{owner_scope}:{function_name}: reviewed non-target egress caller is missing"
+            )
+        elif len(defining) > 1:
+            violations.append(
+                f"{owner_scope}:{function_name}: duplicate non-target egress authority "
+                f"defined in {', '.join(defining)}"
             )
     return tuple(violations)
 

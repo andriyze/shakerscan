@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
@@ -27,10 +31,7 @@ def test_durable_scanner_capability_set_is_explicit():
 
 
 def test_scanner_queue_carries_identity_not_target_authority():
-    source = (ROOT / "api" / "api.py").read_text()
-    start = source.index("async def _enqueue_canonical_scanner_capability(")
-    end = source.index("\n\nasync def _agent_tool_run_tool", start)
-    enqueue = source[start:end]
+    enqueue = definition_source("_enqueue_canonical_scanner_capability")
 
     for field in (
         '"hunt_id"',
@@ -52,13 +53,10 @@ def test_scanner_queue_carries_identity_not_target_authority():
 
 
 def test_api_routes_scanners_through_worker_owned_durable_settlement():
-    source = (ROOT / "api" / "api.py").read_text()
-    start = source.index("async def execute_hunt_capability(")
-    end = source.index(
-        '\n\n@app.post("/hunts/{hunt_id}/shell-plans',
-        start,
+    handler = (
+        definition_source("execute_hunt_capability")
+        + definition_source("_execute_hunt_capability_lifecycle")
     )
-    handler = source[start:end]
 
     assert 'is_scanner = placement == "worker_scanner"' in handler
     assert "await _enqueue_canonical_scanner_capability(" in handler

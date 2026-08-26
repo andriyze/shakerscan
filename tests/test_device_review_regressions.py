@@ -7,6 +7,10 @@ runtime on lightweight developer hosts.
 
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,9 +22,8 @@ def test_device_result_uses_the_shared_nul_sanitizer_before_returning():
 
 
 def test_device_scan_enforces_the_state_change_approval_policy():
-    source = (ROOT / "api" / "api.py").read_text()
-    endpoint = source[source.index('@app.post("/devices/{device_id}/scan")'):]
-    endpoint = endpoint[:endpoint.index('@app.get("/device-scans")')]
+    source = api_tree_source()
+    endpoint = route_source("POST", "/devices/{device_id}/scan")
     assert "_validate_approval_receipt_for_action" in endpoint
     assert 'else "device.scan"' in endpoint
     assert "_DEVICE_AGENT_PARENT_AUTHORITY" in endpoint
@@ -29,11 +32,9 @@ def test_device_scan_enforces_the_state_change_approval_policy():
 
 
 def test_device_agent_revalidates_the_session_receipt_on_every_turn():
-    source = (ROOT / "api" / "api.py").read_text()
-    start = source[source.index('@app.post("/devices/{device_id}/agent/session")'):]
-    start = start[:start.index('@app.get("/device-agent/session/{run_id}")')]
-    reply = source[source.index('@app.post("/device-agent/session/{run_id}/reply")'):]
-    reply = reply[:reply.index('@app.post("/device-agent/session/{run_id}/cancel")')]
+    source = api_tree_source()
+    start = route_source("POST", "/devices/{device_id}/agent/session")
+    reply = route_source("POST", "/device-agent/session/{run_id}/reply")
     assert "_device_posture_enabled" in start
     assert "_validate_approval_receipt_for_action" in start
     assert "_validate_approval_receipt_for_action" in reply
@@ -43,9 +44,8 @@ def test_device_agent_revalidates_the_session_receipt_on_every_turn():
 
 
 def test_device_agent_shell_is_immutable_user_confirmed_and_remote_only():
-    source = (ROOT / "api" / "api.py").read_text()
-    endpoint = source[source.index('@app.post("/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")'):]
-    endpoint = endpoint[:endpoint.index('@app.post("/device-agent/session/{run_id}/reply")')]
+    source = api_tree_source()
+    endpoint = route_source("POST", "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")
     scanner = (ROOT / "scanner" / "scanner_tools" / "ssh_scanner.py").read_text()
     assert "confirm_exact_commands" in endpoint
     assert "confirm_remote_device_effects" in endpoint
@@ -57,11 +57,8 @@ def test_device_agent_shell_is_immutable_user_confirmed_and_remote_only():
 
 
 def test_dashboard_queries_explicitly_exclude_the_device_product_plane():
-    source = (ROOT / "api" / "api.py").read_text()
-    action_center = source[source.index("async def _build_dashboard_action_center"):]
-    action_center = action_center[:action_center.index('@app.get("/dashboard")')]
-    dashboard = source[source.index('@app.get("/dashboard")'):]
-    dashboard = dashboard[:dashboard.index('@app.get("/exposure/graph")')]
+    action_center = definition_source("_build_dashboard_action_center")
+    dashboard = route_source("GET", "/dashboard")
     assert "COALESCE(source, '') <> 'device'" in action_center
     assert "device_target_id IS NULL" in action_center
     assert "COALESCE(source, '') <> 'device'" in dashboard
@@ -78,11 +75,10 @@ def test_bootstrap_schema_contains_device_agent_runs():
 
 
 def test_device_locator_changes_preserve_identity_and_history():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     schema = (ROOT / "db" / "init.sql").read_text()
     migration = (ROOT / "api" / "retest_contract.py").read_text()
-    endpoint = api[api.index('@app.post("/devices/{device_id}/locator")'):]
-    endpoint = endpoint[:endpoint.index('@app.delete("/devices/{device_id}")')]
+    endpoint = route_source("POST", "/devices/{device_id}/locator")
     helper = api[api.index("async def _change_device_primary_locator"):]
     helper = helper[:helper.index("def _public_device_credential_profile")]
 
@@ -98,9 +94,8 @@ def test_device_locator_changes_preserve_identity_and_history():
 
 
 def test_device_detail_exposes_current_locator_and_bounded_history():
-    api = (ROOT / "api" / "api.py").read_text()
-    detail = api[api.index('@app.get("/devices/{device_id}")'):]
-    detail = detail[:detail.index('@app.patch("/devices/{device_id}")')]
+    api = api_tree_source()
+    detail = route_source("GET", "/devices/{device_id}")
     ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
 
     assert "device_locator_history" in detail
@@ -112,11 +107,10 @@ def test_device_detail_exposes_current_locator_and_bounded_history():
 
 
 def test_device_detail_supports_display_name_changes_without_changing_identity():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     api_client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
     ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
-    endpoint = api[api.index('@app.patch("/devices/{device_id}")'):]
-    endpoint = endpoint[:endpoint.index('@app.post("/devices/{device_id}/locator")')]
+    endpoint = route_source("PATCH", "/devices/{device_id}")
 
     assert 'detail="Device name cannot be empty"' in endpoint
     assert 'payload["name"] = normalized_name' in endpoint
@@ -126,9 +120,8 @@ def test_device_detail_supports_display_name_changes_without_changing_identity()
 
 
 def test_device_detail_scopes_udp_uncertainty_to_the_latest_posture_scan():
-    api = (ROOT / "api" / "api.py").read_text()
-    detail = api[api.index('@app.get("/devices/{device_id}")'):]
-    detail = detail[:detail.index('@app.patch("/devices/{device_id}")')]
+    api = api_tree_source()
+    detail = route_source("GET", "/devices/{device_id}")
     ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
 
     assert "state='open|filtered' AND scan_id=$2" in detail
@@ -158,7 +151,7 @@ def test_device_detail_makes_exact_scan_open_ports_prominent():
 
 
 def test_device_views_expose_last_scan_reachability_without_assuming_online():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     worker = (ROOT / "api" / "worker.py").read_text()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     presentation = (ROOT / "ui" / "src" / "lib" / "deviceScanPresentation.mjs").read_text()
@@ -175,7 +168,7 @@ def test_device_views_expose_last_scan_reachability_without_assuming_online():
 
 
 def test_device_overviews_preserve_latest_posture_completeness():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     list_ui = (ROOT / "ui" / "src" / "app" / "devices" / "page.tsx").read_text()
 
@@ -187,11 +180,9 @@ def test_device_overviews_preserve_latest_posture_completeness():
 
 
 def test_device_list_uses_bounded_reachability_summary():
-    api = (ROOT / "api" / "api.py").read_text()
-    listing = api[api.index('@app.get("/devices")'):]
-    listing = listing[:listing.index('@app.post("/devices")')]
-    detail = api[api.index('@app.get("/devices/{device_id}")'):]
-    detail = detail[:detail.index('@app.patch("/devices/{device_id}")')]
+    api = api_tree_source()
+    listing = route_source("GET", "/devices")
+    detail = route_source("GET", "/devices/{device_id}")
 
     assert "- 'attempts' - 'nmap_host_discovery'" in listing
     assert "- 'attempts' - 'nmap_host_discovery'" not in detail
@@ -228,14 +219,14 @@ def test_unified_hunt_client_and_device_redirect_are_wired():
 
 
 def test_unified_hunt_history_is_durable_and_target_bound():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     hunt_router = (ROOT / "api" / "hunt" / "run_router.py").read_text()
     hunt_client = (ROOT / "ui" / "src" / "lib" / "huntV2.ts").read_text()
     hunt_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "agent" / "page.tsx").read_text()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     assert "CREATE TABLE IF NOT EXISTS hunt_runs" in (ROOT / "api" / "retest_contract.py").read_text()
-    assert '@router.get("/hunts")' in hunt_router
-    assert '@router.get("/hunts/{hunt_id}")' in hunt_router
+    assert route_is_declared("GET", "/hunts")
+    assert route_is_declared("GET", "/hunts/{hunt_id}")
     assert "app.include_router(hunt_run_router)" in api
     assert "target_id" in hunt_client
     assert "new URLSearchParams({ target: id })" in hunt_ui
@@ -255,9 +246,7 @@ def test_device_findings_use_atomic_conflict_upsert():
 
 
 def test_device_service_verifier_carries_candidate_contract_to_the_worker():
-    source = (ROOT / "api" / "api.py").read_text()
-    function = source[source.index('async def verify_device_service') :]
-    function = function[: function.index('\n\n@app.get("/device-scans")')]
+    function = definition_source("verify_device_service")
 
     assert 'candidate_uuid = _device_uuid(request.candidate_id, "candidate")' in function
     assert '"candidate_id": str(candidate_uuid) if candidate_uuid else None' in function
@@ -284,9 +273,8 @@ def test_device_worker_rechecks_feature_flag_and_injects_cancel_guard():
 
 
 def test_web_retest_endpoints_reject_device_findings():
-    source = (ROOT / "api" / "api.py").read_text()
-    single = source[source.index('@app.post("/findings/{finding_id:path}/retest")'):]
-    single = single[:single.index('@app.get("/retests/finding/{finding_id:path}")')]
+    source = api_tree_source()
+    single = route_source("POST", "/findings/{finding_id:path}/retest")
     bulk = source[source.index("async def bulk_retest_findings"):]
     bulk = bulk.split("\n@app.", 1)[0]
     assert 'finding_data.get("source") == "device"' in single
@@ -295,7 +283,7 @@ def test_web_retest_endpoints_reject_device_findings():
 
 
 def test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memory():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     worker = (ROOT / "api" / "worker.py").read_text()
     schema = (ROOT / "db" / "init.sql").read_text()
     assert "CREATE TABLE device_credential_profiles" in schema
@@ -310,7 +298,7 @@ def test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memo
 
 
 def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transcript():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     worker = (ROOT / "api" / "worker.py").read_text()
     assert "Credentialed device scans require safety_profile=authenticated_active" in api
     assert "Credentialed device investigations require safety_profile=authenticated_active" in api
@@ -319,7 +307,7 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
 
 
 def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     collection_api = (ROOT / "api" / "request_collection_api.py").read_text()
     worker = (ROOT / "api" / "worker.py").read_text()
     agent = (ROOT / "api" / "device_agent.py").read_text()
@@ -332,13 +320,14 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert "CREATE TABLE device_request_collections" in schema
     assert "encrypted_payload TEXT NOT NULL" in schema
     assert "'postman_collection','har','openapi'" in schema
-    assert '@app.post("/devices/{device_id}/request-collections")' in api
+    assert route_is_declared("POST", "/devices/{device_id}/request-collections")
     assert "Encrypted storage is required for device request collections" in api
     assert 'summary = _json_object(payload.get("summary_json"))' in api
     assert "WHERE device_request_collections.is_active=false" in api
-    update_start = api.index('@app.patch("/devices/{device_id}/request-collections/{collection_id}")')
-    update_end = api.index('@app.delete("/devices/{device_id}/request-collections/{collection_id}")', update_start)
-    assert "is_active=true" not in api[update_start:update_end]
+    update_handler = route_source(
+        "PATCH", "/devices/{device_id}/request-collections/{collection_id}"
+    )
+    assert "is_active=true" not in update_handler
     assert "_hydrate_device_request_collections" in worker
     assert 'hydrated["_resolved_device_request_collections"]' in worker
     assert "external_host_blocked" in web
@@ -355,17 +344,17 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert "new URLSearchParams({ target: id })" in hunt
     assert "redirect(`/hunt?${query.toString()}`)" in hunt
     assert "CREATE TABLE request_collections" in schema
-    assert '@router.post("/request-collections")' in collection_api
+    assert route_is_declared("POST", "/request-collections")
     assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()
     assert "allow_untrusted_tls_credentials" in api
     assert "untrusted_tls_credentials_not_confirmed" in web
 
 
 def test_device_scan_activity_is_structured_and_user_facing():
-    api = (ROOT / "api" / "api.py").read_text()
+    api = api_tree_source()
     worker = (ROOT / "api" / "worker.py").read_text()
     ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
-    assert '@app.get("/scans/{scan_id}/device-activity")' in api
+    assert route_is_declared("GET", "/scans/{scan_id}/device-activity")
     assert "_append_device_activity" in worker
     assert "Meaningful events only; commands, payloads, and secrets are hidden." in ui
     assert "getDeviceScanActivity" in ui

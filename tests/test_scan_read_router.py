@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from api.scan import read_router
 
 
@@ -23,7 +27,7 @@ def test_canonical_scan_read_routes_are_owned_by_native_router():
 
 
 def test_primary_api_mounts_router_without_duplicate_endpoint_implementations():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
+    source = api_tree_source()
 
     assert "app.include_router(scan_read_router)" in source
     for path in (
@@ -55,7 +59,7 @@ def test_family_preview_resolves_standard_active_without_ai_or_implicit_families
 
 
 def test_scan_detail_reuses_router_owned_public_projection():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
+    source = api_tree_source()
 
     assert "PUBLIC_SCAN_ACTIONS_SQL as _PUBLIC_SCAN_ACTIONS_SQL" in source
     assert (
