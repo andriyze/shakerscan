@@ -205,6 +205,7 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     options = scan_body["options"]
     assert scan_url == "http://scanner.test/scans"
     assert options["require_current_workers"] is True
+    assert "benchmark_principal_validation" not in options
     assert scan_body["budget_profile"] == "thorough"
     assert scan_body["policy"] == {"active_testing": True}
     assert scan_body["approval_receipt_id"] == "approval-1"

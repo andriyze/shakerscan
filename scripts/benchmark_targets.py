@@ -25,6 +25,7 @@ import secrets
 import sys
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 try:
@@ -228,8 +229,37 @@ def check_fleet(api):
 def _post(url, body, timeout=30):
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode("utf-8", errors="replace"))
+        except (TypeError, ValueError):
+            payload = {}
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, list):
+            safe_detail = [
+                {
+                    key: item.get(key)
+                    for key in ("loc", "msg", "type")
+                    if item.get(key) is not None
+                }
+                for item in detail[:20]
+                if isinstance(item, dict)
+            ]
+        elif isinstance(detail, dict):
+            safe_detail = {
+                key: detail.get(key)
+                for key in ("error", "message")
+                if detail.get(key) is not None
+            }
+        else:
+            safe_detail = str(detail or "request rejected")[:500]
+        path = urllib.parse.urlsplit(url).path or "/"
+        raise RuntimeError(
+            f"HTTP {exc.code} POST {path}: {json.dumps(safe_detail, sort_keys=True)}"
+        ) from None
 
 
 def _canonical_benchmark_authority(api, target_url, *, credential_risk):
@@ -788,7 +818,6 @@ def submit_target(name, api, do_auth):
                 ],
                 "validation_method": "jwt_stable_claim",
             })
-    opts["benchmark_principal_validation"] = principal_validation
     target_id, approval_id = _canonical_benchmark_authority(
         api, fx["target_url"], credential_risk=bool(minted_tokens),
     )
