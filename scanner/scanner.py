@@ -2392,6 +2392,263 @@ except Exception as e:
     format_forced_browsing_findings = _fallback_format_forced_browsing_findings
     ssh_auth_methods = _fallback_ssh_auth_methods
 
+    async def _fallback_tls_suite_probe(*args, **kwargs):
+        return {}
+
+    async def _fallback_curl_headers_probe(*args, **kwargs):
+        return {"headers": {}, "status_code": 0, "error": "http client module unavailable"}
+
+    async def _fallback_http_version_probe(*args, **kwargs):
+        return False
+
+    async def _fallback_fetch_security_txt(*args, **kwargs):
+        return None
+
+    async def _fallback_cors_probe(*args, **kwargs):
+        return {"vulnerable": False, "findings": [], "error": "security module unavailable"}
+
+    nmap_ciphers = _fallback_tls_suite_probe
+    testssl = _fallback_tls_suite_probe
+    sslyze_scan = _fallback_tls_suite_probe
+    curl_headers = _fallback_curl_headers_probe
+    supports_http2 = _fallback_http_version_probe
+    supports_http3 = _fallback_http_version_probe
+    fetch_security_txt = _fallback_fetch_security_txt
+    check_cors = _fallback_cors_probe
+    check_subdomain_takeover = _fallback_cors_probe
+    check_exposed_files = _fallback_cors_probe
+    # Degrade every remaining modular capability instead of crashing with a
+    # NameError mid-scan when only part of the import block failed.
+    async def _fallback_async_empty(*args, **kwargs):
+        return []
+
+    def _fallback_sync_mapping(*args, **kwargs):
+        return {}
+
+    class _FallbackDataClass:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __getattr__(self, name):
+            return None
+
+    for _degraded_name in (
+        "advanced_vuln_tests",
+        "analyze_js_bundles",
+        "api_login",
+        "api_security_test",
+        "apply_validation_to_finding",
+        "blind_ssrf_test",
+        "breach_assessment",
+        "browser_crawl_fallback",
+        "browser_fetch",
+        "cache_poisoning_test",
+        "call_ai_provider",
+        "check_asn_discovery",
+        "check_bola_enumeration",
+        "check_bola_multi_user",
+        "check_brand_protection",
+        "check_certificate_transparency",
+        "check_dangling_dns",
+        "check_dnsbl",
+        "check_domain_breaches",
+        "check_domain_intelligence",
+        "check_enhanced_dns",
+        "check_gungnir_available",
+        "check_ip_reputation",
+        "check_network_services",
+        "check_smtp_security",
+        "check_typosquatting",
+        "classify_findings_batch",
+        "comprehensive_port_scan",
+        "comprehensive_subdomain_scan",
+        "create_authenticated_session",
+        "custom_sqli_test",
+        "custom_xss_test",
+        "dalfox_one",
+        "deep_discovery_scan",
+        "detect_cloud_services",
+        "detect_login_form",
+        "detect_rate_limits",
+        "detect_rate_limits_per_endpoint",
+        "detect_waf",
+        "discover_allowed_methods",
+        "discover_openapi_schema",
+        "discover_subdomains",
+        "discover_technologies",
+        "dom_xss_analysis",
+        "enhanced_tech_fingerprinting",
+        "enhanced_url_discovery",
+        "enumerate_dkim_selectors",
+        "enumerate_virtual_hosts",
+        "extract_openapi_endpoints",
+        "fetch_openapi_schema",
+        "fetch_sitemap_urls",
+        "follow_json_links",
+        "form_login",
+        "generate_executive_summary_ai",
+        "generate_vendor_findings",
+        "get_code_example",
+        "graphql_alias_idor_test",
+        "graphql_batch_attack_test",
+        "graphql_comprehensive_test",
+        "graphql_depth_attack_test",
+        "graphql_field_suggestion_test",
+        "graphql_vulnerability_test",
+        "grpc_reflection_discovery",
+        "gungnir_scan",
+        "http_smuggling_test",
+        "interactive_browser_crawl",
+        "jwt_algorithm_confusion_test",
+        "jwt_claim_manipulation_test",
+        "jwt_comprehensive_test",
+        "jwt_kid_injection_test",
+        "jwt_vulnerability_test",
+        "katana_crawl",
+        "ldap_injection_test",
+        "ldap_injection_test_json_body",
+        "mass_assignment_test_json_body",
+        "nmap_full_scan",
+        "nosql_injection_test",
+        "nosql_injection_test_json_body",
+        "nuclei_comprehensive_scan",
+        "nuclei_scan",
+        "oauth_authenticate",
+        "oauth_refresh_token",
+        "oauth_vulnerability_test",
+        "oidc_discover",
+        "oob_sqli_test",
+        "parse_jwt_claims",
+        "pd_httpx_probe",
+        "probe_websocket_endpoints",
+        "quick_subdomain_scan",
+        "recursive_directory_discovery",
+        "run_injection_extra_checks",
+        "run_race_condition_tests",
+        "run_smart_active_tests",
+        "run_websocket_security_tests",
+        "schemathesis_run",
+        "session_vulnerability_test",
+        "should_report_finding",
+        "smart_auth_access_test",
+        "smart_bola_test",
+        "smart_discovery",
+        "smart_sqli_test",
+        "smart_xss_test",
+        "sqli_data_extraction",
+        "sqlmap_replay_request",
+        "sqlmap_test",
+        "sqlmap_test_context",
+        "ssrf_injection_test_json_body",
+        "ssti_test",
+        "staged_nuclei_scan",
+        "stored_xss_workflow",
+        "subdomain_takeover_check",
+        "subfinder_scan",
+        "test_2fa_bypass",
+        "test_account_enumeration",
+        "test_api_security",
+        "test_backup_files",
+        "test_bruteforce_protection",
+        "test_business_logic",
+        "test_cicd_exposure",
+        "test_client_side_vulns",
+        "test_cloud_buckets",
+        "test_cloud_metadata_ssrf",
+        "test_container_registry_exposure",
+        "test_csrf",
+        "test_default_credentials",
+        "test_default_credentials_aggressive",
+        "test_deserialization",
+        "test_directory_listing",
+        "test_file_upload",
+        "test_form_login",
+        "test_host_header_injection",
+        "test_http_methods",
+        "test_idor_bola",
+        "test_js_dependencies",
+        "test_js_secrets",
+        "test_kubernetes_exposure",
+        "test_open_redirect",
+        "test_package_exposure",
+        "test_password_policy",
+        "test_password_reset",
+        "test_path_traversal",
+        "test_rate_limiting",
+        "test_session_management",
+        "test_terraform_state",
+        "test_verb_tampering",
+        "test_verb_tampering_authenticated",
+        "test_zone_transfer",
+        "timing_attack_test",
+        "validate_finding",
+        "validate_findings_pipeline",
+        "validate_spf_record",
+        "vendor_risk_assessment",
+        "xpath_injection_test",
+        "xpath_injection_test_json_body",
+        "xxe_injection_test",
+        "xxe_injection_test_json_body",
+    ):
+        globals().setdefault(_degraded_name, _fallback_async_empty)
+
+    for _sync_degraded_name in (
+        "analyze_cookies",
+        "analyze_csp",
+        "calculate_hybrid_confidence",
+        "convert_to_sarif",
+        "create_baseline",
+        "detect_server_versions",
+        "filter_by_baseline",
+        "generate_breach_findings",
+        "generate_compliance_report",
+        "get_remediation_for_finding",
+        "load_baseline",
+        "parse_security_headers",
+        "quality_gate_check",
+        "save_baseline",
+        "write_sarif_file",
+    ):
+        globals().setdefault(_sync_degraded_name, _fallback_sync_mapping)
+
+    globals().setdefault("ValidationPipelineConfig", _FallbackDataClass)
+
+    def _fallback_parse_openssl_cert(*args, **kwargs):
+        return {}
+
+    def _fallback_days_until(*args, **kwargs):
+        return 0
+
+    def _fallback_parse_cookie_string(*args, **kwargs):
+        return {}
+
+    def _fallback_js_dependency_report_severity(*args, **kwargs):
+        return "info"
+
+    def _fallback_calculate_adaptive_depth(*args, **kwargs):
+        return 1
+
+    def _fallback_detect_dbms(*args, **kwargs):
+        return ""
+
+    def _fallback_identify_race_prone_endpoints(*args, **kwargs):
+        return []
+
+    for _sync_name, _sync_stub in (
+        ("parse_openssl_cert", _fallback_parse_openssl_cert),
+        ("days_until", _fallback_days_until),
+        ("parse_cookie_string", _fallback_parse_cookie_string),
+        ("js_dependency_report_severity", _fallback_js_dependency_report_severity),
+        ("calculate_adaptive_depth", _fallback_calculate_adaptive_depth),
+        ("detect_dbms", _fallback_detect_dbms),
+        ("identify_race_prone_endpoints", _fallback_identify_race_prone_endpoints),
+    ):
+        globals().setdefault(_sync_name, _sync_stub)
+
+    for _data_name in ("AuthSession", "OAuthSession", "AIClassificationResult", "ValidationResult"):
+        globals().setdefault(_data_name, _FallbackDataClass)
+    globals().setdefault("CONFIDENCE_THRESHOLDS", {})
+
+
     # AI classifier fallbacks
     async def _fallback_classify_findings_batch(*args, **kwargs):
         return {}, "AI classifier module not available", None
