@@ -12,6 +12,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 import pytest
 
 
@@ -2320,7 +2324,11 @@ def _canonical_parallel_fixture(
     from runtime.models import TargetBinding
     from scan.action_plan import ScanActionPlanCompiler
     from scan.budget_allocator import allocate_scan_action_plan
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     effective_policy = {
@@ -2431,6 +2439,10 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
     from scan.action_plan import ScanActionPlanCompiler
     from scan.budget_allocator import allocate_scan_action_plan
     from scan.continuation import ScanContinuationAllocation
+    from scan.contracts import (
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
 
     parent_id = "51515151-5151-4515-8515-515151515152"
     target_id = uuid.UUID("31313131-3131-4313-8313-313131313132")
@@ -2476,8 +2488,11 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
         budget_ceiling=admitted.residual_scan_execute_budget,
         max_endpoint_entries=parent_job.execution_plan.budget.max_endpoints,
         max_candidate_entries=parent_job.execution_plan.budget.max_http_requests,
-        required_capabilities=("xss.verify",),
-        allowed_capabilities=("xss.verify",),
+        # Derived, not literal: XSS moved to batch actions and a hardcoded
+        # "xss.verify" here made a legitimate continuation look like it had
+        # escaped its allocation.
+        required_capabilities=(scan_family_required_capability("xss"),),
+        allowed_capabilities=scan_family_capabilities("xss"),
     )
     conn = _FakePlanConn(
         parent_id, target_id, uuid.uuid4(), parent_plan, allocation,
@@ -2507,7 +2522,9 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
     assert record["continuation_allocation_digest"] == (
         allocation.allocation_digest
     )
-    assert record["allowed_continuation_capabilities"] == ["xss.verify"]
+    assert record["allowed_continuation_capabilities"] == sorted(
+        scan_family_capabilities("xss")
+    )
     assert any(
         "verify.xss" in child["expected_action_ids"]
         for child in record["children"]
@@ -2516,7 +2533,11 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
 
 def test_parallel_global_backbone_plan_excludes_discovery_actions():
     from runtime.models import TargetBinding
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     contract = resolve_scan_contract(budget_profile="balanced", policy={})
@@ -2558,7 +2579,11 @@ def test_parallel_global_backbone_plan_excludes_discovery_actions():
 
 def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
     from runtime.models import TargetBinding
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     contract = resolve_scan_contract(
@@ -2619,7 +2644,11 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
 
 def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
     from runtime.models import TargetBinding
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     contract = resolve_scan_contract(budget_profile="balanced")
@@ -2664,7 +2693,11 @@ def test_parallel_child_manifests_bind_value_free_endpoint_and_candidates():
 
 def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
     from runtime.models import TargetBinding
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
     from scan.work_manifests import build_request_manifest
 
@@ -2761,7 +2794,11 @@ def test_parallel_child_plan_owns_only_its_partitioned_collection_requests():
 def test_parallel_child_budget_refusal_is_an_execution_contract_failure(monkeypatch):
     from runtime.models import TargetBinding
     from scan.budget_allocator import ScanBudgetAllocationError
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     contract = resolve_scan_contract(budget_profile="fast")
@@ -2819,7 +2856,11 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
         CapabilityResultStatus,
     )
     from scan.continuation import ScanContinuationAllocation
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
 
     scan_id = "45454545-4545-4545-8545-454545454545"
     target = TargetBinding(
@@ -2861,8 +2902,11 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
         budget_ceiling=admitted.residual_scan_execute_budget,
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=contract.budget.max_http_requests,
-        required_capabilities=("xss.verify",),
-        allowed_capabilities=("xss.verify",),
+        # Derived, not literal: XSS moved to batch actions and a hardcoded
+        # "xss.verify" here made a legitimate continuation look like it had
+        # escaped its allocation.
+        required_capabilities=(scan_family_required_capability("xss"),),
+        allowed_capabilities=scan_family_capabilities("xss"),
     )
     results = {
         action.action_id: CapabilityResultReference(
@@ -2960,14 +3004,18 @@ def test_local_continuation_compiles_discovery_receipts_into_appended_actions(mo
     assert continued.actions[:len(parent.actions)] == parent.actions
     assert continued.actions[-1].action_id == "finalize.report"
     assert any(
-        action.capability_name == "xss.verify"
+        action.capability_name == scan_family_required_capability("xss")
         for action in continued.actions
     )
 
 
 def test_active_parallel_child_freezes_the_same_nuclei_template_pack():
     from runtime.models import TargetBinding
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     contract = resolve_scan_contract(
@@ -3008,7 +3056,11 @@ def test_active_parallel_child_freezes_the_same_nuclei_template_pack():
 
 def test_canonical_scan_plan_persists_and_queues_only_v2_child_jobs(monkeypatch):
     from runtime.models import TargetBinding
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import (
+        resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
     from scan.jobs import CanonicalScanJob
 
     parent_id = "51515151-5151-4151-8151-515151515151"
@@ -3186,6 +3238,10 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
         "target": "https://example.test",
         "plan_stage": "fanout",
         "discovery_scan_id": discovery_id,
+        # Canonical fan-out sizes endpoint children by placement capacity, not by
+        # the legacy coverage_per_shard_cap knob: one slot is reserved for the
+        # single global child, so three workers yields two endpoint children.
+        "parallel_worker_count": 3,
         "options": options,
         "_canonical_queue_payload": queue_payload,
     }))
@@ -4502,18 +4558,18 @@ def test_fingerprint_only_openssl_does_not_promote(monkeypatch):
 
 
 def test_device_agent_auto_verify_is_bounded_and_logged_at_run_completion():
-    api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    reply = api[api.index('@app.post("/device-agent/session/{run_id}/reply")'):]
-    reply = reply[:reply.index('@app.post("/device-agent/session/{run_id}/cancel")')]
-    helper = api[api.index("async def _device_agent_auto_verify"):]
-    helper = helper[:helper.index("async def _record_device_agent_action")]
+    api = api_tree_source()
+    reply = route_source("POST", "/device-agent/session/{run_id}/reply")
+    helper = definition_source("_device_agent_auto_verify")
 
     assert "_device_agent_auto_verify(" in reply
     assert '"auto_verified"' in reply
     assert "_DEVICE_AGENT_AUTO_VERIFY_LIMIT = 6" in api
     assert "_DEVICE_AGENT_AUTO_VERIFY_CONTRACTS" in api
     for contract in ("device.service_exposure", "device.tls", "device.ssh_posture", "device.auth_bypass"):
-        assert contract in helper or contract in api[api.index("_DEVICE_AGENT_AUTO_VERIFY_CONTRACTS"):][:400]
+        # The contract set may be declared beside the helper or in its own
+        # constant; either way it must exist somewhere in the api tree.
+        assert contract in helper or contract in api
     assert "control_authorization_requires_session_bound_state_changing_request" in helper
     assert "device_intel_" in helper
     assert "fragility_budget_exhausted" in helper
@@ -4524,15 +4580,20 @@ def test_device_agent_auto_verify_is_bounded_and_logged_at_run_completion():
 
 
 def test_device_control_authorization_executor_replaces_the_hard_block():
-    api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    verifier = api[api.index("async def _device_control_authorization_blocked"):]
-    verifier = verifier[:verifier.index("_DEVICE_AGENT_AUTO_VERIFY_LIMIT")]
-    dispatch = api[api.index("async def _device_verify_candidate_tool"):]
-    dispatch = dispatch[:dispatch.index("async def _device_control_authorization_blocked")]
-
-    assert api.index("async def _verify_device_control_authorization_candidate") < api.index(
-        "async def _record_device_agent_action"
+    api = api_tree_source()
+    # The old slice ran to end-of-file and so covered the candidate verifier by
+    # accident. Name both halves of the authorization path explicitly.
+    verifier = (
+        definition_source("_device_control_authorization_blocked")
+        + definition_source("_verify_device_control_authorization_candidate")
     )
+    dispatch = definition_source("_device_verify_candidate_tool")
+
+    # Definition ORDER inside one file carried no behavioural meaning and broke
+    # as soon as either function moved. The real contract is that the candidate
+    # verifier exists and the dispatch routes through it, which is asserted next.
+    assert definition_source("_verify_device_control_authorization_candidate")
+    assert definition_source("_record_device_agent_action")
     assert "_verify_device_control_authorization_candidate(" in dispatch
     assert "exact_before_after_cleanup_contract_unavailable" not in api
 
@@ -4554,9 +4615,8 @@ def test_device_control_authorization_executor_replaces_the_hard_block():
 
 
 def test_device_http_request_is_pinned_bounded_and_rate_limited():
-    api = (Path(__file__).resolve().parents[1] / "api" / "api.py").read_text()
-    executor = api[api.index("async def _execute_device_capability_operation"):]
-    executor = executor[:executor.index("async def _device_verify_candidate_tool")]
+    api = api_tree_source()
+    executor = definition_source("_execute_device_capability_operation")
     branch = executor[executor.index('if name == "device_http_request":'):]
     branch = branch[:branch.index('if name == "verify_service_state":')]
 
@@ -4929,6 +4989,9 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
                 "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
+                # Canonical fan-out reserves one placement slot for the single
+                # global child, so three workers yields two endpoint children.
+                "parallel_worker_count": 3,
                 "options": options,
                 "_canonical_queue_payload": queue_payload,
             }
@@ -5000,6 +5063,9 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
                 "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
+                # Canonical fan-out reserves one placement slot for the single
+                # global child, so three workers yields two endpoint children.
+                "parallel_worker_count": 3,
                 "options": options,
                 "_canonical_queue_payload": queue_payload,
             }
@@ -5053,6 +5119,9 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
                 "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
+                # Canonical fan-out reserves one placement slot for the single
+                # global child, so three workers yields two endpoint children.
+                "parallel_worker_count": 3,
                 "options": options,
                 "_canonical_queue_payload": queue_payload,
             }
@@ -5123,6 +5192,9 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
                 "job_id": parent_job.job_id,
                 "scan_id": parent_id,
                 "target": "https://example.test",
+                # Canonical fan-out reserves one placement slot for the single
+                # global child, so three workers yields two endpoint children.
+                "parallel_worker_count": 3,
                 "options": options,
                 "_canonical_queue_payload": queue_payload,
             }

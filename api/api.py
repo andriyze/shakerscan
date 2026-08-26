@@ -515,8 +515,11 @@ try:
     from scan.contracts import (
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
+        SCAN_V2_FAMILY_NAMES,
         bind_scan_scope_receipt,
         resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
     )
     from scan.collection_replay import (
         EXECUTABLE_REPLAY_POLICIES,
@@ -635,8 +638,11 @@ except ModuleNotFoundError:
     from api.scan.contracts import (
         ResolvedScanContract,
         SCAN_AUTHENTICATION_KEYS,
+        SCAN_V2_FAMILY_NAMES,
         bind_scan_scope_receipt,
         resolve_scan_contract,
+        scan_family_capabilities,
+        scan_family_required_capability,
     )
     from api.scan.collection_replay import (
         EXECUTABLE_REPLAY_POLICIES,
@@ -10844,43 +10850,29 @@ def _compile_scan_admission_action_authority(
             None,
         )
 
-    required_by_family = {
-        "nuclei_active": "templates.active_batch",
-        "xss": "xss.verify_batch",
-        "sqli": "sqli.verify_batch",
-        "bola": "authz.verify",
-        "sensitive_exposure": "exposure.verify_batch",
-        "nosqli": "nosqli.verify_batch",
-        "authz_surface": "authz_surface.verify_batch",
-    }
-    allowed_by_family = dict(required_by_family)
+    # Derived from the canonical Scan contract, never a local family table. The
+    # previous copy fell behind when XSS and SQLi moved to batch actions.
+    included = set(scan_contract.policy.include_families)
+    excluded = set(scan_contract.policy.exclude_families)
+    active_families = tuple(
+        family for family in SCAN_V2_FAMILY_NAMES
+        if scan_family_required_capability(family) is not None
+    )
     required_capabilities = tuple(
-        required_by_family[family]
-        for family in (
-            "xss", "sqli", "bola", "nuclei_active", "sensitive_exposure", "nosqli",
-            "authz_surface",
-        )
-        if family in set(scan_contract.policy.include_families)
-        and family not in set(scan_contract.policy.exclude_families)
+        scan_family_required_capability(family)
+        for family in active_families
+        if family in included and family not in excluded
     )
     enabled_families = {
         family
-        for family in allowed_by_family
-        if family not in set(scan_contract.policy.exclude_families)
-        and (
-            not scan_contract.policy.include_families
-            or family in set(scan_contract.policy.include_families)
-        )
+        for family in active_families
+        if family not in excluded and (not included or family in included)
     }
     allowed_capabilities = {
-        allowed_by_family[family] for family in enabled_families
+        capability
+        for family in enabled_families
+        for capability in scan_family_capabilities(family)
     }
-    if "xss" in enabled_families:
-        allowed_capabilities.add("xss.request_verify_batch")
-        allowed_capabilities.add("xss.browser_prove_batch")
-    if "sqli" in enabled_families:
-        allowed_capabilities.add("sqli.request_verify_batch")
-        allowed_capabilities.add("sqli.prove_batch")
     required_holds = (*required_capabilities, "scan.finalize")
     reserved_budget: dict[str, int] = {}
     for capability_name in required_holds:

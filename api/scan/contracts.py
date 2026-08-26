@@ -63,6 +63,42 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "nosqli": ("nosqli.verify_batch",),
     "authz_surface": ("authz_surface.verify_batch",),
 }
+# Proof capabilities are additional verifiers a family may escalate to after its
+# batch action produces a candidate. They are part of the family's authority even
+# though the family is complete without them.
+_SCAN_V2_FAMILY_PROOF_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
+    "xss": ("xss.browser_prove_batch",),
+    "sqli": ("sqli.prove_batch",),
+}
+
+
+def scan_family_required_capability(family: str) -> str | None:
+    """The capability whose absence means the family did not run at all."""
+    capabilities = _SCAN_V2_FAMILY_CAPABILITIES.get(family) or ()
+    spec = get_check_family(family)
+    if not capabilities or spec is None or not spec.is_active:
+        return None
+    return capabilities[0]
+
+
+def scan_family_capabilities(family: str) -> tuple[str, ...]:
+    """Every capability a selected family may execute, proof verifiers included.
+
+    Callers must not maintain their own family-to-capability table. The
+    continuation allocation did, and it still named the pre-batching
+    ``xss.verify``/``sqli.verify`` capabilities, so a continuation that
+    legitimately compiled ``xss.verify_batch`` was rejected as outside its
+    allocation.
+    """
+    spec = get_check_family(family)
+    if spec is None or not spec.is_active:
+        return ()
+    return (
+        *(_SCAN_V2_FAMILY_CAPABILITIES.get(family) or ()),
+        *(_SCAN_V2_FAMILY_PROOF_CAPABILITIES.get(family) or ()),
+    )
+
+
 _SCAN_V2_BASELINE_CAPABILITIES = (
     "http.request", "dns.inspect", "tls.inspect",
 )
