@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+import operator_auth as operator_auth_module  # noqa: E402
 from hunt import run_router as hunt_run_router_module  # noqa: E402
 from hunt.start_contract import (  # noqa: E402
     MAX_HUNT_BODY_BYTES,
@@ -4550,7 +4551,10 @@ def test_policy_profile_mutation_requires_model_intake_operator(monkeypatch):
     def deny(_request):
         raise api_module.HTTPException(status_code=403, detail="denied")
 
-    monkeypatch.setattr(api_module, "_require_model_intake_operator", deny)
+    # The operator gate lives in operator_auth and is called from within that
+    # module by _model_intake_authenticated_subject, so patch it where it is
+    # resolved rather than on the api module that re-exports it.
+    monkeypatch.setattr(operator_auth_module, "_require_model_intake_operator", deny)
     request = api_module.PolicyProfileRequest(
         name="corp-prod",
         product_area="model_intake",
@@ -20596,8 +20600,11 @@ def test_active_scan_admission_freezes_discovery_then_residual_continuation():
     assert continuation is not None
     assert continuation.parent_plan_digest == parent.plan_digest
     assert continuation.required_capabilities == ("xss.verify_batch",)
+    # Selecting xss also allows its exact-request verifier and its canonical
+    # headless browser proof, so a continuation can escalate a reflection to a
+    # verified browser-execution finding without new admission authority.
     assert continuation.allowed_capabilities == (
-        "xss.request_verify_batch", "xss.verify_batch",
+        "xss.browser_prove_batch", "xss.request_verify_batch", "xss.verify_batch",
     )
     assert "finalize.report" not in {
         action.action_id for action in parent.actions

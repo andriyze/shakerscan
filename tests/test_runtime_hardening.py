@@ -1307,9 +1307,23 @@ def test_api_owns_loopback_session_signing_and_ui_never_receives_the_operator_se
     assert "MODEL_INTAKE_LOCAL_SESSION_SECRET" in route
     assert "createHmac" not in route
     assert "http://api:8080/model-intake/operator-session" in route
-    api = (ROOT / "api" / "api.py").read_text()
-    assert "def _mint_model_intake_local_session" in api
-    assert '@app.get("/model-intake/operator-session")' in api
+    # The guarantee is that the API layer — never the UI — mints and signs the
+    # loopback session. Assert it against the api/ tree rather than one file, so
+    # module decomposition cannot silently move signing out of the API or make
+    # this gate vacuous.
+    api_sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (ROOT / "api").rglob("*.py")
+    }
+    assert any(
+        "def _mint_model_intake_local_session" in text
+        for text in api_sources.values()
+    )
+    assert any(
+        '@app.get("/model-intake/operator-session")' in text
+        or '@router.get("/model-intake/operator-session")' in text
+        for text in api_sources.values()
+    )
 
 
 def test_startup_fails_closed_on_mixed_release_images_and_ui_reports_baked_identity():
