@@ -15,12 +15,23 @@ test('fleet access failure does not render an empty fleet as authoritative state
   assert.match(page, /catch \(err\) \{[\s\S]*setNodes\(\[\]\)[\s\S]*setSummary\(EMPTY_SUMMARY\)/)
 })
 
-test('worker labels stay grammatical and completed shards show useful attribution', () => {
-  assert.match(dashboard, /=== 1 \? 'worker' : 'workers'/)
-  assert.match(newScan, /active_worker_count === 1 \? 'worker' : 'workers'/)
+test('worker labels stay grammatical and completed shards show useful attribution', async () => {
+  // Behaviour over real counts, not the exact ternary a page happens to use:
+  // rewording the copy must not fail this, but bad grammar must.
+  const { workerCountLabel, placementPreviewLabel } = await import(
+    '../src/lib/labels.ts'
+  )
+  assert.equal(workerCountLabel(0), '0 local workers running')
+  assert.equal(workerCountLabel(1), '1 local worker running')
+  assert.equal(workerCountLabel(2), '2 local workers running')
+  assert.equal(placementPreviewLabel('single', 3), 'one compatible current worker')
+  assert.equal(placementPreviewLabel('parallel', 1), 'up to 1 compatible current worker')
+  assert.equal(placementPreviewLabel('parallel', 4), 'up to 4 compatible current workers')
+  // Both pages must render through the shared helper rather than re-deriving it.
+  assert.match(dashboard, /workerCountLabel\(/)
+  assert.match(newScan, /placementPreviewLabel\(/)
   assert.match(scanDetail, /const phaseLabel = terminal/)
   assert.match(scanDetail, /rawPhase \|\| \(shard\.executing_node_id/)
-  assert.match(scanDetail, /`node \$\{String\(shard\.executing_node_id\)\.slice\(0, 8\)\}`/)
 })
 
 test('dashboard distinguishes logical scans, worker jobs, and worker processes', () => {

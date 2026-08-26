@@ -1,6 +1,7 @@
 'use client'
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
+import { HUNT_SESSION_NON_AUTONOMOUS_NOTICE, huntStatusLabel } from '@/lib/labels'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Compass, ShieldCheck } from 'lucide-react'
@@ -61,11 +62,6 @@ function positiveInteger(value: string): number | undefined {
   if (!/^\d+$/.test(value.trim())) return undefined
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
-}
-
-function huntStatusLabel(status: HuntV2['status']): string {
-  if (status === 'active') return 'agent session open'
-  return status.replaceAll('_', ' ')
 }
 
 function huntActionStatusClass(status: string): string {
@@ -858,7 +854,7 @@ function HuntContent() {
               {hunt.created_at && <p className="text-xs text-gray-500">Started {new Date(hunt.created_at).toLocaleString()}</p>}
               {hunt.status === 'active' && (
                 <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
-                  This agent session is open for planner actions. It does not investigate autonomously and is not running background traffic; network activity occurs only when your coding agent submits a permitted capability call.
+                  {HUNT_SESSION_NON_AUTONOMOUS_NOTICE}
                 </p>
               )}
               {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}

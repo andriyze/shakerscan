@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { placementPreviewLabel } from '@/lib/labels'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -567,7 +568,7 @@ export default function NewScanPage() {
               </span>
             </label>
           </div>
-          <p className="mt-3 text-xs text-gray-500">Placement preview: {topology === 'single' ? 'one compatible current worker' : `up to ${Math.max(1, active_worker_count)} compatible current workers`}.</p>
+          <p className="mt-3 text-xs text-gray-500">Placement preview: {placementPreviewLabel(topology, active_worker_count)}.</p>
         </Card>
 
         <Card className="overflow-hidden">

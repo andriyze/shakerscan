@@ -3,10 +3,30 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
-const apiServer = readFileSync(path.join(root, '../api/api.py'), 'utf8')
+// The server-side copy this suite asserts on now lives in an extracted domain
+// router, not the composition root. Read the whole api tree so a behaviour
+// guarantee does not depend on which module currently holds the string.
+const apiServer = (function readApiTree() {
+  const { readdirSync, statSync } = require('node:fs')
+  const base = path.join(root, '../api')
+  const parts = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      if (entry === '__pycache__') continue
+      const full = path.join(dir, entry)
+      if (statSync(full).isDirectory()) walk(full)
+      else if (entry.endsWith('.py')) parts.push(readFileSync(full, 'utf8'))
+    }
+  }
+  walk(base)
+  return parts.join('\n')
+})()
 const workflow = readFileSync(path.join(root, 'src/app/model-intake/ControlledWorkflow.tsx'), 'utf8')
 const page = readFileSync(path.join(root, 'src/app/model-intake/page.tsx'), 'utf8')
 const scanDetail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')

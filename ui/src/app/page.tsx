@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { workerCountLabel } from '@/lib/labels'
 import Link from 'next/link'
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
 import {
@@ -318,7 +319,7 @@ export default function Dashboard() {
             </span>
             <span className="hidden text-xs text-gray-500 sm:inline">{fleetEnabled ? 'schedulable' : 'current'}</span>
             {fleetEnabled && (
-              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount ?? 0} local ${(workerCount ?? 0) === 1 ? 'worker' : 'workers'} running`}>
+              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
                 {localAvailable} local
               </span>
             )}

@@ -47,8 +47,18 @@ test('a newly started Hunt immediately becomes a reload-safe exact-run URL', () 
   )
 })
 
-test('open Hunt sessions do not imply background network execution', () => {
-  assert.match(hunt, /if \(status === 'active'\) return 'open for planner'/)
-  assert.match(hunt, /It is not running background traffic/)
-  assert.match(hunt, /network activity occurs only when the current coding agent submits a permitted capability call/)
+test('open Hunt sessions do not imply background network execution', async () => {
+  const { huntStatusLabel, HUNT_SESSION_NON_AUTONOMOUS_NOTICE } = await import(
+    '../src/lib/labels.ts'
+  )
+  // "active" must not read as "the system is working on it".
+  assert.equal(huntStatusLabel('active'), 'agent session open')
+  assert.doesNotMatch(huntStatusLabel('active'), /running|scanning|in progress/i)
+  assert.equal(huntStatusLabel('stopped_by_user'), 'stopped by user')
+  // The notice must keep saying the run is not autonomous and makes no
+  // background traffic, however the sentence is worded.
+  assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /not investigate autonomously/)
+  assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /not running background traffic/)
+  assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /only when your coding agent submits/)
+  assert.match(hunt, /HUNT_SESSION_NON_AUTONOMOUS_NOTICE/)
 })
