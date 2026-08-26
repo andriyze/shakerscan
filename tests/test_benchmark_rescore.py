@@ -208,7 +208,16 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     assert options["require_current_workers"] is True
     assert "benchmark_principal_validation" not in options
     assert scan_body["budget_profile"] == "thorough"
-    assert scan_body["policy"] == {"active_testing": True}
+    # Explicit canonical family set (§17): authz_surface is included because a
+    # primary principal was minted; nuclei_active is excluded.
+    assert scan_body["policy"] == {
+        "active_testing": True,
+        "include_families": [
+            "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
+            "nosqli", "authz_surface",
+        ],
+        "exclude_families": ["nuclei_active"],
+    }
     assert scan_body["approval_receipt_id"] == "approval-1"
     assert scan_body["credential_profile_ids"] == ["profile-1", "profile-2"]
     assert user1_token not in str(scan_body)
@@ -779,3 +788,50 @@ def test_run_target_server_receipt_passes_with_claim_recorded(monkeypatch, tmp_p
     assert out["principal_validation_client_claim"] is claim
     gate = next(g for g in out["gates"] if g["gate"] == "require_verified_bola")
     assert gate["pass"] is True
+
+
+def test_nosqli_expectation_is_not_satisfied_by_a_sqli_finding():
+    # §17: no cross-family aliases. A NoSQLi expectation must be met by a
+    # first-class nosqli finding, never credited to a SQLi finding.
+    assert b.COMPAT["nosqli"] == {"nosqli"}
+    assert b.COMPAT["sensitive_exposure"] == {"sensitive_exposure"}
+    report = {
+        "findings": [
+            {"title": "SQL injection in search", "severity": "critical", "verified": True},
+        ],
+        "coverage": {
+            "family_coverage": [
+                {"family": "sqli", "required": True, "attempted_candidates": 5,
+                 "coverage_status": "complete", "reason": None},
+                {"family": "nosqli", "required": True, "attempted_candidates": 0,
+                 "planned_candidates": 10, "coverage_status": "partial",
+                 "reason": "zero_attempts"},
+            ],
+            "selected_family_gaps": ["nosqli"],
+        },
+        "result": {"grade_reliable": False},
+    }
+    fixture = {"expected": [
+        {"id": "sqli-search", "family": "sqli", "route": "/rest/products/search",
+         "min_severity": "critical", "proof": "verified"},
+        {"id": "nosqli-reviews", "family": "nosqli", "route": "/rest/products/reviews",
+         "min_severity": "high", "proof": "deterministic"},
+    ], "gates": {}}
+
+    card = b.collect_scorecard(report, fixture)
+    assert [e["id"] for e in card["expected_found"]] == ["sqli-search"]
+    assert [e["id"] for e in card["expected_missed"]] == ["nosqli-reviews"]
+    assert card["family_attempt_failures"] == ["nosqli"]
+    assert card["attempted_families"] == ["sqli"]
+
+
+def test_zero_attempt_selected_family_hard_fails_the_gate():
+    card = {"family_attempt_failures": ["nosqli"]}
+    gates = b.apply_gates(card, {"gates": {}})
+    gate = next(g for g in gates if g["gate"] == "selected_families_attempted")
+    assert gate["pass"] is False
+    assert "nosqli" in gate["detail"]
+
+    clean = b.apply_gates({"family_attempt_failures": []}, {"gates": {}})
+    ok = next(g for g in clean if g["gate"] == "selected_families_attempted")
+    assert ok["pass"] is True

@@ -61,11 +61,16 @@ CLASS_KEYWORDS = {
     "jwt": ["jwt", "json web token"],
     "xxe": ["xxe", "xml external entity"],
 }
+# No cross-family aliases: each expected class is satisfied only by its own
+# first-class family now that sensitive_exposure, nosqli, and authz_surface
+# exist. broken_access_control still admits bola because object-level (BOLA) and
+# function-level (BFLA) findings are both broken access control — that is one
+# vulnerability class, not two distinct families aliased together.
 COMPAT = {
-    "sqli": {"sqli"}, "nosqli": {"nosqli", "sqli"}, "xss": {"xss"},
-    "bola": {"bola", "broken_access_control"},
-    "broken_access_control": {"broken_access_control", "bola", "sensitive_exposure"},
-    "sensitive_exposure": {"sensitive_exposure", "broken_access_control"},
+    "sqli": {"sqli"}, "nosqli": {"nosqli"}, "xss": {"xss"},
+    "bola": {"bola"},
+    "broken_access_control": {"broken_access_control", "bola"},
+    "sensitive_exposure": {"sensitive_exposure"},
     "webhook": {"webhook"}, "approval": {"approval"},
     "path_traversal": {"path_traversal"}, "jwt": {"jwt"}, "xxe": {"xxe"},
 }
@@ -735,6 +740,27 @@ def collect_scorecard(report, fixture):
 
     cov = ((report.get("smart_coverage") or {}).get("endpoints") or {})
     active = report.get("active_checks") or {}
+    # Canonical V2 truth: the per-family rollup and grade reliability the pure
+    # finalizer computes, read directly instead of via legacy projections.
+    canonical_coverage = report.get("coverage") or {}
+    family_coverage = [
+        dict(row) for row in (canonical_coverage.get("family_coverage") or [])
+        if isinstance(row, dict)
+    ]
+    selected_family_gaps = list(canonical_coverage.get("selected_family_gaps") or [])
+    canonical_grade_reliable = (report.get("result") or {}).get("grade_reliable")
+    attempted_families = {
+        str(row.get("family"))
+        for row in family_coverage
+        if int(row.get("attempted_candidates") or 0) > 0
+        or str(row.get("coverage_status")) == "complete"
+    }
+    # Mandatory family-attempt gate (§17): a selected expected family that
+    # attempted nothing is a hard failure, independent of finding matching.
+    family_attempt_failures = sorted({
+        row.get("family") for row in family_coverage
+        if row.get("required") and str(row.get("reason")) == "zero_attempts"
+    })
     return {
         "total_findings": len(findings),
         "verified_high_critical": len(verified_hc),
@@ -758,6 +784,11 @@ def collect_scorecard(report, fixture):
         "benchmark_followups": followups,
         "body_completion_diagnostics": collect_body_completion_diagnostics(report),
         "expected_recall": round(len(found) / max(1, len(expected)), 2),
+        "family_coverage": family_coverage,
+        "selected_family_gaps": selected_family_gaps,
+        "family_attempt_failures": family_attempt_failures,
+        "attempted_families": sorted(attempted_families),
+        "canonical_grade_reliable": canonical_grade_reliable,
     }
 
 
@@ -783,6 +814,12 @@ def apply_gates(card, fixture):
         f"grade_reliable={card.get('grade_reliable')}")
     chk("active_execution_ok", not bool(card.get("active_execution_failed")),
         f"active_execution_failed={bool(card.get('active_execution_failed'))}")
+    # §17 mandatory family-attempt gate: a selected family that attempted zero
+    # candidates is a hard failure — no aliasing or finding can mask it.
+    family_gaps = card.get("family_attempt_failures") or []
+    chk("selected_families_attempted", not family_gaps,
+        "all selected families attempted" if not family_gaps
+        else "zero-attempt families: " + ", ".join(str(f) for f in family_gaps))
     chk("report_not_degraded", not bool(card.get("report_degraded")),
         f"report_degraded={bool(card.get('report_degraded'))}")
     if "retest_settled" in card:
@@ -904,11 +941,24 @@ def submit_target(name, api, do_auth):
         )
         for lane, token in minted_tokens
     ]
+    # Select the canonical family set explicitly (§17) so every first-class
+    # family the fixture expects actually runs — no reliance on preset defaults
+    # and no alias credit. authz_surface (BFLA) is credential-gated, so add it
+    # only when a primary principal was minted; nuclei_active stays off.
+    include_families = [
+        "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure", "nosqli",
+    ]
+    if minted_tokens:
+        include_families.append("authz_surface")
     resp = _post(f"{api}/scans", {
         "target": fx["target_url"],
         "target_kind": "web",
         "budget_profile": budget_profile,
-        "policy": {"active_testing": True},
+        "policy": {
+            "active_testing": True,
+            "include_families": include_families,
+            "exclude_families": ["nuclei_active"],
+        },
         "options": opts,
         "credential_profile_ids": credential_profile_ids,
         "approval_receipt_id": approval_id,
