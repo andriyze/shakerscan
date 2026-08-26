@@ -1576,12 +1576,12 @@ def _resolve_auto_shard_policy(options):
     return "scan", payload, enabled, worker_count
 
 
-def test_auto_sharding_defaults_enabled_for_fresh_installs(monkeypatch):
+def test_auto_sharding_defaults_disabled_for_fresh_installs(monkeypatch):
     monkeypatch.delenv("AUTO_SHARDING_ENABLED", raising=False)
 
     settings = api_module._default_scan_execution_settings()
 
-    assert settings["auto_sharding_enabled"] is True
+    assert settings["auto_sharding_enabled"] is False
 
 
 def test_auto_sharding_env_can_disable_default(monkeypatch):

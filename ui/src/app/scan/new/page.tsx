@@ -42,6 +42,7 @@ const ADVANCED_LIMITS = [
 ] as const
 
 type FamilyMode = 'default' | 'include' | 'exclude'
+type ScanTopology = 'single' | 'parallel'
 
 function formatLimit(value: number | undefined): string {
   return Number.isFinite(value) ? Number(value).toLocaleString() : 'server default'
@@ -57,6 +58,7 @@ export default function NewScanPage() {
   const [targetKind, setTargetKind] = useState<'web' | 'api'>('web')
   const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
   const [activeTesting, setActiveTesting] = useState(false)
+  const [topology, setTopology] = useState<ScanTopology>('single')
   const [authorized, setAuthorized] = useState(false)
   const [subdomainDiscovery, setSubdomainDiscovery] = useState(false)
   const [networkDiscovery, setNetworkDiscovery] = useState(false)
@@ -319,7 +321,8 @@ export default function NewScanPage() {
       approval_receipt_id: approvalReceipt.trim() || undefined,
       options: {
         ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
-        require_current_workers: activeTesting,
+        parallel: topology === 'parallel',
+        require_current_workers: false,
       },
     }
 
@@ -420,11 +423,6 @@ export default function NewScanPage() {
           {scanContractError && <p className="mt-3 text-xs text-amber-300">{scanContractError}. Server validation still applies.</p>}
         </Card>
 
-        {workerStats?.fleet?.enabled && <Card className="p-4">
-          <h2 className="font-medium text-white">Automatic placement</h2>
-          <p className="mt-1 text-sm text-gray-400">ShakerScan will place and shard this Scan across {active_worker_count} compatible {active_worker_count === 1 ? 'worker' : 'workers'} within the selected budget.</p>
-        </Card>}
-
         <Card className="p-5 space-y-4">
           <div>
             <h2 className="font-medium text-white">Testing policy</h2>
@@ -506,10 +504,30 @@ export default function NewScanPage() {
           )}
           {activeTesting && staleWorkers > 0 && (
             <p className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200">
-              {staleWorkers} worker{staleWorkers === 1 ? '' : 's'} are not on the current build. Rebuild and restart the scanner, then refresh this page before submitting active work.
+              {staleWorkers} worker{staleWorkers === 1 ? '' : 's'} are not on the current build. The scan will be placed only on a compatible current worker.
               {workerStats?.fleet?.enabled && <> <Link href="/fleet" className="font-medium underline">Open Fleet</Link>.</>}
             </p>
           )}
+        </Card>
+
+        <Card className="p-5">
+          <h2 className="font-medium text-white">Execution topology</h2>
+          <p className="mt-1 text-xs text-gray-500">Choose placement independently from the resource budget.</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <label className={`rounded-lg border p-4 ${topology === 'single' ? 'border-emerald-600 bg-emerald-950/20' : 'border-gray-800'}`}>
+              <span className="flex items-start gap-3">
+                <input type="radio" name="scan-topology" value="single" checked={topology === 'single'} onChange={() => setTopology('single')} />
+                <span><span className="block text-sm font-medium text-white">Single worker — recommended</span><span className="mt-1 block text-xs text-gray-500">Release-authoritative execution with one coherent action graph.</span></span>
+              </span>
+            </label>
+            <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
+              <span className="flex items-start gap-3">
+                <input type="radio" name="scan-topology" value="parallel" checked={topology === 'parallel'} onChange={() => setTopology('parallel')} />
+                <span><span className="block text-sm font-medium text-white">Parallel — experimental</span><span className="mt-1 block text-xs text-gray-500">Explicit multi-worker fan-out; validate results against single-worker execution.</span></span>
+              </span>
+            </label>
+          </div>
+          <p className="mt-3 text-xs text-gray-500">Placement preview: {topology === 'single' ? 'one compatible current worker' : `up to ${Math.max(1, active_worker_count)} compatible current workers`}.</p>
         </Card>
 
         <Card className="overflow-hidden">

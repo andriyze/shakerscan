@@ -1960,8 +1960,8 @@ def _normalize_auto_shard_count(value: Any, default: int = 4) -> int:
 def _default_scan_execution_settings() -> dict[str, Any]:
     return {
         "auto_sharding_enabled": _is_truthy(
-            os.environ.get("AUTO_SHARDING_ENABLED", "true"),
-            default=True,
+            os.environ.get("AUTO_SHARDING_ENABLED", "false"),
+            default=False,
         ),
         "auto_sharding_strategy": _normalize_parallel_strategy(
             os.environ.get("AUTO_SHARDING_STRATEGY", "auto"),
@@ -13927,6 +13927,7 @@ def _worker_freshness_snapshot() -> dict:
         "available": False,
         "fleet_size": 0,
         "running": 0,
+        "current_count": 0,
         "stale_count": 0,
         "stale_names": [],
         "pending_count": 0,
@@ -13989,6 +13990,8 @@ def _worker_freshness_snapshot() -> dict:
             elif cur is None:
                 snap["pending_count"] += 1
                 snap["pending_names"].append(name)
+            else:
+                snap["current_count"] += 1
     except Exception:
         pass
     return snap
@@ -30261,15 +30264,15 @@ async def _submit_scan(
     options_payload["request_collections"] = [dict(item) for item in request.request_collections]
     options_payload["scan_policy"]["approval_receipt_id"] = approval_receipt_id
 
-    # §2 Operational freshness: record which build the fleet was on at submit, and
-    # optionally refuse active scans unless the local fleet is positively
-    # identified and current (opt-in, fail-closed).
+    # Record the eligible build at submit. Ordinary active scans require one
+    # compatible current worker; the explicit strict flag still requires the
+    # entire locally inventoried fleet to be uniform for release acceptance.
     _freshness = _worker_freshness_snapshot()
-    require_current_workers = bool(
+    require_uniform_current_fleet = bool(
         getattr(execution_options, "require_current_workers", False)
         and scan_contract.policy.active_testing
     )
-    if require_current_workers and (
+    if require_uniform_current_fleet and (
         not _freshness.get("available") or int(_freshness.get("fleet_size") or 0) < 1
     ):
         raise HTTPException(
@@ -30284,12 +30287,38 @@ async def _submit_scan(
             },
         )
     if _freshness.get("available"):
-        options_payload["expected_build_fingerprint_at_submit"] = _freshness.get("expected_build_fingerprint")
+        expected_worker_build = _freshness.get("expected_build_fingerprint")
+        options_payload["expected_build_fingerprint_at_submit"] = expected_worker_build
+        options_payload["selected_worker_build_fingerprint"] = expected_worker_build
         options_payload["stale_worker_count_at_submit"] = _freshness.get("stale_count")
         options_payload["pending_worker_count_at_submit"] = _freshness.get("pending_count")
         options_payload["worker_fleet_size_at_submit"] = _freshness.get("fleet_size")
+        options_payload["current_worker_count_at_submit"] = _freshness.get("current_count")
+        # This is per-job placement eligibility, not uniform-fleet admission.
+        # The lease guard ensures a worker that becomes stale after submission
+        # returns the job for a current worker instead of executing it.
+        options_payload["require_current_worker_assignment"] = bool(
+            scan_contract.policy.active_testing
+        )
+        if (
+            scan_contract.policy.active_testing
+            and int(_freshness.get("current_count") or 0) < 1
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "no_compatible_current_worker",
+                    "message": (
+                        "No current-build scanner worker is available for active testing. "
+                        "Start or rebuild one compatible worker, then retry."
+                    ),
+                    "stale_workers": _freshness.get("stale_names", []),
+                    "pending_workers": _freshness.get("pending_names", []),
+                    "expected_build_fingerprint": expected_worker_build,
+                },
+            )
         unsafe_worker_count = int(_freshness.get("stale_count") or 0) + int(_freshness.get("pending_count") or 0)
-        if require_current_workers and unsafe_worker_count > 0:
+        if require_uniform_current_fleet and unsafe_worker_count > 0:
             raise HTTPException(
                 status_code=409,
                 detail={

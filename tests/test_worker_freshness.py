@@ -104,6 +104,25 @@ def test_stale_worker_refuses_and_requeues(monkeypatch):
     assert job["stale_requeue_attempts"] == 1
 
 
+def test_ordinary_active_assignment_refuses_a_stale_worker(monkeypatch):
+    monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "STALE_DIFFERENT")
+    pushed = []
+
+    class _FakeRedis:
+        def rpush(self, queue, payload):
+            pushed.append(queue)
+
+        def hset(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(worker, "get_redis", lambda: _FakeRedis())
+    job = _job(CURRENT_FP, require=False)
+    job["options"]["require_current_worker_assignment"] = True
+
+    assert _run(worker._refuse_stale_job_if_needed(job)) is True
+    assert pushed == [worker.QUEUE_NAME]
+
+
 def test_stale_worker_requeues_original_canonical_envelope_without_private_options(monkeypatch):
     monkeypatch.setattr(worker, "_worker_build_fingerprint", lambda: "STALE_DIFFERENT")
     pushed = []

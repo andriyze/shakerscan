@@ -18673,7 +18673,10 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
     fail-closed window, fail the scan rather than loop. Returns True if refused."""
     options = job_data.get('options') if isinstance(job_data.get('options'), dict) else {}
     expected_fp = options.get('expected_build_fingerprint_at_submit')
-    require_current = bool(options.get('require_current_workers')) or \
+    require_current = bool(
+        options.get('require_current_workers')
+        or options.get('require_current_worker_assignment')
+    ) or \
         str(os.environ.get('SHAKERSCAN_WORKER_FAIL_CLOSED') or '').strip().lower() in ('1', 'true', 'yes')
     if not (expected_fp and require_current):
         return False

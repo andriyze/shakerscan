@@ -307,6 +307,7 @@ def test_worker_freshness_snapshot_marks_running_pending_as_unsafe(monkeypatch):
     assert snap["available"] is True
     assert snap["fleet_size"] == 4
     assert snap["running"] == 3
+    assert snap["current_count"] == 1
     assert snap["stale_count"] == 1
     assert snap["stale_names"] == ["shakerscan-worker-3"]
     assert snap["pending_count"] == 1
@@ -353,5 +354,6 @@ def test_worker_freshness_snapshot_excludes_colocated_fleet_workers(monkeypatch)
 
     assert snap["fleet_size"] == 1
     assert snap["running"] == 1
+    assert snap["current_count"] == 1
     assert snap["stale_count"] == 0
     assert snap["pending_count"] == 0
