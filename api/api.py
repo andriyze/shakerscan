@@ -29871,28 +29871,6 @@ def _compile_scan_admission_action_authority(
             None,
         )
 
-    raw_parent = ScanActionPlanCompiler().compile(
-        scan_id=scan_id,
-        execution_plan=scan_contract.execution_plan,
-        target_binding=target_binding,
-        credential_profile_refs=credential_profile_action_refs(credential_refs),
-        request_collection_refs=request_collection_action_refs(
-            request_collection_refs
-        ),
-        request_manifest_refs=request_manifest_refs,
-        endpoint_manifest_ref=endpoint_manifest_ref,
-        candidate_manifest_ref=candidate_manifest_ref,
-        request_candidate_manifest_ref=request_candidate_manifest_ref,
-        template_manifest_ref=template_manifest_ref,
-        defer_manifest_actions=True,
-        include_finalizer=False,
-    )
-    parent_allocation = allocate_scan_action_plan(
-        raw_parent,
-        scan_contract.budget,
-        assign_residual_to_finalizer=False,
-        require_finalizer=False,
-    )
     required_by_family = {
         "nuclei": "templates.scan",
         "xss": "xss.verify",
@@ -29923,6 +29901,35 @@ def _compile_scan_admission_action_authority(
         if "sqli" in enabled_families:
             allowed_capabilities.add("sqli.request_verify")
     required_holds = (*required_capabilities, "scan.finalize")
+    reserved_budget: dict[str, int] = {}
+    for capability_name in required_holds:
+        specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        for name, amount in specification.budget_cost.items():
+            reserved_budget[name] = reserved_budget.get(name, 0) + amount
+
+    raw_parent = ScanActionPlanCompiler().compile(
+        scan_id=scan_id,
+        execution_plan=scan_contract.execution_plan,
+        target_binding=target_binding,
+        credential_profile_refs=credential_profile_action_refs(credential_refs),
+        request_collection_refs=request_collection_action_refs(
+            request_collection_refs
+        ),
+        request_manifest_refs=request_manifest_refs,
+        endpoint_manifest_ref=endpoint_manifest_ref,
+        candidate_manifest_ref=candidate_manifest_ref,
+        request_candidate_manifest_ref=request_candidate_manifest_ref,
+        template_manifest_ref=template_manifest_ref,
+        defer_manifest_actions=True,
+        include_finalizer=False,
+    )
+    parent_allocation = allocate_scan_action_plan(
+        raw_parent,
+        scan_contract.budget,
+        assign_residual_to_finalizer=False,
+        require_finalizer=False,
+        reserved_budget=reserved_budget,
+    )
     remaining = dict(parent_allocation.residual_scan_execute_budget)
     for capability_name in required_holds:
         specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)

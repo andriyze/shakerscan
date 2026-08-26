@@ -76,6 +76,7 @@ def allocate_scan_action_plan(
     *,
     assign_residual_to_finalizer: bool = False,
     require_finalizer: bool = True,
+    reserved_budget: Mapping[str, int] | None = None,
 ) -> ScanBudgetAllocation:
     """Admit the complete worst-case graph before any action may execute.
 
@@ -83,9 +84,29 @@ def allocate_scan_action_plan(
     tiers. A selected smaller tier is frozen into the returned action digest before
     traffic. Required work fails admission when no tier fits; optional work remains
     in the immutable plan with a stable skip reason. Residual authority remains
-    visibly unallocated; the pure finalizer never receives target-traffic authority.
+    visibly unallocated; explicit continuation holds stay in that residual authority.
+    The pure finalizer never receives target-traffic authority.
     """
     limits = budget.ledger_limits()
+    reserved = {
+        str(name): int(amount)
+        for name, amount in dict(reserved_budget or {}).items()
+    }
+    undeclared_reserved = set(reserved) - set(limits)
+    invalid_reserved = {
+        name: amount for name, amount in reserved.items()
+        if amount < 0 or amount > limits.get(name, 0)
+    }
+    if undeclared_reserved or invalid_reserved:
+        raise ScanBudgetAllocationError(
+            "reserved_budget",
+            {
+                **{f"undeclared:{name}": reserved[name]
+                   for name in sorted(undeclared_reserved)},
+                **{f"invalid:{name}": amount
+                   for name, amount in sorted(invalid_reserved.items())},
+            },
+        )
     allocated = {name: 0 for name in limits}
     admitted: dict[str, ScanAction] = {}
     def shortages(action: ScanAction) -> dict[str, int]:
@@ -97,9 +118,9 @@ def allocate_scan_action_plan(
                  for name in sorted(undeclared)},
             )
         return {
-            name: allocated[name] + amount - limits[name]
+            name: allocated[name] + reserved.get(name, 0) + amount - limits[name]
             for name, amount in action.requested_budget.items()
-            if allocated[name] + amount > limits[name]
+            if allocated[name] + reserved.get(name, 0) + amount > limits[name]
         }
 
     for action in sorted(plan.actions, key=lambda item: (_phase(item), item.action_id)):
@@ -130,7 +151,10 @@ def allocate_scan_action_plan(
                 action.capability_name,
                 requested=action.requested_budget,
                 available={
-                    name: max(0, limits[name] - allocated[name])
+                    name: max(
+                        0,
+                        limits[name] - allocated[name] - reserved.get(name, 0),
+                    )
                     for name in limits
                 },
             )

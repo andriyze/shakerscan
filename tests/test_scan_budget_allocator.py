@@ -100,6 +100,20 @@ def test_allocator_rejects_legacy_residual_assignment_for_pure_finalizer():
         )
 
 
+def test_allocator_preserves_explicit_continuation_hold():
+    budget = ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 0, 25)
+    plan = _compile(budget, active=False)
+
+    allocation = allocate_scan_action_plan(
+        plan,
+        budget,
+        reserved_budget={"tool_wall_seconds": 1},
+    )
+
+    assert allocation.residual_scan_execute_budget["tool_wall_seconds"] >= 1
+    assert allocation.plan.actions[-1].capability_name == "scan.finalize"
+
+
 def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
     budget = ScanBudget(300, 100, 50, 10, 10, 30, 1, 0, 10)
     execution = ScanExecutionPlan(

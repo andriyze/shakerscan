@@ -20595,6 +20595,40 @@ def test_active_scan_admission_freezes_discovery_then_residual_continuation():
     )
 
 
+def test_fast_active_scan_admission_preserves_finalizer_authority():
+    from runtime.models import TargetBinding
+    from scan.contracts import resolve_scan_contract
+
+    target = TargetBinding(
+        target_id="target-fast-active",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    contract = resolve_scan_contract(
+        budget_profile="fast",
+        policy={"active_testing": True},
+    )
+    template_manifest = api_module._compile_scan_template_work_manifest(
+        scan_id="36333333-3333-4333-8333-333333333334",
+        scan_contract=contract,
+        target_binding=target,
+    )
+
+    parent, continuation = api_module._compile_scan_admission_action_authority(
+        scan_id="36333333-3333-4333-8333-333333333334",
+        scan_contract=contract,
+        target_binding=target,
+        template_manifest_ref=template_manifest.reference().canonical_dict(),
+    )
+
+    assert continuation is not None
+    assert continuation.parent_plan_digest == parent.plan_digest
+    assert continuation.budget_ceiling["tool_wall_seconds"] >= 1
+
+
 def test_passive_scan_admission_needs_no_continuation():
     from runtime.models import TargetBinding
     from scan.contracts import resolve_scan_contract
