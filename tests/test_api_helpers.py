@@ -283,6 +283,9 @@ from targets import router as targets_router_module  # noqa: E402
 import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
 from devices import router as devices_router_module  # noqa: E402
+from arsenal_routes import router as arsenal_router_module  # noqa: E402
+from finding_routes import router as finding_routes_module  # noqa: E402
+from finding_exceptions import router as finding_exceptions_module  # noqa: E402
 from hunt import run_router as hunt_run_router_module  # noqa: E402
 from hunt.start_contract import (  # noqa: E402
     MAX_HUNT_BODY_BYTES,
@@ -790,6 +793,7 @@ def test_native_hunt_start_persists_exact_contract_and_capability_allowlist(monk
         api_module, "_require_approval_receipt_if_policy_enabled", no_approval_required,
     )
     monkeypatch.setattr(api_module, "_target_web_origins", origins)
+    monkeypatch.setattr(arsenal_router_module, "_target_web_origins", origins)
     monkeypatch.setattr(api_module, "_generic_collection_refs", collections)
     monkeypatch.setattr(api_module, "_resolve_agent_target_addresses", addresses)
 
@@ -2610,6 +2614,7 @@ def test_dashboard_action_center_prioritizes_server_derived_items(monkeypatch):
     # connection. Tracked benchmark scorecards in results/ must not make the
     # expectation depend on checkout mtimes or unrelated local artifacts.
     monkeypatch.setattr(api_module, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
+    monkeypatch.setattr(arsenal_router_module, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
     conn = _ActionCenterConn()
     snapshot = {
         "available": True,
@@ -2775,6 +2780,7 @@ def test_dashboard_action_center_surfaces_refuter_integrity_spike(monkeypatch):
     # benchmark scorecards. A fresh clone gives those files identical mtimes,
     # which previously changed the number of reported integrity signals.
     monkeypatch.setattr(api_module, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
+    monkeypatch.setattr(arsenal_router_module, "_load_benchmark_scorecard_artifacts", lambda **_kwargs: [])
     # A target whose latest scan spiked from a ~4-finding baseline to 30.
     spike_scans = [
         {"target_id": "t1", "target_url": "https://app.example.test", "scan_id": "s4", "findings_count": 30},
@@ -6657,6 +6663,7 @@ def test_authz_replay_route_forwards_gated_campaign_action(monkeypatch):
         return {"dispatched": True}
 
     monkeypatch.setattr(api_module, "_arsenal_execute_detached", fake_execute)
+    monkeypatch.setattr(arsenal_router_module, "_arsenal_execute_detached", fake_execute)
     result = asyncio.run(api_module.arsenal_execute_authz_replay(
         str(action_id),
         api_module.AuthzReplayExecuteRequest(
@@ -6685,6 +6692,7 @@ def test_authz_promote_route_forwards_gated_campaign_action(monkeypatch):
         return {"dispatched": True}
 
     monkeypatch.setattr(api_module, "_arsenal_execute_detached", fake_execute)
+    monkeypatch.setattr(arsenal_router_module, "_arsenal_execute_detached", fake_execute)
     result = asyncio.run(api_module.arsenal_promote_authz_replay(
         str(action_id),
         api_module.AuthzReplayPromoteRequest(
@@ -7906,7 +7914,9 @@ def test_execute_refuter_review_plan_queues_deterministic_retest_without_truth_m
         return {"id": "refuter-op", "status": kwargs["status"]}
 
     monkeypatch.setattr(api_module, "get_finding_record", fake_get_finding_record)
+    monkeypatch.setattr(finding_routes_module, "get_finding_record", fake_get_finding_record)
     monkeypatch.setattr(api_module, "retest_finding", fake_retest_finding)
+    monkeypatch.setattr(finding_routes_module, "retest_finding", fake_retest_finding)
     monkeypatch.setattr(api_module, "_record_command_result", fake_record_command_result)
 
     result = asyncio.run(api_module._execute_refuter_review_plan(
@@ -9563,6 +9573,7 @@ def test_arsenal_execute_dispatches_read_only_command(monkeypatch):
         return {"campaigns": [], "count": 0, "execution_enabled": False}
 
     monkeypatch.setattr(api_module, "arsenal_campaigns", fake_campaigns)
+    monkeypatch.setattr(arsenal_router_module, "arsenal_campaigns", fake_campaigns)
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn, api_module.ArsenalExecuteRequest(command="campaign.list", parameters={"limit": 5})
@@ -10058,6 +10069,7 @@ def test_arsenal_execute_gated_exception_lifecycle_sweep_dispatches_when_allowed
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
     monkeypatch.setattr(api_module, "finding_exception_lifecycle_sweep", fake_sweep)
+    monkeypatch.setattr(finding_exceptions_module, "finding_exception_lifecycle_sweep", fake_sweep)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
@@ -10175,6 +10187,7 @@ def test_arsenal_execute_detached_dispatches_without_holding_outer_db_conn(monke
     monkeypatch.setattr(api_module, "db_pool", pool)
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
     monkeypatch.setattr(api_module, "_arsenal_gated_adapters", lambda: {"asm.improve": fake_adapter})
+    monkeypatch.setattr(arsenal_router_module, "_arsenal_gated_adapters", lambda: {"asm.improve": fake_adapter})
 
     result = asyncio.run(api_module._arsenal_execute_detached(
         api_module.ArsenalExecuteRequest(
@@ -10226,9 +10239,13 @@ def test_arsenal_execute_detached_persists_bounded_read_result(monkeypatch):
 
     monkeypatch.setattr(api_module, "db_pool", pool)
     monkeypatch.setattr(api_module, "_validate_arsenal_execute_request", fake_validate)
+    monkeypatch.setattr(arsenal_router_module, "_validate_arsenal_execute_request", fake_validate)
     monkeypatch.setattr(api_module, "_validate_campaign_action_for_execution", lambda *args: asyncio.sleep(0))
+    monkeypatch.setattr(arsenal_router_module, "_validate_campaign_action_for_execution", lambda *args: asyncio.sleep(0))
     monkeypatch.setattr(api_module, "_arsenal_readonly_adapters", lambda: {"asm.gaps": fake_adapter})
+    monkeypatch.setattr(arsenal_router_module, "_arsenal_readonly_adapters", lambda: {"asm.gaps": fake_adapter})
     monkeypatch.setattr(api_module, "_arsenal_gated_adapters", lambda: {})
+    monkeypatch.setattr(arsenal_router_module, "_arsenal_gated_adapters", lambda: {})
 
     result = asyncio.run(api_module._arsenal_execute_detached(
         api_module.ArsenalExecuteRequest(
@@ -12917,6 +12934,7 @@ def test_arsenal_execute_links_dispatched_action_to_campaign(monkeypatch):
         return {"campaigns": []}
 
     monkeypatch.setattr(api_module, "arsenal_campaigns", fake_campaigns)
+    monkeypatch.setattr(arsenal_router_module, "arsenal_campaigns", fake_campaigns)
     conn = _CampaignLinkRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn, api_module.ArsenalExecuteRequest(command="campaign.list", campaign_id=CAMPAIGN_ID)
@@ -12932,6 +12950,7 @@ def test_arsenal_execute_links_result_to_planned_campaign_action(monkeypatch):
         return {"campaigns": []}
 
     monkeypatch.setattr(api_module, "arsenal_campaigns", fake_campaigns)
+    monkeypatch.setattr(arsenal_router_module, "arsenal_campaigns", fake_campaigns)
     conn = _CampaignLinkRecordingConn(action_row=_campaign_action_row())
     result = asyncio.run(api_module._arsenal_execute(
         conn,
@@ -16845,6 +16864,7 @@ def test_research_preflight_claim_loser_does_not_queue_duplicate(monkeypatch):
 
     monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
     monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
+    monkeypatch.setattr(arsenal_router_module, "_research_campaign_readiness", fake_readiness)
     monkeypatch.setattr(api_module, "_submit_scan", forbidden_submit)
 
     result = asyncio.run(api_module._research_campaign_self_repair(campaign_id))
@@ -16932,6 +16952,7 @@ def test_research_preflight_terminal_running_marker_can_claim_successor(monkeypa
     conn = Conn()
     monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
     monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
+    monkeypatch.setattr(arsenal_router_module, "_research_campaign_readiness", fake_readiness)
     monkeypatch.setattr(api_module, "_research_campaign_budget_snapshot", fake_budget)
     monkeypatch.setattr(api_module, "_submit_scan", fake_submit)
 
@@ -17028,6 +17049,7 @@ def test_research_stale_queueing_claim_and_transient_worker_failure_recover(monk
     conn = Conn()
     monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
     monkeypatch.setattr(api_module, "_research_campaign_readiness", fake_readiness)
+    monkeypatch.setattr(arsenal_router_module, "_research_campaign_readiness", fake_readiness)
     monkeypatch.setattr(api_module, "_research_campaign_budget_snapshot", fake_budget)
     monkeypatch.setattr(api_module, "_submit_scan", stale_workers)
 
