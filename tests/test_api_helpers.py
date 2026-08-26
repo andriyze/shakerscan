@@ -276,6 +276,7 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
+from devices import router as devices_router_module  # noqa: E402
 from hunt import run_router as hunt_run_router_module  # noqa: E402
 from hunt.start_contract import (  # noqa: E402
     MAX_HUNT_BODY_BYTES,
@@ -1872,7 +1873,7 @@ def test_agent_tool_readiness_requires_current_build_and_complete_arsenal(monkey
             }).encode()}
 
     monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
-    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
+    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "expected")
     monkeypatch.setattr(api_module, "current_scanner_version", lambda: "build")
 
     readiness = api_module._agent_tool_worker_readiness()
@@ -2050,7 +2051,7 @@ def test_device_worker_readiness_uses_its_own_current_capable_registry(monkeypat
 
     monkeypatch.setenv("DEVICE_POSTURE_ENABLED", "true")
     monkeypatch.setattr(api_module, "get_redis", lambda: RedisStub())
-    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
+    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "expected")
     monkeypatch.setattr(api_module, "current_scanner_version", lambda: "label")
 
     readiness = api_module._device_worker_readiness()
@@ -2082,7 +2083,7 @@ def test_device_worker_readiness_fails_closed_for_stale_or_missing_port_tools(mo
 
     monkeypatch.setenv("DEVICE_POSTURE_ENABLED", "true")
     monkeypatch.setattr(api_module, "get_redis", lambda: RedisStub())
-    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
+    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "expected")
     monkeypatch.setattr(api_module, "current_scanner_version", lambda: "label")
 
     readiness = api_module._device_worker_readiness()
@@ -3128,11 +3129,12 @@ def test_confirmed_ssh_dispatch_requires_durable_queue_handoff(confirmed):
 
 
 def test_device_routes_confirm_handoff_before_reporting_queued():
-    source = Path(api_module.__file__).read_text()
-    scan_route = source[source.index("async def scan_device("):]
-    scan_route = scan_route[:scan_route.index('\n\n@app.post("/devices/{device_id}/verify-service")')]
-    probe_route = source[source.index("async def verify_device_service("):]
-    probe_route = probe_route[:probe_route.index('\n\n@app.get("/device-scans")')]
+    # Read each handler's own source rather than slicing the module by the route
+    # that happens to follow it, so moving a route cannot silently empty this gate.
+    import inspect
+
+    scan_route = inspect.getsource(devices_router_module.scan_device)
+    probe_route = inspect.getsource(devices_router_module.verify_device_service)
 
     for route in (scan_route, probe_route):
         assert "_QUEUE_HANDOFF_CONFIRMATION_KEY: False" in route
@@ -17638,12 +17640,12 @@ def test_device_control_verifier_restores_query_state_before_promotion(monkeypat
 
     pool = _Pool()
     monkeypatch.setattr(api_module, "db_pool", pool)
-    monkeypatch.setattr(api_module, "decrypt_secret", lambda _value: raw_payload)
-    monkeypatch.setattr(api_module, "_resolve_imported_device_requests", lambda _payload: [request])
-    monkeypatch.setattr(api_module, "_device_confirmed_web_origins", _origins)
-    monkeypatch.setattr(api_module, "_device_request_pinned_http", _read)
-    monkeypatch.setattr(api_module, "_device_request_pinned_control_http", _control)
-    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "test-build")
+    monkeypatch.setattr(devices_router_module, "decrypt_secret", lambda _value: raw_payload)
+    monkeypatch.setattr(devices_router_module, "_resolve_imported_device_requests", lambda _payload: [request])
+    monkeypatch.setattr(devices_router_module, "_device_confirmed_web_origins", _origins)
+    monkeypatch.setattr(devices_router_module, "_device_request_pinned_http", _read)
+    monkeypatch.setattr(devices_router_module, "_device_request_pinned_control_http", _control)
+    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "test-build")
 
     state = api_module.device_agent.seed_state(
         objective="verify owned TV power authorization",

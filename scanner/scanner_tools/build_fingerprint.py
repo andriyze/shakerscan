@@ -36,6 +36,7 @@ FINGERPRINT_SOURCE_FILES: tuple[tuple[str, str, str], ...] = (
 # running stale code in any one of them must never advertise the same build fingerprint.
 V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "capabilities",
+    "devices",
     "exposure",
     "finding_exceptions",
     "findings",
