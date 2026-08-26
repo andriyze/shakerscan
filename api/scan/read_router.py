@@ -186,8 +186,9 @@ async def preview_scan_contract(request: ScanFamilyPreviewRequest):
             "network_discovery": contract.policy.network_discovery,
         },
         "minimum_family_quotas": {
-            family: SCAN_MINIMUM_FAMILY_QUOTAS[family]
-            for family in resolved if family in SCAN_MINIMUM_FAMILY_QUOTAS
+            family: SCAN_MINIMUM_FAMILY_QUOTAS[contract.budget_profile][family]
+            for family in resolved
+            if family in SCAN_MINIMUM_FAMILY_QUOTAS[contract.budget_profile]
         },
         "execution_topology": request.execution_topology,
         "ai_used": False,

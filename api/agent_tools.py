@@ -658,6 +658,7 @@ def build_enforced_scanner_plan(
         raise AgentToolError("scanner reservation has no wall-clock capacity")
     runtime = dict(runtime_paths or {})
     internal_options = dict(options or {})
+    batch_attempt = internal_options.pop("_batch_attempt", False) is True
     if scanner == "ffuf" and runtime.get("ffuf_wordlist"):
         internal_options["wordlist"] = "common"
 
@@ -785,6 +786,15 @@ def build_enforced_scanner_plan(
                 "redirects": 0,
                 "public_oob": False,
             }
+        elif batch_attempt and http >= 1:
+            hard = {"http_requests": http, "tool_wall_seconds": wall}
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            mode, method = "conservative", "runtime_transport_wall_limiter"
+            proof_inputs = {
+                "profile": "batch_attempt", "targets": 1,
+                "connection_ceiling": http, "wall_seconds": wall,
+                "retries": 0, "redirects": 0, "public_oob": False,
+            }
         elif http >= 4_000 and wall >= 300:
             hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
             timeout_seconds, timeout_ms = 300, 300_000
@@ -800,7 +810,16 @@ def build_enforced_scanner_plan(
             )
     elif scanner == "dalfox":
         http = int(reservation.get("http_requests") or 0)
-        if http >= 400 and wall >= 120:
+        if batch_attempt and http >= 1:
+            hard = {"http_requests": http, "tool_wall_seconds": wall}
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            mode, method = "conservative", "runtime_transport_wall_limiter"
+            proof_inputs = {
+                "profile": "batch_attempt", "targets": 1,
+                "connection_ceiling": http, "wall_seconds": wall,
+                "workers": 3, "headless": False, "blind_oob": False,
+            }
+        elif http >= 400 and wall >= 120:
             hard = {"http_requests": 400, "tool_wall_seconds": 120}
             timeout_seconds, timeout_ms = 120, 120_000
             mode, method = "conservative", "fixed_conservative_profile"
@@ -821,7 +840,12 @@ def build_enforced_scanner_plan(
         _replace_argv_value(argv, "--threads", 1)
         _replace_argv_value(argv, "--retries", 0)
         http = int(reservation.get("http_requests") or 0)
-        if http >= 900 and wall >= 300:
+        if batch_attempt and http >= 1:
+            hard = {"http_requests": http, "tool_wall_seconds": wall}
+            timeout_seconds, timeout_ms = wall, wall * 1_000
+            mode, method = "conservative", "runtime_transport_wall_limiter"
+            techniques, profile = "BEUT", "batch_attempt"
+        elif http >= 900 and wall >= 300:
             hard = {"http_requests": 900, "tool_wall_seconds": 300}
             timeout_seconds, timeout_ms = 300, 300_000
             mode, method = "conservative", "fixed_conservative_profile"
@@ -832,6 +856,7 @@ def build_enforced_scanner_plan(
             )
         proof_inputs = {
             "profile": profile, "targets": 1, "candidate_requests": 1,
+            "connection_ceiling": http if batch_attempt else None,
             "crawl_depth": 0, "retries": 0, "threads": 1,
             "delay_ms": 1_000, "startup_burst": 1,
             "techniques": techniques, "shell": False, "file_read": False,

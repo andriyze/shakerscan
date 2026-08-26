@@ -150,13 +150,17 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "http.request",
       "sqli.request_verify",
       "sqli.verify",
+      "sqli.verify_batch",
+      "templates.active_batch",
+      "templates.passive_batch",
       "templates.passive_scan",
       "templates.scan",
       "web.content_discover",
       "web.crawl",
       "web.probe",
       "xss.request_verify",
-      "xss.verify"
+      "xss.verify",
+      "xss.verify_batch"
     ],
     "supported_auth_kinds": [
       "api_key_header",
@@ -189,7 +193,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     },
     {
       "capabilities": [
-        "templates.passive_scan"
+        "templates.passive_batch"
       ],
       "default_enabled": true,
       "description": "Reviewed read-only Nuclei templates included in passive Scan presets.",
@@ -201,7 +205,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     },
     {
       "capabilities": [
-        "templates.scan"
+        "templates.active_batch"
       ],
       "default_enabled": false,
       "description": "Explicit active Nuclei templates, scheduled after deterministic verifier quotas.",
@@ -213,7 +217,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     },
     {
       "capabilities": [
-        "xss.verify",
+        "xss.verify_batch",
         "xss.request_verify"
       ],
       "default_enabled": false,
@@ -226,7 +230,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     },
     {
       "capabilities": [
-        "sqli.verify",
+        "sqli.verify_batch",
         "sqli.request_verify"
       ],
       "default_enabled": false,

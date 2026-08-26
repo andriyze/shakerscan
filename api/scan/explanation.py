@@ -25,6 +25,7 @@ _TERMINAL = frozenset({
 _SUCCESS = frozenset({"success"})
 _ACTIVE_VERIFIERS = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
+    "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
     "browser.proof",
 })
 _TRAFFIC_DIMENSIONS = frozenset({

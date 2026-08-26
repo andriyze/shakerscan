@@ -226,6 +226,14 @@ class ScanExecutionBackend(Protocol):
         self, action_id: str, reference: ScanWorkManifestReference,
     ) -> ScanWorkManifest: ...
 
+    async def load_batch_attempts(
+        self, action_id: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
+
+    async def checkpoint_batch_attempt(
+        self, action_id: str, attempt: Mapping[str, Any],
+    ) -> None: ...
+
     async def cancellation_requested(self) -> bool: ...
 
 
@@ -1078,6 +1086,85 @@ class PostgresScanExecutionBackend:
         if manifest is None or manifest.reference() != reference:
             raise ScanExecutionBackendError("authorized work manifest is unavailable")
         return manifest
+
+    async def load_batch_attempts(
+        self, action_id: str,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Load immutable completed sub-attempts for one local batch action."""
+        action = self._require_action(action_id)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT attempt_id, candidate_id, status, budget_consumed,
+                          observations_json, errors_json, proof_state
+                     FROM scan_action_attempt_checkpoints
+                    WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
+                    ORDER BY created_at, attempt_id""",
+                uuid.UUID(self._plan.scan_id), action.action_id, action.action_digest,
+            )
+        return tuple({
+            "attempt_id": str(row["attempt_id"]),
+            "candidate_id": str(row["candidate_id"]),
+            "status": str(row["status"]),
+            "budget_consumed": _json_object(
+                row["budget_consumed"], name="batch attempt budget",
+            ),
+            "observations": tuple(_json_array(
+                row["observations_json"], name="batch attempt observations",
+            )),
+            "errors": tuple(str(item) for item in _json_array(
+                row["errors_json"], name="batch attempt errors",
+            )),
+            "proof_state": str(row.get("proof_state") or "") or None,
+        } for row in rows)
+
+    async def checkpoint_batch_attempt(
+        self, action_id: str, attempt: Mapping[str, Any],
+    ) -> None:
+        """Durably freeze one completed candidate attempt before continuing."""
+        action = self._require_action(action_id)
+        attempt_id = str(attempt.get("attempt_id") or "").strip().lower()
+        candidate_id = str(attempt.get("candidate_id") or "").strip()
+        status = str(attempt.get("status") or "").strip().lower()
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", attempt_id)
+            or not candidate_id
+            or status not in {
+                "success", "partial", "skipped", "blocked", "failed",
+                "cancelled", "timed_out",
+            }
+        ):
+            raise ScanExecutionBackendError("batch attempt checkpoint is invalid")
+        budget = {
+            str(name): max(0, int(amount))
+            for name, amount in dict(attempt.get("budget_consumed") or {}).items()
+        }
+        observations = [
+            dict(item) for item in attempt.get("observations") or ()
+            if isinstance(item, Mapping)
+        ]
+        errors = [str(item)[:500] for item in attempt.get("errors") or ()][:20]
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO scan_action_attempt_checkpoints (
+                       scan_id, action_id, action_digest, attempt_id, candidate_id,
+                       status, budget_consumed, observations_json, errors_json,
+                       proof_state
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10)
+                   ON CONFLICT (scan_id, action_id, attempt_id) DO UPDATE
+                      SET updated_at=now()
+                    WHERE scan_action_attempt_checkpoints.action_digest=EXCLUDED.action_digest
+                      AND scan_action_attempt_checkpoints.candidate_id=EXCLUDED.candidate_id
+                      AND scan_action_attempt_checkpoints.status=EXCLUDED.status
+                  RETURNING attempt_id""",
+                uuid.UUID(self._plan.scan_id), action.action_id, action.action_digest,
+                attempt_id, candidate_id, status,
+                json.dumps(budget, sort_keys=True),
+                json.dumps(observations, sort_keys=True),
+                json.dumps(errors),
+                str(attempt.get("proof_state") or "") or None,
+            )
+        if row is None:
+            raise ScanExecutionBackendError("batch attempt checkpoint conflicts with authority")
 
     async def cancellation_requested(self) -> bool:
         async with self._pool.acquire() as conn:

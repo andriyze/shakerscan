@@ -446,6 +446,62 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "templates.passive_batch",
+            "Reviewed GET-only Nuclei pack over one immutable endpoint slice.",
+            "internal", "read_only", _HTTP_TARGETS, "nuclei.batch", "1",
+            None, {"http_requests": 350, "tool_wall_seconds": 60},
+            {
+                "network_reachability": True,
+                "binary": "nuclei",
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "target_ref": {"type": "string"},
+                "target_manifest_ref": {"type": "object"},
+                "template_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=(
+                "target_manifest_ref", "template_manifest_ref", "slice",
+                "profile", "proof_policy",
+            )),
+            "nuclei-batch/v1", (
+                "candidate_attempt", "template_match", "request_response",
+            ),
+            retest_contract="rerun-template-on-same-surface",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
+            "templates.active_batch",
+            "Active Nuclei pack over one immutable endpoint slice.",
+            "internal", "active", _HTTP_TARGETS, "nuclei.batch", "1",
+            "active_testing", {"http_requests": 4_000, "tool_wall_seconds": 300},
+            {
+                "network_reachability": True,
+                "binary": "nuclei",
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "target_ref": {"type": "string"},
+                "target_manifest_ref": {"type": "object"},
+                "template_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=(
+                "target_manifest_ref", "template_manifest_ref", "slice",
+                "profile", "proof_policy",
+            )),
+            "nuclei-batch/v1", (
+                "candidate_attempt", "template_match", "request_response",
+            ),
+            retest_contract="rerun-template-or-family-on-same-surface",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "web.crawl", "Bounded same-host crawl and JavaScript endpoint discovery.",
             "external_tool", "read_only", _HTTP_TARGETS, "katana", "1",
             None, {"http_requests": 150, "tool_wall_seconds": 75},
@@ -484,6 +540,31 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
+            "xss.verify_batch",
+            "Bounded Dalfox verification over one immutable candidate slice.",
+            "internal", "active", _HTTP_TARGETS, "dalfox.batch", "1",
+            "active_testing", {"http_requests": 1_000, "tool_wall_seconds": 300},
+            {
+                "network_reachability": True,
+                "binary": "dalfox",
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "candidate_manifest_ref": {"type": "object"},
+                "endpoint_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=(
+                "candidate_manifest_ref", "slice", "profile", "proof_policy",
+            )),
+            "dalfox-batch/v1", (
+                "candidate_attempt", "xss_reflection_or_browser_proof",
+            ),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "sqli.verify", "Bounded target-bound SQL injection verification.",
             "external_tool", "active", _HTTP_TARGETS, "sqlmap", "1",
             "active_testing", {"http_requests": 900, "tool_wall_seconds": 300},
@@ -493,6 +574,33 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "sqlmap", "sqlmap", 300_000, ("--version",), ("/opt/tools/sqlmap",),
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",
             hunt_executor="worker_scanner",
+        ),
+        CapabilitySpec(
+            "sqli.verify_batch",
+            "Bounded SQLMap verification over one immutable candidate slice.",
+            "internal", "active", _HTTP_TARGETS, "sqlmap.batch", "1",
+            "active_testing", {"http_requests": 1_800, "tool_wall_seconds": 300},
+            {
+                "network_reachability": True,
+                "binary": "sqlmap",
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "candidate_manifest_ref": {"type": "object"},
+                "endpoint_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=(
+                "candidate_manifest_ref", "slice", "profile", "proof_policy",
+            )),
+            "sqlmap-batch/v1", (
+                "candidate_attempt", "sqli_dbms_or_error_proof",
+            ),
+            arsenal_status="gated",
+            retest_contract="rerun-request-with-sqli-proof",
+            planner_visible=False,
         ),
         CapabilitySpec(
             "xss.request_verify",

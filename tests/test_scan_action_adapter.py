@@ -104,6 +104,7 @@ class Backend:
         self.results = dict(results or {})
         self.observations = dict(observations or {})
         self.manifests = dict(manifests or {})
+        self.attempts = {}
 
     async def load_result(self, action_id):
         return self.results.get(action_id)
@@ -113,6 +114,12 @@ class Backend:
 
     async def load_work_manifest(self, _action_id, reference):
         return self.manifests[reference.manifest_id]
+
+    async def load_batch_attempts(self, action_id):
+        return tuple(self.attempts.get(action_id, {}).values())
+
+    async def checkpoint_batch_attempt(self, action_id, attempt):
+        self.attempts.setdefault(action_id, {})[attempt["attempt_id"]] = dict(attempt)
 
 
 def _dispatcher(
@@ -585,6 +592,89 @@ def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
 
 async def _noop():
     return None
+
+
+def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/one", "concrete_path": "/one",
+                    "query_keys": ["first"], "source": "web.crawl",
+                },
+                {
+                    "method": "GET", "scheme": "https",
+                    "host": "app.example.test", "port": 443,
+                    "normalized_path": "/two", "concrete_path": "/two",
+                    "query_keys": ["second"], "source": "web.crawl",
+                },
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.web_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+            "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True,
+            parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    first = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    second = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert len(calls) == 2
+    assert len(backend.attempts[action.action_id]) == 2
+    assert {item["candidate_id"] for item in backend.attempts[action.action_id].values()} == {
+        item["candidate_id"] for item in candidates.entries
+    }
+    assert second.redacted_execution["resumed_count"] == 2
+    assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
 def test_database_neutral_finalizer_reads_only_durable_results_and_observations():

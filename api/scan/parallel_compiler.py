@@ -505,9 +505,9 @@ def _capability_family(capability_name: str) -> str:
         return "xss"
     if capability_name.startswith("sqli."):
         return "sqli"
-    if capability_name == "templates.passive_scan":
+    if capability_name in {"templates.passive_scan", "templates.passive_batch"}:
         return "nuclei_passive"
-    if capability_name == "templates.scan":
+    if capability_name in {"templates.scan", "templates.active_batch"}:
         return "nuclei_active"
     if capability_name.startswith("authz."):
         return "bola"

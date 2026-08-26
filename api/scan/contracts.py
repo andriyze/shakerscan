@@ -46,19 +46,17 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "standard_active": ("recon", "nuclei_passive", "xss", "sqli"),
     "custom": (),
 }
-SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, int] = {
-    # Per-candidate execution can guarantee one attempt under every preset.
-    # The verifier-batch recovery step raises this reviewed floor without
-    # multiplying process reservations.
-    "xss": 1,
-    "sqli": 1,
+SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
+    "fast": {"xss": 5, "sqli": 5},
+    "balanced": {"xss": 20, "sqli": 10},
+    "thorough": {"xss": 100, "sqli": 50},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": ("web.probe", "web.crawl", "web.content_discover"),
-    "nuclei_passive": ("templates.passive_scan",),
-    "nuclei_active": ("templates.scan",),
-    "xss": ("xss.verify", "xss.request_verify"),
-    "sqli": ("sqli.verify", "sqli.request_verify"),
+    "nuclei_passive": ("templates.passive_batch",),
+    "nuclei_active": ("templates.active_batch",),
+    "xss": ("xss.verify_batch", "xss.request_verify"),
+    "sqli": ("sqli.verify_batch", "sqli.request_verify"),
     "bola": ("authz.verify",),
 }
 _SCAN_V2_BASELINE_CAPABILITIES = (

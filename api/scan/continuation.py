@@ -40,9 +40,13 @@ _LEGACY_CONTINUATION_CAPABILITIES = (
     "authz.verify",
     "sqli.request_verify",
     "sqli.verify",
+    "sqli.verify_batch",
     "templates.scan",
+    "templates.passive_batch",
+    "templates.active_batch",
     "xss.request_verify",
     "xss.verify",
+    "xss.verify_batch",
 )
 
 

@@ -90,6 +90,33 @@ CREATE TABLE IF NOT EXISTS scan_capability_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_scan_capability_actions_scan_status
     ON scan_capability_actions(scan_id, status, ordinal);
+CREATE TABLE IF NOT EXISTS scan_action_attempt_checkpoints (
+    scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    action_id TEXT NOT NULL,
+    action_digest CHAR(64) NOT NULL CHECK (action_digest ~ '^[0-9a-f]{64}$'),
+    attempt_id CHAR(64) NOT NULL CHECK (attempt_id ~ '^[0-9a-f]{64}$'),
+    candidate_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'success','partial','skipped','blocked','failed','cancelled','timed_out'
+    )),
+    budget_consumed JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (
+        jsonb_typeof(budget_consumed) = 'object'
+    ),
+    observations_json JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+        jsonb_typeof(observations_json) = 'array'
+    ),
+    errors_json JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+        jsonb_typeof(errors_json) = 'array'
+    ),
+    proof_state TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scan_id, action_id, attempt_id),
+    FOREIGN KEY (scan_id, action_id)
+        REFERENCES scan_capability_actions(scan_id, action_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scan_action_attempt_checkpoints_action
+    ON scan_action_attempt_checkpoints(scan_id, action_id, created_at);
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS result_json JSONB;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS receipt_json JSONB;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS backend_name TEXT;

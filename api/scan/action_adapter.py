@@ -159,6 +159,12 @@ class ObservationBackend(Protocol):
     async def load_work_manifest(
         self, action_id: str, reference: ScanWorkManifestReference,
     ) -> ScanWorkManifest: ...
+    async def load_batch_attempts(
+        self, action_id: str,
+    ) -> tuple[Mapping[str, Any], ...]: ...
+    async def checkpoint_batch_attempt(
+        self, action_id: str, attempt: Mapping[str, Any],
+    ) -> None: ...
 
 
 class ScanActionAdapterError(RuntimeError):
@@ -999,6 +1005,265 @@ class DatabaseNeutralScanActionDispatcher:
             action, adapter, heartbeat, managed_cancellation=True,
         )
 
+    async def _external_batch(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """Run a resumable ranked manifest slice under one durable reservation."""
+        batch_contracts = {
+            "xss.verify_batch": ("xss.verify", "dalfox", ScanWorkManifestKind.CANDIDATE),
+            "sqli.verify_batch": ("sqli.verify", "sqlmap", ScanWorkManifestKind.CANDIDATE),
+            "templates.passive_batch": (
+                "templates.passive_scan", "nuclei", ScanWorkManifestKind.ENDPOINT,
+            ),
+            "templates.active_batch": (
+                "templates.scan", "nuclei", ScanWorkManifestKind.ENDPOINT,
+            ),
+        }
+        legacy_capability, tool, manifest_kind = batch_contracts[action.capability_name]
+        manifest_argument = (
+            "candidate_manifest_ref"
+            if manifest_kind is ScanWorkManifestKind.CANDIDATE
+            else "target_manifest_ref"
+        )
+        manifest = await self._work_manifest(action, manifest_argument, manifest_kind)
+        endpoints = (
+            await self._work_manifest(
+                action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+            )
+            if manifest_kind is ScanWorkManifestKind.CANDIDATE else manifest
+        )
+        if manifest is None or endpoints is None:
+            return self._skip(action, "manifest_unavailable")
+        raw_slice = action.capability_args.get("slice")
+        if not isinstance(raw_slice, Mapping):
+            raise ScanActionAdapterError("batch action slice is invalid")
+        start = raw_slice.get("start")
+        count = raw_slice.get("count")
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(count, bool) or not isinstance(count, int)
+            or not 1 <= count <= 50
+        ):
+            raise ScanActionAdapterError("batch action slice is invalid")
+        stop = min(len(manifest.entries), start + count)
+        rows = tuple(enumerate(manifest.entries[start:stop], start=start))
+        if not rows:
+            return self._skip(action, "not_applicable")
+        template_options: dict[str, Any] = {}
+        if tool == "nuclei":
+            template_manifest = await self._work_manifest(
+                action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,
+            )
+            if template_manifest is None:
+                raise ScanActionAdapterError(
+                    "Nuclei batch has no immutable template manifest"
+                )
+            try:
+                template_options = canonical_nuclei_options_for_manifest(
+                    template_manifest, action_id=action.action_id,
+                )
+            except ScanWorkManifestError as exc:
+                raise ScanActionAdapterError(str(exc)) from exc
+        load_attempts = getattr(self.backend, "load_batch_attempts", None)
+        checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
+        if not callable(load_attempts) or not callable(checkpoint_attempt):
+            raise ScanActionAdapterError(
+                "batch action backend has no durable attempt checkpoint contract"
+            )
+        completed = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in await load_attempts(action.action_id)
+            if isinstance(item, Mapping)
+        }
+        manifest_digest = manifest.reference().manifest_digest
+        family = {
+            "xss.verify_batch": "xss",
+            "sqli.verify_batch": "sqli",
+            "templates.passive_batch": "nuclei_passive",
+            "templates.active_batch": "nuclei_active",
+        }[action.capability_name]
+        started_at = datetime.now(timezone.utc).isoformat()
+        observations: list[Mapping[str, Any]] = []
+        errors: list[str] = []
+        consumed = {name: 0 for name in action.requested_budget}
+        attempted = 0
+        resumed = 0
+        terminal_failure = False
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=legacy_capability,
+        )
+        for offset, (manifest_index, row) in enumerate(rows):
+            candidate_id = str(
+                row.get("candidate_id") or row.get("route_id")
+                or hashlib.sha256(str(manifest_index).encode()).hexdigest()
+            )
+            attempt_id = hashlib.sha256(
+                f"{manifest_digest}:{family}:{candidate_id}".encode()
+            ).hexdigest()
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                observations.extend(prior.get("observations") or ())
+                for name, amount in dict(prior.get("budget_consumed") or {}).items():
+                    consumed[name] = consumed.get(name, 0) + int(amount)
+                continue
+            if self.cancelled():
+                break
+            if manifest_kind is ScanWorkManifestKind.CANDIDATE:
+                execution_target = execution_url_for_manifest_candidate(
+                    endpoints, manifest, manifest_index,
+                )
+            else:
+                execution_target = execution_url_for_manifest_endpoint(
+                    manifest, manifest_index,
+                )
+            remaining_attempts = max(1, len(rows) - offset)
+            remaining_budget = {
+                name: max(0, int(limit) - int(consumed.get(name, 0)))
+                for name, limit in action.requested_budget.items()
+            }
+            sub_budget = {
+                name: max(1, amount // remaining_attempts)
+                for name, amount in remaining_budget.items() if amount > 0
+            }
+            if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
+                break
+            parsed = urllib.parse.urlsplit(execution_target)
+            registered_target = urllib.parse.urlunsplit(
+                (parsed.scheme, parsed.netloc, "", "", "")
+            )
+            socket_factory = FrozenTargetSocketFactory(
+                hostname=str(parsed.hostname or self.target.canonical_host),
+                port=parsed.port or (443 if parsed.scheme == "https" else 80),
+                frozen_addresses=self.target.allowed_addresses,
+            )
+            scanner_options = {"_batch_attempt": True}
+            args = dict(primary.capability_args())
+            if tool == "nuclei":
+                scanner_options.update(template_options)
+                args.update(template_options)
+            elif tool == "dalfox":
+                scanner_options["severity"] = "high"
+                args["severity"] = "high"
+            legacy_spec = CAPABILITY_REGISTRY.require(legacy_capability)
+            prepared = fit_prepared_scan_capability(
+                prepare_scan_external_capability(
+                    specification=legacy_spec,
+                    target=self.target,
+                    args=args,
+                    policy=self.policy,
+                ),
+                ledger_limits=sub_budget,
+            )
+            adapter = ScannerExecutionAdapter(
+                specification=legacy_spec,
+                process_payload={
+                    "job_id": f"{self.job_id}:{action.action_id}:{attempt_id[:16]}",
+                    "tool_name": tool,
+                    "execution_target": execution_target,
+                    "registered_target": registered_target,
+                    "scanner_options": scanner_options,
+                    "trusted_headers": primary.headers(),
+                    "timeout_ms": int(sub_budget["tool_wall_seconds"]) * 1_000,
+                    "pinned_address": socket_factory.primary_address,
+                    "authorized_addresses": list(self.target.allowed_addresses),
+                    "address_policy": socket_factory.policy_receipt,
+                    "oob_interactsh_server": None,
+                    "oob_interactsh_token": None,
+                },
+                process_runner=self.process_runner,
+                requested_budget=sub_budget,
+                redacted_execution=prepared.redacted_execution,
+            )
+            result = await CapabilityExecutor().execute(
+                CapabilityExecutionContext(
+                    specification=legacy_spec,
+                    target=self.target,
+                    requested_budget=sub_budget,
+                    adapter_managed_cancellation=True,
+                ),
+                adapter,
+                heartbeat=heartbeat,
+                cancelled=self.cancelled,
+            )
+            attempt_observations = tuple({
+                **dict(item),
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+            } for item in result.observations)
+            proof_state = next((
+                str(item.get("proof_state"))
+                for item in attempt_observations if item.get("proof_state")
+            ), "unproven")
+            response_hashes = sorted({
+                str(value)
+                for item in attempt_observations
+                for key, value in item.items()
+                if "sha256" in str(key).lower() and str(value)
+            })[:20]
+            attempt_observations = (
+                {
+                    "kind": "candidate_attempt",
+                    "attempt_id": attempt_id,
+                    "candidate_id": candidate_id,
+                    "family": family,
+                    "status": result.status,
+                    "proof_state": proof_state,
+                    "response_hashes": response_hashes,
+                    "budget_consumed": dict(result.actual_budget),
+                },
+                *attempt_observations,
+            )
+            attempt = {
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+                "status": result.status,
+                "budget_consumed": dict(result.actual_budget),
+                "observations": attempt_observations,
+                "errors": tuple(result.errors),
+                "proof_state": proof_state,
+            }
+            if result.status != "cancelled":
+                await checkpoint_attempt(action.action_id, attempt)
+            attempted += 1
+            observations.extend(attempt_observations)
+            errors.extend(str(item) for item in result.errors)
+            for name, amount in result.actual_budget.items():
+                consumed[name] = min(
+                    int(action.requested_budget.get(name, 0)),
+                    consumed.get(name, 0) + int(amount),
+                )
+            if result.status in {"failed", "timed_out"}:
+                terminal_failure = True
+            if result.status == "cancelled":
+                break
+        unattempted = max(0, len(rows) - attempted)
+        partial = unattempted > 0 or terminal_failure
+        return self._receipt(
+            action,
+            status="partial" if partial else "success",
+            parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
+            started_at=started_at,
+            observations=tuple(observations),
+            errors=tuple(errors[:20]),
+            consumed=consumed,
+            partial=partial,
+            timed_out=False,
+            redacted_execution={
+                "action_id": action.action_id,
+                "profile": action.capability_args.get("profile"),
+                "proof_policy": action.capability_args.get("proof_policy"),
+                "manifest_digest": manifest_digest,
+                "slice": {"start": start, "count": count},
+                "candidate_count": len(rows),
+                "attempted_count": attempted,
+                "resumed_count": resumed,
+                "unattempted_count": unattempted,
+                "checkpoint_mode": "after_each_candidate",
+            },
+        )
+
     async def _authz(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
@@ -1104,6 +1369,11 @@ class DatabaseNeutralScanActionDispatcher:
             "xss.verify", "sqli.verify",
         }:
             return await self._external(action, heartbeat)
+        if action.capability_name in {
+            "xss.verify_batch", "sqli.verify_batch",
+            "templates.passive_batch", "templates.active_batch",
+        }:
+            return await self._external_batch(action, heartbeat)
         if action.capability_name in {
             "xss.request_verify", "sqli.request_verify",
         }:

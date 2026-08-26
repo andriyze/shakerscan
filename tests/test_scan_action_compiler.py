@@ -86,6 +86,61 @@ def _request_candidate_manifest_ref(count: int = 1):
     ).canonical_dict()
 
 
+def test_large_manifest_compiles_to_bounded_batch_graph():
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000083",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="c" * 64,
+        entry_count=1526,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000084",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="d" * 64,
+        entry_count=1526,
+        status="complete",
+    ).canonical_dict()
+    templates = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=_target().digest,
+        include_active=True,
+    ).reference().canonical_dict()
+    base = _execution(include=(
+        "xss", "sqli", "nuclei_passive", "nuclei_active",
+    ))
+    execution = ScanExecutionPlan(
+        policy=base.policy,
+        budget_profile="thorough",
+        budget=base.budget,
+    )
+
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=templates,
+        action_scope="endpoint",
+    )
+    batches = [
+        action for action in plan.actions
+        if action.capability_name.endswith("_batch")
+    ]
+
+    assert len(plan.actions) < 100
+    assert {action.capability_name for action in batches} == {
+        "templates.passive_batch", "templates.active_batch",
+        "xss.verify_batch", "sqli.verify_batch",
+    }
+    assert all(1 <= action.capability_args["slice"]["count"] <= 50 for action in batches)
+    assert sum(action.required for action in batches if action.capability_name == "xss.verify_batch") == 2
+    assert sum(action.required for action in batches if action.capability_name == "sqli.verify_batch") == 2
+
+
 def test_compiler_adds_separate_exact_request_verifiers_only_with_mutation_authority():
     compiler = ScanActionPlanCompiler()
     disabled = compiler.compile(
@@ -164,10 +219,10 @@ def test_parallel_family_scope_narrows_actions_and_is_digest_bound():
         family_scope=("sqli",),
     )
 
-    assert any(action.capability_name == "xss.verify" for action in xss.actions)
-    assert not any(action.capability_name == "sqli.verify" for action in xss.actions)
-    assert any(action.capability_name == "sqli.verify" for action in sqli.actions)
-    assert not any(action.capability_name == "xss.verify" for action in sqli.actions)
+    assert any(action.capability_name == "xss.verify_batch" for action in xss.actions)
+    assert not any(action.capability_name == "sqli.verify_batch" for action in xss.actions)
+    assert any(action.capability_name == "sqli.verify_batch" for action in sqli.actions)
+    assert not any(action.capability_name == "xss.verify_batch" for action in sqli.actions)
     assert xss.plan_digest != sqli.plan_digest
     assert xss.actions[0].input_binding_digest != sqli.actions[0].input_binding_digest
 
@@ -288,7 +343,7 @@ def test_passive_scan_compiles_bounded_read_only_surface_discovery():
     )
     assert "active.templates" not in by_id
     assert by_id["passive.templates"].capability_name == (
-        "templates.passive_scan"
+        "templates.passive_batch"
     )
     assert by_id["passive.templates"].dependencies == ()
     assert by_id["passive.templates"].capability_args["target_ref"] == (
@@ -326,7 +381,7 @@ def test_compiler_requires_and_binds_one_complete_nuclei_template_manifest():
         template_manifest_ref=manifest.reference().canonical_dict(),
     )
     action = next(
-        item for item in plan.actions if item.capability_name == "templates.scan"
+        item for item in plan.actions if item.capability_name == "templates.active_batch"
     )
     assert action.capability_args["template_manifest_ref"] == (
         manifest.reference().canonical_dict()
@@ -508,20 +563,19 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     )
     endpoint_by_id = {action.action_id: action for action in endpoint.actions}
     assert set(endpoint_by_id) == {
-        "inputs.auth_primary", "verify.xss", "verify.xss.00001",
-        "verify.xss.00002", "verify.xss.00003", "finalize.report",
+        "inputs.auth_primary", "verify.xss", "finalize.report",
     }
     xss_actions = [
         action for action in endpoint.actions
-        if action.capability_name == "xss.verify"
+        if action.capability_name == "xss.verify_batch"
     ]
     assert all(
         action.dependencies == ("inputs.auth_primary",)
         for action in xss_actions
     )
     assert [
-        action.capability_args["candidate_index"] for action in xss_actions
-    ] == [0, 1, 2, 3]
+        action.capability_args["slice"] for action in xss_actions
+    ] == [{"start": 0, "count": 4}]
     assert all(
         action.capability_args["candidate_manifest_ref"] == candidate_ref
         and action.capability_args["endpoint_manifest_ref"] == endpoint_ref
@@ -570,18 +624,15 @@ def test_explicit_xss_family_compiles_its_minimum_executable_quota():
         action_scope="full",
     )
     actions = [
-        action for action in plan.actions if action.capability_name == "xss.verify"
+        action for action in plan.actions if action.capability_name == "xss.verify_batch"
     ]
 
-    # Preset resolution promises a non-zero executable quota for every selected
-    # active family. Per-candidate actions are replaced by bounded batches in the
-    # next recovery step; until then, preserve the published minimum exactly.
     assert len(actions) >= 1
-    assert actions[0].capability_args["candidate_index"] == 0
+    assert actions[0].capability_args["slice"] == {"start": 0, "count": 20}
     allocation = allocate_scan_action_plan(plan, _budget())
     allocated_actions = [
         action for action in allocation.plan.actions
-        if action.capability_name == "xss.verify"
+        if action.capability_name == "xss.verify_batch"
         and action.admission_status == "planned"
     ]
     assert len(allocated_actions) >= 1
@@ -612,7 +663,7 @@ def test_resolved_family_allowlist_removes_all_unselected_xss_actions():
     )
 
     assert not any(action.capability_name.startswith("xss.") for action in plan.actions)
-    assert any(action.capability_name == "sqli.verify" for action in plan.actions)
+    assert any(action.capability_name == "sqli.verify_batch" for action in plan.actions)
 
 
 def test_explicit_verifier_remains_visible_when_candidate_manifest_is_empty():
@@ -643,11 +694,11 @@ def test_explicit_verifier_remains_visible_when_candidate_manifest_is_empty():
     )
     verifier = next(
         action for action in plan.actions
-        if action.capability_name == "xss.verify"
+        if action.capability_name == "xss.verify_batch"
     )
 
     assert verifier.required is True
-    assert verifier.capability_args["candidate_index"] == 0
+    assert verifier.capability_args["slice"] == {"start": 0, "count": 1}
     assert verifier.capability_args["candidate_manifest_ref"] == candidate_ref
 
 

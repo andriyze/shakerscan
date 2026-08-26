@@ -29894,9 +29894,9 @@ def _compile_scan_admission_action_authority(
         )
 
     required_by_family = {
-        "nuclei_active": "templates.scan",
-        "xss": "xss.verify",
-        "sqli": "sqli.verify",
+        "nuclei_active": "templates.active_batch",
+        "xss": "xss.verify_batch",
+        "sqli": "sqli.verify_batch",
         "bola": "authz.verify",
     }
     allowed_by_family = dict(required_by_family)

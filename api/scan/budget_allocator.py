@@ -68,6 +68,8 @@ _PRIMARY_ACTIVE_VERIFIER_IDS = {
     "verify.authz",
 }
 _ACTIVE_VERIFIER_CAPABILITIES = {
+    "sqli.verify_batch",
+    "xss.verify_batch",
     "sqli.verify",
     "xss.verify",
     "sqli.request_verify",
@@ -95,7 +97,7 @@ def _allocation_priority(action: ScanAction) -> int:
         return 3
     if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
         return 4
-    if action.capability_name == "templates.scan":
+    if action.capability_name in {"templates.scan", "templates.active_batch"}:
         return 5
     return 6
 

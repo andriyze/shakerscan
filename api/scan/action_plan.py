@@ -47,6 +47,32 @@ _SCHEMA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/-]{0,127}$")
 _MAX_CANONICAL_BYTES = 512 * 1024
 _MAX_ACTIONS = 512
 _MAX_DEPENDENCIES = 511
+_BATCH_CAPABILITIES = frozenset({
+    "xss.verify_batch",
+    "sqli.verify_batch",
+    "templates.passive_batch",
+    "templates.active_batch",
+})
+_BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
+    "fast": {
+        "xss.verify_batch": (5, {"http_requests": 100, "tool_wall_seconds": 90}),
+        "sqli.verify_batch": (5, {"http_requests": 400, "tool_wall_seconds": 120}),
+        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
+        "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
+    },
+    "balanced": {
+        "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
+        "sqli.verify_batch": (10, {"http_requests": 800, "tool_wall_seconds": 180}),
+        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
+        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
+    },
+    "thorough": {
+        "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
+        "sqli.verify_batch": (25, {"http_requests": 1_800, "tool_wall_seconds": 300}),
+        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
+        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
+    },
+}
 _FORBIDDEN_ACTION_KEYS = frozenset({
     "password", "passwd", "secret", "token", "authorization", "cookie", "cookies",
     "private_key", "client_secret", "api_key", "auth_header", "auth_cookies",
@@ -705,7 +731,7 @@ class ScanActionPlanCompiler:
         active_nuclei = active and enabled("nuclei_active")
         bola = active and enabled("bola")
         template_actions_expected = (
-            (scope in {"full", "endpoint"} and passive_nuclei)
+            (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
         )
         if template_actions_expected and (
@@ -941,6 +967,29 @@ class ScanActionPlanCompiler:
             override = dict(action_budgets or {}).get(blueprint.action_id)
             if override is not None:
                 return override
+            if blueprint.capability_name in _BATCH_CAPABILITIES:
+                profile = _BATCH_PROFILES.get(
+                    execution_plan.budget_profile, _BATCH_PROFILES["balanced"],
+                )
+                batch_size, maximum = profile[blueprint.capability_name]
+                raw_slice = blueprint.capability_args.get("slice")
+                slice_count = (
+                    int(raw_slice.get("count") or 0)
+                    if isinstance(raw_slice, Mapping) else batch_size
+                )
+                wall_floor = {
+                    "templates.passive_batch": 10,
+                    "templates.active_batch": 30,
+                    "xss.verify_batch": 10,
+                    "sqli.verify_batch": 20,
+                }[blueprint.capability_name]
+                return {
+                    name: max(
+                        wall_floor if name == "tool_wall_seconds" else 1,
+                        (int(amount) * slice_count + batch_size - 1) // batch_size,
+                    )
+                    for name, amount in maximum.items()
+                }
             specification = self._registry.require(blueprint.capability_name)
             requested = dict(specification.budget_cost)
             if (
@@ -1072,16 +1121,93 @@ class ScanActionPlanCompiler:
                 not reference or int(reference.get("entry_count") or 0) > 0
             )
 
+        def add_manifest_batches(
+            base_action_id: str,
+            stage: str,
+            capability_name: str,
+            capability_args: Mapping[str, Any],
+            *,
+            manifest_ref: Mapping[str, Any],
+            dependencies: Sequence[str],
+            required: bool,
+            minimum_batches: int = 1,
+            reserve_dependency_slots: int = 0,
+        ) -> None:
+            """Compile bounded ranked slices instead of one process per candidate."""
+            profile = _BATCH_PROFILES.get(
+                execution_plan.budget_profile, _BATCH_PROFILES["balanced"],
+            )
+            batch_size, batch_budget = profile[capability_name]
+            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
+            total_batches = max(
+                1,
+                (entry_count + batch_size - 1) // batch_size if entry_count else 0,
+            )
+            limits = execution_plan.budget.ledger_limits()
+            reserved = {name: 0 for name in limits}
+            finalizer_budget = dict(action_budgets or {}).get(
+                "finalize.report",
+                self._registry.require("scan.finalize").budget_cost,
+            )
+            for name, amount in finalizer_budget.items():
+                reserved[name] = reserved.get(name, 0) + amount
+            for blueprint in blueprints:
+                if not blueprint.required:
+                    continue
+                for name, amount in blueprint_budget(blueprint).items():
+                    reserved[name] = reserved.get(name, 0) + amount
+            affordable = total_batches
+            for name, amount in batch_budget.items():
+                if amount > 0:
+                    available_amount = max(
+                        0, limits.get(name, 0) - reserved.get(name, 0),
+                    )
+                    affordable = min(affordable, available_amount // amount)
+            count = max(1, minimum_batches if required else 0, affordable)
+            count = min(
+                total_batches,
+                count,
+                32,
+                max(0, _MAX_DEPENDENCIES - len(blueprints) - reserve_dependency_slots),
+            )
+            if required and count < minimum_batches:
+                raise ScanActionPlanError(
+                    f"required batch action {base_action_id} exceeds plan graph capacity"
+                )
+            for batch_index in range(count):
+                start = batch_index * batch_size
+                slice_count = (
+                    min(batch_size, max(0, entry_count - start))
+                    if entry_count else 1
+                )
+                add(
+                    base_action_id if batch_index == 0 else f"{base_action_id}.{batch_index:03d}",
+                    stage,
+                    capability_name,
+                    {
+                        **dict(capability_args),
+                        "slice": {"start": start, "count": slice_count},
+                        "profile": f"{execution_plan.budget_profile}_batch_v1",
+                        "proof_policy": (
+                            "deterministic_differential_required"
+                            if capability_name == "sqli.verify_batch"
+                            else "deterministic_proof_contract_required"
+                        ),
+                    },
+                    dependencies=dependencies,
+                    required=required and batch_index < minimum_batches,
+                )
+
         authz_will_run = (
             scope in {"full", "endpoint"}
             and bola
             and {"primary", "secondary"} <= set(lane_refs)
         )
-        if scope in {"full", "endpoint"} and passive_nuclei:
-            add_manifest_breadth(
+        if scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions:
+            add_manifest_batches(
                 "passive.templates",
                 "deterministic_baseline",
-                "templates.passive_scan",
+                "templates.passive_batch",
                 {
                     "target_ref": "canonical_origin",
                     **(
@@ -1091,7 +1217,6 @@ class ScanActionPlanCompiler:
                     "template_manifest_ref": template_ref,
                 },
                 manifest_ref=endpoint_ref,
-                index_name="endpoint_index",
                 # The reviewed GET-only pack is executable against the frozen
                 # canonical origin. Optional crawl/content breadth must not be
                 # able to block this required passive baseline.
@@ -1105,16 +1230,15 @@ class ScanActionPlanCompiler:
                 ),
             )
         if scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions:
-            add_manifest_breadth(
+            add_manifest_batches(
                 "active.templates",
                 "deterministic_active",
-                "templates.scan",
+                "templates.active_batch",
                 {
                     "target_manifest_ref": endpoint_ref or "discover.web_crawl",
                     "template_manifest_ref": template_ref or None,
                 },
                 manifest_ref=endpoint_ref,
-                index_name="endpoint_index",
                 dependencies=active_dependencies,
                 required="nuclei_active" in explicitly_requested,
                 reserve_dependency_slots=(
@@ -1124,20 +1248,19 @@ class ScanActionPlanCompiler:
                 ),
             )
         if scope in {"full", "endpoint"} and xss and not defer_manifest_actions:
-            add_manifest_breadth(
+            add_manifest_batches(
                 "verify.xss",
                 "verify_candidates",
-                "xss.verify",
+                "xss.verify_batch",
                 {
                     "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
                     "endpoint_manifest_ref": endpoint_ref or None,
                 },
                 manifest_ref=candidate_ref,
-                index_name="candidate_index",
                 dependencies=active_dependencies,
                 required="xss" in explicitly_requested,
-                minimum_count=(
-                    1 if "xss" in explicitly_requested else 0
+                minimum_batches=(
+                    2 if execution_plan.budget_profile == "thorough" else 1
                 ),
                 reserve_dependency_slots=(
                     int(has_manifest_work(sqli, candidate_ref))
@@ -1145,20 +1268,19 @@ class ScanActionPlanCompiler:
                 ),
             )
         if scope in {"full", "endpoint"} and sqli and not defer_manifest_actions:
-            add_manifest_breadth(
+            add_manifest_batches(
                 "verify.sqli",
                 "verify_candidates",
-                "sqli.verify",
+                "sqli.verify_batch",
                 {
                     "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
                     "endpoint_manifest_ref": endpoint_ref or None,
                 },
                 manifest_ref=candidate_ref,
-                index_name="candidate_index",
                 dependencies=active_dependencies,
                 required="sqli" in explicitly_requested,
-                minimum_count=(
-                    1 if "sqli" in explicitly_requested else 0
+                minimum_batches=(
+                    2 if execution_plan.budget_profile == "thorough" else 1
                 ),
                 reserve_dependency_slots=int(authz_will_run),
             )
@@ -1273,6 +1395,13 @@ class ScanActionPlanCompiler:
                 raise ScanActionPlacementError(
                     f"placement cannot execute capability {blueprint.capability_name}"
                 )
+            if (
+                blueprint.capability_name in _BATCH_CAPABILITIES
+                and "local" not in backends
+            ):
+                raise ScanActionPlacementError(
+                    f"{blueprint.capability_name} requires the single-worker local adapter"
+                )
             requested = blueprint_budget(blueprint)
             action_bindings = {
                 **global_bindings,
@@ -1281,7 +1410,11 @@ class ScanActionPlanCompiler:
             }
             placement = {
                 "schema_version": "scan-action-placement/v1",
-                "eligible_backends": list(backends),
+                "eligible_backends": list(
+                    ("local",)
+                    if blueprint.capability_name in _BATCH_CAPABILITIES
+                    else backends
+                ),
                 "requirements": dict(specification.placement_requirements),
                 "adapter_name": specification.adapter,
                 "adapter_version": specification.adapter_version,

@@ -155,13 +155,16 @@ def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
 
     assert rows["discover.web_crawl"].admission_status == "planned"
     assert rows["passive.templates"].requested_budget == {
-        "http_requests": 7, "tool_wall_seconds": 30,
+        "http_requests": 7, "tool_wall_seconds": 10,
     }
     assert rows["active.templates"].reason_code == "insufficient_plan_budget"
     assert rows["active.templates"].requested_budget == {}
     assert rows["verify.xss"].reason_code == "insufficient_plan_budget"
     assert rows["verify.xss"].requested_budget == {}
-    assert rows["verify.sqli"].reason_code == "insufficient_plan_budget"
+    assert rows["verify.sqli"].admission_status == "planned"
+    assert rows["verify.sqli"].requested_budget == {
+        "http_requests": 80, "tool_wall_seconds": 24,
+    }
     assert rows["finalize.report"].admission_status == "planned"
 
 
@@ -171,16 +174,16 @@ def test_thorough_allocator_funds_full_verifiers_before_template_breadth():
     rows = {action.action_id: action for action in allocation.plan.actions}
 
     assert rows["verify.sqli"].requested_budget == {
-        "http_requests": 900,
-        "tool_wall_seconds": 300,
+        "http_requests": 80,
+        "tool_wall_seconds": 24,
     }
     assert rows["verify.xss"].requested_budget == {
-        "http_requests": 400,
-        "tool_wall_seconds": 120,
+        "http_requests": 20,
+        "tool_wall_seconds": 18,
     }
     assert rows["active.templates"].requested_budget == {
-        "http_requests": 4_000,
-        "tool_wall_seconds": 300,
+        "http_requests": 80,
+        "tool_wall_seconds": 30,
     }
 
 
@@ -210,13 +213,13 @@ def test_allocator_scales_required_passive_pack_inside_parallel_child_budget():
 
     assert rows["passive.templates"].requested_budget == {
         "http_requests": 7,
-        "tool_wall_seconds": 20,
+        "tool_wall_seconds": 10,
     }
     assert rows["passive.templates"].admission_status == "planned"
     assert rows["finalize.report"].requested_budget == {
         "tool_wall_seconds": 1,
     }
-    assert allocation.allocated["tool_wall_seconds"] == 21
+    assert allocation.allocated["tool_wall_seconds"] == 11
 
 
 def test_allocator_fails_admission_when_focused_required_graph_cannot_fit():

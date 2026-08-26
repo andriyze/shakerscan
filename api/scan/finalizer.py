@@ -27,6 +27,7 @@ _SEVERITY_WEIGHT = {
 }
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
+    "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
     "xss.request_verify", "sqli.request_verify", "browser.proof",
 })
 _TRAFFIC_BUDGETS = frozenset({
@@ -78,18 +79,26 @@ def _findings_for_action(
     allowed_kinds = {
         "http.request": {"http_observation"},
         "xss.verify": {"xss_alert"},
+        "xss.verify_batch": {"candidate_attempt", "xss_alert"},
         "sqli.verify": {"sqli_finding"},
+        "sqli.verify_batch": {
+            "candidate_attempt", "sqli_finding", "sqli_dbms_fingerprint",
+        },
         "xss.request_verify": {"request_body_verification"},
         "sqli.request_verify": {"request_body_verification"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
+        "templates.active_batch": {"candidate_attempt", "template_match"},
+        "templates.passive_batch": {"candidate_attempt", "template_match"},
         "tls.inspect": {"tls_protocol"},
     }.get(result.capability_name, set())
     for raw in observations:
         item = dict(raw)
         kind = str(item.get("kind") or "")
         if kind not in allowed_kinds:
+            continue
+        if kind == "candidate_attempt":
             continue
         if kind == "http_observation" and result.action_id == "baseline.http":
             request = (
@@ -161,7 +170,7 @@ def _findings_for_action(
                     "param": item.get("param"),
                     "payload_sha256": item.get("payload_sha256"),
                     "message": item.get("message"),
-                    "canonical_capability": "xss.verify",
+                    "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                     "detail": {"verified": True, "type": "verified"},
                 },
@@ -247,7 +256,7 @@ def _findings_for_action(
                     "method": item.get("method") or "GET",
                     "param": item.get("param"),
                     "sqlmap_message": item.get("message"),
-                    "canonical_capability": "sqli.verify",
+                    "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
             )
@@ -671,6 +680,45 @@ def finalize_scan_report(
             "reason_code": row["reason_code"],
         } for row in action_rows],
     }
+    batch_families = {
+        "xss.verify_batch": "xss",
+        "sqli.verify_batch": "sqli",
+        "templates.passive_batch": "nuclei_passive",
+        "templates.active_batch": "nuclei_active",
+    }
+    candidate_coverage: dict[str, dict[str, Any]] = {}
+    for action in expected_actions:
+        family = batch_families.get(action.capability_name)
+        if family is None:
+            continue
+        raw_slice = action.capability_args.get("slice")
+        planned = (
+            int(raw_slice.get("count") or 0)
+            if isinstance(raw_slice, Mapping) else 0
+        )
+        attempts = {
+            str(item.get("attempt_id") or "")
+            for item in observations.get(action.action_id, ())
+            if isinstance(item, Mapping)
+            and item.get("kind") == "candidate_attempt"
+            and str(item.get("attempt_id") or "")
+        }
+        row = candidate_coverage.setdefault(family, {
+            "planned_candidates": 0,
+            "attempted_candidates": 0,
+            "unattempted_candidates": 0,
+            "batch_actions": 0,
+            "status": "complete",
+        })
+        row["planned_candidates"] += planned
+        row["attempted_candidates"] += len(attempts)
+        row["batch_actions"] += 1
+    for row in candidate_coverage.values():
+        row["unattempted_candidates"] = max(
+            0, row["planned_candidates"] - row["attempted_candidates"],
+        )
+        if row["unattempted_candidates"]:
+            row["status"] = "partial"
     if zero_attempt_actions and coverage_status == "complete":
         coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
@@ -699,6 +747,7 @@ def finalize_scan_report(
             },
             "optional_gaps": optional_gaps,
             "active_zero_attempt_actions": zero_attempt_actions,
+            "candidate_coverage": candidate_coverage,
         },
         "verification_summary": {
             "verified": verified,

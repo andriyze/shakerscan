@@ -23,7 +23,7 @@ from api.scan.contracts import resolve_scan_contract
 from api.scan.work_manifests import (
     ScanWorkManifestReference,
     build_candidate_manifest,
-    build_canonical_nuclei_template_manifest,
+    build_canonical_scan_nuclei_template_manifest,
     build_endpoint_manifest,
     unique_work_manifest_reference_dicts,
 )
@@ -93,8 +93,8 @@ def _plans():
         budget_ceiling=parent_allocation.residual_scan_execute_budget,
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
-        required_capabilities=("xss.verify",),
-        allowed_capabilities=("xss.verify",),
+        required_capabilities=("templates.passive_batch", "xss.verify_batch"),
+        allowed_capabilities=("templates.passive_batch", "xss.verify_batch"),
     )
     endpoints = build_endpoint_manifest(
         scan_id=SCAN_ID,
@@ -107,9 +107,10 @@ def _plans():
         source_action_ids=("discover.web_crawl",),
         maximum=100,
     )
-    templates = build_canonical_nuclei_template_manifest(
+    templates = build_canonical_scan_nuclei_template_manifest(
         scan_id=SCAN_ID,
         target_binding_digest=target.digest,
+        include_active=False,
     )
     continuation_raw = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -134,6 +135,7 @@ def test_admission_plan_can_stop_before_manifest_bound_actions():
     assert "finalize.report" not in {action.action_id for action in parent.actions}
     assert not {
         "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
+        "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
     } & {action.capability_name for action in parent.actions}
     assert allocation.parent_action_ids == tuple(
         action.action_id for action in parent.actions
@@ -161,7 +163,8 @@ def test_v1_continuation_allocation_remains_readable_for_inflight_scans():
     restored = ScanContinuationAllocation.from_dict(legacy.canonical_dict())
 
     assert restored == legacy
-    assert "xss.verify" in restored.allowed_capabilities
+    assert "xss.verify_batch" in restored.allowed_capabilities
+    assert "templates.passive_batch" in restored.allowed_capabilities
     assert merge_scan_action_continuation(
         parent_plan=parent,
         continuation_plan=continuation,
@@ -184,7 +187,7 @@ def test_continuation_append_preserves_parent_and_binds_one_finalizer():
         action.action_id for action in amended.actions[:-1]
     )
     assert any(
-        action.capability_name == "xss.verify"
+        action.capability_name == "xss.verify_batch"
         and action.capability_args["candidate_manifest_ref"]["manifest_digest"]
         for action in amended.actions
     )
@@ -309,7 +312,9 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
         required_capabilities=("xss.request_verify",),
-        allowed_capabilities=("xss.request_verify", "xss.verify"),
+        allowed_capabilities=(
+            "templates.passive_batch", "xss.request_verify", "xss.verify_batch",
+        ),
     )
     continuation_raw = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -318,6 +323,11 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         request_collection_refs=collection,
         request_manifest_refs={"a" * 64: request_ref},
         request_candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=build_canonical_scan_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=target.digest,
+            include_active=False,
+        ).reference().canonical_dict(),
         action_scope="endpoint",
         action_budgets={"inputs.collection_00": {}},
     )
@@ -444,7 +454,7 @@ def test_continuation_cannot_change_existing_private_input_authority():
         budget_ceiling=parent_allocation.residual_scan_execute_budget,
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=contract.budget.max_http_requests,
-        allowed_capabilities=("xss.verify",),
+        allowed_capabilities=("templates.passive_batch", "xss.verify_batch"),
     )
     continuation = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -453,6 +463,11 @@ def test_continuation_cannot_change_existing_private_input_authority():
         request_collection_refs=collection,
         request_manifest_refs={"a" * 64: request_ref},
         request_candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=build_canonical_scan_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=target.digest,
+            include_active=False,
+        ).reference().canonical_dict(),
         action_scope="endpoint",
         action_budgets={"inputs.collection_00": {}},
     )
