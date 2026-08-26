@@ -38,6 +38,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "capabilities",
     "exposure",
     "finding_exceptions",
+    "findings",
     "hunt",
     "interactive",
     "policy_profiles",

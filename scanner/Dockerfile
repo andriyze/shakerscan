@@ -316,6 +316,7 @@ COPY api/ai_gate /app/ai_gate
 COPY api/capabilities /app/capabilities
 COPY api/exposure /app/exposure
 COPY api/finding_exceptions /app/finding_exceptions
+COPY api/findings /app/findings
 COPY api/hunt /app/hunt
 COPY api/interactive /app/interactive
 COPY api/policy_profiles /app/policy_profiles

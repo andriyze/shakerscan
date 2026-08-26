@@ -80,6 +80,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from findings import router as findings_router_module  # noqa: E402
 
 
 def test_request_collection_binding_rejects_cross_target_origins():
@@ -3113,7 +3114,11 @@ def test_enqueue_finding_retest_advisory_lock_unlocks_when_insert_fails(monkeypa
     async def fail_insert(*args, **kwargs):
         raise RuntimeError("insert failed")
 
-    monkeypatch.setattr(api_module, "_enqueue_finding_retest_unlocked", fail_insert)
+    # enqueue_finding_retest now lives in the findings router and resolves this
+    # name in its own module, so patch it where it is resolved.
+    monkeypatch.setattr(
+        findings_router_module, "_enqueue_finding_retest_unlocked", fail_insert
+    )
     conn = FakeConn()
     with pytest.raises(RuntimeError, match="insert failed"):
         asyncio.run(api_module.enqueue_finding_retest(
