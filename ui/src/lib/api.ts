@@ -5,6 +5,7 @@ import {
   gradeTextColorClass,
 } from './constants'
 import type {
+  ScanBudgetProfile,
   ScanPublicContract,
   ScanStartRequest,
 } from './scanContract.generated'
@@ -4138,6 +4139,41 @@ export async function submitScan(target: string, options: Record<string, unknown
 export async function getScanPublicContract(): Promise<ScanPublicContract> {
   const res = await fetch(`${API_URL}/scan/contracts`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load the Scan contract'))
+  return res.json()
+}
+
+export interface ScanContractPreview {
+  preset: 'passive' | 'standard_active' | 'custom'
+  requested_families: string[]
+  resolved_families: string[]
+  derived_prerequisites: string[]
+  active_permissions: {
+    active_testing: boolean
+    state_changing_http: boolean
+    network_discovery: boolean
+  }
+  minimum_family_quotas: Record<string, number>
+  execution_topology: 'single_worker' | 'parallel'
+  ai_used: false
+}
+
+export async function previewScanContract(request: {
+  preset: 'passive' | 'standard_active' | 'custom'
+  budget_profile: ScanBudgetProfile
+  include_families: string[]
+  exclude_families: string[]
+  active_testing: boolean
+  allow_state_changing_http: boolean
+  network_discovery: boolean
+  subdomain_discovery: boolean
+  execution_topology: 'single_worker' | 'parallel'
+}): Promise<ScanContractPreview> {
+  const res = await fetch(`${API_URL}/scan/contracts/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to preview Scan families'))
   return res.json()
 }
 

@@ -63,6 +63,7 @@ export interface ScanPublicContract {{
     default_enabled: boolean
     capabilities: string[]
   }}>
+  family_presets: Record<'passive' | 'standard_active' | 'custom', string[]>
   passive_coverage: {{
     description: string
     baseline_capabilities: string[]

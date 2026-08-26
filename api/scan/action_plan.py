@@ -528,6 +528,8 @@ class ScanActionPlanCompiler:
 
     @staticmethod
     def _family_enabled(plan: ScanExecutionPlan, family: str) -> bool:
+        if plan.resolved_families:
+            return family in set(plan.resolved_families)
         include = set(plan.policy.include_families)
         exclude = set(plan.policy.exclude_families)
         return family not in exclude and (not include or family in include)
@@ -715,7 +717,9 @@ class ScanActionPlanCompiler:
             raise ScanActionPlanError(
                 "Nuclei actions require an immutable template manifest with the complete passive pack"
             )
-        explicitly_requested = set(policy.include_families)
+        explicitly_requested = set(
+            execution_plan.resolved_families or policy.include_families
+        )
         needs_candidates = xss or sqli or nuclei or passive_nuclei
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
@@ -1056,9 +1060,9 @@ class ScanActionPlanCompiler:
                     capability_name,
                     {**dict(capability_args), index_name: index},
                     dependencies=dependencies,
-                    # An explicit family requires at least one bounded attempt;
-                    # remaining ranked manifest entries are optional breadth.
-                    required=required and index == 0,
+                    # An explicitly resolved family requires its published
+                    # minimum quota; remaining ranked entries are optional.
+                    required=required and index < max(1, int(minimum_count)),
                 )
 
         def has_manifest_work(
@@ -1132,6 +1136,9 @@ class ScanActionPlanCompiler:
                 index_name="candidate_index",
                 dependencies=active_dependencies,
                 required="xss" in explicitly_requested,
+                minimum_count=(
+                    1 if "xss" in explicitly_requested else 0
+                ),
                 reserve_dependency_slots=(
                     int(has_manifest_work(sqli, candidate_ref))
                     + int(authz_will_run)
@@ -1150,6 +1157,9 @@ class ScanActionPlanCompiler:
                 index_name="candidate_index",
                 dependencies=active_dependencies,
                 required="sqli" in explicitly_requested,
+                minimum_count=(
+                    1 if "sqli" in explicitly_requested else 0
+                ),
                 reserve_dependency_slots=int(authz_will_run),
             )
         private_request_dependencies = tuple(

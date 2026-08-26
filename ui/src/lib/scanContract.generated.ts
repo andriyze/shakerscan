@@ -239,6 +239,19 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "risk_level": "high"
     }
   ],
+  "family_presets": {
+    "custom": [],
+    "passive": [
+      "recon",
+      "nuclei"
+    ],
+    "standard_active": [
+      "recon",
+      "nuclei",
+      "xss",
+      "sqli"
+    ]
+  },
   "generation": "v2",
   "passive_coverage": {
     "baseline_capabilities": [
@@ -293,6 +306,7 @@ export interface ScanPublicContract {
     default_enabled: boolean
     capabilities: string[]
   }>
+  family_presets: Record<'passive' | 'standard_active' | 'custom', string[]>
   passive_coverage: {
     description: string
     baseline_capabilities: string[]

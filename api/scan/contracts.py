@@ -39,6 +39,18 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
 # The broader check registry remains available to ASM; accepting unimplemented
 # names here would create a successful no-op Scan.
 SCAN_V2_FAMILY_NAMES = ("recon", "nuclei", "xss", "sqli", "bola")
+SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
+    "passive": ("recon", "nuclei"),
+    "standard_active": ("recon", "nuclei", "xss", "sqli"),
+    "custom": (),
+}
+SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, int] = {
+    # Per-candidate execution can guarantee one attempt under every preset.
+    # The verifier-batch recovery step raises this reviewed floor without
+    # multiplying process reservations.
+    "xss": 1,
+    "sqli": 1,
+}
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": ("web.probe", "web.crawl", "web.content_discover"),
     "nuclei": ("templates.passive_scan", "templates.scan"),
@@ -117,6 +129,9 @@ def public_scan_contract() -> dict[str, Any]:
         "budget_profiles": profile_dicts,
         "advanced_limits": limits,
         "families": families,
+        "family_presets": {
+            name: list(families) for name, families in SCAN_FAMILY_PRESETS.items()
+        },
         "passive_coverage": {
             "description": (
                 "Every passive Scan runs the target baseline, surface discovery, "
@@ -171,6 +186,9 @@ def bind_scan_scope_receipt(
         policy=policy,
         budget_profile=contract.budget_profile,
         budget=contract.budget,
+        family_preset=contract.execution_plan.family_preset,
+        requested_families=contract.execution_plan.requested_families,
+        resolved_families=contract.execution_plan.resolved_families,
     )
     return replace(contract, policy=policy, execution_plan=plan)
 
@@ -241,7 +259,7 @@ def resolve_scan_contract(
     policy_data = policy if isinstance(policy, Mapping) else {}
     allowed_policy_keys = {
         "active_testing", "allow_state_changing_http", "network_discovery",
-        "subdomain_discovery", "include_families", "exclude_families",
+        "subdomain_discovery", "include_families", "exclude_families", "preset",
     }
     unknown_policy = set(policy_data) - allowed_policy_keys
     if unknown_policy:
@@ -267,7 +285,19 @@ def resolve_scan_contract(
         )
     if set(include) & set(exclude):
         raise ValueError("include_families and exclude_families must not overlap")
-    active_only_families = set(include) & {"xss", "sqli", "bola"}
+    preset = str(policy_data.get("preset") or "passive").strip().lower()
+    if preset not in SCAN_FAMILY_PRESETS:
+        raise ValueError("scan family preset must be passive, standard_active, or custom")
+    if preset == "standard_active" and not active_testing:
+        raise ValueError("standard_active preset requires active_testing")
+    preset_defaults = set(SCAN_FAMILY_PRESETS[preset])
+    resolved = tuple(
+        family for family in SCAN_V2_FAMILY_NAMES
+        if family in ((preset_defaults | set(include)) - set(exclude))
+    )
+    if preset == "custom" and not resolved:
+        raise ValueError("custom preset requires at least one selected family")
+    active_only_families = set(resolved) & {"xss", "sqli", "bola"}
     if active_only_families and not active_testing:
         raise ValueError(
             "active_testing is required to include families: "
@@ -278,7 +308,10 @@ def resolve_scan_contract(
         allow_state_changing_http=bool(policy_data.get("allow_state_changing_http", False)),
         network_discovery=bool(policy_data.get("network_discovery", False)),
         subdomain_discovery=bool(policy_data.get("subdomain_discovery", False)),
-        include_families=include,
+        # Downstream compatibility readers treat include_families as the exact
+        # allowlist. The execution plan separately preserves what the operator
+        # requested and what preset resolution selected.
+        include_families=resolved,
         exclude_families=exclude,
         approval_receipt_id=str(approval_receipt_id or "").strip() or None,
     )
@@ -309,6 +342,9 @@ def resolve_scan_contract(
         policy=resolved_policy,
         budget_profile=profile,
         budget=budget,
+        family_preset=preset,
+        requested_families=include,
+        resolved_families=resolved,
     )
     return ResolvedScanContract(
         generation="v2",

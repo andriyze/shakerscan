@@ -7,10 +7,12 @@ import {
   getTargets,
   getScanPublicContract,
   getWorkers,
+  previewScanContract,
   submitBatchV2,
   submitScanV2,
   type ScanBudgetProfile,
   type ScanPublicContract,
+  type ScanContractPreview,
   type Target,
 } from '@/lib/api'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
@@ -41,8 +43,8 @@ const ADVANCED_LIMITS = [
   ['max_workers', 'Maximum workers'],
 ] as const
 
-type FamilyMode = 'default' | 'include' | 'exclude'
 type ScanTopology = 'single' | 'parallel'
+type ScanFamilyPreset = 'passive' | 'standard_active' | 'custom'
 
 function formatLimit(value: number | undefined): string {
   return Number.isFinite(value) ? Number(value).toLocaleString() : 'server default'
@@ -59,6 +61,7 @@ export default function NewScanPage() {
   const [budgetProfile, setBudgetProfile] = useState<ScanBudgetProfile>('balanced')
   const [activeTesting, setActiveTesting] = useState(false)
   const [topology, setTopology] = useState<ScanTopology>('single')
+  const [familyPreset, setFamilyPreset] = useState<ScanFamilyPreset>('passive')
   const [authorized, setAuthorized] = useState(false)
   const [subdomainDiscovery, setSubdomainDiscovery] = useState(false)
   const [networkDiscovery, setNetworkDiscovery] = useState(false)
@@ -72,7 +75,9 @@ export default function NewScanPage() {
   const [requestCollectionMetadata, setRequestCollectionMetadata] = useState<RequestCollectionSelectionMetadata>({})
   const [scanContract, setScanContract] = useState<ScanPublicContract | null>(null)
   const [scanContractError, setScanContractError] = useState<string | null>(null)
-  const [familyModes, setFamilyModes] = useState<Record<string, FamilyMode>>({})
+  const [customFamilies, setCustomFamilies] = useState<string[]>([])
+  const [contractPreview, setContractPreview] = useState<ScanContractPreview | null>(null)
+  const [contractPreviewError, setContractPreviewError] = useState<string | null>(null)
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [customEndpoints, setCustomEndpoints] = useState('')
@@ -110,7 +115,6 @@ export default function NewScanPage() {
       .then((contract) => {
         if (cancelled) return
         setScanContract(contract)
-        setFamilyModes(Object.fromEntries(contract.families.map((family) => [family.name, 'default'])))
       })
       .catch((cause) => {
         if (!cancelled) {
@@ -138,8 +142,33 @@ export default function NewScanPage() {
       ? customDuration
       : scanContract?.budget_profiles[budgetProfile]?.max_duration_seconds ?? 7200
   ) / 60) + 15
-  const includeFamilies = Object.entries(familyModes).filter(([, mode]) => mode === 'include').map(([name]) => name)
-  const excludeFamilies = Object.entries(familyModes).filter(([, mode]) => mode === 'exclude').map(([name]) => name)
+  const includeFamilies = familyPreset === 'custom' ? customFamilies : []
+  const excludeFamilies: string[] = []
+  const resolvedFamilies = contractPreview?.resolved_families ?? (
+    familyPreset === 'standard_active'
+      ? ['recon', 'nuclei', 'xss', 'sqli']
+      : familyPreset === 'passive' ? ['recon', 'nuclei'] : customFamilies
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      previewScanContract({
+        preset: familyPreset,
+        budget_profile: budgetProfile,
+        include_families: includeFamilies,
+        exclude_families: excludeFamilies,
+        active_testing: activeTesting,
+        allow_state_changing_http: allowStateChanging,
+        network_discovery: networkDiscovery,
+        subdomain_discovery: subdomainDiscovery,
+        execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
+      })
+        .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null) } })
+        .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable') } })
+    }, 150)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology])
 
   function credentialCompatibility(
     profile: CredentialProfile,
@@ -166,7 +195,7 @@ export default function NewScanPage() {
     }
     const allowed = new Set(profile.allowed_capabilities)
     if (!allowed.size) return { compatible: true }
-    if (includeFamilies.includes('bola') && !allowed.has('authz.verify')) {
+    if (resolvedFamilies.includes('bola') && !allowed.has('authz.verify')) {
       return { compatible: false, reason: 'does not allow the selected BOLA / IDOR verifier' }
     }
     const interactive = scanContract.credentials.interactive_auth_kinds.includes(profile.auth_kind)
@@ -224,6 +253,10 @@ export default function NewScanPage() {
       setError('Batch submission supports at most 50 unique targets.')
       return
     }
+    if (contractPreviewError || !contractPreview) {
+      setError(contractPreviewError || 'Wait for the Scan family preview before submitting.')
+      return
+    }
     const invalid = submittedTargets.map(validateScanTarget).find(Boolean)
     if (invalid) {
       setError(invalid)
@@ -260,7 +293,7 @@ export default function NewScanPage() {
       setError(`${includedActiveFamily.label} is an active family. Enable active testing or return it to Default.`)
       return
     }
-    if (includeFamilies.includes('bola') && selectedCredentialIds.length !== 2) {
+    if (resolvedFamilies.includes('bola') && selectedCredentialIds.length !== 2) {
       setError('Explicit BOLA / IDOR coverage requires two distinct authenticated principals.')
       return
     }
@@ -303,6 +336,7 @@ export default function NewScanPage() {
       target_kind: targetKind,
       budget_profile: budgetProfile,
       policy: {
+        preset: familyPreset,
         active_testing: activeTesting,
         allow_state_changing_http: allowStateChanging,
         subdomain_discovery: subdomainDiscovery,
@@ -431,7 +465,7 @@ export default function NewScanPage() {
             </p>
           </div>
           <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
-            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (!credentialUse) setAuthorized(false); setNetworkDiscovery(false); setAllowStateChanging(false); removeConfirmedActiveSelections() } }} />
+            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (familyPreset === 'standard_active') setFamilyPreset('passive'); if (!credentialUse) setAuthorized(false); setNetworkDiscovery(false); setAllowStateChanging(false); removeConfirmedActiveSelections() } }} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
               <span className="block text-xs text-gray-500">Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.</span>
@@ -466,39 +500,45 @@ export default function NewScanPage() {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h3 className="text-sm font-medium text-gray-200">Coverage families</h3>
-                  <p className="mt-1 text-xs text-gray-500">Default follows the server policy. Include requires that family; Exclude removes it.</p>
+                  <p className="mt-1 text-xs text-gray-500">The server resolves this preset into one exact persisted family set before queueing.</p>
                 </div>
                 <span className="text-[11px] text-gray-600">{scanContract.action_plan_schema}</span>
               </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                {scanContract.families.map((family) => (
-                  <label key={family.name} className="rounded border border-gray-800 p-3 text-xs text-gray-400">
-                    <span className="flex items-start justify-between gap-3">
-                      <span>
-                        <span className="block text-sm font-medium text-gray-200">{family.label}</span>
-                        <span className="mt-1 block text-gray-500">{family.description}</span>
-                      </span>
-                      <select
-                        aria-label={`${family.label} family policy`}
-                        value={familyModes[family.name] || 'default'}
-                        onChange={(event) => setFamilyModes((current) => ({
-                          ...current,
-                          [family.name]: event.target.value as FamilyMode,
-                        }))}
-                        className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-white"
-                      >
-                        <option value="default">Default</option>
-                        <option value="include">Include</option>
-                        <option value="exclude">Exclude</option>
-                      </select>
-                    </span>
-                    <span className="mt-2 block text-[11px] text-gray-600">
-                      {family.requires_active_testing ? 'Active permission required · ' : ''}
-                      {family.requires_credentials ? 'Two principals required · ' : ''}
-                      {family.capabilities.join(' · ')}
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                {([
+                  ['passive', 'Passive', 'Recon and reviewed passive templates'],
+                  ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi'],
+                  ['custom', 'Custom', 'Choose an exact family set'],
+                ] as const).map(([value, label, description]) => (
+                  <label key={value} className={`rounded border p-3 ${familyPreset === value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800'}`}>
+                    <span className="flex items-start gap-2">
+                      <input type="radio" name="family-preset" value={value} checked={familyPreset === value} disabled={value === 'standard_active' && !activeTesting} onChange={() => setFamilyPreset(value)} />
+                      <span><span className="block text-sm font-medium text-gray-200">{label}</span><span className="mt-1 block text-xs text-gray-500">{description}</span></span>
                     </span>
                   </label>
                 ))}
+              </div>
+              {familyPreset === 'custom' && (
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {scanContract.families.map((family) => (
+                    <label key={family.name} className={`flex items-start gap-3 rounded border border-gray-800 p-3 text-xs ${family.requires_active_testing && !activeTesting ? 'text-gray-600' : 'text-gray-300'}`}>
+                      <input
+                        type="checkbox"
+                        disabled={family.requires_active_testing && !activeTesting}
+                        checked={customFamilies.includes(family.name)}
+                        onChange={(event) => setCustomFamilies((current) => event.target.checked ? [...current, family.name] : current.filter((name) => name !== family.name))}
+                      />
+                      <span><span className="block text-sm font-medium">{family.label}</span><span className="mt-1 block text-gray-500">{family.description}</span></span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="mt-3 rounded border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
+                <span className="font-medium text-gray-200">Resolved families:</span> {resolvedFamilies.length ? resolvedFamilies.join(', ') : 'none'}
+                {contractPreview && Object.keys(contractPreview.minimum_family_quotas).length > 0 && (
+                  <span className="mt-1 block">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${family} ${quota}`).join(' · ')}</span>
+                )}
+                {contractPreviewError && <span className="mt-1 block text-amber-300">{contractPreviewError}</span>}
               </div>
             </div>
           )}

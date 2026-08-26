@@ -53,7 +53,8 @@ _FORBIDDEN_JOB_KEYS = frozenset({
     "headers", "body", "raw_request", "command", "argv", "shell",
 })
 _PLAN_KEYS = frozenset({
-    "schema_version", "generation", "engine", "budget_profile", "policy", "budget",
+    "schema_version", "generation", "engine", "budget_profile", "family_preset",
+    "requested_families", "resolved_families", "policy", "budget",
 })
 _POLICY_KEYS = frozenset({
     "active_testing", "allow_state_changing_http", "network_discovery",
@@ -477,6 +478,20 @@ def _plan_from_payload(value: Any, supplied_digest: Any) -> ScanExecutionPlan:
             "network discovery requires active_testing and an approval receipt"
         )
 
+    family_preset = str(raw["family_preset"] or "").strip().lower()
+    if family_preset not in {"passive", "standard_active", "custom"}:
+        raise CanonicalScanJobError("execution_plan.family_preset is invalid")
+    requested_families = _families(
+        raw["requested_families"], name="include_families"
+    )
+    resolved_families = _families(
+        raw["resolved_families"], name="include_families"
+    )
+    if include != resolved_families:
+        raise CanonicalScanJobError(
+            "execution_plan resolved_families must match the policy allowlist"
+        )
+
     budget_raw = raw["budget"]
     if not isinstance(budget_raw, Mapping):
         raise CanonicalScanJobError("execution_plan.budget must be an object")
@@ -518,6 +533,9 @@ def _plan_from_payload(value: Any, supplied_digest: Any) -> ScanExecutionPlan:
         policy=policy,
         budget_profile=profile,
         budget=ScanBudget(**normalized_budget),
+        family_preset=family_preset,
+        requested_families=requested_families,
+        resolved_families=resolved_families,
     )
     if raw != plan.canonical_dict():
         raise CanonicalScanJobError("execution_plan is not canonical")

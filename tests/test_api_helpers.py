@@ -9767,6 +9767,7 @@ def test_arsenal_execute_gated_scan_focused_family_dispatches_when_allowed(monke
     assert body.target == "https://app.example.com"
     assert body.budget_profile == "thorough"
     assert body.policy == {
+        "preset": "custom",
         "active_testing": True,
         "include_families": ["sqli"],
     }
@@ -11475,7 +11476,11 @@ def test_canonical_family_policy_does_not_resurrect_legacy_focus_fields():
     )
     contract = api_module.resolve_scan_contract(
         budget_profile="thorough",
-        policy={"active_testing": True, "include_families": ["bola"]},
+        policy={
+            "preset": "custom",
+            "active_testing": True,
+            "include_families": ["bola"],
+        },
     )
     payload = api_module._build_canonical_scan_options_payload(
         model,
@@ -16897,6 +16902,7 @@ def test_research_preflight_terminal_running_marker_can_claim_successor(monkeypa
     assert result["scan_id"] == str(next_preflight_id)
     assert len(submitted) == 1
     assert submitted[0].policy == {
+        "preset": "custom",
         "active_testing": True,
         "include_families": ["recon"],
     }
@@ -20574,7 +20580,11 @@ def test_active_scan_admission_freezes_discovery_then_residual_continuation():
     )
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={
+            "preset": "custom",
+            "active_testing": True,
+            "include_families": ["xss"],
+        },
     )
 
     parent, continuation = api_module._compile_scan_admission_action_authority(

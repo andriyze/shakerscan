@@ -42,6 +42,9 @@ class ScanExecutionPlan:
     policy: ScanPolicy
     budget_profile: str
     budget: ScanBudget
+    family_preset: str = "custom"
+    requested_families: tuple[str, ...] = ()
+    resolved_families: tuple[str, ...] = ()
     generation: str = SCAN_GENERATION
     engine: str = SCAN_ENGINE
     schema_version: str = SCAN_EXECUTION_SCHEMA
@@ -57,6 +60,19 @@ class ScanExecutionPlan:
         if not profile:
             raise ValueError("budget_profile must not be empty")
         object.__setattr__(self, "budget_profile", profile)
+        preset = str(self.family_preset or "").strip().lower()
+        if preset not in {"passive", "standard_active", "custom"}:
+            raise ValueError("family_preset must be passive, standard_active, or custom")
+        requested = tuple(dict.fromkeys(str(item).strip().lower() for item in self.requested_families if str(item).strip()))
+        resolved = tuple(dict.fromkeys(str(item).strip().lower() for item in self.resolved_families if str(item).strip()))
+        # Compatibility for server-authored tests and stored adapters that build
+        # the plan directly: a non-empty legacy include list is already an exact
+        # allowlist, so preserve it in the new explicit fields.
+        if not resolved and self.policy.include_families:
+            resolved = tuple(self.policy.include_families)
+        object.__setattr__(self, "family_preset", preset)
+        object.__setattr__(self, "requested_families", requested)
+        object.__setattr__(self, "resolved_families", resolved)
 
     def canonical_dict(self) -> dict[str, Any]:
         """Canonical persisted/public representation; contains no legacy mode alias."""
@@ -65,6 +81,9 @@ class ScanExecutionPlan:
             "generation": self.generation,
             "engine": self.engine,
             "budget_profile": self.budget_profile,
+            "family_preset": self.family_preset,
+            "requested_families": list(self.requested_families),
+            "resolved_families": list(self.resolved_families),
             "policy": _json_safe(asdict(self.policy)),
             "budget": _json_safe(asdict(self.budget)),
         }

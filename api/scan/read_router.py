@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 import uuid
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 
 from .action_store import PostgresScanActionStore
 from .continuation import ScanPlanRevision
-from .contracts import public_scan_contract
+from .contracts import (
+    SCAN_MINIMUM_FAMILY_QUOTAS,
+    public_scan_contract,
+    resolve_scan_contract,
+)
 from .explanation import (
     action_list_response,
     build_scan_execution_explanation,
@@ -21,6 +26,22 @@ from .parity import build_scan_semantic_parity_artifact
 
 
 router = APIRouter()
+
+
+class ScanFamilyPreviewRequest(BaseModel):
+    """Target-independent family and quota resolution used by every Scan client."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset: Literal["passive", "standard_active", "custom"] = "passive"
+    budget_profile: Literal["fast", "balanced", "thorough"] = "balanced"
+    include_families: list[str] = Field(default_factory=list, max_length=100)
+    exclude_families: list[str] = Field(default_factory=list, max_length=100)
+    active_testing: bool = False
+    allow_state_changing_http: bool = False
+    network_discovery: bool = False
+    subdomain_discovery: bool = False
+    execution_topology: Literal["single_worker", "parallel"] = "single_worker"
 
 PUBLIC_SCAN_ACTIONS_SQL = """
     SELECT a.action_id, a.stage, a.ordinal, a.capability_name, a.adapter_name,
@@ -127,6 +148,52 @@ async def get_scan_public_contract():
     return public_scan_contract()
 
 
+@router.post("/scan/contracts/preview")
+async def preview_scan_contract(request: ScanFamilyPreviewRequest):
+    """Resolve the exact immutable family set before a Scan is submitted."""
+    try:
+        contract = resolve_scan_contract(
+            budget_profile=request.budget_profile,
+            policy={
+                "preset": request.preset,
+                "active_testing": request.active_testing,
+                "allow_state_changing_http": request.allow_state_changing_http,
+                "network_discovery": request.network_discovery,
+                "subdomain_discovery": request.subdomain_discovery,
+                "include_families": request.include_families,
+                "exclude_families": request.exclude_families,
+            },
+            # Preview cannot validate a target-bound receipt. Preserve permission
+            # resolution without granting executable receipt authority.
+            approval_receipt_id=(
+                "preview-only" if request.allow_state_changing_http or request.network_discovery else None
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    resolved = list(contract.execution_plan.resolved_families)
+    prerequisites = ["http.request"]
+    if "recon" in resolved:
+        prerequisites.extend(["web.probe", "web.crawl"])
+    return {
+        "preset": contract.execution_plan.family_preset,
+        "requested_families": list(contract.execution_plan.requested_families),
+        "resolved_families": resolved,
+        "derived_prerequisites": list(dict.fromkeys(prerequisites)),
+        "active_permissions": {
+            "active_testing": contract.policy.active_testing,
+            "state_changing_http": contract.policy.allow_state_changing_http,
+            "network_discovery": contract.policy.network_discovery,
+        },
+        "minimum_family_quotas": {
+            family: SCAN_MINIMUM_FAMILY_QUOTAS[family]
+            for family in resolved if family in SCAN_MINIMUM_FAMILY_QUOTAS
+        },
+        "execution_topology": request.execution_topology,
+        "ai_used": False,
+    }
+
+
 @router.get("/scans/{scan_id}/actions")
 async def get_scan_actions(scan_id: str):
     """Explain the immutable stage/action timeline without private inputs."""
@@ -183,6 +250,7 @@ __all__ = [
     "get_scan_coverage",
     "get_scan_parity_artifact",
     "get_scan_public_contract",
+    "preview_scan_contract",
     "load_public_scan_execution_explanation",
     "public_scan_execution_explanation",
     "router",

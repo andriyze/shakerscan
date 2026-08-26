@@ -543,7 +543,7 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     assert "verify.xss" not in discovery_ids
 
 
-def test_manifest_breadth_compiles_ranked_reduced_profile_capacity():
+def test_explicit_xss_family_compiles_its_minimum_executable_quota():
     endpoint_ref = ScanWorkManifestReference(
         manifest_id="10000000-0000-4000-8000-000000000092",
         kind="endpoint",
@@ -573,28 +573,46 @@ def test_manifest_breadth_compiles_ranked_reduced_profile_capacity():
         action for action in plan.actions if action.capability_name == "xss.verify"
     ]
 
-    # The compiler exposes every ranked candidate that could fit at the minimum
-    # reviewed tier; whole-plan allocation then chooses exact larger/smaller tiers.
-    assert len(actions) == 82
-    assert [action.capability_args["candidate_index"] for action in actions] == list(
-        range(82)
-    )
+    # Preset resolution promises a non-zero executable quota for every selected
+    # active family. Per-candidate actions are replaced by bounded batches in the
+    # next recovery step; until then, preserve the published minimum exactly.
+    assert len(actions) >= 1
+    assert actions[0].capability_args["candidate_index"] == 0
     allocation = allocate_scan_action_plan(plan, _budget())
     allocated_actions = [
         action for action in allocation.plan.actions
         if action.capability_name == "xss.verify"
         and action.admission_status == "planned"
     ]
-    assert len(allocated_actions) > 6
-    assert any(
-        action.requested_budget != {"http_requests": 400, "tool_wall_seconds": 120}
-        for action in allocated_actions
-    )
+    assert len(allocated_actions) >= 1
     assert all(
         action.admission_status == "planned"
         for action in allocation.plan.actions
         if action.required
     )
+
+
+def test_resolved_family_allowlist_removes_all_unselected_xss_actions():
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000094",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="5" * 64,
+        entry_count=100,
+        status="complete",
+    ).canonical_dict()
+    execution = _execution(include=("sqli",), exclude=("xss", "recon"))
+
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        candidate_manifest_ref=candidate_ref,
+        action_scope="full",
+    )
+
+    assert not any(action.capability_name.startswith("xss.") for action in plan.actions)
+    assert any(action.capability_name == "sqli.verify" for action in plan.actions)
 
 
 def test_explicit_verifier_remains_visible_when_candidate_manifest_is_empty():

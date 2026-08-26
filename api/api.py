@@ -29894,10 +29894,13 @@ def _compile_scan_admission_action_authority(
         )
 
     required_by_family = {
-        "nuclei": "templates.scan",
         "xss": "xss.verify",
         "sqli": "sqli.verify",
         "bola": "authz.verify",
+    }
+    allowed_by_family = {
+        "nuclei": "templates.scan",
+        **required_by_family,
     }
     required_capabilities = tuple(
         required_by_family[family]
@@ -29907,7 +29910,7 @@ def _compile_scan_admission_action_authority(
     )
     enabled_families = {
         family
-        for family in required_by_family
+        for family in allowed_by_family
         if family not in set(scan_contract.policy.exclude_families)
         and (
             not scan_contract.policy.include_families
@@ -29915,7 +29918,7 @@ def _compile_scan_admission_action_authority(
         )
     }
     allowed_capabilities = {
-        required_by_family[family] for family in enabled_families
+        allowed_by_family[family] for family in enabled_families
     }
     if scan_contract.policy.allow_state_changing_http:
         if "xss" in enabled_families:
@@ -50953,6 +50956,7 @@ async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_rece
         name=p.get("name"),
         budget_profile="thorough",
         policy={
+            "preset": "standard_active" if check_family == "all" else "custom",
             "active_testing": True,
             "include_families": ([] if check_family == "all" else [check_family]),
         },
@@ -59159,6 +59163,7 @@ async def _research_campaign_self_repair(campaign_id: Any) -> dict[str, Any]:
             target=str(target["url"]),
             budget_profile="thorough",
             policy={
+                "preset": "standard_active" if focus_family == "all" else "custom",
                 "active_testing": True,
                 "include_families": ([] if focus_family == "all" else [focus_family]),
             },
@@ -65012,6 +65017,11 @@ async def _canonical_asm_scan_options(
     contract = resolve_scan_contract(
         budget_profile=options.get("budget_profile"),
         policy={
+            "preset": (
+                "custom" if include_families
+                else "standard_active" if active_testing
+                else "passive"
+            ),
             "active_testing": active_testing,
             # ASM has no first-class state-changing permission in its request
             # contract, so an old target option or stale receipt can never grant it.

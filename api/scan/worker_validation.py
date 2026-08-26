@@ -31,7 +31,8 @@ V2_KEYS = frozenset({
 })
 REQUIRED_V2_KEYS = V2_KEYS | {"budget_profile"}
 PLAN_KEYS = frozenset({
-    "schema_version", "generation", "engine", "budget_profile", "policy", "budget"
+    "schema_version", "generation", "engine", "budget_profile", "family_preset",
+    "requested_families", "resolved_families", "policy", "budget"
 })
 POLICY_KEYS = frozenset(field.name for field in fields(ScanPolicy))
 BUDGET_KEYS = frozenset(field.name for field in fields(ScanBudget))
@@ -192,10 +193,22 @@ def validate_execution_plan(options: Mapping[str, Any]) -> ScanExecutionPlan:
     if raw["engine"] != SCAN_ENGINE:
         raise WorkerScanContractError("scan execution plan engine is invalid")
     policy = _policy(raw["policy"])
+    family_preset = str(raw["family_preset"] or "").strip().lower()
+    if family_preset not in {"passive", "standard_active", "custom"}:
+        raise WorkerScanContractError("scan execution family_preset is invalid")
+    requested_families = _families(raw["requested_families"], "include_families")
+    resolved_families = _families(raw["resolved_families"], "include_families")
+    if tuple(policy.include_families) != tuple(resolved_families):
+        raise WorkerScanContractError(
+            "resolved_families must match the policy allowlist"
+        )
     plan = ScanExecutionPlan(
         policy=policy,
         budget_profile=_profile(raw["budget_profile"]),
         budget=_budget(raw["budget"]),
+        family_preset=family_preset,
+        requested_families=requested_families,
+        resolved_families=resolved_families,
     )
     if plan.budget.max_state_changing_requests and not policy.allow_state_changing_http:
         raise WorkerScanContractError(

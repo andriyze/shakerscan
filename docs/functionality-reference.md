@@ -1434,8 +1434,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 397 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 334 | `api/**/*.py` |
+| Public REST operations | 398 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 335 | `api/**/*.py` |
 | Check families | 14 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1770,6 +1770,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/retests/finding/{finding_id:path}` | `list_finding_retests` |
 | `GET` | `/retests/{retest_id}` | `get_retest` |
 | `GET` | `/scan/contracts` | `get_scan_public_contract` |
+| `POST` | `/scan/contracts/preview` | `preview_scan_contract` |
 | `GET` | `/scans` | `list_scans` |
 | `POST` | `/scans` | `submit_scan_endpoint` |
 | `POST` | `/scans/batch` | `submit_batch_endpoint` |
@@ -2208,7 +2209,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `ARTIFACT_S3_PREFIX` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_STORAGE_BACKEND` | `api/artifact_storage.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `ARTIFACT_STORAGE_REQUIRED` | `api/artifact_storage.py`, `api/broker_worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `ASM_DEFAULT_DOMAIN_RATE_PER_HOUR` | `api/asm_inventory.py` |
+| `ASM_DEFAULT_DOMAIN_RATE_PER_HOUR` | `api/asm_inventory.py`, `docker-compose.yml` |
 | `ASM_DEFAULT_ENABLED` | `api/api.py` |
 | `ASM_GONE_RETENTION_DAYS` | `api/asm_inventory.py` |
 | `ASM_GONE_STREAK_THRESHOLD` | `api/asm_inventory.py` |
