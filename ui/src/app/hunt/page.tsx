@@ -64,7 +64,7 @@ function positiveInteger(value: string): number | undefined {
 }
 
 function huntStatusLabel(status: HuntV2['status']): string {
-  if (status === 'active') return 'open for planner'
+  if (status === 'active') return 'agent session open'
   return status.replaceAll('_', ' ')
 }
 
@@ -501,7 +501,7 @@ function HuntContent() {
         '',
         `/hunt?target=${encodeURIComponent(created.target_id)}&run=${encodeURIComponent(created.hunt_id)}`,
       )
-      toast.success('Hunt started through the V2 policy contract')
+      toast.success('Agent Hunt Session opened through the V2 policy contract')
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Failed to start Hunt'
       setError(message)
@@ -528,7 +528,7 @@ function HuntContent() {
     if (!hunt) return
     try {
       setHunt(await cancelHuntV2(hunt.hunt_id))
-      toast.success('Hunt cancelled')
+      toast.success('Agent Hunt Session cancelled')
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : 'Failed to cancel Hunt')
     }
@@ -541,9 +541,9 @@ function HuntContent() {
           <Compass className="h-6 w-6" />
         </div>
         <div>
-          <h1 className="text-2xl font-semibold text-white">Hunt</h1>
+          <h1 className="text-2xl font-semibold text-white">Agent Hunt Session</h1>
           <p className="mt-1 text-sm text-gray-400">
-            One evidence-driven investigation for web, API, network, and connected-device targets.
+            An evidence-driven capability session your coding agent drives for web, API, network, and connected-device targets. It does not investigate on its own — the agent proposes each permitted capability call and the runtime executes and proves it.
           </p>
         </div>
       </div>
@@ -814,7 +814,7 @@ function HuntContent() {
                   {startBlockedReason || 'Ready to start. The runtime will enforce the target, policy, and budget shown above.'}
                 </p>
                 <Button onClick={start} loading={starting} disabled={Boolean(startBlockedReason)} aria-describedby="hunt-start-guidance">
-                  Start Hunt
+                  Open agent session
                 </Button>
               </div>
             </>
@@ -858,7 +858,7 @@ function HuntContent() {
               {hunt.created_at && <p className="text-xs text-gray-500">Started {new Date(hunt.created_at).toLocaleString()}</p>}
               {hunt.status === 'active' && (
                 <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
-                  This Hunt is open for planner actions. It is not running background traffic; network activity occurs only when the current coding agent submits a permitted capability call.
+                  This agent session is open for planner actions. It does not investigate autonomously and is not running background traffic; network activity occurs only when your coding agent submits a permitted capability call.
                 </p>
               )}
               {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
@@ -883,7 +883,7 @@ function HuntContent() {
                 The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
               </div>
               {['active', 'awaiting_planner'].includes(hunt.status) && (
-                <Button variant="danger" onClick={cancel}>Cancel Hunt</Button>
+                <Button variant="danger" onClick={cancel}>Cancel session</Button>
               )}
               <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
                 Back to launcher and history

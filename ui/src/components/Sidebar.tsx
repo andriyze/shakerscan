@@ -96,7 +96,7 @@ const navGroups: {
     heading: 'AI Investigator',
     badge: 'Agentic',
     items: [
-      { href: '/hunt', label: 'Hunt', icon: <Compass className="w-5 h-5" /> },
+      { href: '/hunt', label: 'Agent Hunt', icon: <Compass className="w-5 h-5" /> },
     ],
   },
   {
