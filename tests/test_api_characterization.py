@@ -240,3 +240,43 @@ def test_extracted_routers_register_routes_on_their_own_router():
         "these handlers register on an `app` object instead of their module's "
         f"APIRouter, so they are not on the public API: {offenders}"
     )
+
+
+def test_composition_root_does_not_use_router_only_idioms():
+    """api.py must not contain a router's ``_pool()`` or ``_<domain>.`` rewrites.
+
+    When a handler is moved back out of an extracted router -- because the
+    closure dragged it in by mistake -- it carries that router's idioms with it.
+    ``_pool()`` and the ``_targets.``/``_ai_targets.`` module aliases do not
+    exist in the composition root, so the handler raises NameError on its first
+    real request. cancel_scan shipped exactly that way and the suite did not
+    notice, because nothing exercises its database path.
+    """
+    source = (_ROOT / "api" / "api.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defined = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "_pool" and "_pool" not in defined:
+                offenders.append(f"_pool() at line {node.lineno}")
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            name = node.value.id
+            if name.startswith("_") and name[1:] in _ROUTER_ALIAS_DOMAINS:
+                offenders.append(f"{name}.{node.attr} at line {node.lineno}")
+    assert not offenders, (
+        "api.py contains router-only idioms, so these call sites raise NameError "
+        f"at request time: {sorted(set(offenders))}"
+    )
+
+
+_ROUTER_ALIAS_DOMAINS = frozenset({
+    "ai_targets", "arsenal_routes", "devices", "evidence_routes", "exposure",
+    "finding_exceptions", "finding_routes", "fleet_routes", "interactive",
+    "local_agent_routes", "model_intake", "operations", "policy_profiles",
+    "research_routes", "schedules", "settings_routes", "targets",
+})
