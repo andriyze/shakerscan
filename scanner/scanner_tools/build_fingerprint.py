@@ -38,6 +38,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "ai_targets",
     "arsenal_routes",
     "evidence_routes",
+    "local_agent_routes",
     "capabilities",
     "devices",
     "exposure",
