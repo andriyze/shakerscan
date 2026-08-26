@@ -320,6 +320,7 @@ COPY api/hunt /app/hunt
 COPY api/interactive /app/interactive
 COPY api/policy_profiles /app/policy_profiles
 COPY api/runtime /app/runtime
+COPY api/schedules /app/schedules
 COPY api/scan /app/scan
 COPY api/worker_handlers /app/worker_handlers
 

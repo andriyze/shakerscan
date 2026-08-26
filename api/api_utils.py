@@ -101,7 +101,9 @@ def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list
 
 
 __all__ = [
+    "LEGACY_SCAN_WRITE_FIELDS",
     "SEVERITY_ORDER",
+    "_record_map",
     "_parse_iso_datetime",
     "utc_now",
     "utc_now_iso",
@@ -223,3 +225,14 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+def _record_map(row: Any) -> dict[str, Any]:
+    if not row:
+        return {}
+    try:
+        return dict(row)
+    except Exception:
+        return row if isinstance(row, dict) else {}
+LEGACY_SCAN_WRITE_FIELDS = frozenset({
+    "scan_type", "quick", "thorough", "active", "xss", "sqli",
+    "check_family", "asm_check_family",
+})
