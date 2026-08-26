@@ -277,10 +277,14 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     # time-based techniques (the widened wall window + wire reservation bound the time-based
     # payloads), level/risk 2, no crawl, output to a scratch dir the worker owns (replaced
     # per-job by bind_scanner_runtime_paths); findings surface in stdout ("is vulnerable").
+    # --smart is omitted on purpose: its basic-heuristic prune skips params that later
+    # techniques would confirm (Juice Shop's q returns 500 yet was skipped).
+    # --ignore-redirects keeps redirect containment without an --answers pattern that
+    # substring-matches URLs containing "redirect" and silently declines testing.
     return ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
-            "--smart", "--disable-coloring", "--answers", "redirect=N",
+            "--ignore-redirects", "--disable-coloring",
             "--user-agent", "shakerscan-sqlmap/1.0"]
 
 
