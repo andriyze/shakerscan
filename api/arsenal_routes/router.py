@@ -71,6 +71,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 
 try:
+    from evidence_routes.router import EvidenceInstanceRequest, _validate_evidence_retention_preview_payload
     from action_scope import _decode_json_value, evaluate_scope, receipt_to_dict
     from api_utils import LEGACY_SCAN_WRITE_FIELDS, _ARSENAL_CREATED_BY_CONTEXT, _clean_string_list, _int_or_none, _json_safe_row, _optional_uuid, _uuid_or_400, utc_now, utc_now_iso
     from http_experiment import ExperimentContractError, execute_experiment
@@ -87,6 +88,7 @@ try:
     from operations import router as _operations
     from targets import router as _targets
 except ModuleNotFoundError:  # package import in host-side tests
+    from ..evidence_routes.router import EvidenceInstanceRequest, _validate_evidence_retention_preview_payload
     from ..action_scope import _decode_json_value, evaluate_scope, receipt_to_dict
     from ..api_utils import LEGACY_SCAN_WRITE_FIELDS, _ARSENAL_CREATED_BY_CONTEXT, _clean_string_list, _int_or_none, _json_safe_row, _optional_uuid, _uuid_or_400, utc_now, utc_now_iso
     from ..http_experiment import ExperimentContractError, execute_experiment
@@ -113,7 +115,6 @@ _deps: dict[str, Callable[..., Any]] = {}
 SOURCE_INGEST_VERSION = "source_ingest_hypothesis_v1"
 REFUTER_FINDING_DELTA_MIN_BASELINE = 2   # need at least this many prior scans for a baseline
 RESEARCH_SURFACE_MIN_EXECUTABLE_ROUTES = 1
-EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION = 1
 SOURCE_INGEST_DEFAULT_IGNORED_PATHS = (
     ".git/",
     "node_modules/",
@@ -1990,28 +1991,6 @@ class ToolReceiptRequest(BaseModel):
     created_by: Optional[str] = None
 
 
-class EvidenceInstanceRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    finding_id: Optional[str] = None
-    evidence_object_id: Optional[str] = None
-    scan_id: Optional[str] = None
-    target_id: Optional[str] = None
-    concrete_url: Optional[str] = None
-    object_id: Optional[str] = None
-    payload_variant: Optional[str] = None
-    request_response_refs: list[str] = Field(default_factory=list)
-    principal_pair: dict[str, Any] = Field(default_factory=dict)
-    proof_observation: dict[str, Any] = Field(default_factory=dict)
-    campaign_action_id: Optional[str] = None
-    tool_receipt_id: Optional[str] = None
-    redaction_profile: str = "redact_sensitive_v1"
-    hash: Optional[str] = None
-    retention_policy: str = Field(default="standard", pattern="^(standard|short|audit|legal_hold|sensitive)$")
-    proof_state: str = Field(default="unverified", pattern="^(verified|suspected|unverified|refuted|inconclusive)$")
-    evidence_strength: Optional[str] = Field(default=None, pattern="^(claimed|signal|reproduced|cross_principal_verified)$")
-    metadata_json: dict[str, Any] = Field(default_factory=dict)
-    created_by: Optional[str] = None
 
 
 class AgentDecisionTraceRequest(BaseModel):
@@ -4759,29 +4738,6 @@ async def _research_campaign_yield_metrics(conn: Any, campaign: Any) -> dict[str
     }
 
 
-def _validate_evidence_retention_preview_payload(payload: dict[str, Any], *, allow_consumed: bool = False) -> None:
-    if payload.get("schema_version") != EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION:
-        raise HTTPException(status_code=409, detail="Retention preview uses an unsupported schema; run a new preview")
-    expected_hash = _evidence_retention_preview_hash(payload)
-    if not secrets.compare_digest(str(payload.get("preview_hash") or ""), expected_hash):
-        raise HTTPException(status_code=409, detail="Retention preview is invalid; run a new preview")
-    criteria = payload.get("criteria")
-    if not isinstance(criteria, dict) or criteria.get("scope") != "target" or not criteria.get("target_id"):
-        raise HTTPException(status_code=409, detail="Retention preview scope is invalid; run a new preview")
-    if str(payload.get("target_id") or "") != str(criteria.get("target_id") or ""):
-        raise HTTPException(status_code=409, detail="Retention preview target binding is invalid; run a new preview")
-    if not isinstance(payload.get("candidates"), list):
-        raise HTTPException(status_code=409, detail="Retention preview candidate set is invalid; run a new preview")
-    status = str(payload.get("status") or "")
-    if status in {"executing", "consumed"} and allow_consumed:
-        return
-    if payload.get("policy_hash") != _evidence_retention_policy_hash():
-        raise HTTPException(status_code=409, detail="Retention policy changed after preview; run a new preview")
-    if status != "ready":
-        raise HTTPException(status_code=409, detail="Retention preview is no longer executable; run a new preview")
-    expires_at = _parse_hypothesis_time(payload.get("expires_at"))
-    if not expires_at or expires_at <= datetime.now(timezone.utc):
-        raise HTTPException(status_code=409, detail="Retention preview expired; run a new preview")
 def _normalized_web_origins(primary_url: Any, values: Any = None) -> list[str]:
     """Normalize and de-duplicate concrete origins while preserving preference order."""
     candidates = values if isinstance(values, list) else []
@@ -6579,29 +6535,8 @@ async def _research_net_new_finding_count(
 
 
 
-def _evidence_retention_policy_hash() -> str:
-    encoded = json.dumps(
-        {
-            "schema_version": EVIDENCE_RETENTION_PREVIEW_SCHEMA_VERSION,
-            "policy_days": _get("EVIDENCE_RETENTION_DAYS"),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _evidence_retention_preview_hash(payload: dict[str, Any]) -> str:
-    material = {
-        "schema_version": payload.get("schema_version"),
-        "issued_at": payload.get("issued_at"),
-        "expires_at": payload.get("expires_at"),
-        "criteria": payload.get("criteria"),
-        "policy_hash": payload.get("policy_hash"),
-        "candidates": payload.get("candidates"),
-    }
-    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 class SourceIngestHint(BaseModel):
     kind: str = Field(default="route", pattern="^(route|endpoint|openapi_operation|graphql_field|package_manifest|frontend_route|backend_route|iac_resource|ai_tool_endpoint)$")
     method: Optional[str] = Field(default=None, max_length=16)

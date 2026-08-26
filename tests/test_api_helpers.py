@@ -284,6 +284,7 @@ import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
 from devices import router as devices_router_module  # noqa: E402
 from arsenal_routes import router as arsenal_router_module  # noqa: E402
+from evidence_routes import router as evidence_router_module  # noqa: E402
 from finding_routes import router as finding_routes_module  # noqa: E402
 from finding_exceptions import router as finding_exceptions_module  # noqa: E402
 from hunt import run_router as hunt_run_router_module  # noqa: E402
@@ -9161,6 +9162,15 @@ def test_retention_sweep_executes_exact_remote_preview_once(monkeypatch):
             "retryable": False,
         }
     ))
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda storage_uri: (
+        calls.append(storage_uri) or {
+            "storage_uri": storage_uri,
+            "storage_backend": "s3",
+            "status": "deleted",
+            "deleted": True,
+            "retryable": False,
+        }
+    ))
 
     preview = _run_retention_preview(conn)
     result = _run_retention_execute(conn, preview["preview_id"])
@@ -9182,6 +9192,14 @@ def test_retention_sweep_preserves_row_when_remote_delete_fails(monkeypatch):
     row = _retention_row(storage_uri="s3:evidence_objects/audit-bucket/evidence-objects/aa/" + ("a" * 64) + ".json")
     conn = _RetentionConn([row])
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda storage_uri: {
+        "storage_uri": storage_uri,
+        "storage_backend": "s3",
+        "status": "remote_error",
+        "deleted": False,
+        "retryable": True,
+        "error": "HTTPError: 403",
+    })
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda storage_uri: {
         "storage_uri": storage_uri,
         "storage_backend": "s3",
         "status": "remote_error",
@@ -9267,6 +9285,7 @@ def test_retention_execute_aborts_all_when_finding_becomes_active(monkeypatch):
     conn.findings[finding_id]["status"] = "active"
     calls = []
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: calls.append(uri))
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda uri: calls.append(uri))
 
     with pytest.raises(api_module.HTTPException) as exc:
         _run_retention_execute(conn, preview["preview_id"])
@@ -9288,6 +9307,7 @@ def test_retention_execute_aborts_when_shared_blob_effect_changes(monkeypatch):
     conn.scans[shared["scan_id"]] = {"id": shared["scan_id"], "target_id": conn.target_id}
     calls = []
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda value: calls.append(value))
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda value: calls.append(value))
 
     with pytest.raises(api_module.HTTPException) as exc:
         _run_retention_execute(conn, preview["preview_id"])
@@ -9317,7 +9337,9 @@ def test_retention_execution_never_escalates_previewed_shared_blob_to_delete(mon
 
     blob_deletes = []
     monkeypatch.setattr(api_module, "_evidence_retention_links_match_target", remove_shared_after_intent)
+    monkeypatch.setattr(evidence_router_module, "_evidence_retention_links_match_target", remove_shared_after_intent)
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: blob_deletes.append(uri))
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda uri: blob_deletes.append(uri))
 
     result = _run_retention_execute(conn, preview["preview_id"])
 
@@ -9342,7 +9364,17 @@ def test_retention_execution_finishes_committed_intent_if_finding_resurfaces(mon
 
     blob_deletes = []
     monkeypatch.setattr(api_module, "_evidence_retention_links_match_target", activate_after_intent)
+    monkeypatch.setattr(evidence_router_module, "_evidence_retention_links_match_target", activate_after_intent)
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: (
+        blob_deletes.append(uri) or {
+            "storage_uri": uri,
+            "storage_backend": "s3",
+            "status": "deleted",
+            "deleted": True,
+            "retryable": False,
+        }
+    ))
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda uri: (
         blob_deletes.append(uri) or {
             "storage_uri": uri,
             "storage_backend": "s3",
@@ -9370,6 +9402,7 @@ def test_retention_execute_aborts_when_candidate_becomes_legal_hold(monkeypatch)
     conn.evidence[0]["retention_class"] = "legal_hold"
     calls = []
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", lambda uri: calls.append(uri))
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", lambda uri: calls.append(uri))
 
     with pytest.raises(api_module.HTTPException) as exc:
         _run_retention_execute(conn, preview["preview_id"])
@@ -9425,6 +9458,7 @@ def test_retention_execute_rejects_policy_change(monkeypatch):
     changed_policy = dict(api_module.EVIDENCE_RETENTION_DAYS)
     changed_policy["short"] += 1
     monkeypatch.setattr(api_module, "EVIDENCE_RETENTION_DAYS", changed_policy)
+    monkeypatch.setattr(evidence_router_module, "EVIDENCE_RETENTION_DAYS", changed_policy)
 
     with pytest.raises(api_module.HTTPException) as exc:
         _run_retention_execute(conn, preview["preview_id"])
@@ -9445,6 +9479,7 @@ def test_retention_local_delete_failure_preserves_evidence_row(monkeypatch):
             return "/safe/evidence.json"
 
     monkeypatch.setattr(api_module, "local_evidence_path", lambda *_args: _FailingPath())
+    monkeypatch.setattr(evidence_router_module, "local_evidence_path", lambda *_args: _FailingPath())
     preview = _run_retention_preview(conn)
     result = _run_retention_execute(conn, preview["preview_id"])
 
@@ -9484,6 +9519,7 @@ def test_retention_execution_resumes_after_post_blob_database_failure(monkeypatc
         return await original_record(*args, **kwargs)
 
     monkeypatch.setattr(api_module, "delete_remote_evidence_object", delete_blob)
+    monkeypatch.setattr(evidence_router_module, "delete_remote_evidence_object", delete_blob)
     monkeypatch.setattr(api_module, "_record_command_result", fail_first_finalize)
     preview = _run_retention_preview(conn)
 
@@ -9515,6 +9551,7 @@ def test_retention_deletion_io_waits_for_threads_before_propagating_cancellation
         return {"deleted": [], "missing": [], "errors": [], "deleted_ids": []}
 
     monkeypatch.setattr(api_module, "_delete_remote_evidence_objects", blocking_remote)
+    monkeypatch.setattr(evidence_router_module, "_delete_remote_evidence_objects", blocking_remote)
 
     async def scenario():
         task = asyncio.create_task(api_module._run_evidence_retention_deletion_io([{"id": "one"}], []))
@@ -9761,6 +9798,7 @@ def test_arsenal_execute_dispatches_evidence_export_bundle(monkeypatch):
         return {"bundle_hash": "b" * 64, "export_event": {"id": "event-1"}}
 
     monkeypatch.setattr(api_module, "evidence_export_bundle", fake_bundle)
+    monkeypatch.setattr(evidence_router_module, "evidence_export_bundle", fake_bundle)
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
         api_module.ArsenalExecuteRequest(
@@ -9951,6 +9989,7 @@ def test_arsenal_execute_gated_evidence_retention_sweep_dispatches_when_allowed(
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
     monkeypatch.setattr(api_module, "evidence_retention_sweep", fake_sweep)
+    monkeypatch.setattr(evidence_router_module, "evidence_retention_sweep", fake_sweep)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
@@ -9993,6 +10032,7 @@ def test_arsenal_retention_preview_dispatches_without_execution_gate_or_approval
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", reject_if_validated)
     monkeypatch.setattr(api_module, "evidence_retention_sweep", fake_sweep)
+    monkeypatch.setattr(evidence_router_module, "evidence_retention_sweep", fake_sweep)
 
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(),
@@ -10036,6 +10076,7 @@ def test_public_arsenal_retention_preview_uses_read_only_detached_path(monkeypat
     monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", reject_if_validated)
     monkeypatch.setattr(api_module, "evidence_retention_sweep", fake_sweep)
+    monkeypatch.setattr(evidence_router_module, "evidence_retention_sweep", fake_sweep)
 
     result = asyncio.run(api_module.arsenal_execute(api_module.ArsenalExecuteRequest(
         command="evidence.retention_sweep",
