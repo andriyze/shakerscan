@@ -13,6 +13,7 @@ turn a stubbed test into real IO.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any
@@ -101,6 +102,9 @@ def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list
 
 __all__ = [
     "SEVERITY_ORDER",
+    "_parse_iso_datetime",
+    "utc_now",
+    "utc_now_iso",
     "extract_root_domain",
     "_clean_string_list",
     "_graph_get",
@@ -200,3 +204,22 @@ def _graph_get(container: dict[str, Any], *path: str) -> Any:
             return None
         cursor = cursor.get(key)
     return cursor
+def utc_now() -> datetime:
+    """Return UTC as a naive datetime to match existing DB timestamp columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed

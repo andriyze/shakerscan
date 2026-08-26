@@ -345,13 +345,8 @@ DEVICE_WEB_ORIGIN_ROLE = "device_web_origin"
 VALID_SCHEDULE_KINDS = {"normal_scan", "asm_improve", "evidence_retention_sweep"}
 
 
-def utc_now() -> datetime:
-    """Return UTC as a naive datetime to match existing DB timestamp columns."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def utc_now_iso() -> str:
-    return utc_now().isoformat()
 
 try:
     from evidence_triage import (
@@ -439,7 +434,10 @@ except ModuleNotFoundError:  # package import in host-side tests
 try:
     from api_utils import (
         SEVERITY_ORDER,
+        _parse_iso_datetime,
         extract_root_domain,
+        utc_now,
+        utc_now_iso,
         _clean_string_list,
         _content_free_hash,
         _graph_get,
@@ -459,7 +457,10 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from api.api_utils import (
         SEVERITY_ORDER,
+        _parse_iso_datetime,
         extract_root_domain,
+        utc_now,
+        utc_now_iso,
         _clean_string_list,
         _content_free_hash,
         _graph_get,
@@ -4812,6 +4813,39 @@ except ModuleNotFoundError:  # package import in host-side tests
 configure_policy_profile_router(lambda: db_pool)
 app.include_router(policy_profile_router)
 try:
+    from finding_exceptions.router import (
+        FindingExceptionLifecycleSweepRequest,
+        FindingExceptionRequest,
+        _finding_exception_lifecycle_sweep,
+        configure_finding_exception_router,
+        create_finding_exception,
+        delete_finding_exception,
+        finding_exception_lifecycle_sweep,
+        list_finding_exceptions,
+        router as finding_exception_router,
+        update_finding_exception,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.finding_exceptions.router import (
+        FindingExceptionLifecycleSweepRequest,
+        FindingExceptionRequest,
+        _finding_exception_lifecycle_sweep,
+        configure_finding_exception_router,
+        create_finding_exception,
+        delete_finding_exception,
+        finding_exception_lifecycle_sweep,
+        list_finding_exceptions,
+        router as finding_exception_router,
+        update_finding_exception,
+    )
+configure_finding_exception_router(
+    lambda: db_pool,
+    # Resolved lazily: both hubs are defined later in this module.
+    approval_validator=lambda *a, **k: _validate_approval_receipt_for_action(*a, **k),
+    command_recorder=lambda *a, **k: _record_command_result(*a, **k),
+)
+app.include_router(finding_exception_router)
+try:
     from exposure.router import (
         _build_exposure_graph,
         _focus_exposure_subgraph,
@@ -8128,16 +8162,6 @@ def _exception_records(
     return [item for item in (db_exceptions or []) if isinstance(item, dict)]
 
 
-def _parse_iso_datetime(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 def _active_exception_keys(exceptions: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
@@ -28969,244 +28993,21 @@ async def get_scan_deployment_decision(scan_id: str):
 
 
 
-class FindingExceptionRequest(BaseModel):
-    finding_id: Optional[str] = None
-    fingerprint: Optional[str] = None
-    policy_id: Optional[str] = None       # scopes the waiver to one policy profile (enforced)
-    target_id: Optional[str] = None       # scopes the waiver to one target (enforced in loader SQL)
-    scope: Optional[str] = None           # free-text descriptor; not an enforcement gate
-    owner: Optional[str] = None
-    approver: Optional[str] = None
-    reason: Optional[str] = None
-    compensating_controls: Optional[str] = None
-    status: str = "active"
-    expires_at: Optional[str] = None
-
-
-class FindingExceptionLifecycleSweepRequest(BaseModel):
-    dry_run: bool = True
-    target_id: Optional[str] = None
-    limit: int = Field(default=200, ge=1, le=500)
-    approval_receipt_id: Optional[str] = None
 
 
 
-@app.get("/finding-exceptions")
-async def list_finding_exceptions(
-    target_id: Optional[str] = None,
-    status: Optional[str] = None,
-    queue_filter: Optional[str] = None,
-    expiring_within_days: int = Query(7, ge=1, le=365),
-    limit: int = Query(200, ge=1, le=500),
-):
-    clauses, params = [], []
-    if target_id:
-        params.append(uuid.UUID(target_id))
-        clauses.append(f"target_id = ${len(params)}")
-    if status:
-        params.append(status)
-        clauses.append(f"status = ${len(params)}")
-    qf = str(queue_filter or "").strip().lower()
-    if qf in {"expired", "expired_or_status"}:
-        clauses.append("status <> 'revoked'")
-        clauses.append("(status = 'expired' OR (expires_at IS NOT NULL AND expires_at < NOW()))")
-    elif qf in {"expiring", "expiring_soon"}:
-        params.append(int(expiring_within_days))
-        clauses.append(
-            f"expires_at IS NOT NULL AND expires_at >= NOW() "
-            f"AND expires_at <= NOW() + (${len(params)}::int * INTERVAL '1 day')"
-        )
-        clauses.append("status IN ('active', 'approved', 'accepted_risk')")
-    elif qf in {"missing_owner", "missing_approver", "missing_controls", "policy_scoped", "target_scoped"}:
-        clauses.append("status IN ('active', 'approved', 'accepted_risk')")
-        if qf == "missing_owner":
-            clauses.append("(owner IS NULL OR btrim(owner) = '')")
-        elif qf == "missing_approver":
-            clauses.append("(approver IS NULL OR btrim(approver) = '')")
-        elif qf == "missing_controls":
-            clauses.append("(compensating_controls IS NULL OR btrim(compensating_controls) = '')")
-        elif qf == "policy_scoped":
-            clauses.append("policy_id IS NOT NULL")
-        elif qf == "target_scoped":
-            clauses.append("target_id IS NOT NULL")
-    elif qf:
-        raise HTTPException(
-            status_code=422,
-            detail="queue_filter must be one of expired, expiring, missing_owner, missing_approver, missing_controls, policy_scoped, target_scoped",
-        )
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    async with db_pool.acquire() as conn:
-        params.append(limit)
-        rows = await conn.fetch(
-            f"SELECT * FROM finding_exceptions{where} ORDER BY created_at DESC LIMIT ${len(params)}",
-            *params,
-        )
-    return {"finding_exceptions": [row_to_dict(r) for r in rows]}
 
 
-@app.post("/finding-exceptions/lifecycle/sweep")
-async def finding_exception_lifecycle_sweep(req: FindingExceptionLifecycleSweepRequest):
-    return await _finding_exception_lifecycle_sweep(req, pool=db_pool)
 
 
-async def _finding_exception_lifecycle_sweep(
-    req: FindingExceptionLifecycleSweepRequest,
-    *,
-    pool: asyncpg.Pool,
-) -> dict[str, Any]:
-    """Preview or expire elapsed exceptions without renewing or deleting them."""
-    try:
-        target_uuid = uuid.UUID(req.target_id) if req.target_id else None
-    except ValueError:
-        raise HTTPException(status_code=422, detail="target_id must be a UUID")
-
-    async with pool.acquire() as conn:
-        if not req.dry_run:
-            await _validate_approval_receipt_for_action(
-                conn,
-                req.approval_receipt_id,
-                target_id=target_uuid,
-                action_name="finding_exception.lifecycle_sweep",
-                command="finding_exception.lifecycle_sweep",
-                risk_tier="active",
-                always_require_receipt=True,
-            )
-        candidates = await conn.fetch(
-            """
-            SELECT *
-            FROM finding_exceptions
-            WHERE status IN ('active', 'approved', 'accepted_risk')
-              AND expires_at IS NOT NULL
-              AND expires_at < NOW()
-              AND ($1::uuid IS NULL OR target_id = $1)
-            ORDER BY expires_at ASC, created_at ASC
-            LIMIT $2
-            """,
-            target_uuid,
-            req.limit,
-        )
-        candidate_ids = [str(row["id"]) for row in candidates]
-        expired_rows: list[Any] = []
-        command_result: dict[str, Any] | None = None
-        if candidate_ids and not req.dry_run:
-            expired_rows = await conn.fetch(
-                """
-                UPDATE finding_exceptions
-                SET status = 'expired',
-                    updated_at = NOW(),
-                    edit_history = edit_history || jsonb_build_array(
-                        jsonb_build_object(
-                            'status', status,
-                            'expires_at', expires_at,
-                            'replaced_at', NOW(),
-                            'transition', 'lifecycle_sweep'
-                        )
-                    )
-                WHERE id = ANY($1::uuid[])
-                  AND status IN ('active', 'approved', 'accepted_risk')
-                  AND expires_at IS NOT NULL
-                  AND expires_at < NOW()
-                RETURNING id
-                """,
-                [uuid.UUID(item) for item in candidate_ids],
-            )
-        if not req.dry_run:
-            expired_ids = [str(row["id"]) for row in expired_rows]
-            command_result = await _record_command_result(
-                conn,
-                command="finding_exception.lifecycle_sweep",
-                status="completed",
-                risk_tier="active",
-                approval_receipt_id=req.approval_receipt_id,
-                operator_message=f"Expired {len(expired_ids)} elapsed finding exception(s)",
-                next_action="/exceptions?queue_filter=expired",
-                result_json={
-                    "target_id": str(target_uuid) if target_uuid else None,
-                    "candidate_count": len(candidate_ids),
-                    "expired_count": len(expired_ids),
-                    "expired_exception_ids": expired_ids,
-                },
-            )
-    response = {
-        "dry_run": req.dry_run,
-        "target_id": str(target_uuid) if target_uuid else None,
-        "candidate_count": len(candidate_ids),
-        "expired_count": len(expired_rows),
-        "candidate_exception_ids": candidate_ids,
-        "execution_enabled": not req.dry_run,
-    }
-    if command_result:
-        response["operation_id"] = command_result["id"]
-    return response
 
 
-@app.post("/finding-exceptions")
-async def create_finding_exception(req: FindingExceptionRequest):
-    if not (req.finding_id or req.fingerprint):
-        raise HTTPException(status_code=422, detail="finding_id or fingerprint is required")
-    if not (req.approver or req.owner):
-        raise HTTPException(status_code=422, detail="approver or owner is required for an auditable exception")
-    expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO finding_exceptions
-                (finding_id, fingerprint, policy_id, target_id, scope, owner, approver,
-                 reason, compensating_controls, status, expires_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            RETURNING *
-            """,
-            req.finding_id, req.fingerprint,
-            uuid.UUID(req.policy_id) if req.policy_id else None,
-            uuid.UUID(req.target_id) if req.target_id else None,
-            req.scope, req.owner, req.approver, req.reason, req.compensating_controls,
-            req.status, expires_at,
-        )
-    return row_to_dict(row)
 
 
-@app.patch("/finding-exceptions/{exception_id}")
-async def update_finding_exception(exception_id: str, req: FindingExceptionRequest):
-    expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
-    if not (req.approver or req.owner):
-        raise HTTPException(status_code=422, detail="approver or owner is required for an auditable exception")
-    async with db_pool.acquire() as conn:
-        current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
-        if not current:
-            raise HTTPException(status_code=404, detail="Finding exception not found")
-        prior_snapshot = {
-            "owner": current["owner"],
-            "approver": current["approver"],
-            "reason": current["reason"],
-            "compensating_controls": current["compensating_controls"],
-            "status": current["status"],
-            "expires_at": current["expires_at"].isoformat() if current["expires_at"] else None,
-            "replaced_at": utc_now_iso(),
-        }
-        row = await conn.fetchrow(
-            """
-            UPDATE finding_exceptions SET
-                scope=$2, owner=$3, approver=$4, reason=$5, compensating_controls=$6,
-                status=$7, expires_at=$8, updated_at=NOW(),
-                edit_history = edit_history || $9::jsonb
-            WHERE id=$1 RETURNING *
-            """,
-            uuid.UUID(exception_id), req.scope, req.owner, req.approver, req.reason,
-            req.compensating_controls, req.status, expires_at,
-            json.dumps([prior_snapshot], default=str),
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="Finding exception not found")
-    return row_to_dict(row)
 
 
-@app.delete("/finding-exceptions/{exception_id}")
-async def delete_finding_exception(exception_id: str):
-    async with db_pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
-    if result.endswith("0"):
-        raise HTTPException(status_code=404, detail="Finding exception not found")
-    return {"deleted": True, "id": exception_id}
+
+
 
 
 # ============================================================
