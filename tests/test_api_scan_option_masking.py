@@ -80,6 +80,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from operations import router as ops_router_module  # noqa: E402
 from settings_routes import router as settings_router_module  # noqa: E402
 from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
@@ -1099,7 +1100,7 @@ def test_default_scan_list_hides_shards_and_asm_activity_rows():
         api_module.asm_inventory.ASM_BATCH_ROLE,
         api_module.asm_inventory.ASM_RECON_ROLE,
         api_module.parallel_scan.PARALLEL_DISCOVERY_ROLE,
-        api_module.DEVICE_WEB_ORIGIN_ROLE,
+        ops_router_module.DEVICE_WEB_ORIGIN_ROLE,
     ]
 
 
@@ -1108,7 +1109,7 @@ def test_scan_list_internal_flags_reveal_requested_implementation_rows():
         api_module.asm_inventory.ASM_BATCH_ROLE,
         api_module.asm_inventory.ASM_RECON_ROLE,
         api_module.parallel_scan.PARALLEL_DISCOVERY_ROLE,
-        api_module.DEVICE_WEB_ORIGIN_ROLE,
+        ops_router_module.DEVICE_WEB_ORIGIN_ROLE,
     ]
     assert api_module._hidden_scan_roles_for_list(include_internal=True) == ["shard"]
     assert api_module._hidden_scan_roles_for_list(include_shards=True, include_internal=True) == []
@@ -2434,9 +2435,15 @@ def test_broker_private_option_split_keeps_public_job_secret_free():
 
 
 def test_cli_v1_scan_is_historical_read_only():
-    source = Path(api_module.__file__).read_text(encoding="utf-8")
-    assert '@app.get("/api/v1/scan"' in source
+    # The compatibility CLI reads moved to the operations router; read the whole
+    # api tree and accept either decorator form.
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((Path(api_module.__file__).parent).rglob("*.py"))
+    )
+    assert '@app.get("/api/v1/scan"' in source or '@router.get("/api/v1/scan"' in source
     assert '@app.post("/api/v1/scan"' not in source
+    assert '@router.post("/api/v1/scan"' not in source
     assert "_translate_cli_v1_scan_request" not in source
 
 

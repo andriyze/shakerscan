@@ -322,6 +322,7 @@ COPY api/finding_routes /app/finding_routes
 COPY api/fleet_routes /app/fleet_routes
 COPY api/hunt /app/hunt
 COPY api/model_intake /app/model_intake
+COPY api/operations /app/operations
 COPY api/interactive /app/interactive
 COPY api/policy_profiles /app/policy_profiles
 COPY api/runtime /app/runtime

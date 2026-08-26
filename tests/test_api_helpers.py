@@ -49,10 +49,10 @@ def test_latest_result_rejects_traversal_and_symlink_escape(tmp_path, monkeypatc
     (results / "escape.test").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(api_module, "RESULTS_DIR", results)
 
-    assert asyncio.run(api_module.get_latest_result("example.com")) == {"ok": True}
+    assert asyncio.run(ops_router_module.get_latest_result("example.com")) == {"ok": True}
     for candidate in ("..", "../outside", "escape.test", "bad/name"):
         with pytest.raises(api_module.HTTPException) as exc:
-            asyncio.run(api_module.get_latest_result(candidate))
+            asyncio.run(ops_router_module.get_latest_result(candidate))
         assert exc.value.status_code == 404
 
 
@@ -76,7 +76,7 @@ def test_list_results_tolerates_null_and_mixed_legacy_timestamps(tmp_path, monke
         )
     monkeypatch.setattr(api_module, "RESULTS_DIR", results)
 
-    response = asyncio.run(api_module.list_results(limit=50))
+    response = asyncio.run(ops_router_module.list_results(limit=50))
 
     assert response["count"] == 3
     assert {item["folder"] for item in response["results"]} == set(fixtures)
@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from operations import router as ops_router_module  # noqa: E402
 from settings_routes import router as settings_router_module  # noqa: E402
 from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
@@ -13011,7 +13012,7 @@ def test_command_result_event_uses_live_scan_status_over_frozen_status():
         "campaign_action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "mission_campaign_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     }
-    ev = api_module._command_result_timeline_event(row)
+    ev = ops_router_module._command_result_timeline_event(row)
     assert ev["kind"] == "command_result"
     assert ev["status"] == "running"          # live scan status wins
     assert ev["active_scan_id"] == "44444444-4444-4444-8444-444444444444"
@@ -13025,7 +13026,7 @@ def test_timeline_sort_orders_newest_first_and_none_last():
     newer = {"created_at": "2026-07-06T00:00:00+00:00", "event_id": "new"}
     undated = {"created_at": None, "event_id": "none"}
     events = [older, undated, newer]
-    events.sort(key=api_module._timeline_sort_key, reverse=True)
+    events.sort(key=ops_router_module._timeline_sort_key, reverse=True)
     assert [e["event_id"] for e in events] == ["new", "old", "none"]
 
 
@@ -13039,7 +13040,7 @@ def test_command_result_event_blocked_row_keeps_its_status():
         "operator_message": "blocked", "created_at": datetime(2026, 7, 6, tzinfo=timezone.utc),
         "scan_status": None, "scan_target_url": None, "scan_target_id": None,
     }
-    ev = api_module._command_result_timeline_event(row)
+    ev = ops_router_module._command_result_timeline_event(row)
     assert ev["status"] == "blocked"          # no scan -> keep command-result status
     assert ev["active_scan_id"] is None
     assert ev["blocked_by"] == ["approval_receipt_expired"]
@@ -13060,7 +13061,7 @@ def test_campaign_action_event_uses_live_scan_status_and_refs():
         "scan_target_id": "99999999-9999-4999-8999-999999999999",
     }
 
-    ev = api_module._campaign_action_timeline_event(row)
+    ev = ops_router_module._campaign_action_timeline_event(row)
 
     assert ev["kind"] == "campaign_action"
     assert ev["status"] == "running"
@@ -13091,7 +13092,7 @@ def test_evidence_instance_timeline_event_is_evidence_bound():
         "created_at": datetime(2026, 7, 6, 13, tzinfo=timezone.utc),
     }
 
-    ev = api_module._evidence_instance_timeline_event(row)
+    ev = ops_router_module._evidence_instance_timeline_event(row)
 
     assert ev["kind"] == "evidence_instance"
     assert ev["status"] == "evidence_bound"
@@ -13120,7 +13121,7 @@ def test_refuter_review_timeline_event_is_refuter_requested_without_mutation():
         "created_at": datetime(2026, 7, 6, 13, tzinfo=timezone.utc),
     }
 
-    ev = api_module._refuter_review_timeline_event(row)
+    ev = ops_router_module._refuter_review_timeline_event(row)
 
     assert ev["kind"] == "refuter_review"
     assert ev["status"] == "refuter_requested"
@@ -13162,7 +13163,7 @@ def test_export_event_timeline_event_is_content_free_export_record():
         "finding_target_id": None,
     }
 
-    ev = api_module._export_event_timeline_event(row)
+    ev = ops_router_module._export_event_timeline_event(row)
 
     assert ev["kind"] == "export_event"
     assert ev["status"] == "completed"
@@ -20191,7 +20192,12 @@ def test_finding_owner_count_refreshes_web_and_device_namespaces():
 
 
 def test_all_public_limit_parameters_have_explicit_lower_bounds():
-    source = inspect.getsource(api_module)
+    # Routes now live across the api package; read the whole tree so an extracted
+    # route cannot slip past this bound check by leaving api.py.
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((Path(api_module.__file__).parent).rglob("*.py"))
+    )
     assert 'async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000))' in source
     assert 'async def list_discovery_runs(limit: int = Query(20, ge=1, le=200))' in source
     assert 'async def list_results(limit: int = Query(50, ge=1, le=500))' in source
@@ -20958,7 +20964,7 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
     monkeypatch.setattr(api_module, "queue_payloads", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(api_module, "pending_depth", lambda *_args, **_kwargs: 0)
 
-    result = asyncio.run(api_module.queue_stats())
+    result = asyncio.run(ops_router_module.queue_stats())
 
     assert result["running"] == 1
     assert result["work_running"] == 4

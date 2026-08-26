@@ -45,6 +45,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "hunt",
     "interactive",
     "model_intake",
+    "operations",
     "policy_profiles",
     "runtime",
     "scan",
