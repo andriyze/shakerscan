@@ -39,6 +39,7 @@ _MAX_ACTIONS = 512
 _LEGACY_CONTINUATION_CAPABILITIES = (
     "authz.verify",
     "exposure.verify_batch",
+    "nosqli.verify_batch",
     "sqli.prove_batch",
     "sqli.request_verify",
     "sqli.verify",

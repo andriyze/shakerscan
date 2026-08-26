@@ -57,6 +57,7 @@ _BATCH_CAPABILITIES = frozenset({
     "sqli.prove_batch",
     "xss.browser_prove_batch",
     "exposure.verify_batch",
+    "nosqli.verify_batch",
 })
 _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     "fast": {
@@ -69,6 +70,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
         "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
         "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
+        "nosqli.verify_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
     },
     "balanced": {
         "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
@@ -80,6 +82,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
         "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
         "exposure.verify_batch": (60, {"http_requests": 400, "tool_wall_seconds": 180}),
+        "nosqli.verify_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
     },
     "thorough": {
         "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
@@ -91,6 +94,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
         "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
         "exposure.verify_batch": (80, {"http_requests": 600, "tool_wall_seconds": 240}),
+        "nosqli.verify_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
     },
 }
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -755,6 +759,7 @@ class ScanActionPlanCompiler:
         active_nuclei = active and enabled("nuclei_active")
         bola = active and enabled("bola")
         sensitive_exposure = active and enabled("sensitive_exposure")
+        nosqli = active and enabled("nosqli")
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
@@ -1014,6 +1019,7 @@ class ScanActionPlanCompiler:
                     "sqli.prove_batch": 20,
                     "xss.browser_prove_batch": 50,
                     "exposure.verify_batch": 15,
+                    "nosqli.verify_batch": 20,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1025,13 +1031,13 @@ class ScanActionPlanCompiler:
                 if (
                     blueprint.capability_name in {
                         "xss.request_verify_batch", "sqli.request_verify_batch",
-                        "sqli.prove_batch",
+                        "sqli.prove_batch", "nosqli.verify_batch",
                     }
                     and not policy.allow_state_changing_http
                 ):
                     budget.pop("state_changing_requests", None)
                 if (
-                    blueprint.capability_name == "sqli.prove_batch"
+                    blueprint.capability_name in {"sqli.prove_batch", "nosqli.verify_batch"}
                     and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)
@@ -1397,6 +1403,21 @@ class ScanActionPlanCompiler:
                 minimum_batches=1,
                 reserve_dependency_slots=int(authz_will_run),
             )
+        if scope in {"full", "endpoint"} and nosqli and not defer_manifest_actions:
+            add_manifest_batches(
+                "verify.nosqli",
+                "verify_candidates",
+                "nosqli.verify_batch",
+                {
+                    "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
+                    "endpoint_manifest_ref": endpoint_ref or None,
+                },
+                manifest_ref=candidate_ref,
+                dependencies=active_dependencies,
+                required="nosqli" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
         private_request_dependencies = tuple(
             row.action_id for row in blueprints
             if row.action_id.startswith("inputs.collection_")
@@ -1451,6 +1472,18 @@ class ScanActionPlanCompiler:
                         ))),
                         required=False,
                     )
+            if nosqli:
+                add_manifest_batches(
+                    "verify.request_nosqli",
+                    "verify_candidates",
+                    "nosqli.verify_batch",
+                    {"request_candidate_manifest_ref": request_candidate_ref},
+                    manifest_ref=request_candidate_ref,
+                    dependencies=tuple(dict.fromkeys((
+                        *primary_dependency, *private_request_dependencies,
+                    ))),
+                    required=False,
+                )
         if authz_will_run and not defer_manifest_actions:
             add(
                 "verify.authz",

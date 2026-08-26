@@ -211,7 +211,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
     assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
     assert [item["name"] for item in contract["families"]] == [
         "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
-        "sensitive_exposure",
+        "sensitive_exposure", "nosqli",
     ]
     assert contract["passive_coverage"]["default_families"] == ["recon", "nuclei_passive"]
     assert contract["family_presets"]["standard_active"] == [

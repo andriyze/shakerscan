@@ -311,6 +311,37 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         description="Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups.",
     ),
     CheckFamilySpec(
+        name="nosqli",
+        phase="active",
+        family="injection",
+        label="NoSQL Injection",
+        is_active=True,
+        risk_level="high",
+        telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("method", "url_or_request", "field", "operator", "response_delta"),
+        severity_rules={
+            "critical_requires": ["authentication_bypass"],
+            "high_requires": ["operator_response_delta"],
+        },
+        # V2-native: executed by the ``nosqli.verify_batch`` capability, not the
+        # legacy scanner boolean-flag loop.
+        dispatch_adapter="nosqli_verify_batch",
+        aliases=("nosql", "nosql-injection", "nosql_injection", "mongo_injection"),
+        finding_tools=("nosqli_verify", "nosql_injection"),
+        finding_cwes=("CWE-943",),
+        finding_title_markers=("nosql injection", "nosql"),
+        finding_type_markers=("nosqli", "nosql injection"),
+        remediation=(
+            "Reject request-supplied query operators; coerce user input to expected scalar types.",
+            "Use typed query builders and never pass raw request objects into document queries.",
+            "Enforce authentication independently of query-shaped comparison operators.",
+        ),
+        emits_endpoint_telemetry=True,
+        scanner_focus_order=45,
+        runnable=False,
+        description="Deterministic Mongo-style operator injection proof over query and JSON candidates.",
+    ),
+    CheckFamilySpec(
         name="ssrf",
         phase="active",
         family="server_side",

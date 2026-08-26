@@ -267,6 +267,18 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "requires_active_testing": true,
       "requires_credentials": false,
       "risk_level": "high"
+    },
+    {
+      "capabilities": [
+        "nosqli.verify_batch"
+      ],
+      "default_enabled": false,
+      "description": "Deterministic Mongo-style operator injection proof over query and JSON candidates.",
+      "label": "NoSQL Injection",
+      "name": "nosqli",
+      "requires_active_testing": true,
+      "requires_credentials": false,
+      "risk_level": "high"
     }
   ],
   "family_presets": {

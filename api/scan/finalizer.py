@@ -93,6 +93,7 @@ def _findings_for_action(
         "sqli.prove_batch": {"candidate_attempt", "sqli_proof"},
         "xss.browser_prove_batch": {"candidate_attempt", "xss_browser_proof"},
         "exposure.verify_batch": {"candidate_attempt", "sensitive_exposure_proof"},
+        "nosqli.verify_batch": {"candidate_attempt", "nosqli_proof"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
@@ -409,6 +410,51 @@ def _findings_for_action(
                 "proof_state": "verified",
                 "verification_reason": (
                     "Deterministic sensitive-exposure response signature satisfied"
+                ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "nosqli_proof"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("proof_contract") or "").startswith("nosqli_")
+            and int(item.get("repetitions") or 0) >= 2
+        ):
+            auth_bypass = item.get("technique") == "operator_auth_bypass_repeated"
+            finding = _base_finding(
+                tool="shakerscan_nosqli_verify",
+                title=(
+                    "Verified NoSQL injection authentication bypass"
+                    if auth_bypass else "Verified NoSQL injection"
+                ),
+                severity="critical" if auth_bypass else "high",
+                cwe="CWE-943",
+                url=None,
+                evidence={
+                    "candidate_id": item.get("candidate_id"),
+                    "request_ref_id": item.get("request_ref_id"),
+                    "method": item.get("method"),
+                    "field_path": item.get("field_path"),
+                    "request_class": item.get("request_class"),
+                    "proof_contract": item.get("proof_contract"),
+                    "technique": item.get("technique"),
+                    "operator": item.get("operator"),
+                    "repetitions": item.get("repetitions"),
+                    "response_pairs": list(item.get("response_pairs") or ()),
+                    "session_state_discarded": item.get("session_state_discarded"),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "deterministic_operator_differential",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "verification_reason": (
+                    "Repeated deterministic NoSQL operator differential satisfied"
                 ),
             })
             findings.append(finding)
@@ -834,6 +880,7 @@ def finalize_scan_report(
         "sqli.prove_batch": "sqli_proof",
         "xss.browser_prove_batch": "xss_browser_proof",
         "exposure.verify_batch": "sensitive_exposure",
+        "nosqli.verify_batch": "nosqli",
     }
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:

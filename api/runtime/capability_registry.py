@@ -807,6 +807,38 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "nosqli.verify_batch",
+            "Prove NoSQL operator injection with a repeated sentinel differential "
+            "over query and worker-private JSON candidates.",
+            "internal", "active", _HTTP_TARGETS, "nosqli.verify_batch", "1",
+            "active_testing",
+            {
+                "http_requests": 200,
+                "state_changing_requests": 200,
+                "tool_wall_seconds": 180,
+            },
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "deterministic_proof_contract": True,
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "candidate_manifest_ref": {"type": "object"},
+                "endpoint_manifest_ref": {"type": "object"},
+                "request_candidate_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=("slice", "profile", "proof_policy")),
+            "nosqli-verify-batch/v1",
+            ("candidate_attempt", "nosqli_proof"),
+            arsenal_status="wired",
+            retest_contract="rerun-exact-nosqli-differential",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "service.fingerprint", "Bounded connection-based service/version fingerprint.",
             "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
             "network_discovery", {"tcp_ports_attempted": 60, "tool_wall_seconds": 90},
