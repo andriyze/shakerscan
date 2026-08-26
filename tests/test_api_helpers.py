@@ -274,6 +274,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from targets import router as targets_router_module  # noqa: E402
 import operator_auth as operator_auth_module  # noqa: E402
 from interactive import router as interactive_router_module  # noqa: E402
 from devices import router as devices_router_module  # noqa: E402
@@ -2119,7 +2120,7 @@ def test_device_policy_validation_normalizes_bounded_requirements():
 
 
 def test_target_credential_profile_public_shape_never_returns_secret(monkeypatch):
-    monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
+    monkeypatch.setattr(targets_router_module, "encryption_enabled", lambda: True)
     row = {
         "id": uuid.uuid4(),
         "target_id": uuid.uuid4(),
@@ -2158,7 +2159,7 @@ def test_target_credential_profile_expiry_and_inactive_states():
 
 
 def test_target_credential_profile_values_encrypt_and_reject_header_injection(monkeypatch):
-    monkeypatch.setattr(api_module, "encrypt_secret", lambda value: f"encrypted:{value}")
+    monkeypatch.setattr(targets_router_module, "encrypt_secret", lambda value: f"encrypted:{value}")
     values = api_module._target_credential_profile_values(
         name=" Customer A ",
         auth_kind="authorization_header",
@@ -3243,7 +3244,7 @@ def _freeze_test_asm_target(monkeypatch):
 
     monkeypatch.setattr(api_module.asm_inventory, "claim_test_batch", claim)
     monkeypatch.setattr(api_module.asm_inventory, "release_leased_test_batch", release)
-    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", persist)
+    monkeypatch.setattr(targets_router_module, "_persist_asm_scan_authority", persist)
 
 
 def test_asm_scan_authority_freezes_exact_v2_work_without_legacy_execution(monkeypatch):
@@ -3824,8 +3825,12 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
 
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable_count)
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "_enqueue_asm_exploit_batch", fake_enqueue_asm_exploit_batch)
+    monkeypatch.setattr(targets_router_module, "_enqueue_asm_exploit_batch", fake_enqueue_asm_exploit_batch)
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "_enqueue_asm_recon", fake_enqueue_asm_recon)
+    monkeypatch.setattr(targets_router_module, "_enqueue_asm_recon", fake_enqueue_asm_recon)
 
     asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
 
@@ -9646,7 +9651,9 @@ def test_arsenal_execute_gated_dispatches_when_gate_satisfied(monkeypatch):
         return {"operation_id": "op-1", "status": "queued", "action": "test"}
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "asm_improve", fake_asm_improve)
+    monkeypatch.setattr(targets_router_module, "asm_improve", fake_asm_improve)
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(), api_module.ArsenalExecuteRequest(
             command="asm.improve",
@@ -9686,7 +9693,9 @@ def test_arsenal_execute_dispatches_target_list(monkeypatch):
     async def fake_list_targets(**kwargs):
         return {"targets": []}
 
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "list_targets", fake_list_targets)
+    monkeypatch.setattr(targets_router_module, "list_targets", fake_list_targets)
     conn = _BlockedRecordingConn()
     result = asyncio.run(api_module._arsenal_execute(
         conn, api_module.ArsenalExecuteRequest(command="target.list", parameters={})
@@ -9713,7 +9722,9 @@ def test_arsenal_execute_gated_asm_test_dispatches_when_allowed(monkeypatch):
         return {"operation_id": "op-9", "status": "queued"}
 
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", fake_validate)
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "asm_test", fake_asm_test)
+    monkeypatch.setattr(targets_router_module, "asm_test", fake_asm_test)
     result = asyncio.run(api_module._arsenal_execute(
         _BlockedRecordingConn(), api_module.ArsenalExecuteRequest(
             command="asm.test",
@@ -12196,7 +12207,7 @@ def test_auto_provision_endpoint_validates_approval_before_external_signup(monke
 
     monkeypatch.setattr(api_module, "db_pool", FakePool())
     monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", rejected)
-    monkeypatch.setattr(api_module, "_auto_provision_principals", must_not_provision)
+    monkeypatch.setattr(targets_router_module, "_auto_provision_principals", must_not_provision)
 
     with pytest.raises(api_module.HTTPException, match="invalid approval"):
         asyncio.run(api_module.auto_provision_target_principals(
@@ -12217,7 +12228,7 @@ def test_auto_provision_reuses_existing_principal_without_signup(monkeypatch):
         async def execute(self, query, *args):
             raise AssertionError("idempotent reuse must not write")
 
-    monkeypatch.setattr(api_module, "encryption_enabled", lambda: True)
+    monkeypatch.setattr(targets_router_module, "encryption_enabled", lambda: True)
     result = asyncio.run(api_module._auto_provision_principals(
         FakeConn(),
         target_id,
@@ -12233,7 +12244,7 @@ def test_auto_provision_reuses_existing_principal_without_signup(monkeypatch):
 
 
 def test_auto_provision_requires_encrypted_secret_storage(monkeypatch):
-    monkeypatch.setattr(api_module, "encryption_enabled", lambda: False)
+    monkeypatch.setattr(targets_router_module, "encryption_enabled", lambda: False)
     with pytest.raises(api_module.HTTPException) as exc:
         asyncio.run(api_module._auto_provision_principals(
             object(), uuid.uuid4(), "https://app.example.test", {"enabled": True},

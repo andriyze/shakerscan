@@ -38,7 +38,8 @@ try:
     import investigation_candidates
     import family_proof
     from api_utils import (
-        SEVERITY_ORDER, _clean_string_list, _int_or_none, _iso_or_none, _optional_uuid,
+        SEVERITY_ORDER, _QUEUE_HANDOFF_CONFIRMATION_KEY, _clean_string_list, _int_or_none,
+        _iso_or_none, _optional_uuid, _target_credential_profile_status,
         _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     from redaction import redact_text
@@ -63,7 +64,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import device_agent, device_capabilities, investigation_candidates
     from .. import family_proof
     from ..api_utils import (
-        SEVERITY_ORDER, _clean_string_list, _int_or_none, _iso_or_none, _optional_uuid,
+        SEVERITY_ORDER, _QUEUE_HANDOFF_CONFIRMATION_KEY, _clean_string_list, _int_or_none,
+        _iso_or_none, _optional_uuid, _target_credential_profile_status,
         _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     from scanner.scanner_tools.request_collections import validate_request_collection as validate_device_request_collection
@@ -171,7 +173,6 @@ async def _record_command_result(*a: Any, **k: Any) -> Any:
 async def _mark_scan_enqueue_failed(*a: Any, **k: Any) -> Any:
     return await _dep("mark_scan_enqueue_failed")(*a, **k)
 
-_QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
 
 
 DEVICE_SCAN_MAX_DURATION_MINUTES = {
@@ -3539,23 +3540,6 @@ async def _device_queue_handoff_readback_confirmed(
     )
 
 
-def _target_credential_profile_status(row: dict[str, Any]) -> tuple[str, bool]:
-    if not bool(row.get("is_active", True)):
-        return "inactive", False
-    expires_at = row.get("expires_at")
-    if isinstance(expires_at, str):
-        try:
-            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        except ValueError:
-            expires_at = None
-    if isinstance(expires_at, datetime):
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        if expires_at <= now:
-            return "expired", True
-        return "active", expires_at <= now + timedelta(days=7)
-    return "active", False
 def _device_agent_scan_ids(value: Any, *, depth: int = 0) -> list[str]:
     """Return only scan identifiers from a sanitized action summary."""
     if depth > 5:

@@ -46,6 +46,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "runtime",
     "scan",
     "schedules",
+    "targets",
     "worker_handlers",
 )
 _NATIVE_V2_FINGERPRINT_MARKER = "_shakerscan_v2_package_fingerprint"

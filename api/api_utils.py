@@ -13,7 +13,8 @@ turn a stubbed test into real IO.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import contextvars
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any
@@ -100,9 +101,33 @@ def _clean_string_list(values: list[Any] | None, *, max_items: int = 50) -> list
     return cleaned
 
 
+_QUEUE_HANDOFF_CONFIRMATION_KEY = "queue_handoff_confirmed"
+
+def _target_credential_profile_status(row: dict[str, Any]) -> tuple[str, bool]:
+    if not bool(row.get("is_active", True)):
+        return "inactive", False
+    expires_at = row.get("expires_at")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            expires_at = None
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if expires_at <= now:
+            return "expired", True
+        return "active", expires_at <= now + timedelta(days=7)
+    return "active", False
+
+
 __all__ = [
     "LEGACY_SCAN_WRITE_FIELDS",
     "SEVERITY_ORDER",
+    "_ARSENAL_CREATED_BY_CONTEXT",
+    "_QUEUE_HANDOFF_CONFIRMATION_KEY",
+    "_target_credential_profile_status",
     "_record_map",
     "_parse_iso_datetime",
     "utc_now",
@@ -236,3 +261,7 @@ LEGACY_SCAN_WRITE_FIELDS = frozenset({
     "scan_type", "quick", "thorough", "active", "xss", "sqli",
     "check_family", "asm_check_family",
 })
+_ARSENAL_CREATED_BY_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "arsenal_created_by",
+    default=None,
+)

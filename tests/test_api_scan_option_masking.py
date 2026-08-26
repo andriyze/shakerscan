@@ -80,6 +80,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
+from targets import router as targets_router_module  # noqa: E402
 from findings import router as findings_router_module  # noqa: E402
 
 
@@ -1062,7 +1063,9 @@ def test_ai_ops_router_execute_api_budget_when_confirmed(monkeypatch):
             "status": "queued",
         }
 
+    # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "asm_improve", fake_asm_improve)
+    monkeypatch.setattr(targets_router_module, "asm_improve", fake_asm_improve)
 
     result = asyncio.run(
         api_module.ai_ops_route(
@@ -1299,7 +1302,7 @@ def test_asm_improve_queues_recon_when_inventory_is_empty(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
-    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
+    monkeypatch.setattr(targets_router_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
     monkeypatch.setattr(
         api_module,
         "_resolve_runtime_target_addresses",
@@ -1345,7 +1348,7 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
-    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
+    monkeypatch.setattr(targets_router_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
     monkeypatch.setattr(
         api_module.asm_inventory,
         "claim_test_batch",
@@ -1406,7 +1409,7 @@ def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
-    monkeypatch.setattr(api_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
+    monkeypatch.setattr(targets_router_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
     monkeypatch.setattr(
         api_module.asm_inventory,
         "claim_test_batch",
