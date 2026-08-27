@@ -218,6 +218,30 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 <a href="/safe-template">template fixture</a>
 </body></html>""", "text/html")
             return
+        if p == "/leaked-cloud-credentials":
+            # Provider-format credential material for the Hunt candidate-verification acceptance.
+            # The format has to be real so the server's own classifier engages; the values are
+            # random and correspond to no account anywhere. Keeping them here, rather than
+            # pointing the acceptance at an external target, is what makes that check deterministic.
+            self._send(200, {
+                "instance-id": "i-0fixture0acceptance",
+                "iam/security-credentials/fixture-role": {
+                    "AccessKeyId": "AKIA7QW3ZR5NKVD2XHTB",
+                    "SecretAccessKey": "wJ8x2Qr7Ld4Vn9Kc3Tp6Hs1Bg5Zy0Mf8Ae2Rq4U",
+                    "Type": "AWS-HMAC",
+                },
+            })
+            return
+        if p == "/public-service-directory":
+            # The negative control for the same acceptance: a successful anonymous read carrying
+            # nothing sensitive must not promote, or the check above proves only that the pipeline
+            # runs, not that it discriminates.
+            self._send(200, {
+                "services": [{"name": "catalog", "status": "ok"},
+                             {"name": "search", "status": "ok"}],
+                "count": 2,
+            })
+            return
         if p == "/linked/a":
             self._send(200, '<a href="/linked/b">next</a>', "text/html")
             return

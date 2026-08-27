@@ -1616,6 +1616,91 @@ def run_hunt() -> H.Scorecard:
         if device_id:
             H.delete(f"/devices/{device_id}")
 
+    # The point of a Hunt is a deterministically verified finding. Every check above proves
+    # authority, receipts and lifecycle; none of them ran the loop the product exists for, so a
+    # Hunt that could never promote anything would still have passed this area.
+    try:
+        status, run = H.post("/hunts", _hunt_start_payload(
+            target_id,
+            goal="Verify an anonymous credential exposure end to end.",
+            active=True,
+            scope_id=scope_id,
+            approval_id=approval_id,
+        ))
+        verify_hunt_id = str(run.get("hunt_id") or "")
+
+        def _candidate_verdict(route: str, title: str, claim: str) -> dict:
+            """Probe one route, raise a candidate from that observation, and verify it."""
+            probe_status, probe = H.post(
+                f"/hunts/{verify_hunt_id}/capabilities/http.request",
+                {
+                    "idempotency_key": f"e2e-verify-{abs(hash(route)) % 10**8}-{_RUN_NONCE}",
+                    "input": {"method": "GET", "path": route},
+                },
+                timeout=120,
+            )
+            action_id = str(probe.get("action_id") or "")
+            cand_status, cand = H.post(f"/hunts/{verify_hunt_id}/candidates", {
+                "family": "data_exposure",
+                "locus": {"route": route, "method": "GET"},
+                "title": title,
+                "claim": claim,
+                "severity": "critical",
+                "evidence_refs": [action_id],
+            }, timeout=60)
+            candidate_id = str((cand.get("candidate") or {}).get("id") or "")
+            verify_status, verified = H.post(
+                f"/hunts/{verify_hunt_id}/candidates/{candidate_id}/verify", {}, timeout=600,
+            )
+            return {
+                "probe_status": probe_status, "candidate_status": cand_status,
+                "verify_status": verify_status, "action_id": action_id,
+                "candidate_id": candidate_id,
+                "verification": verified.get("verification") or {},
+            }
+
+        exposed = _candidate_verdict(
+            "/leaked-cloud-credentials",
+            "Anonymous read exposes provider credential material",
+            "An anonymous GET returns HTTP 200 carrying an AccessKeyId and SecretAccessKey.",
+        )
+        proof = exposed["verification"]
+        finding_id = str(proof.get("verified_finding_id") or "")
+        finding_status, finding = (H.get(f"/findings/{finding_id}") if finding_id else (0, {}))
+        finding_row = finding.get("finding") if isinstance(finding.get("finding"), dict) else finding
+        sc.check(
+            "H-16 a Hunt candidate is verified into a materialized finding",
+            exposed["probe_status"] == exposed["candidate_status"] == 200
+            and bool(exposed["candidate_id"])
+            and proof.get("proof_state") == "verified"
+            and (proof.get("family_proof") or {}).get("promotable") is True
+            and bool(finding_id)
+            and finding_status == 200
+            and str(finding_row.get("last_verification_verdict")) == "exploited"
+            and str(finding_row.get("severity")) in {"critical", "high"},
+            f"verification={proof} finding_status={finding_status} finding={finding_row}",
+        )
+
+        control = _candidate_verdict(
+            "/public-service-directory",
+            "Anonymous read exposes the service directory",
+            "An anonymous GET returns HTTP 200 with the service directory.",
+        )
+        control_proof = control["verification"]
+        sc.check(
+            "H-17 a candidate with no sensitive evidence is not promoted",
+            control["candidate_status"] == 200
+            and control_proof.get("proof_state") != "verified"
+            and (control_proof.get("family_proof") or {}).get("promotable") is not True
+            and not control_proof.get("verified_finding_id"),
+            f"verification={control_proof}",
+        )
+        H.post(f"/hunts/{verify_hunt_id}/finish", {
+            "summary": "Candidate verification acceptance completed.", "next_actions": [],
+        })
+    except Exception as exc:
+        sc.error("H-16 through H-17 candidate verification acceptance", exc)
+
     return sc
 
 
