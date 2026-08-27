@@ -42,6 +42,18 @@ def _broker_node_id(explicit: str | None) -> str:
     )
 
 
+# The active work this gate exists to compare. Nuclei stays out because its
+# template set is the noisiest and least deterministic comparator input, and
+# BOLA needs two principals this lane does not carry.
+PARITY_ACTIVE_FAMILIES = [
+    "recon",
+    "sensitive_exposure",
+    "xss",
+    "sqli",
+    "nosqli",
+]
+
+
 def _submit(
     *,
     target: str,
@@ -53,10 +65,18 @@ def _submit(
     status, response = H.post("/scans", {
         "target": target,
         "budget_profile": "balanced",
+        # Explicit custom preset with an exact include list. Setting only
+        # active_testing leaves the preset at its passive default, so excluding
+        # both Nuclei families resolved the whole workload to recon alone: the
+        # gate compared two recon-only scans and could never have detected active
+        # parity drift. Active testing grants permission; it does not select
+        # families.
         "policy": {
             "active_testing": True,
             "allow_state_changing_http": True,
-            "exclude_families": ["nuclei_passive", "nuclei_active", "bola"],
+            "preset": "custom",
+            "include_families": PARITY_ACTIVE_FAMILIES,
+            "exclude_families": [],
         },
         "advanced": {
             "max_duration_seconds": 600,
