@@ -10846,9 +10846,9 @@ def _compile_scan_admission_action_authority(
         for family in active_families
         if family in included and family not in excluded
     )
+    # Passive families carry continuation authority too: see scan_family_capabilities.
     enabled_families = {
-        family
-        for family in active_families
+        family for family in SCAN_V2_FAMILY_NAMES
         if family not in excluded and (not included or family in included)
     }
     allowed_capabilities = {
@@ -11407,9 +11407,9 @@ async def _submit_scan(
         # omit its action produces a scan that reports success while never running
         # the work the operator selected.
         family_prerequisite_errors = check_registry.scan_family_precondition_errors(
-            scan_contract.policy.include_families,
-            options_payload,
+            scan_contract.policy.include_families, options_payload,
             exploit_depth=bool(options_payload.get("exploit_depth")),
+            deep_intent_families=scan_contract.execution_plan.requested_families,
         )
         if family_prerequisite_errors:
             raise HTTPException(

@@ -549,3 +549,54 @@ def test_discovery_receipts_compile_reproducible_endpoint_and_candidate_work():
     assert {item["parameter_name"] for item in first[1].entries} == {"id", "q"}
     assert first[0].manifest_digest == second[0].manifest_digest
     assert first[1].manifest_digest == second[1].manifest_digest
+
+
+def test_passive_families_keep_their_continuation_capabilities():
+    """A passive family declares real execution authority.
+
+    Gating ``scan_family_capabilities`` on ``is_active`` discarded what
+    ``recon`` and ``nuclei_passive`` declare, so the default passive Scan
+    reached its first continuation with an empty allowlist and failed with
+    "continuation introduced a capability outside its allocation:
+    templates.passive_batch".
+    """
+    from api.scan.contracts import (
+        SCAN_V2_FAMILY_NAMES,
+        scan_family_capabilities,
+        scan_family_required_capability,
+    )
+
+    assert "templates.passive_batch" in scan_family_capabilities("nuclei_passive")
+    assert "web.crawl" in scan_family_capabilities("recon")
+    # A passive family still has no "did the active family run" capability.
+    assert scan_family_required_capability("nuclei_passive") is None
+    assert scan_family_required_capability("recon") is None
+    # Every declared family contributes something; an unknown one fails closed.
+    for family in SCAN_V2_FAMILY_NAMES:
+        assert scan_family_capabilities(family), family
+    assert scan_family_capabilities("no_such_family") == ()
+
+
+def test_default_passive_scan_allows_its_own_passive_template_capability():
+    """The admission allowlist must cover the capabilities a passive Scan runs."""
+    from api.scan.contracts import (
+        SCAN_V2_FAMILY_NAMES,
+        resolve_scan_contract,
+        scan_family_capabilities,
+    )
+
+    contract = resolve_scan_contract(budget_profile="balanced", policy={})
+    included = set(contract.policy.include_families)
+    excluded = set(contract.policy.exclude_families)
+    # The same selection the scan-admission authority computes.
+    enabled = {
+        family for family in SCAN_V2_FAMILY_NAMES
+        if family not in excluded and (not included or family in included)
+    }
+    allowed = {
+        capability
+        for family in enabled
+        for capability in scan_family_capabilities(family)
+    }
+    assert "templates.passive_batch" in allowed
+    assert allowed, "a passive Scan must allow at least one continuation capability"

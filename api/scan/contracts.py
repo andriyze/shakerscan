@@ -89,9 +89,18 @@ def scan_family_capabilities(family: str) -> tuple[str, ...]:
     ``xss.verify``/``sqli.verify`` capabilities, so a continuation that
     legitimately compiled ``xss.verify_batch`` was rejected as outside its
     allocation.
+
+    A passive family has real execution authority. Gating this accessor on
+    ``is_active`` -- which only answers "did this active family run at all?"
+    for :func:`scan_family_required_capability` -- discarded the capabilities
+    ``recon`` and ``nuclei_passive`` correctly declare below. That left the
+    default passive Scan with an empty continuation allowlist, so the first
+    continuation to compile ``templates.passive_batch`` was rejected as
+    outside its own allocation and the scan failed. An unknown family still
+    fails closed.
     """
     spec = get_check_family(family)
-    if spec is None or not spec.is_active:
+    if spec is None:
         return ()
     return (
         *(_SCAN_V2_FAMILY_CAPABILITIES.get(family) or ()),
