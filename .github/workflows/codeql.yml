@@ -33,8 +33,11 @@ jobs:
           languages: ${{ matrix.language }}
           queries: security-extended
 
-      - name: Build analyzed source
-        uses: github/codeql-action/autobuild@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827
+      # No build step: CodeQL extracts Python and JavaScript/TypeScript from
+      # source. Running autobuild made the javascript-typescript matrix leg try
+      # to build the Next.js UI during database generation, which fails and took
+      # the whole analysis down with it -- the checked-in generated contract is
+      # already present, so nothing needs producing first.
 
       - name: Analyze
         uses: github/codeql-action/analyze@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827
