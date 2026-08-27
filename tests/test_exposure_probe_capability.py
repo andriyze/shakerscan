@@ -240,3 +240,28 @@ def test_real_actuator_shapes_are_still_detected():
         assert signature is not None, body
         assert signature.exposure_class == "actuator_endpoint"
         assert signature.severity == "high"
+
+
+def test_directory_listing_titles_cover_common_server_stacks():
+    """Listing titles differ by stack and all of them are the same exposure."""
+    bodies = {
+        "apache": b"<html><head><title>Index of /ftp</title></head><body></body></html>",
+        "python": b"<html><head><title>Directory listing for /ftp</title></head></html>",
+        "serve_index": b"<html><head><title>listing directory /ftp</title></head></html>",
+    }
+    for stack, body in bodies.items():
+        signature = classify_exposure(
+            path="/ftp", status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"}, body=body,
+        )
+        assert signature is not None, stack
+        assert signature.exposure_class == "directory_listing"
+        assert signature.severity == "high"
+
+
+def test_an_ordinary_html_page_is_not_a_directory_listing():
+    assert classify_exposure(
+        path="/", status=200,
+        headers={"Content-Type": "text/html; charset=utf-8"},
+        body=b"<html><head><title>My Shop</title></head><body>Welcome</body></html>",
+    ) is None

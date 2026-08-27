@@ -85,8 +85,13 @@ _ENV_SECRET_RE = re.compile(
 _GIT_CONFIG_RE = re.compile(r"(?m)^\s*\[core\]|\brepositoryformatversion\b")
 _GIT_HEAD_RE = re.compile(r"(?m)^\s*ref:\s*refs/")
 _METRICS_RE = re.compile(r"(?m)^# HELP \S+.*(?:\n|.)*?^# TYPE \S+")
+# Server-generated listing titles differ by stack: Apache and nginx autoindex
+# say "Index of /", Python's http.server says "Directory listing for /", and
+# the Node/Express serve-index middleware says "listing directory /". Matching
+# only the first two missed an exposed directory whose links this module was
+# already parsing correctly.
 _LISTING_RE = re.compile(
-    r"(?i)<title>\s*(?:index of|directory listing)"
+    r"(?i)<title>\s*(?:index of|directory listing|listing directory)"
     r"|Directory listing for /"
 )
 # A bare ``"status":`` is one of the most common keys in any JSON API, so it
