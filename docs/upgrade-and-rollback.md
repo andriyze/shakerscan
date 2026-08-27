@@ -92,12 +92,17 @@ mv results "results.failed-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
 tar -xzf /secure/path/shakerscan-backups/shakerscan-TIMESTAMP/results.tar.gz -C ~/.shakerscan
 cp /secure/path/shakerscan-backups/shakerscan-TIMESTAMP/runtime.env ~/.shakerscan/.env
 
-curl -fsSL https://install.shakerscan.com | \
-  SHAKERSCAN_RAW_BASE=https://raw.githubusercontent.com/andriyze/shakerscan/vPREVIOUS_VERSION \
-  SHAKERSCAN_START=0 sh
+SHAKERSCAN_INSTALL_VERSION=PREVIOUS_VERSION SHAKERSCAN_START=0 \
+  sh -c "$(curl -fsSL https://install.shakerscan.com)"
 SCANNER_IMAGE_TAG=PREVIOUS_VERSION SHAKERSCAN_PULL_IMAGES=1 shakerscan start --prebuilt
 shakerscan status
 ```
+
+`SHAKERSCAN_INSTALL_VERSION` names the exact tag to restore, and the dispatcher then runs that
+tag's own installer against that tag's files. Piping into `sh` with the variable set on the *left*
+of the pipe sets it for `curl`, not for the installer, which is why the command reads the script
+into `sh -c` instead. `SHAKERSCAN_RAW_BASE` remains available for an arbitrary source tree and now
+also suppresses channel resolution, so a pinned base is no longer replaced by current stable.
 
 Keep the failed-upgrade data and logs until the rollback is verified. A database upgraded by a newer
 release is not assumed to be backward-compatible with an older image; restoring the matching
