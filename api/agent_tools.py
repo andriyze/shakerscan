@@ -27,6 +27,7 @@ from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from scan.external_process import (
+    BATCH_ATTEMPT_FLOORS,
     EnforcedProcessPlan,
     ExternalProcessContractError,
     PROCESS_BUDGET_PROOF_SCHEMA,
@@ -235,11 +236,16 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # and the family spent its entire budget proving nothing. Below these floors an
 # attempt is not worth starting -- funding the top of a ranked manifest and
 # reporting the rest as unattempted is strictly better than diluting all of it.
+# How much of a batched attempt's wall its pacing may plan to consume. The
+# remainder absorbs process start-up and teardown so a healthy run finishes
+# inside its deadline instead of being killed at it.
+_BATCH_ATTEMPT_WALL_UTILISATION = 0.6
+# The tool-keyed view of the shared per-attempt floors, so argv enforcement can
+# reason in tool terms. scan.external_process owns the numbers: duplicating them
+# is how the planner and the adapter drifted apart in the first place.
 EXTERNAL_BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
-    "dalfox": {"http_requests": 120, "tool_wall_seconds": 30},
-    # Measured: sqlmap reaches a verdict on an obvious error-based injection in
-    # about a hundred requests, so a slice below that cannot prove anything.
-    "sqlmap": {"http_requests": 160, "tool_wall_seconds": 30},
+    "dalfox": dict(BATCH_ATTEMPT_FLOORS["xss.verify_batch"]),
+    "sqlmap": dict(BATCH_ATTEMPT_FLOORS["sqli.verify_batch"]),
 }
 
 
@@ -713,7 +719,13 @@ def _batch_attempt_pacing(http: int, wall: int, *, minimum_seconds: float) -> tu
     """
     requests = max(1, int(http))
     seconds = max(1, int(wall))
-    delay = seconds / requests
+    # Pace against a fraction of the wall, never all of it. Spreading the
+    # reserved requests across the whole deadline leaves no room for process
+    # start-up, connection set-up, or the proxy hop, so the tool is guaranteed
+    # to still be working when the wall expires: every attempt came back
+    # "timeout" and the family proved nothing despite being correctly funded.
+    usable = max(1.0, seconds * _BATCH_ATTEMPT_WALL_UTILISATION)
+    delay = usable / requests
     if delay < minimum_seconds:
         # Too little wall to pace this many requests: keep the floor and admit
         # the smaller number the wall can actually cover.

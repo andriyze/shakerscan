@@ -916,7 +916,16 @@ class PostgresScanExecutionBackend:
             reason = CapabilityResultReason.TIMED_OUT
         elif raw_status == "partial" or receipt.partial:
             status = CapabilityResultStatus.PARTIAL
-            reason = CapabilityResultReason.OUTPUT_TRUNCATED
+            # A partial result is not automatically a truncated one. A batch that
+            # deliberately funds fewer, viable attempts than it planned is
+            # partial for budget reasons and nothing was cut off; labelling that
+            # "output_truncated" put a false reason on the action and made the
+            # whole grade unreliable. Honour whatever reason the adapter stated,
+            # exactly as the skipped and blocked branches already do, and keep
+            # truncation as the fallback for adapters that state nothing.
+            reason = self._receipt_reason(
+                receipt, CapabilityResultReason.OUTPUT_TRUNCATED,
+            )
         elif raw_status == "skipped":
             status = CapabilityResultStatus.SKIPPED
             reason = self._receipt_reason(receipt, CapabilityResultReason.NOT_APPLICABLE)

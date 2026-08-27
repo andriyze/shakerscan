@@ -263,8 +263,14 @@ def test_a_batched_attempt_is_paced_to_spend_what_it_reserved():
     delay = float(argv[argv.index("--delay") + 1])
     hard = dict(plan.hard_budget)
     assert hard["http_requests"] <= 160 and hard["tool_wall_seconds"] <= 30
-    # The pacing must let the reserved requests fit inside the reserved wall.
-    assert delay * hard["http_requests"] <= hard["tool_wall_seconds"] + 1
+    # The pacing must leave headroom: planning to consume the whole wall means
+    # start-up and teardown push the tool past its deadline and every attempt
+    # returns "timeout" having proved nothing.
+    planned_span = delay * hard["http_requests"]
+    assert planned_span < hard["tool_wall_seconds"], (
+        f"pacing plans {planned_span:.1f}s of a {hard['tool_wall_seconds']}s wall"
+    )
+    assert planned_span <= hard["tool_wall_seconds"] * 0.9
     # ...and still be slow enough that the wall bounds the traffic.
     assert delay > 0
 
@@ -285,3 +291,50 @@ def test_both_batched_verifiers_declare_a_reachable_floor():
         hard = dict(plan.hard_budget)
         assert hard["http_requests"] >= 100, tool
         assert hard["tool_wall_seconds"] >= 20, tool
+
+
+def test_a_timed_out_batch_reports_a_timeout_not_truncated_output():
+    """The durable reason must be the real one.
+
+    Every per-attempt error was the tool's own "timeout" string, which is not a
+    reason code, so the result fell back to `output_truncated` -- a false reason
+    on a required action that made the whole scan's grade unreliable.
+    """
+    import pathlib
+
+    from api.scan.capability_result import CapabilityResultReason
+
+    adapter = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "api" / "scan" / "action_adapter.py"
+    ).read_text(encoding="utf-8")
+    batch = adapter[adapter.index("async def _external_batch"):]
+    batch = batch[:batch.index("    async def _authz(")]
+    assert "CapabilityResultReason.TIMED_OUT.value" in batch
+    assert "CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value" in batch
+    # The stated reason must lead, so _receipt_reason finds it before tool noise.
+    assert "batch_errors.insert(0, stated)" in batch
+    assert CapabilityResultReason.TIMED_OUT.value == "timed_out"
+
+
+def test_the_planner_and_the_adapter_share_one_set_of_floors():
+    """Drift between them is what broke batch funding.
+
+    The planner sizes a slice and the adapter decides whether an attempt is
+    worth starting. When those read different numbers, a batch declares more
+    candidates than its own reservation can pay for and reports partial forever.
+    """
+    from api.scan.external_process import BATCH_ATTEMPT_FLOORS, batch_attempt_capacity
+
+    assert agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS["dalfox"] == (
+        BATCH_ATTEMPT_FLOORS["xss.verify_batch"]
+    )
+    assert agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS["sqlmap"] == (
+        BATCH_ATTEMPT_FLOORS["sqli.verify_batch"]
+    )
+    # A capability with no declared floor is unbounded rather than zero.
+    assert batch_attempt_capacity("exposure.verify_batch", {"http_requests": 600}) is None
+    # ...and a real floor divides its reservation.
+    assert batch_attempt_capacity(
+        "sqli.verify_batch", {"http_requests": 1_600, "tool_wall_seconds": 300},
+    ) == 10

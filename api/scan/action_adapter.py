@@ -153,6 +153,8 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .capability_result import CapabilityResultReason
+from .external_process import BATCH_ATTEMPT_FLOORS
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -1134,13 +1136,29 @@ class DatabaseNeutralScanActionDispatcher:
             if result.status == "cancelled":
                 break
         unattempted = max(0, len(rows) - attempted)
+        # State why the batch is partial. Attempts stop when the remaining
+        # reservation can no longer fund one that could reach a verdict, so the
+        # candidates left over are a budget outcome, not truncated output.
+        # Say why this batch is partial, ahead of any per-attempt tool errors, so
+        # the durable reason is the real one. A tool error string like "timeout"
+        # is not a reason code, so without this the result fell back to
+        # "output_truncated" and put a false reason on a required action.
+        batch_errors = list(errors[:20])
+        if unattempted:
+            stated = (
+                CapabilityResultReason.TIMED_OUT.value
+                if all(str(item).strip().lower() == "timeout" for item in batch_errors)
+                and batch_errors
+                else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+            )
+            batch_errors.insert(0, stated)
         return self._receipt(
             action,
             status="partial" if unattempted else "success",
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
-            errors=tuple(errors[:20]),
+            errors=tuple(batch_errors),
             consumed=consumed,
             partial=bool(unattempted),
             timed_out=False,
@@ -2270,7 +2288,7 @@ class DatabaseNeutralScanActionDispatcher:
             # the family spent its whole budget proving nothing. The manifest is
             # ranked, so funding the top of it and reporting the remainder as
             # unattempted is strictly more useful than diluting all of it.
-            floor = agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS.get(tool, {})
+            floor = BATCH_ATTEMPT_FLOORS.get(action.capability_name, {})
             # Check the floor against what is actually left before building the
             # slice: a dimension that has run out is absent from the slice
             # entirely, so testing only the dimensions present would let an
@@ -2397,13 +2415,26 @@ class DatabaseNeutralScanActionDispatcher:
                 break
         unattempted = max(0, len(rows) - attempted)
         partial = unattempted > 0 or terminal_failure
+        # Say why, ahead of any per-attempt tool errors, so the durable reason is
+        # the real one. A tool's own "timeout" string is not a reason code, so
+        # without this the result fell back to "output_truncated" and put a false
+        # reason on a required action -- which alone made the grade unreliable.
+        batch_errors = list(errors[:20])
+        if partial:
+            attempt_errors = [str(item).strip().lower() for item in batch_errors]
+            stated = (
+                CapabilityResultReason.TIMED_OUT.value
+                if attempt_errors and all(item == "timeout" for item in attempt_errors)
+                else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+            )
+            batch_errors.insert(0, stated)
         return self._receipt(
             action,
             status="partial" if partial else "success",
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
-            errors=tuple(errors[:20]),
+            errors=tuple(batch_errors[:21]),
             consumed=consumed,
             partial=partial,
             timed_out=False,

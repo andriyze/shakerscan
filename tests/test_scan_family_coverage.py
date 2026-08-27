@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import pathlib
 
 from api.scan.action_plan import ScanAction, ScanActionPlan
 from api.scan.finalizer import finalize_scan_report
@@ -272,3 +273,35 @@ def test_an_unfundable_proof_is_reported_as_unavailable_not_failed():
     assert report["coverage"]["selected_family_gaps"] == []
     assert row["proof_escalation"]["status"] == "unavailable"
     assert row["proof_escalation"]["reason"] == "insufficient_plan_budget"
+
+
+def test_a_budget_limited_batch_is_not_reported_as_truncated_output():
+    """Partial is not automatically truncated.
+
+    A batch stops attempting when the remaining reservation can no longer fund
+    an attempt that could reach a verdict, so the leftover candidates are a
+    budget outcome and nothing was cut off. Labelling that `output_truncated`
+    put a false reason on the action and, because it is a required action, made
+    the whole scan's grade unreliable.
+    """
+    from api.scan.capability_result import CapabilityResultReason
+
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "api" / "scan" / "execution_backend.py"
+    ).read_text(encoding="utf-8")
+    partial_branch = source[source.index('elif raw_status == "partial"'):]
+    partial_branch = partial_branch[:partial_branch.index('elif raw_status == "skipped"')]
+    # The reason must come from the receipt, with truncation only as fallback.
+    assert "self._receipt_reason(" in partial_branch
+    assert "CapabilityResultReason.OUTPUT_TRUNCATED" in partial_branch
+
+    adapter = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "api" / "scan" / "action_adapter.py"
+    ).read_text(encoding="utf-8")
+    # ...and the batch must actually state that reason when it under-attempts.
+    assert (
+        "CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value" in adapter
+    ), "the external batch does not state why it is partial"
+    assert CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value == "insufficient_plan_budget"

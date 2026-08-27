@@ -37,7 +37,10 @@ from .work_manifests import (
     ScanWorkManifestKind,
     ScanWorkManifestReference,
 )
-from .external_process import minimum_reservation_scaled_profile
+from .external_process import (
+    batch_attempt_capacity,
+    minimum_reservation_scaled_profile,
+)
 
 
 SCAN_ACTION_PLAN_SCHEMA = "scan-action-plan/v1"

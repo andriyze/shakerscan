@@ -28,6 +28,34 @@ _BUDGET_DIMENSIONS = frozenset({
     "hosts_attempted",
     "tool_wall_seconds",
 })
+# The smallest slice on which one batched attempt can still reach a verdict.
+# The planner uses it so a batch never declares more candidates than its own
+# reservation can pay for, and the adapter uses it so it never starts an attempt
+# too small to prove anything. Both must read the same numbers: when they drifted
+# a batch planned fifty candidates on a budget that funded eight, every run
+# reported the family partial and made the whole grade unreliable.
+BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
+    "xss.verify_batch": {"http_requests": 120, "tool_wall_seconds": 30},
+    # Measured: sqlmap reaches a verdict on an obvious error-based injection in
+    # about a hundred requests, so a slice below that cannot prove anything.
+    "sqli.verify_batch": {"http_requests": 160, "tool_wall_seconds": 30},
+}
+
+
+def batch_attempt_capacity(
+    capability_name: str, budget: dict[str, int] | None,
+) -> int | None:
+    """How many attempts this reservation can fund, or None when unbounded."""
+    floor = BATCH_ATTEMPT_FLOORS.get(str(capability_name or ""))
+    if not floor or not budget:
+        return None
+    affordable = [
+        int(budget.get(name, 0)) // amount
+        for name, amount in floor.items() if amount > 0
+    ]
+    return max(1, min(affordable)) if affordable else None
+
+
 _PROOF_METHODS = frozenset({
     "exact_request_count",
     "rate_time_upper_bound",
