@@ -85,3 +85,24 @@ def test_the_refusal_is_not_limited_to_one_schedule_kind():
         guard = source.index("_refuse_raw_schedule_authentication(scan_options)")
         assert source.rfind(branch, 0, guard) == -1, (
             f"{handler} must refuse raw authentication before its per-kind branch")
+
+
+# --- Targets store the options every later scan and ASM wave inherits ------------------------
+# `POST /scans` refuses raw authentication, so a target carrying it produced a scan that could
+# never run -- but the secret was already written to targets.scan_options JSONB in plaintext, and
+# ASM reads those same stored options. The boundary has to refuse the write, not only the use:
+# storing a bearer token unencrypted is the defect even when nothing can spend it.
+
+def test_target_create_refuses_raw_authentication():
+    assert "_refuse_raw_target_authentication(" in definition_source("create_target")
+
+
+def test_target_update_refuses_raw_authentication():
+    assert "_refuse_raw_target_authentication(" in definition_source("update_target")
+
+
+def test_target_refusal_uses_the_same_canonical_helper_as_schedules():
+    refusal = definition_source("_refuse_raw_target_authentication")
+    assert "raw_scan_authentication_keys" in refusal
+    assert "credential_profile_ids" in refusal
+    assert "status_code=422" in refusal

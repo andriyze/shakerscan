@@ -59,7 +59,9 @@ try:
     from runtime.models import TargetBinding
     from scan.action_plan import ScanActionPlanError
     from scan.action_store import PostgresScanActionStore
-    from scan.contracts import bind_scan_scope_receipt, resolve_scan_contract
+    from scan.contracts import (
+        bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
+    )
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -90,7 +92,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.models import TargetBinding
     from ..scan.action_plan import ScanActionPlanError
     from ..scan.action_store import PostgresScanActionStore
-    from ..scan.contracts import bind_scan_scope_receipt, resolve_scan_contract
+    from ..scan.contracts import (
+        bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
+    )
     from ..scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from ..scan.manifest_store import PostgresScanManifestStore
     from ..secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -169,6 +173,31 @@ def _load_effective_automation_settings(*a: Any, **k: Any) -> Any:
 
 def _safe_default_asm_config(*a: Any, **k: Any) -> Any:
     return _dep("safe_default_asm_config")(*a, **k)
+
+def _refuse_raw_target_authentication(scan_options: Any) -> None:
+    """Refuse raw authentication in stored target options.
+
+    A target's scan_options is inherited by every later scan and every ASM wave, so accepting
+    authentication here writes a bearer header, cookie, login password or OAuth secret to JSONB in
+    plaintext, outside the encrypted credential store. Canonical Scan admission already refuses to
+    spend it, which makes the stored value both a secret at rest and a trap: the write succeeds and
+    every scan afterwards fails. Refuse the write instead, using the same canonical vocabulary as
+    the direct route and schedules.
+    """
+    raw_keys = raw_scan_authentication_keys(
+        scan_options if isinstance(scan_options, Mapping) else None
+    )
+    if raw_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "target scan options reject raw authentication ("
+                + ", ".join(raw_keys)
+                + "); create an encrypted credential profile and pass "
+                "credential_profile_ids with a target-bound approval receipt"
+            ),
+        )
+
 
 def _sanitize_scan_options(*a: Any, **k: Any) -> Any:
     return _dep("sanitize_scan_options")(*a, **k)
@@ -592,6 +621,7 @@ async def list_domains():
 @router.post("/targets")
 async def create_target(request: TargetCreate):
     """Create a new target."""
+    _refuse_raw_target_authentication(request.scan_options)
     scheme_inferred = "://" not in (request.url or "")
     try:
         normalized_target, target_note = normalize_target_url(request.url)
@@ -694,6 +724,7 @@ async def update_target(target_id: str, request: TargetUpdate):
             param_idx += 1
 
         if request.scan_options is not None:
+            _refuse_raw_target_authentication(request.scan_options)
             updates.append(f"scan_options = ${param_idx}")
             params.append(json.dumps(request.scan_options))
             param_idx += 1

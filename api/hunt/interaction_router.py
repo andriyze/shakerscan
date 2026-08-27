@@ -31,6 +31,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .run_service import agent_tools
+from .cancellation import HuntCancellationWatch
 from .device_policy import DeviceHuntPolicyState
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -630,6 +631,10 @@ async def confirm_hunt_shell_plan(
     dispatch_error: Exception | None = None
     capability_execution = None
     if dispatch_required:
+        # A confirmed SSH plan reaches a real device, so a Hunt cancelled between confirmation and
+        # dispatch must stop here rather than at the next unchecked beat.
+        device_cancellation_watch = HuntCancellationWatch(_pool, run["id"])
+        await device_cancellation_watch.refresh(force=True)
         parent_token = _devices._DEVICE_AGENT_PARENT_AUTHORITY.set(True)
         shell_token = _devices._DEVICE_AGENT_APPROVED_SHELL_PLAN.set(plan)
         correlation_token = _devices._HUNT_DEVICE_QUEUE_CORRELATION.set({
@@ -677,8 +682,8 @@ async def confirm_hunt_shell_plan(
                     requested_budget=durable_reservation.record.requested,
                 ),
                 dispatch_adapter,
-                heartbeat=lambda: asyncio.sleep(0),
-                cancelled=lambda: False,
+                heartbeat=device_cancellation_watch.heartbeat(),
+                cancelled=device_cancellation_watch.cancelled,
             )
             queued = dispatch_adapter.result or None
             if isinstance(dispatch_adapter.blocked_exception, Exception):
@@ -1963,11 +1968,16 @@ async def _execute_hunt_capability_lifecycle(
         factory = RegisteredHuntAdapterFactory({
             spec.adapter: lambda _spec, _request: adapter,
         })
+        # Prime once before dispatch: the executor's pre-execution barrier is the only chance to
+        # stop an adapter that never heartbeats, and a Hunt cancelled while this action queued
+        # must not reach the target at all.
+        watch = HuntCancellationWatch(_pool, run["id"])
+        await watch.refresh(force=True)
         return await HUNT_ACTION_DISPATCHER.execute(
             action_request,
             factory,
-            heartbeat=lambda: asyncio.sleep(0),
-            cancelled=lambda: False,
+            heartbeat=watch.heartbeat(),
+            cancelled=watch.cancelled,
             adapter_managed_cancellation=adapter_managed_cancellation,
         )
 
