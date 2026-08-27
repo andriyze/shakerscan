@@ -127,7 +127,10 @@ def test_hunt_actions_emit_capability_receipts_and_never_accept_raw_argv():
     assert 'elif name == "http.request"' in api
     assert "inspect_tls_origin" in api
     assert "_hunt_tls_inspect" not in api
-    assert "device_agent.validate_tool_call" in api
+    # device_agent.validate_tool_call was only reachable from the deleted legacy
+    # reply handler. Canonical Hunt validates every capability input through the
+    # semantic registry before any reservation or action write.
+    assert "validate_hunt_input" in api
     assert "ADD COLUMN IF NOT EXISTS capability_name" in migration
     assert "ADD COLUMN IF NOT EXISTS hunt_id" in migration
     assert "argv" not in capability_manifest(

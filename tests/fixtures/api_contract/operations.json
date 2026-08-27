@@ -505,16 +505,6 @@
     "operation_id": "cancel_device_agent_session_device_agent_session__run_id__cancel_post"
   },
   {
-    "path": "/device-agent/session/{run_id}/reply",
-    "method": "post",
-    "operation_id": "submit_device_agent_reply_device_agent_session__run_id__reply_post"
-  },
-  {
-    "path": "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm",
-    "method": "post",
-    "operation_id": "confirm_device_agent_shell_plan_device_agent_session__run_id__shell_plans__plan_id__confirm_post"
-  },
-  {
     "path": "/device-policies",
     "method": "get",
     "operation_id": "list_device_policies_device_policies_get"
@@ -563,11 +553,6 @@
     "path": "/devices/{device_id}",
     "method": "patch",
     "operation_id": "update_device_devices__device_id__patch"
-  },
-  {
-    "path": "/devices/{device_id}/agent/session",
-    "method": "post",
-    "operation_id": "start_device_agent_session_devices__device_id__agent_session_post"
   },
   {
     "path": "/devices/{device_id}/capabilities",

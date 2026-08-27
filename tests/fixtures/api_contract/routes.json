@@ -707,20 +707,6 @@
     "name": "cancel_device_agent_session"
   },
   {
-    "path": "/device-agent/session/{run_id}/reply",
-    "methods": [
-      "POST"
-    ],
-    "name": "submit_device_agent_reply"
-  },
-  {
-    "path": "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm",
-    "methods": [
-      "POST"
-    ],
-    "name": "confirm_device_agent_shell_plan"
-  },
-  {
     "path": "/device-policies",
     "methods": [
       "GET"
@@ -789,13 +775,6 @@
       "PATCH"
     ],
     "name": "update_device"
-  },
-  {
-    "path": "/devices/{device_id}/agent/session",
-    "methods": [
-      "POST"
-    ],
-    "name": "start_device_agent_session"
   },
   {
     "path": "/devices/{device_id}/capabilities",

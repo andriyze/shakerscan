@@ -32,20 +32,30 @@ def test_device_scan_enforces_the_state_change_approval_policy():
 
 
 def test_device_agent_revalidates_the_session_receipt_on_every_turn():
+    """The legacy per-turn revalidation is now the canonical capability path.
+
+    start/reply are deleted; every device turn goes through
+    POST /hunts/{hunt_id}/capabilities/{name}, which revalidates the approval
+    receipt on each action rather than trusting the one taken at session start.
+    """
     source = api_tree_source()
-    start = route_source("POST", "/devices/{device_id}/agent/session")
-    reply = route_source("POST", "/device-agent/session/{run_id}/reply")
-    assert "_device_posture_enabled" in start
-    assert "_validate_approval_receipt_for_action" in start
-    assert "_validate_approval_receipt_for_action" in reply
-    assert 'action_name="device.agent.session"' in reply
+    turn = (
+        route_source("POST", "/hunts/{hunt_id}/capabilities/{capability_name:path}")
+        + definition_source("_execute_hunt_capability_lifecycle")
+    )
+    assert "_validate_approval_receipt_for_action" in turn
+    assert "revalidate" in turn
+    # Device posture must still gate every device surface that can reach a host.
+    assert "_device_posture_enabled" in source
     assert '"inconclusive_observations": inconclusive_observations' in source
     assert '"confirmed_open": len(confirmed_services)' in source
 
 
 def test_device_agent_shell_is_immutable_user_confirmed_and_remote_only():
     source = api_tree_source()
-    endpoint = route_source("POST", "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")
+    # The legacy confirmation route is deleted; the same immutable,
+    # user-confirmed, remote-only contract is enforced by canonical Hunt.
+    endpoint = route_source("POST", "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")
     scanner = (ROOT / "scanner" / "scanner_tools" / "ssh_scanner.py").read_text()
     assert "confirm_exact_commands" in endpoint
     assert "confirm_remote_device_effects" in endpoint
@@ -301,7 +311,9 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
     api = api_tree_source()
     worker = (ROOT / "api" / "worker.py").read_text()
     assert "Credentialed device scans require safety_profile=authenticated_active" in api
-    assert "Credentialed device investigations require safety_profile=authenticated_active" in api
+    # The investigation-start copy lived in the deleted legacy session handler.
+    # Canonical device Hunt enforces the same rule in the worker, immediately
+    # before credentials are resolved -- asserted below against worker.py.
     assert '"credentials_visible_to_planner": False' in api
     assert 'device credentials require safety_profile=authenticated_active' in worker
 

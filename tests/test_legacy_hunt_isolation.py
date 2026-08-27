@@ -98,8 +98,10 @@ def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
     # The Agent Hunt write handlers are DELETED, not merely isolated, so this no
     # longer requires them to exist -- see the deletion proofs below. The
     # middleware remains for the surfaces still pending removal in later phases.
+    # Agent Hunt and device-agent writes are DELETED, not merely isolated. The
+    # middleware remains for the surfaces still pending removal (Research).
     assert not route_is_declared("POST", "/agent/hunt/{target_id}")
-    assert route_is_declared("POST", "/devices/{device_id}/agent/session")
+    assert not route_is_declared("POST", "/devices/{device_id}/agent/session")
     assert route_is_declared("POST", "/research/launch")
     assert "It is not a Hunt launcher" in product
     assert "A Hunt request creates one `/hunts` run" in product
@@ -194,3 +196,28 @@ def test_no_new_legacy_agent_hunt_rows_are_written():
     assert "INSERT INTO agent_hunt_runs" not in source, (
         "a legacy agent_hunt_runs insert survives; the surface is read-only"
     )
+
+
+def test_no_non_cancel_write_exists_under_the_legacy_device_agent_surface():
+    """The device-agent write handlers are deleted, like Agent Hunt's."""
+    from tests.api_sources import declared_routes, route_is_declared
+
+    offenders = [
+        f"{method} {path}"
+        for method, path in declared_routes("/device-agent")
+        if method not in {"GET", "HEAD", "OPTIONS"}
+        and not path.rstrip("/").endswith("/cancel")
+    ]
+    assert not offenders, f"legacy device-agent still declares writes: {offenders}"
+    assert not route_is_declared("POST", "/devices/{device_id}/agent/session")
+    # History and cancellation remain for the migration window.
+    assert route_is_declared("GET", "/device-agent/runs")
+    assert route_is_declared("POST", "/device-agent/session/{run_id}/cancel")
+
+
+def test_no_new_legacy_device_agent_rows_are_written():
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    for statement in ("INSERT INTO device_agent_runs", "INSERT INTO device_agent_actions"):
+        assert statement not in source, f"{statement} survives; the surface is read-only"

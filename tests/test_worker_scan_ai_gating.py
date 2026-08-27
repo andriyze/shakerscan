@@ -4557,26 +4557,35 @@ def test_fingerprint_only_openssl_does_not_promote(monkeypatch):
     assert result["findings"] == []
 
 
-def test_device_agent_auto_verify_is_bounded_and_logged_at_run_completion():
-    api = api_tree_source()
-    reply = route_source("POST", "/device-agent/session/{run_id}/reply")
-    helper = definition_source("_device_agent_auto_verify")
+def test_no_unbounded_auto_verification_exists_on_any_path():
+    """Auto-verification must always be bounded, on whichever path performs it.
 
-    assert "_device_agent_auto_verify(" in reply
-    assert '"auto_verified"' in reply
-    assert "_DEVICE_AGENT_AUTO_VERIFY_LIMIT = 6" in api
-    assert "_DEVICE_AGENT_AUTO_VERIFY_CONTRACTS" in api
-    for contract in ("device.service_exposure", "device.tls", "device.ssh_posture", "device.auth_bypass"):
-        # The contract set may be declared beside the helper or in its own
-        # constant; either way it must exist somewhere in the api tree.
-        assert contract in helper or contract in api
-    assert "control_authorization_requires_session_bound_state_changing_request" in helper
-    assert "device_intel_" in helper
-    assert "fragility_budget_exhausted" in helper
-    assert "auto_verify_limit_reached" in helper
-    assert "resolve_local_intel" in helper
-    assert "_device_verify_candidate_tool(" in helper
-    assert "candidate_not_open_for_verification" in helper
+    The legacy device-agent run-completion auto-verifier is deleted with the rest
+    of that engine. Its guarantee is kept here rather than dropped: the agent
+    path's auto-verify is capped, and canonical Hunt verifies a candidate only
+    on an explicit request routed through the deterministic family-proof moat,
+    so there is no loop left that could verify without a ceiling.
+    """
+    import re
+
+    api = api_tree_source()
+    assert "_device_agent_auto_verify" not in api, (
+        "the legacy device auto-verifier survived the device-agent deletion"
+    )
+    limits = [
+        int(value)
+        for value in re.findall(r"_AGENT_AUTO_VERIFY_LIMIT\s*=\s*(\d+)", api)
+    ]
+    assert limits, "the agent auto-verify path declares no ceiling"
+    assert all(0 < limit <= 32 for limit in limits), f"unbounded ceiling: {limits}"
+    assert "if len(attempts) >= _AGENT_AUTO_VERIFY_LIMIT" in api, (
+        "the declared auto-verify ceiling is not enforced"
+    )
+    # Canonical verification stays explicit and moat-gated.
+    assert route_is_declared("POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify")
+    assert "family_proof" in definition_source("verify_hunt_candidate") or (
+        "family_proof" in api
+    )
 
 
 def test_device_control_authorization_executor_replaces_the_hard_block():
@@ -4593,7 +4602,9 @@ def test_device_control_authorization_executor_replaces_the_hard_block():
     # as soon as either function moved. The real contract is that the candidate
     # verifier exists and the dispatch routes through it, which is asserted next.
     assert definition_source("_verify_device_control_authorization_candidate")
-    assert definition_source("_record_device_agent_action")
+    # The legacy device-agent action recorder is deleted; canonical Hunt writes
+    # every device action to the hunt_actions ledger instead.
+    assert "INSERT INTO hunt_actions" in api
     assert "_verify_device_control_authorization_candidate(" in dispatch
     assert "exact_before_after_cleanup_contract_unavailable" not in api
 

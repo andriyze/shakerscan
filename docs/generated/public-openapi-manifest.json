@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 168,
+  "component_schema_count": 166,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -54,8 +54,6 @@
     "CredentialProfilePatch": "cd1434168495cb6793c31dccf93e1869184272fcc88913d0feabfd7057e599f1",
     "CredentialProfileRotate": "9a29e2246008a2ac8143b0d245a4869ca6f4b5daaea156fe8265254401d806b5",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
-    "DeviceAgentReplyRequest": "54c7482ff3ec2e35ca3c780b2d00df3172eb17083a66261880fd4ad87ed93edf",
-    "DeviceAgentSessionStartRequest": "a6be49a0fad370789b5ea30eba2c6d7aac3be895eac78de3e886f9dde648c2b9",
     "DeviceAgentShellConfirmRequest": "fdef7745a9931aea4c672a551ab838d981de2c6b0944bd82847ae7baaa52d437",
     "DeviceCredentialProfileCreate": "b25505648ad3d2e27de4afb54586d228485d92f256a42418acb2ace596582813",
     "DeviceCredentialProfileRotate": "ca0d7a30052e7a49bc93ac150e0d63f025ae2575d52826b2506954340f8084c7",
@@ -174,9 +172,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "2aa0af6e524951bfa8181c593afe697858b4722901fa5b19b4d75eb5cdbb7f97",
+  "contract_sha256": "d08a0521969aaaae95752a611ea27703c075c94e5bca6ef9ed450d540d302ce7",
   "openapi": "3.1.0",
-  "operation_count": 385,
+  "operation_count": 382,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3443,32 +3441,6 @@
       "surface": null,
       "tags": []
     },
-    "POST /device-agent/session/{run_id}/reply": {
-      "deprecated": false,
-      "operation_id": "submit_device_agent_reply_device_agent_session__run_id__reply_post",
-      "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
-      "request_schema_sha256": "deac06c8bb92e0051c946197914f097c8dbee67d142063e85108833709145c49",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /device-agent/session/{run_id}/shell-plans/{plan_id}/confirm": {
-      "deprecated": false,
-      "operation_id": "confirm_device_agent_shell_plan_device_agent_session__run_id__shell_plans__plan_id__confirm_post",
-      "parameters_sha256": "ebcf0357fe7be3b4c23e1316628717c29b00283c14465fa02215059d0582a4fa",
-      "request_schema_sha256": "6f932c0d2b6f5f06a72fa8d4c8a93bfc09e89cf5db80ff301738d6b79e574e83",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
     "POST /device-policies": {
       "deprecated": false,
       "operation_id": "create_device_policy_device_policies_post",
@@ -3487,19 +3459,6 @@
       "operation_id": "create_device_devices_post",
       "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "request_schema_sha256": "b5ea04b5ee8c9fffdee49b8aec8824e0b372370adf342c3c6f9f95e5fd484405",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /devices/{device_id}/agent/session": {
-      "deprecated": false,
-      "operation_id": "start_device_agent_session_devices__device_id__agent_session_post",
-      "parameters_sha256": "f4cfd733db310a3a2f6ad246c2fad9a28974b07ff5c4497a56160bb24a27a105",
-      "request_schema_sha256": "873f761af2caf2c2f7e2c3b3e1f7b11bd61fc441826a4d7283da6166822de4bf",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"

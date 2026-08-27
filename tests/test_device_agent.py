@@ -195,13 +195,21 @@ def test_protocol_playbook_never_infers_unknown_service_from_port_alone():
 def test_device_agent_api_and_schema_preserve_the_device_boundary():
     api_source = api_tree_source()
     migration_source = open(os.path.join(ROOT, "api", "retest_contract.py"), encoding="utf-8").read()
-    assert route_is_declared("POST", "/devices/{device_id}/agent/session")
-    assert route_is_declared("POST", "/device-agent/session/{run_id}/reply")
-    assert route_is_declared("POST", "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm")
+    # The legacy device-agent writes are deleted. History and cancellation stay,
+    # and the shell-confirmation contract they carried is now enforced by the
+    # canonical Hunt route.
+    assert not route_is_declared("POST", "/devices/{device_id}/agent/session")
+    assert not route_is_declared("POST", "/device-agent/session/{run_id}/reply")
+    assert not route_is_declared(
+        "POST", "/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm"
+    )
+    assert route_is_declared("GET", "/device-agent/runs")
+    assert route_is_declared("GET", "/device-agent/session/{run_id}")
+    assert route_is_declared("POST", "/device-agent/session/{run_id}/cancel")
+    assert route_is_declared("POST", "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm")
     assert "confirm_exact_commands" in api_source
     assert "confirm_remote_device_effects" in api_source
     assert "_DEVICE_AGENT_APPROVED_SHELL_PLAN" in api_source
-    assert "DeviceAgentSessionStartRequest" in api_source
     assert '"target_fixed": True' in api_source
     assert '"safety_profile_fixed": True' in api_source
     assert "CREATE TABLE IF NOT EXISTS device_agent_runs" in migration_source

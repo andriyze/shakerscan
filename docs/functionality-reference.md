@@ -1434,8 +1434,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 395 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 332 | `api/**/*.py` |
+| Public REST operations | 392 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 329 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1559,8 +1559,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/device-agent/runs` | `list_device_agent_runs` |
 | `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
 | `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
-| `POST` | `/device-agent/session/{run_id}/reply` | `submit_device_agent_reply` |
-| `POST` | `/device-agent/session/{run_id}/shell-plans/{plan_id}/confirm` | `confirm_device_agent_shell_plan` |
 | `GET` | `/device-policies` | `list_device_policies` |
 | `POST` | `/device-policies` | `create_device_policy` |
 | `PATCH` | `/device-policies/{policy_id}` | `update_device_policy` |
@@ -1571,7 +1569,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `DELETE` | `/devices/{device_id}` | `deactivate_device` |
 | `GET` | `/devices/{device_id}` | `get_device` |
 | `PATCH` | `/devices/{device_id}` | `update_device` |
-| `POST` | `/devices/{device_id}/agent/session` | `start_device_agent_session` |
 | `GET` | `/devices/{device_id}/capabilities` | `get_device_capabilities` |
 | `GET` | `/devices/{device_id}/credentials` | `list_device_credentials` |
 | `POST` | `/devices/{device_id}/credentials` | `create_device_credential` |

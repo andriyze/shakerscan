@@ -84,9 +84,6 @@ surfaces:
     sunset: 2026-09-30
     caller_telemetry: required
     pending_write_removals:
-      - POST /device-agent/session/{run_id}/reply
-      - POST /device-agent/session/{run_id}/shell-plans/{plan_id}/confirm
-      - POST /devices/{device_id}/agent/session
     routes:
       - /device-agent
       - /device-agent/*
