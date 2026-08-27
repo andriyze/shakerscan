@@ -798,6 +798,7 @@ try:
         CapabilityExecutor,
     )
     from hunt.device_policy import DeviceHuntPolicyState
+    from hunt import prior_knowledge as hunt_prior_knowledge
     from capabilities.inline import (
         ControlPlaneExecutionAdapter,
         DeviceExecutionAdapter,
@@ -851,6 +852,7 @@ except ModuleNotFoundError:
         CapabilityExecutor,
     )
     from api.hunt.device_policy import DeviceHuntPolicyState
+    from api.hunt import prior_knowledge as hunt_prior_knowledge
     from api.capabilities.inline import (
         ControlPlaneExecutionAdapter,
         DeviceExecutionAdapter,
@@ -12798,50 +12800,9 @@ def _provision_same_origin_url(target_url: str, path: Any) -> str:
 
 
 
-
-
-
-
-
-
 # ============================================================
 # CONTINUOUS ASM - per-target endpoint inventory + async testing (docs §16)
 # ============================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def _research_campaign_budget_snapshot(conn: Any, campaign: Any) -> dict[str, Any]:
@@ -12864,10 +12825,6 @@ async def _research_campaign_budget_snapshot(conn: Any, campaign: Any) -> dict[s
         used = {key: int(used.get(key) or 0) + int(episode_used.get(key) or 0) for key in RESEARCH_BUDGET_KEYS}
     remaining = _research_campaign_budget_remaining(limits, used)
     return {"limits": limits, "used": used, "remaining": remaining}
-
-
-
-
 
 
 def _research_finding_family(finding: Any) -> str | None:
@@ -12897,8 +12854,6 @@ def _research_finding_family(finding: Any) -> str | None:
     return None
 
 
-
-
 def _bounded_research_payload(value: Any, *, depth: int = 0) -> Any:
     """Redact and bound planner-visible observations before persistence."""
     if depth > 6:
@@ -12924,14 +12879,6 @@ def _bounded_research_payload(value: Any, *, depth: int = 0) -> Any:
     return str(redacted)[:4000]
 
 
-
-
-
-
-
-
-
-
 def _public_campaign_action_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in (
@@ -12946,16 +12893,12 @@ def _public_campaign_action_row(row: Any) -> dict[str, Any]:
     return payload
 
 
-
-
 def _public_campaign_row(row: Any) -> dict[str, Any]:
     payload = row_to_dict(row)
     for key in ("target_scope", "planner", "deployment_impact", "metadata_json"):
         payload[key] = _decode_json_value(payload.get(key)) or {}
     payload["execution_enabled"] = False
     return payload
-
-
 
 
 def _public_hypothesis_row(row: Any) -> dict[str, Any]:
@@ -13071,12 +13014,6 @@ def _hypothesis_missing_preconditions(hypothesis: dict[str, Any]) -> list[str]:
     return sorted(item for item in requirements if item)
 
 
-
-
-
-
-
-
 def _hypothesis_situation_report(
     rows: Sequence[Any],
     *,
@@ -13165,10 +13102,6 @@ def _hypothesis_situation_report(
     }
 
 
-
-
-
-
 RISK_TIER_ORDER = {
     "read_only": 0,
     "passive": 1,
@@ -13177,10 +13110,6 @@ RISK_TIER_ORDER = {
     "credential": 4,
     "dangerous": 5,
 }
-
-
-
-
 
 
 FORBIDDEN_AGENT_CONTEXT_KEYS = {
@@ -13240,36 +13169,6 @@ def _redact_agent_payload(value: Any) -> Any:
     return value
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # =============================================================================
 # Autonomous-agent tools (slice 3). Each tool enforces scope + approval BEFORE its
 # handler (borrow T3MP3ST execute() placement — containment in code, not the model):
@@ -13278,40 +13177,7 @@ def _redact_agent_payload(value: Any) -> Any:
 # =============================================================================
 
 
-
-
-
-
-
-
-
-
-
-
-
 _AGENT_RUN_TOOL_MAX_OUTPUT = 20000
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # =============================================================================
@@ -13327,14 +13193,6 @@ _AGENT_RUN_TOOL_MAX_OUTPUT = 20000
 # with a steer to request them next turn. (External-audit P1.)
 
 
-
-
-
-
-
-
-
-
 # Families whose SUSPECTED lead is promotable through the DETERMINISTIC DAST retest pipeline. Each
 # maps 1:1 to a retest_contract prover type: headless-DOM XSS, DBMS SQLi/NoSQLi, OOB/timing SSRF and
 # command injection, file-content path traversal, Location-header open redirect, template-eval SSTI,
@@ -13345,32 +13203,10 @@ _AGENT_RUN_TOOL_MAX_OUTPUT = 20000
 # an Origin-header reflection probe), so the auto-queue does not require a `param` for these.
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Auto-verify is best-effort per run: high enough to close most gate-passing claims of a hunt,
 # low enough that one run cannot monopolize the deterministic verifier queue.
 # Bound taxonomy and operational-skip telemetry independently. Taxonomy records cost no target
 # traffic and must never be starved by approval, budget, cancellation, or execution skip noise.
-
-
-
-
-
-
-
-
 
 
 def _research_episode_uses_agent_loop(episode: Any) -> bool:
@@ -13402,40 +13238,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _resolve_hunt_allowed_capabilities(
     contract: HuntStartContract,
     *,
@@ -13445,18 +13247,6 @@ def _resolve_hunt_allowed_capabilities(
         contract,
         credentials_available=credential_access,
     )
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def _validate_hunt_credential_references(
@@ -13542,6 +13332,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 "authorized_target_addresses": await _resolve_agent_target_addresses(
                     target_url
                 ),
+                "prior_knowledge": await hunt_prior_knowledge.safe_prior_knowledge(
+                    conn, target_uuid),
             }
         elif contract.target_kind == "device":
             if not device or not device["is_active"]:
@@ -13594,6 +13386,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                         else f"http://{target_url}"
                     )
                 ),
+                "prior_knowledge": await hunt_prior_knowledge.safe_prior_knowledge(
+                    conn, target_uuid, device=True),
                 "device_policy_state": device_policy_state.public_dict(),
                 "device_runtime": {
                     "schema_version": "hunt-device-runtime/v2",

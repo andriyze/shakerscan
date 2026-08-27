@@ -151,9 +151,14 @@ def get_redis(*a: Any, **k: Any) -> Any:
 __all__ = ["configure_hunt_interaction_router", "router"]
 class HuntQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # hypotheses / graph_nodes / graph_edges were implemented in the knowledge base but missing
+    # from this Literal, so a Hunt could never ask for them: the lead backlog from earlier runs and
+    # the persisted application graph (routes, objects, principals and their auth-boundary edges)
+    # were unreachable exactly where they are most useful.
     kind: Literal[
         "summary", "endpoints", "findings", "principals", "services", "scans",
-        "collections", "candidates", "notes", "receipts"
+        "collections", "candidates", "notes", "receipts", "hypotheses",
+        "graph_nodes", "graph_edges"
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -176,7 +181,10 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
         run = await _hunt_run_or_404(conn, hunt_id)
     kind = request.kind
     limit = request.limit
-    if str(run["target_kind"]) != "device" and kind in {"endpoints", "findings", "principals", "notes", "receipts"}:
+    if str(run["target_kind"]) != "device" and kind in {
+        "endpoints", "findings", "principals", "notes", "receipts",
+        "hypotheses", "graph_nodes", "graph_edges",
+    }:
         mapped = {"receipts": "tool_receipts"}.get(kind, kind)
         result = await _agent_tool_query_kb(run["target_id"], mapped, {**request.filter, "limit": limit})
         return {"hunt_id": hunt_id, **result}
@@ -978,14 +986,40 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
 
 
+class HuntCandidateVerifyRequest(BaseModel):
+    """Optional body for a candidate verification.
+
+    ``attempt`` selects the idempotency key. Verification is expensive and can promote a finding,
+    so a repeat of the same attempt must replay rather than re-execute -- but a verification the
+    server *rejected before dispatch* (`invalid_workflow`: a missing principal context, an
+    unapproved invariant contract, an unresolved route) never ran a proof at all, and its rejection
+    was cached under a fixed key. Once the operator fixed the named cause -- registering the
+    credential the error asked for, approving the contract -- the same candidate could never be
+    verified again in that Hunt. Raising ``attempt`` requests a fresh, separately receipted
+    execution; attempt 1 keeps the original key so existing callers replay exactly as before.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    attempt: int = Field(default=1, ge=1, le=20)
+
+
 @router.post("/hunts/{hunt_id}/candidates/{candidate_id}/verify")
-async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
+async def verify_hunt_candidate(
+    hunt_id: str, candidate_id: str,
+    # A default instance rather than Optional: an `X | None` body publishes an anyOf(..., null)
+    # request schema, which drops the strict `additionalProperties: false` the release contract
+    # requires of every state-changing JSON write. The default keeps the body optional for callers
+    # that post nothing while the published schema stays the strict model. Read-only here.
+    request: HuntCandidateVerifyRequest = HuntCandidateVerifyRequest(),
+):
     candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    attempt = int(request.attempt)
+    suffix = "" if attempt == 1 else f":retry-{attempt}"
     action = await execute_hunt_capability(
         hunt_id,
         "candidate.verify",
         HuntCapabilityRequest(
-            idempotency_key=f"candidate-verify:{candidate_uuid}",
+            idempotency_key=f"candidate-verify:{candidate_uuid}{suffix}",
             input={"candidate_id": str(candidate_uuid)},
         ),
     )
@@ -998,6 +1032,7 @@ async def verify_hunt_candidate(hunt_id: str, candidate_id: str):
     return {
         "hunt_id": hunt_id,
         "candidate_id": str(candidate_uuid),
+        "attempt": attempt,
         "verification": verification,
         "action": action,
     }
@@ -1011,6 +1046,13 @@ async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str,
     family = str(flt.get("family") or "").strip().lower()
     severity = str(flt.get("severity") or "").strip().lower()
     method = str(flt.get("method") or "").strip().upper()
+    # The context pack advertises how much of the inventory is untested and how many findings are
+    # already proven, so the query has to be able to express both. Without these an agent could read
+    # the census and still only page the top of the priority ranking.
+    test_status = str(flt.get("test_status") or "").strip().lower()
+    auth_state = str(flt.get("auth_state") or "").strip().lower()
+    finding_status = str(flt.get("status") or "").strip().lower()
+    verified_only = bool(flt.get("verified_only"))
     rows: list[Any] = []
     async with _pool().acquire() as conn:
         if kind == "endpoints":
@@ -1018,15 +1060,19 @@ async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str,
                 """SELECT method, path, auth_state, test_status, last_verdict, param_shape, content_type, priority_score
                    FROM target_endpoints WHERE target_id=$1 AND COALESCE(test_status,'')<>'gone'
                      AND ($2='' OR path ILIKE '%'||$2||'%') AND ($3='' OR method=$3)
-                   ORDER BY priority_score DESC, last_seen_at DESC LIMIT $4""",
-                target_uuid, path_contains, method, limit,
+                     AND ($4='' OR lower(COALESCE(test_status,''))=$4)
+                     AND ($5='' OR lower(COALESCE(auth_state,''))=$5)
+                   ORDER BY priority_score DESC, last_seen_at DESC LIMIT $6""",
+                target_uuid, path_contains, method, test_status, auth_state, limit,
             )
         elif kind == "findings":
             rows = await conn.fetch(
                 """SELECT title, severity, status, tool, url, last_verification_verdict
                    FROM findings WHERE target_id=$1 AND ($2='' OR severity=$2)
-                   ORDER BY last_seen_at DESC LIMIT $3""",
-                target_uuid, severity, limit,
+                     AND ($3='' OR lower(COALESCE(status,''))=$3)
+                     AND (NOT $4::boolean OR last_verification_verdict='exploited')
+                   ORDER BY last_seen_at DESC LIMIT $5""",
+                target_uuid, severity, finding_status, verified_only, limit,
             )
         elif kind == "hypotheses":
             rows = await conn.fetch(
