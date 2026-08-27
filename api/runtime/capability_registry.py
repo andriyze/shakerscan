@@ -346,6 +346,18 @@ _HTTP_PRINCIPAL_BINDING_PROPERTIES: Mapping[str, Any] = MappingProxyType({
 })
 
 
+# The request-body shape an injection capability may be pointed at. Declared here rather than
+# passed around the contract: the capability's own schema is what bounds its inputs, and the
+# redacted execution receipt records the field names it was given. Values never appear -- the body
+# the tool sends is built from inert placeholders, and the tool supplies its own payloads.
+_INJECTION_BODY_PROPERTIES: Mapping[str, Any] = {
+    "method": {"type": "string"},
+    "content_type": {"type": "string"},
+    "body_field_names": {"type": "array"},
+    "injection_field": {"type": "string"},
+}
+
+
 def _http_principal_schema(
     properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
@@ -548,6 +560,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "active_testing", {"http_requests": 400, "tool_wall_seconds": 120},
             {"network_reachability": True, "binary": "dalfox"},
             _http_principal_schema({
+                **_INJECTION_BODY_PROPERTIES,
                 "severity": {
                     "type": "string", "enum": ["low", "medium", "high"],
                 },
@@ -614,7 +627,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "external_tool", "active", _HTTP_TARGETS, "sqlmap", "1",
             "active_testing", {"http_requests": 900, "tool_wall_seconds": 300},
             {"network_reachability": True, "binary": "sqlmap"},
-            _http_principal_schema(),
+            _http_principal_schema(_INJECTION_BODY_PROPERTIES),
             "sqlmap-output/v1", ("sqli_dbms_or_error_proof",),
             "sqlmap", "sqlmap", 300_000, ("--version",), ("/opt/tools/sqlmap",),
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",

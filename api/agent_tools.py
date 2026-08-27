@@ -346,6 +346,40 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
             "-timeout", "10", "-retry", "0", "-disable-redirects", "-silent"]
 
 
+# An inert placeholder for every body field the engine sends. The scanner supplies the attack; a
+# payload here would put attack traffic outside the tool's own accounting and outside its reporting.
+_BODY_PLACEHOLDER_VALUE = "shakerscan"
+
+
+def _injection_body(opts: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return ``(method, body, field)`` for a body-field candidate, or None for a query candidate.
+
+    The body carries every field the endpoint declares so the request is well-formed, all set to an
+    inert placeholder. Only the named field is handed to the tool as its injection point, which
+    keeps one candidate to one field's worth of work and its budget proportional.
+    """
+    field = str(opts.get("injection_field") or "").strip()
+    fields = [str(name) for name in opts.get("body_field_names") or () if str(name).strip()]
+    if not field or not fields:
+        return None
+    if field not in fields:
+        # The manifest already validated this field against its endpoint, so a mismatch means the
+        # caller and the manifest disagree. Testing a guessed input is worse than not testing.
+        raise ValueError("injection field is absent from the declared body fields")
+    method = str(opts.get("method") or "POST").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3,12}", method):
+        raise ValueError("injection body method is invalid")
+    content_type = str(opts.get("content_type") or "").strip().lower()
+    if "json" in content_type:
+        body = json.dumps({name: _BODY_PLACEHOLDER_VALUE for name in fields},
+                          sort_keys=True, separators=(",", ":"))
+    else:
+        body = "&".join(
+            f"{urllib.parse.quote(name, safe='')}={_BODY_PLACEHOLDER_VALUE}" for name in fields
+        )
+    return method, body, field
+
+
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded XSS scan of a single URL. GET-based: no data body, no blind callback, no headless,
     # no WAF evasion, no parameter mining beyond the URL itself. json output for the typed parser.
@@ -357,10 +391,15 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         severity_args = ["--only-poc", "r,v"]
     else:
         severity_args = ["--only-poc", "v"]
-    return (["url", url, "--format", "jsonl", "--silence", "--no-color",
+    args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
              "--timeout", "8", "--delay", "1000", "--worker", "3",
              "--skip-bav", "--skip-grepping", "--skip-headless",
              "--skip-mining-all"] + severity_args)
+    injection = _injection_body(opts)
+    if injection is not None:
+        method, body, field = injection
+        args += ["-X", method, "-d", body, "-p", field]
+    return args
 
 
 def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
@@ -372,11 +411,23 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     # techniques would confirm (Juice Shop's q returns 500 yet was skipped).
     # --ignore-redirects keeps redirect containment without an --answers pattern that
     # substring-matches URLs containing "redirect" and silently declines testing.
-    return ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
+    args = ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             "--ignore-redirects", "--disable-coloring",
             "--user-agent", "shakerscan-sqlmap/1.0"]
+    injection = _injection_body(opts)
+    if injection is not None:
+        # sqlmap infers POST from --data; -p keeps the test to the one field this candidate is.
+        _method, body, field = injection
+        args += ["--data", body, "-p", field]
+        # An authentication endpoint answers wrong credentials with 401/403, and sqlmap treats that
+        # on its connection test as "not authorized ... skipping to the next target" -- so it
+        # refuses to test the single endpoint class where body injection most often lives. Juice
+        # Shop's login SQLi is unreachable without this and reachable with it. Scoped to the body
+        # path so no existing query-parameter scan changes behaviour.
+        args += ["--ignore-code", "401", "--ignore-code", "403"]
+    return args
 
 
 def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:

@@ -178,6 +178,7 @@ from .work_manifests import (
     ScanWorkManifestReference,
     canonical_nuclei_options_for_manifest,
     execution_url_for_endpoint,
+    execution_request_for_manifest_candidate,
     execution_url_for_manifest_candidate,
     execution_url_for_manifest_endpoint,
     execution_routes_for_endpoint_manifest,
@@ -2269,10 +2270,22 @@ class DatabaseNeutralScanActionDispatcher:
                 continue
             if self.cancelled():
                 break
+            body_request: dict[str, Any] = {}
             if manifest_kind is ScanWorkManifestKind.CANDIDATE:
-                execution_target = execution_url_for_manifest_candidate(
+                # A body candidate is not describable by a URL, so resolve the whole request and
+                # keep the body shape for the tool. A query candidate resolves to a bare URL
+                # exactly as before.
+                resolved = execution_request_for_manifest_candidate(
                     endpoints, manifest, manifest_index,
                 )
+                execution_target = str(resolved["url"])
+                if resolved.get("body_field_names"):
+                    body_request = {
+                        "method": str(resolved["method"]),
+                        "content_type": resolved.get("content_type"),
+                        "body_field_names": list(resolved["body_field_names"]),
+                        "injection_field": str(resolved["field_name"]),
+                    }
             else:
                 execution_target = execution_url_for_manifest_endpoint(
                     manifest, manifest_index,
@@ -2313,8 +2326,9 @@ class DatabaseNeutralScanActionDispatcher:
                 port=parsed.port or (443 if parsed.scheme == "https" else 80),
                 frozen_addresses=self.target.allowed_addresses,
             )
-            scanner_options = {"_batch_attempt": True}
+            scanner_options = {"_batch_attempt": True, **body_request}
             args = dict(primary.capability_args())
+            args.update(body_request)
             if tool == "nuclei":
                 scanner_options.update(template_options)
                 args.update(template_options)

@@ -641,10 +641,19 @@ def build_discovery_continuation_manifests(
         },
         auth_lane_by_route=auth_lane_by_route,
     )
+    scan_policy = options.get("scan_policy")
     candidates = build_candidate_manifest(
         endpoints,
         source_action_ids=source_action_ids,
         maximum=allocation.max_candidate_entries,
+        # Continuation rebuilds the candidate manifest the plan actually executes, so it needs the
+        # same authority as admission. Reading it from the persisted policy keeps the two from
+        # disagreeing: they did, and the plan ran against an empty manifest while admission's
+        # carried the body candidates.
+        allow_state_changing_http=bool(
+            isinstance(scan_policy, Mapping)
+            and scan_policy.get("allow_state_changing_http")
+        ),
     )
     return endpoints, candidates
 

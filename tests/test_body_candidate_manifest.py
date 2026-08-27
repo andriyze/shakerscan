@@ -163,6 +163,9 @@ def test_both_production_call_sites_pass_their_scan_authority():
     for handler in (
         "_compile_scan_admission_surface_work_manifests",
         "_compile_parallel_child_work_manifests",
+        # Continuation rebuilds the manifest the plan executes; when it disagreed with admission
+        # the plan ran against an empty candidate set and the family reported not_applicable.
+        "build_discovery_continuation_manifests",
     ):
         source = definition_source(handler)
         assert "build_candidate_manifest(" in source, handler
