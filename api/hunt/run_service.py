@@ -310,17 +310,65 @@ class HuntRunService:
         return public_hunt_run(row)
 
     async def cancel(self, hunt_id: str) -> dict[str, Any]:
+        """Cancel a Hunt and the downstream work it queued.
+
+        Flipping ``hunt_runs.status`` alone stopped the Hunt from admitting new actions but left
+        every scan it had already queued running against the target. Actions still in flight learn
+        of the cancellation through ``HuntCancellationWatch``; scans are already queued jobs and
+        have to be cancelled where they live.
+
+        The status rules mirror ``cancel_scan``: device traffic goes to ``cancelling`` and stays
+        there until its worker acknowledges a terminal state after reaping the process group, so a
+        cancel never invents a terminal row while a device is still being probed. Reservations are
+        deliberately left to settle through their own path -- releasing a hold whose action is still
+        running would let the next action spend budget that is already committed.
+        """
+        run_uuid = _uuid_or_400(hunt_id, "hunt id")
         async with self._pool().acquire() as connection:
             row = await connection.fetchrow(
                 """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled',
                           completed_at=NOW(), updated_at=NOW()
                    WHERE id=$1 AND status IN ('created','active','awaiting_planner')
                    RETURNING *""",
-                _uuid_or_400(hunt_id, "hunt id"),
+                run_uuid,
             )
             if not row:
-                row = await hunt_run_or_404(connection, hunt_id)
-        return public_hunt_run(row)
+                row = await hunt_run_or_404(connection, run_uuid)
+                return public_hunt_run(row)
+            cancelled = await connection.fetch(
+                """UPDATE scans
+                   SET status = CASE
+                           WHEN run_kind IN ('device_posture','device_probe') AND status='running'
+                           THEN 'cancelling' ELSE 'cancelled' END,
+                       error_message = 'Cancelled by owning Hunt',
+                       completed_at = CASE
+                           WHEN run_kind IN ('device_posture','device_probe') AND status='running'
+                           THEN NULL ELSE NOW() END,
+                       progress = CASE
+                           WHEN run_kind IN ('device_posture','device_probe') AND status='running'
+                           THEN progress ELSE 100 END,
+                       current_phase = CASE
+                           WHEN run_kind IN ('device_posture','device_probe') AND status='running'
+                           THEN 'cancelling' ELSE 'cancelled' END
+                   WHERE options->'hunt_dispatch'->>'hunt_id' = $1::text
+                     AND status IN ('pending','queued','running')
+                   RETURNING id""",
+                str(run_uuid),
+            )
+            cancelled_ids = [str(item["id"]) for item in cancelled]
+            if cancelled_ids:
+                # Shards of a cancelled parent must not be left to finish on their own.
+                await connection.execute(
+                    """UPDATE scans
+                       SET status='cancelled', error_message='Cancelled by parent scan',
+                           completed_at=NOW(), progress=100, current_phase='cancelled'
+                       WHERE parent_scan_id = ANY($1::uuid[])
+                         AND status IN ('pending','queued','running')""",
+                    [uuid.UUID(item) for item in cancelled_ids],
+                )
+        payload = public_hunt_run(row)
+        payload["cancelled_scan_ids"] = cancelled_ids
+        return payload
 
     async def resume(self, hunt_id: str) -> dict[str, Any]:
         async with self._pool().acquire() as connection:
