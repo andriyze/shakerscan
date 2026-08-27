@@ -7,6 +7,7 @@ import json
 from typing import Any, Mapping, Protocol, Sequence
 import uuid
 
+from .json_fields import strip_null_bytes
 from .observation_manifests import (
     ObservationManifest,
     ObservationManifestError,
@@ -79,8 +80,13 @@ def _canonical_observations(
         try:
             # Round-trip through strict JSON to detach mutable adapter objects,
             # reject non-finite values, and preserve only portable evidence.
+            # NUL is stripped here because PostgreSQL accepts neither text nor
+            # jsonb containing it: a capability that captured binary content --
+            # a probe reading a .pyc or .bak from an exposed directory -- failed
+            # its whole action on the write and discarded every observation it
+            # had already gathered, not just the one carrying the byte.
             encoded = json.dumps(
-                dict(item), sort_keys=True, separators=(",", ":"),
+                strip_null_bytes(dict(item)), sort_keys=True, separators=(",", ":"),
                 ensure_ascii=True, allow_nan=False,
             )
             decoded = json.loads(encoded)

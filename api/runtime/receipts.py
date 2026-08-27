@@ -16,6 +16,7 @@ import re
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from .json_fields import strip_null_bytes
 from .budgets import BUDGET_DIMENSIONS
 
 
@@ -218,12 +219,20 @@ class CapabilityReceipt:
             for item in self.artifact_refs
             if str(item).strip()
         ))
+        # NUL is stripped alongside redaction because this is the one place every
+        # receipt serialization passes through, and PostgreSQL accepts it in
+        # neither text nor jsonb. A capability that captured binary content --
+        # a probe reading a .pyc or .bak from an exposed directory -- otherwise
+        # failed the write for its whole action, and the scan with it.
         observations = tuple(
-            redact_receipt_value(dict(item))
+            strip_null_bytes(redact_receipt_value(dict(item)))
             for item in self.observations
             if isinstance(item, Mapping)
         )
-        errors = tuple(_redact_string(str(item))[:2_000] for item in self.errors if str(item))
+        errors = tuple(
+            strip_null_bytes(_redact_string(str(item))[:2_000])
+            for item in self.errors if str(item)
+        )
 
         object.__setattr__(self, "scan_id", owner_scan)
         object.__setattr__(self, "hunt_id", owner_hunt)

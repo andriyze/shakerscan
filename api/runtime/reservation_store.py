@@ -15,6 +15,7 @@ import json
 import re
 from typing import Any, Mapping, Protocol
 
+from .json_fields import strip_null_bytes
 from .budget_reservations import DurableBudgetReservation
 from .receipts import CapabilityReceipt
 
@@ -265,7 +266,12 @@ def _state_args(
             if ledger_after_settlement is not None else None
         ),
         (
-            json.dumps(dict(receipt), sort_keys=True, separators=(",", ":"))
+            # A receipt carries capability observations, and one of those can
+            # hold NUL from binary content the capability read. jsonb rejects
+            # it, which failed the settlement write for the whole action.
+            json.dumps(
+                strip_null_bytes(dict(receipt)), sort_keys=True, separators=(",", ":"),
+            )
             if receipt is not None else None
         ),
         record.created_at,
