@@ -15357,8 +15357,7 @@ def _compile_parallel_child_work_manifests(
             original["selector"] = selector
             original["selected_requests"] = request_count
             original["selected_mutating_requests"] = sum(
-                entry_is_mutating(entry)
-                for entry in child_request_manifest.entries
+                map(entry_is_mutating, child_request_manifest.entries)
             )
             collection_refs.append(original)
             request_refs[selection_digest] = (

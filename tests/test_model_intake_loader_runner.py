@@ -5,6 +5,7 @@ from tests.api_sources import (
 )
 import hashlib
 import inspect
+import shutil
 import os
 import sys
 import types
@@ -447,6 +448,10 @@ def test_network_trace_parser_does_not_call_local_ipc_or_socket_creation_egress(
     assert all(item["destination_digest"] is None for item in telemetry["observed_operations"])
 
 
+@pytest.mark.skipif(
+    not shutil.which("mkfs.ext4"),
+    reason="real input-drive builder needs mkfs.ext4 (Linux host tooling)",
+)
 def test_real_input_drive_builder_copies_bounded_subject_and_fixed_job(tmp_path):
     quarantine = tmp_path / "quarantine"
     subject = quarantine / "snapshot"

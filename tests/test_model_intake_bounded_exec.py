@@ -3,6 +3,18 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
+# bounded_exec enforces the sandbox with RLIMIT_AS and a seccomp filter. macOS
+# has neither -- setrlimit raises "current limit exceeds maximum limit" before
+# the launcher runs -- so these assert nothing there. They are NOT optional:
+# Linux CI must run them, which is why this skips on platform rather than on a
+# missing import.
+pytestmark = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="bounded_exec sandbox requires Linux RLIMIT_AS and seccomp",
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scanner/scanner_tools/bounded_exec.py"

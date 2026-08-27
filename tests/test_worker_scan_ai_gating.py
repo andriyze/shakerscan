@@ -5096,8 +5096,14 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
         parent_id,
         target_id,
         policy={
+            # A family-partitioned fan-out needs families to partition BY. With
+            # only the default passive preset this resolved to recon and the
+            # plan produced a single standalone shard, proving nothing about
+            # family sharding.
+            "preset": "custom",
             "active_testing": True,
             "allow_state_changing_http": True,
+            "include_families": ["recon", "xss", "sqli"],
         },
         strategy="coverage_family",
         custom_endpoints=endpoints,
@@ -5167,8 +5173,14 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
         parent_id,
         target_id,
         policy={
+            # A family-partitioned fan-out needs families to partition BY. With
+            # only the default passive preset this resolved to recon and the
+            # plan produced a single standalone shard, proving nothing about
+            # family sharding.
+            "preset": "custom",
             "active_testing": True,
             "allow_state_changing_http": True,
+            "include_families": ["recon", "xss", "sqli"],
         },
         strategy="coverage_family",
         custom_endpoints=endpoints,
