@@ -59,7 +59,7 @@ try:
     from runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest
     from runtime.scan_credentials import ScanCredentialError, bind_resolved_scan_credential, scan_credential_resolution_capability
     from runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
-    from scan.action_plan import ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs
+    from scan.action_plan import ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from scan.action_store import PostgresScanActionStore
     from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
@@ -103,7 +103,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest
     from ..runtime.scan_credentials import ScanCredentialError, bind_resolved_scan_credential, scan_credential_resolution_capability
     from ..runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
-    from ..scan.action_plan import ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs
+    from ..scan.action_plan import ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
@@ -3100,11 +3100,12 @@ async def _materialize_broker_scan_continuation(
             for item in options.get("request_collections") or ()
             if isinstance(item, Mapping)
         ]
+        # Derived from the compiler's own rule: only an interactive credential
+        # gets an inputs.auth_* action, so allocating one per credential named
+        # actions that were never created and the plan was rejected outright.
         zero_cost_existing_inputs = {
-            f"inputs.auth_{str(item.get('scan_lane') or item.get('lane') or '').lower()}": {}
-            for item in credential_refs
-            if str(item.get("scan_lane") or item.get("lane") or "").lower()
-            in {"primary", "secondary"}
+            action_id: {}
+            for action_id in interactive_auth_input_action_ids(credential_refs)
         }
         zero_cost_existing_inputs.update({
             f"inputs.collection_{index:02d}": {}

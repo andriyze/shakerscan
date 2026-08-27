@@ -119,3 +119,50 @@ def test_input_binding_digest_is_order_independent_and_rejects_ambiguous_values(
 def test_action_contract_rejects_secret_and_untrusted_execution_material(secret_input):
     with pytest.raises(ScanActionPlanError, match="action input key is forbidden"):
         _action("verify.canary", 0, args=secret_input)
+
+
+def test_static_credentials_allocate_no_auth_input_action():
+    """Only an interactive credential gets an ``inputs.auth_*`` action.
+
+    A bearer token is resolved worker-side at execution and needs no session
+    established first. Callers allocated a zero-cost budget entry per
+    credential regardless, naming actions the compiler never creates, so the
+    plan was rejected with "action budget allocation contains unknown actions"
+    -- and every scan carrying a static credential failed that way, which is
+    most authenticated scans.
+    """
+    from api.scan.action_plan import interactive_auth_input_action_ids
+
+    static = [
+        {"lane": "primary", "auth_kind": "bearer_token"},
+        {"lane": "secondary", "auth_kind": "api_key_header"},
+        {"lane": "primary", "auth_kind": "cookie"},
+    ]
+    assert interactive_auth_input_action_ids(static) == ()
+
+    interactive = [
+        {"lane": "primary", "auth_kind": "form_login"},
+        {"lane": "secondary", "auth_kind": "oauth_password"},
+    ]
+    assert interactive_auth_input_action_ids(interactive) == (
+        "inputs.auth_primary", "inputs.auth_secondary",
+    )
+    # Lanes the compiler never gives an action to are excluded either way.
+    assert interactive_auth_input_action_ids(
+        [{"lane": "service", "auth_kind": "form_login"},
+         {"lane": "ssh", "auth_kind": "ssh_password"}]
+    ) == ()
+
+
+def test_allocation_and_compilation_share_one_rule():
+    """The two must not drift: that drift is what broke authenticated scans."""
+    from api.scan.action_plan import interactive_auth_input_action_ids
+    import pathlib
+
+    for module in ("api/worker.py", "api/fleet_routes/router.py"):
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent / module
+        ).read_text(encoding="utf-8")
+        assert "interactive_auth_input_action_ids(credential_refs)" in source, module
+        # The hand-rolled lane comprehension must be gone from both callers.
+        assert 'f"inputs.auth_{str(item.get(' not in source, module

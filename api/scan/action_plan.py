@@ -29,6 +29,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..runtime.models import TargetBinding
 
+from .contracts import SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
@@ -568,6 +569,33 @@ def _work_manifest_reference(
             f"{kind.value} manifest reference has the wrong kind"
         )
     return reference.canonical_dict()
+
+
+def interactive_auth_input_action_ids(
+    credential_refs: Any,
+) -> tuple[str, ...]:
+    """The ``inputs.auth_*`` actions this compiler will actually create.
+
+    Only an interactive credential needs a session established before the scan
+    can use it; a static one -- a bearer token, an API key header, a cookie --
+    is resolved worker-side at execution and gets no action of its own.
+
+    A caller that allocated a zero-cost budget entry per credential without
+    that rule named actions the compiler never creates, and the plan was
+    rejected with "action budget allocation contains unknown actions". Every
+    scan carrying a static credential failed that way, which is most
+    authenticated scans. Deriving both from this one function is what keeps the
+    allocation and the compilation from drifting apart again.
+    """
+    action_ids: list[str] = []
+    for item in credential_refs or ():
+        if not isinstance(item, Mapping):
+            continue
+        lane = str(item.get("scan_lane") or item.get("lane") or "").strip().lower()
+        auth_kind = str(item.get("auth_kind") or "").strip().lower()
+        if lane in {"primary", "secondary"} and auth_kind in SCAN_V2_INTERACTIVE_AUTH_KINDS:
+            action_ids.append(f"inputs.auth_{lane}")
+    return tuple(dict.fromkeys(action_ids))
 
 
 class ScanActionPlanCompiler:

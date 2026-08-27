@@ -176,6 +176,7 @@ from scan.authorization import (
     revalidate_scan_action_authority,
 )
 from scan.action_plan import (
+    interactive_auth_input_action_ids,
     ScanAction,
     ScanActionPlan,
     ScanActionPlanError,
@@ -11781,11 +11782,12 @@ async def _materialize_local_scan_continuation(
     ]
     request_refs = dispatcher.options.get("request_manifest_refs")
     template_ref = dispatcher.options.get("template_manifest_ref")
+    # Derived from the compiler's own rule: only an interactive credential gets
+    # an inputs.auth_* action, so allocating one per credential named actions
+    # that were never created and the plan was rejected outright.
     zero_cost_existing_inputs = {
-        f"inputs.auth_{str(item.get('scan_lane') or item.get('lane') or '').lower()}": {}
-        for item in credential_refs
-        if str(item.get("scan_lane") or item.get("lane") or "").lower()
-        in {"primary", "secondary"}
+        action_id: {}
+        for action_id in interactive_auth_input_action_ids(credential_refs)
     }
     zero_cost_existing_inputs.update({
         f"inputs.collection_{index:02d}": {}
