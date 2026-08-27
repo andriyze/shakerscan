@@ -612,3 +612,28 @@ def test_finalizer_degrades_when_candidates_receive_zero_active_attempts():
     assert report["coverage"]["active_zero_attempt_actions"] == ["verify.xss.0"]
     assert report["coverage"]["grade_reliability"]["reliable"] is False
     assert report["result"]["grade"] == "A*"
+
+
+def test_anonymous_equals_authenticated_is_not_a_verified_authorization_break():
+    """The differential proves the endpoint is public, not that a control broke.
+
+    On a privileged function, identical anonymous and authenticated responses
+    are broken access control. On a public one -- a product search, a list of
+    security questions -- they are the intended behaviour, and nothing in the
+    differential distinguishes the two. Claiming a verified break marked eight
+    ordinary public endpoints of one application as high-severity findings.
+    """
+    import pathlib
+
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "api" / "scan" / "finalizer.py"
+    ).read_text(encoding="utf-8")
+    block = source[source.index('kind == "authz_surface_proof"'):]
+    block = block[:block.index('kind == "authz_differential"')]
+
+    assert '"Verified broken function-level authorization"' not in block
+    assert '"verified": False' in block
+    assert '"suspected": True' in block
+    assert '"needs_verification": True' in block
+    assert '"severity="high"' not in block

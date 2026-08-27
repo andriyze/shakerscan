@@ -155,7 +155,12 @@ def test_finalizer_promotes_only_boundary_gated_authz_surface_proof():
     assert len(report["findings"]) == 1
     finding = report["findings"][0]
     assert finding["tool"] == "shakerscan_authz_surface"
-    assert finding["severity"] == "high"
     assert finding["cwe"] == "CWE-862"
-    assert finding["verified"] is True
     assert finding["evidence"]["canonical_capability"] == "authz_surface.verify_batch"
+    # The differential shows the endpoint is public; only knowing the function
+    # is privileged would make that a broken control, and nothing here does.
+    # It is reported for verification rather than asserted as proven.
+    assert finding["severity"] == "medium"
+    assert finding["verified"] is False
+    assert finding["suspected"] is True
+    assert finding["needs_verification"] is True

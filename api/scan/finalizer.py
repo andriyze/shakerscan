@@ -494,10 +494,17 @@ def _findings_for_action(
             and str(item.get("request_url") or "")
             and int(item.get("repetitions") or 0) >= 2
         ):
+            # What was actually observed is that the endpoint returns the same
+            # data with and without credentials. On a privileged function that
+            # is broken access control; on a public one -- a product search, a
+            # list of security questions -- it is the intended behaviour, and
+            # nothing in the differential distinguishes the two. Claiming a
+            # verified authorization break here marked ordinary public
+            # endpoints as high-severity findings.
             finding = _base_finding(
                 tool="shakerscan_authz_surface",
-                title="Verified broken function-level authorization",
-                severity="high",
+                title="Endpoint serves identical data to anonymous and authenticated principals",
+                severity="medium",
                 cwe="CWE-862",
                 url=item.get("request_url"),
                 evidence={
@@ -517,12 +524,13 @@ def _findings_for_action(
                 },
             )
             finding.update({
-                "verified": True,
-                "suspected": False,
-                "needs_verification": False,
-                "proof_state": "verified",
+                "verified": False,
+                "suspected": True,
+                "needs_verification": True,
+                "proof_state": "likely_vulnerable",
                 "verification_reason": (
-                    "Anonymous access matched authenticated access on a gated app"
+                    "Anonymous access matched authenticated access, but nothing "
+                    "establishes that this particular function is privileged"
                 ),
             })
             findings.append(finding)
