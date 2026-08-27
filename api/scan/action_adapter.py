@@ -1983,6 +1983,11 @@ class DatabaseNeutralScanActionDispatcher:
             comparisons.append(comparison)
             checkpoint = {
                 "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                # The durable checkpoint contract requires a terminal status.
+                # Without it every checkpoint was rejected as invalid, so this
+                # family could not complete a single batch and every action it
+                # planned failed.
+                "status": "success",
                 "route_id": route_id, "url": url,
                 "anonymous": [vars(probe) for probe in anon_probes],
                 "authenticated": [vars(probe) for probe in authed_probes],
@@ -2266,16 +2271,20 @@ class DatabaseNeutralScanActionDispatcher:
             # ranked, so funding the top of it and reporting the remainder as
             # unattempted is strictly more useful than diluting all of it.
             floor = agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS.get(tool, {})
+            # Check the floor against what is actually left before building the
+            # slice: a dimension that has run out is absent from the slice
+            # entirely, so testing only the dimensions present would let an
+            # unfundable attempt through and fail it downstream instead.
+            if any(
+                remaining_budget.get(name, 0) < amount
+                for name, amount in floor.items()
+            ):
+                break
             sub_budget = {
                 name: max(1, floor.get(name, 1), amount // remaining_attempts)
                 for name, amount in remaining_budget.items() if amount > 0
             }
             if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
-                break
-            if any(
-                sub_budget[name] > remaining_budget.get(name, 0)
-                for name in floor if name in sub_budget
-            ):
                 break
             parsed = urllib.parse.urlsplit(execution_target)
             registered_target = urllib.parse.urlunsplit(

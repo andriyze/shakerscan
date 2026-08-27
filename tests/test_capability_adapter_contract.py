@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -93,3 +94,30 @@ def test_every_capability_adapter_declares_the_executor_contract():
             if missing:
                 failures.append(f"{path.name}:{name} missing {missing}")
     assert not failures, "\n".join(failures)
+
+
+def test_every_batch_checkpoint_carries_a_terminal_status():
+    """``checkpoint_batch_attempt`` rejects an attempt with no status.
+
+    The authz-surface batch built its checkpoint without one, so every
+    checkpoint was refused as invalid and the family could not complete a
+    single batch -- every action it planned failed with adapter_failed and it
+    proved nothing, ever.
+    """
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "api" / "scan" / "action_adapter.py"
+    ).read_text(encoding="utf-8")
+
+    for index, marker in enumerate(re.finditer(
+        r"await checkpoint_attempt\(action\.action_id, (\w+)\)", source,
+    )):
+        name = marker.group(1)
+        # Walk back to where this payload was built and require a status key.
+        built = source.rfind(f"{name} = {{", 0, marker.start())
+        assert built != -1, f"checkpoint payload {name} not found"
+        payload = source[built:marker.start()]
+        assert '"status"' in payload, (
+            f"checkpoint payload #{index} ({name}) has no status; "
+            "the durable contract rejects it"
+        )
