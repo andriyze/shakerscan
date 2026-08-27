@@ -77,13 +77,19 @@ COMPAT = {
 STOP = {"rest", "api", "http", "https", "html", "json", "www", "v1", "v2", "v3",
         "id", "user", "users", "identity", "workshop", "community"}
 SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+# Every value must be a canonical Scan family: this drives an actual focused
+# rerun, so a stale mapping runs the wrong verifier against the miss. NoSQLi and
+# function-level authorization are first-class families now, and "auth" never was
+# one -- a broken-access-control miss asked for a family the contract rejects.
 FOCUSED_FAMILY_FOR_BENCHMARK_MISS = {
     "sqli": "sqli",
-    # NoSQL probes run under the SQLi/body-injection focused lane.
-    "nosqli": "sqli",
+    "nosqli": "nosqli",
     "xss": "xss",
     "bola": "bola",
-    "broken_access_control": "auth",
+    # Function-level access control is authz_surface; object-level is bola.
+    "broken_access_control": "authz_surface",
+    "sensitive_exposure": "sensitive_exposure",
+    "authz_surface": "authz_surface",
 }
 AUTH_REQUIRED_FAMILIES = {"bola", "broken_access_control"}
 PUBLIC_SCAN_OPTION_FIELDS = frozenset({

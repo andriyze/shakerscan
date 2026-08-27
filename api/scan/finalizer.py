@@ -39,6 +39,16 @@ _TRAFFIC_BUDGETS = frozenset({
 })
 # Every selected-family capability collapsed to the canonical family it serves,
 # so coverage and grade reliability are reported per resolved family.
+# Proof escalation runs over the candidates a verifier already attempted, so it
+# is part of the family's authority but not part of its execution coverage.
+# Folding the two together counted the same candidates twice and let a proof
+# action that was correctly skipped as not_applicable mark a fully-executed
+# family incomplete -- raising a selected-family gap and making the whole grade
+# unreliable for work that had succeeded.
+_PROOF_CAPABILITIES = frozenset({
+    "xss.browser_prove_batch",
+    "sqli.prove_batch",
+})
 _FAMILY_BY_CAPABILITY = {
     "xss.verify_batch": "xss",
     "xss.request_verify_batch": "xss",
@@ -864,12 +874,27 @@ def finalize_scan_report(
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
             "verified_findings": 0, "suspected_findings": 0,
             "budget_reserved": {}, "budget_consumed": {}, "_statuses": [],
+            "proof_escalation": {
+                "actions": 0, "attempted_candidates": 0,
+                "_statuses": [], "_reasons": [],
+            },
         })
-        row["batch_actions"] += 1
         row["required"] = row["required"] or bool(action.required)
-        row["planned_candidates"] += planned
-        row["attempted_candidates"] += len(attempts)
-        row["_statuses"].append(result.status.value)
+        if action.capability_name in _PROOF_CAPABILITIES:
+            # Escalation over candidates the verifier already counted: record it
+            # separately so it can neither double-count nor fail its family.
+            proof = row["proof_escalation"]
+            proof["actions"] += 1
+            proof["attempted_candidates"] += len(attempts)
+            proof["_statuses"].append(result.status.value)
+            if result.reason_code is not None:
+                proof["_reasons"].append(result.reason_code.value)
+        else:
+            row["batch_actions"] += 1
+            row["planned_candidates"] += planned
+            row["attempted_candidates"] += len(attempts)
+            row["_statuses"].append(result.status.value)
+        # Budget is real spend either way and stays aggregated for the family.
         for name, amount in result.budget_reserved.items():
             row["budget_reserved"][name] = row["budget_reserved"].get(name, 0) + int(amount)
         for name, amount in result.budget_consumed.items():
@@ -889,6 +914,27 @@ def finalize_scan_report(
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
+        proof = row["proof_escalation"]
+        proof_statuses = proof.pop("_statuses")
+        proof_reasons = proof.pop("_reasons")
+        if not proof_statuses:
+            # The family planned no escalation at all.
+            proof["status"] = "not_planned"
+            proof["reason"] = None
+        elif all(status in {"success", "partial"} for status in proof_statuses):
+            proof["status"] = "complete"
+            proof["reason"] = None
+        elif all(
+            status == "skipped" and reason == "not_applicable"
+            for status, reason in zip(proof_statuses, proof_reasons or proof_statuses)
+        ):
+            # Nothing was eligible to escalate. That is a clean outcome for the
+            # escalation and says nothing about whether the family ran.
+            proof["status"] = "not_applicable"
+            proof["reason"] = "no_proof_eligible_candidate"
+        else:
+            proof["status"] = "failed"
+            proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
         )
@@ -898,7 +944,15 @@ def finalize_scan_report(
         zero_attempts = (
             row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
         )
-        if action_incomplete or zero_attempts:
+        if row["batch_actions"] == 0:
+            # Only escalation was planned for this family, so nothing established
+            # its execution coverage. Reporting it complete would overstate work
+            # that never ran.
+            row["coverage_status"] = "partial"
+            row["reason"] = "no_verifier_action"
+            if row["required"]:
+                selected_family_gaps.append(family)
+        elif action_incomplete or zero_attempts:
             row["coverage_status"] = "partial"
             row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
             if row["required"]:

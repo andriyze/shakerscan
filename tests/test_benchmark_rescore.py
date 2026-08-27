@@ -548,8 +548,13 @@ def test_scorecard_emits_benchmark_miss_followups_for_supported_families():
     assert "post_body_params" in followups["sqli-login"]["operator_hints"]
     assert followups["xss-dom"]["next_test_action"]["parameters"]["check_family"] == "xss"
     assert "browser_proof_required" in followups["xss-dom"]["operator_hints"]
-    assert followups["exposed-file"]["status"] == "detector_gap"
-    assert followups["exposed-file"]["next_test_action"] is None
+    # sensitive_exposure is a canonical family with a focused executor now, so a
+    # missed exposure expectation is a runnable rerun rather than a detector gap.
+    assert followups["exposed-file"]["status"] == "ready"
+    assert (
+        followups["exposed-file"]["next_test_action"]["parameters"]["check_family"]
+        == "sensitive_exposure"
+    )
 
 
 def test_scorecard_blocks_bola_followup_until_second_principal_observed():
