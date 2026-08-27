@@ -375,6 +375,8 @@ def test_worker_reloads_bounded_credential_approval_before_resolution():
         "target_id": TARGET_ID,
         "verdict": "needs_approval",
         "action_name": "hunt.capability:collections.replay_safe",
+        "status": "active",
+        "revoked_at": None,
     })
 
     authority = asyncio.run(validate_worker_credential_authority(
@@ -402,6 +404,16 @@ def test_worker_reloads_bounded_credential_approval_before_resolution():
         ({"target_id": "another-target"}, "target changed"),
         ({"verdict": "blocked"}, "scope is blocked"),
         ({"action_name": "hunt.capability:http.request"}, "action changed"),
+        # Revocation is the one authority change that happens AFTER a job is queued, so the worker
+        # -- the last gate before decryption -- is exactly where it has to be caught. The reload
+        # query omitted both fields revocation writes, so a revoked receipt still released secrets.
+        ({"status": "revoked"}, "revoked"),
+        ({"revoked_at": datetime.now(timezone.utc) - timedelta(seconds=1)}, "revoked"),
+        # approval_receipts.status is NOT NULL DEFAULT 'active'; an absent value means the row was
+        # not read as expected, which is unsafe rather than safe.
+        ({"status": None}, "authority is unavailable"),
+        ({"status": "denied"}, "revoked"),
+        ({"status": "inactive"}, "revoked"),
     ],
 )
 def test_worker_approval_revalidation_fails_closed(changes, message):
@@ -415,6 +427,8 @@ def test_worker_approval_revalidation_fails_closed(changes, message):
         "target_id": TARGET_ID,
         "verdict": "allowed",
         "action_name": "hunt.capability:collections.replay_safe",
+        "status": "active",
+        "revoked_at": None,
     }
     row.update(changes)
     with pytest.raises(CredentialResolutionError, match=message):
@@ -427,3 +441,98 @@ def test_worker_approval_revalidation_fails_closed(changes, message):
             scope_receipt_id="scope-1",
             action_name="hunt.capability:collections.replay_safe",
         ))
+
+
+def test_worker_reload_query_selects_the_fields_revocation_writes():
+    # The reload exists to catch an authority change made after the job was queued. Revocation is
+    # the change that matters most, and it writes only status/revoked_at -- so omitting them from
+    # the SELECT made the reload structurally incapable of seeing it, whatever the checks below did.
+    import inspect
+
+    from api.runtime import credential_resolver
+
+    source = inspect.getsource(credential_resolver.validate_worker_credential_authority)
+    query = source[source.index("SELECT"):source.index("WHERE a.id=$1")]
+    for column in ("a.status", "a.revoked_at"):
+        assert column in query, f"worker approval reload must read {column}"
+
+
+def test_queue_then_revoke_denies_the_secret_release():
+    # End-to-end shape of the defect: a receipt valid at queue time, revoked before the worker runs.
+    approval_id = "44444444-4444-4444-8444-444444444444"
+    valid_at_queue_time = {
+        "scope_receipt_id": "scope-1",
+        "risk_tier": "credential",
+        "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+        "approved_by": "operator",
+        "denial_reason": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(hours=8),
+        "target_id": TARGET_ID,
+        "verdict": "allowed",
+        "action_name": "hunt.capability:collections.replay_safe",
+        "status": "active",
+        "revoked_at": None,
+    }
+
+    def _validate(row):
+        return asyncio.run(validate_worker_credential_authority(
+            ApprovalConn(row),
+            owner_kind="hunt", owner_id="hunt-1", target=_target(),
+            approval_receipt_id=approval_id, scope_receipt_id="scope-1",
+            action_name="hunt.capability:collections.replay_safe",
+        ))
+
+    assert _validate(valid_at_queue_time).approval_validated is True
+
+    # The operator revokes. Everything else on the row is untouched -- expiry, approver,
+    # confirmations and denial state all still look valid, which is why only status/revoked_at
+    # can reveal it.
+    revoked = dict(valid_at_queue_time, status="revoked",
+                   revoked_at=datetime.now(timezone.utc), revoked_by="operator",
+                   revocation_reason="engagement ended")
+    with pytest.raises(CredentialResolutionError, match="revoked"):
+        _validate(revoked)
+
+
+def test_worker_reload_query_only_references_columns_the_schema_declares():
+    """The reload SELECT must be valid against the real tables.
+
+    Every test above drives ``validate_worker_credential_authority`` with a fake connection, so a
+    column that does not exist passes the whole suite and fails only in a worker, at the moment a
+    credential is needed. This checks the query's column references against the declared schema.
+    """
+    import inspect
+    import re
+
+    from api.runtime import credential_resolver
+
+    schema = Path(__file__).resolve().parents[1] / "api" / "retest_contract.py"
+    schema_text = schema.read_text(encoding="utf-8")
+
+    def declared_columns(table: str) -> set[str]:
+        start = schema_text.index(f"CREATE TABLE IF NOT EXISTS {table} (")
+        body = schema_text[start:]
+        body = body[body.index("(") + 1:]
+        depth, end = 1, 0
+        for index, char in enumerate(body):
+            depth += (char == "(") - (char == ")")
+            if depth == 0:
+                end = index
+                break
+        columns = set()
+        for line in body[:end].splitlines():
+            line = line.strip().rstrip(",")
+            match = re.match(r"^([a-z_][a-z0-9_]*)\s+[A-Za-z]", line)
+            if match and match.group(1).upper() not in {"CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK"}:
+                columns.add(match.group(1))
+        return columns
+
+    source = inspect.getsource(credential_resolver.validate_worker_credential_authority)
+    query = source[source.index("SELECT a.scope_receipt_id"):source.index("WHERE a.id=$1")]
+    aliases = {"a": declared_columns("approval_receipts"), "s": declared_columns("scope_receipts")}
+    for alias, columns in aliases.items():
+        assert columns, f"could not read the declared columns for alias {alias}"
+    referenced = set(re.findall(r"\b([as])\.([a-z_][a-z0-9_]*)", query))
+    assert referenced, "the reload query must reference aliased columns"
+    for alias, column in sorted(referenced):
+        assert column in aliases[alias], f"{alias}.{column} is not declared by the schema"

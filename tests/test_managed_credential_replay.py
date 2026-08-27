@@ -46,6 +46,11 @@ class Connection:
             "action_name": "hunt.capability:collections.replay_safe",
             "target_id": TARGET_ID,
             "verdict": "allowed",
+            # approval_receipts.status is NOT NULL DEFAULT 'active' and revoked_at is set only by
+            # revocation; the worker reload fails closed when they are absent, because a row that
+            # cannot exist in the real table means the reload did not read what it thinks it did.
+            "status": "active",
+            "revoked_at": None,
         }
 
 

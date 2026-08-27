@@ -89,7 +89,8 @@ async def validate_worker_credential_authority(
         )
     row = await conn.fetchrow(
         """SELECT a.scope_receipt_id, a.risk_tier, a.confirmations, a.approved_by,
-                  a.denial_reason, a.expires_at, a.action_name, s.target_id, s.verdict
+                  a.denial_reason, a.expires_at, a.action_name, a.status, a.revoked_at,
+                  s.target_id, s.verdict
            FROM approval_receipts a
            JOIN scope_receipts s ON s.id=a.scope_receipt_id
            WHERE a.id=$1""",
@@ -98,6 +99,17 @@ async def validate_worker_credential_authority(
     if not row:
         raise CredentialResolutionError("credential approval receipt is unavailable")
     item = dict(row)
+    # Revocation is the one authority change that lands AFTER a job is queued, and it writes only
+    # status/revoked_at -- leaving approver, confirmations, denial state and expiry all still
+    # looking valid. This reload is the last gate before decryption, so it is where a revoked
+    # receipt has to be refused; every other field here would happily authorize it.
+    approval_status = str(item.get("status") or "").strip().lower()
+    if not approval_status:
+        # approval_receipts.status is NOT NULL DEFAULT 'active', so an absent value means the row
+        # was not read as expected. Unknown authority is unsafe, not safe.
+        raise CredentialResolutionError("credential approval authority is unavailable")
+    if approval_status != "active" or item.get("revoked_at") is not None:
+        raise CredentialResolutionError("credential approval receipt is revoked or inactive")
     if (
         not item.get("approved_by")
         or item.get("denial_reason")

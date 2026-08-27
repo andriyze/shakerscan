@@ -23,11 +23,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from api_utils import LEGACY_SCAN_WRITE_FIELDS, _optional_uuid, _record_map, _uuid_or_400, utc_now, utc_now_iso
-    from scan.contracts import resolve_scan_contract
+    from scan.contracts import raw_scan_authentication_keys, resolve_scan_contract
     from serialization import _decode_json_value, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import LEGACY_SCAN_WRITE_FIELDS, _optional_uuid, _record_map, _uuid_or_400, utc_now, utc_now_iso
-    from ..scan.contracts import resolve_scan_contract
+    from ..scan.contracts import raw_scan_authentication_keys, resolve_scan_contract
     from ..serialization import _decode_json_value, row_to_dict
 
 
@@ -140,6 +140,28 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
 
     # Convert to UTC
     return candidate.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
+
+
+def _refuse_raw_schedule_authentication(scan_options: dict) -> None:
+    """Refuse raw authentication in schedule options, as the direct Scan route does.
+
+    An unvalidated options dict let a schedule carry the exact fields `POST /scans` refuses --
+    bearer headers, cookies, login passwords, OAuth secrets, legacy managed profile references --
+    and persist them verbatim in JSONB, outside the encrypted credential store and outside the
+    approval and action-plan authority the canonical path enforces. This runs for every schedule
+    kind, before any per-kind branch, because ASM waves carry scan options too.
+    """
+    raw_keys = raw_scan_authentication_keys(scan_options)
+    if raw_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "scheduled Scans reject raw authentication ("
+                + ", ".join(raw_keys)
+                + "); create an encrypted credential profile and pass "
+                "credential_profile_ids with a target-bound approval receipt"
+            ),
+        )
 
 
 class ScheduleCreate(BaseModel):
@@ -342,6 +364,8 @@ async def create_schedule(request: ScheduleCreate):
         if not (0 <= request.day_of_week <= 6):
             raise HTTPException(status_code=400, detail="day_of_week must be 0-6 (Monday-Sunday)")
 
+    _refuse_raw_schedule_authentication(scan_options)
+
     if schedule_kind == "normal_scan":
         legacy_fields = sorted(LEGACY_SCAN_WRITE_FIELDS.intersection(scan_options))
         if legacy_fields:
@@ -519,6 +543,7 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
         if request.scan_options is not None:
             scan_options = _schedule_options_dict(request.scan_options)
             scan_options.pop("kind", None)
+            _refuse_raw_schedule_authentication(scan_options)
             if effective_schedule_kind == "evidence_retention_sweep":
                 raise HTTPException(
                     status_code=409,

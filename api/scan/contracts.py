@@ -140,7 +140,34 @@ SCAN_AUTHENTICATION_KEYS = frozenset({
     "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
     "oauth_username", "oauth_password", "user2_cookies", "user2_header",
     "user2_login_url", "user2_login_username", "user2_login_password",
+    # Legacy managed references survived into a worker hydration path that decrypts without the
+    # canonical approval, profile-version, target-kind, capability-allowlist and placement checks.
+    # credential_profile_ids is the validated replacement, so the legacy key is refused as raw
+    # authentication wherever options are admitted.
+    "managed_credential_profiles",
 })
+
+
+def scan_authentication_value_present(value: Any) -> bool:
+    """Return whether an authentication field carries executable private material."""
+    if isinstance(value, bool):
+        return value
+    return value not in (None, "", [], {})
+
+
+def raw_scan_authentication_keys(options: Mapping[str, Any] | None) -> list[str]:
+    """Return the raw authentication keys present in a scan-options mapping.
+
+    Every boundary that admits scan options -- the direct route, schedules, target and ASM paths --
+    must refuse the same set, so they share this helper rather than each keeping a list that drifts
+    out of step with :data:`SCAN_AUTHENTICATION_KEYS`.
+    """
+    if not isinstance(options, Mapping):
+        return []
+    return sorted(
+        key for key in SCAN_AUTHENTICATION_KEYS
+        if scan_authentication_value_present(options.get(key))
+    )
 
 
 def public_scan_contract() -> dict[str, Any]:
