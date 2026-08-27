@@ -49,7 +49,18 @@ def _summary_status(summary: Any) -> tuple[str, str | None, bool]:
     return "complete", reason, False
 
 
-def _known_endpoint_url(value: Any, *, origin: str) -> tuple[str, str] | None:
+def _known_endpoint_url(
+    value: Any, *, origin: str,
+) -> tuple[str, str, str | None, list[str] | None] | None:
+    """Parse one seeded endpoint into method, URL, and any declared body shape.
+
+    The documented seed format is `POST /api/v1/search json:{"query":"test"}`. Splitting on the
+    first whitespace alone left the body spec attached to the URL, so a seeded non-GET endpoint was
+    stored with a canonical path like `/rest/user/login json:{...}` -- a path that matches no real
+    route, and therefore never dedupes against the same endpoint seen by a crawler and never
+    attributes coverage to it. The body is parsed off the path here, and its field names are
+    returned so the endpoint record can carry the shape rather than only a fingerprint.
+    """
     text = str(value or "").strip()
     if not text:
         return None
@@ -58,9 +69,24 @@ def _known_endpoint_url(value: Any, *, origin: str) -> tuple[str, str] | None:
         method, text = pieces[0].upper(), pieces[1].strip()
     else:
         method = "GET"
+    content_type: str | None = None
+    body_fields: list[str] | None = None
+    marker = text.find(" json:")
+    if marker >= 0:
+        body_text = text[marker + len(" json:"):].strip()
+        text = text[:marker].strip()
+        content_type = "application/json"
+        try:
+            decoded = json.loads(body_text)
+        except (TypeError, ValueError):
+            # An unparseable body is dropped rather than left in the URL: a path that cannot be
+            # requested is worse than an endpoint with no declared body.
+            decoded = None
+        if isinstance(decoded, Mapping):
+            body_fields = sorted(str(key)[:200] for key in decoded)
     if text.startswith("/") and not text.startswith("//"):
         text = urllib.parse.urljoin(origin + "/", text.lstrip("/"))
-    return method, text
+    return method, text, content_type, body_fields
 
 
 def build_scan_surface_manifest(
@@ -111,12 +137,17 @@ def build_scan_surface_manifest(
         invalid = 0
         out_of_scope = 0
         truncated = 0
-        for raw_method, raw_url in candidates:
+        for raw in candidates:
+            raw_method, raw_url = raw[0], raw[1]
+            raw_content_type = raw[2] if len(raw) > 2 else None
+            raw_body_schema = raw[3] if len(raw) > 3 else None
             try:
                 record = normalize_endpoint(
                     method=str(raw_method or "GET"),
                     url=str(raw_url or ""),
                     source=name,
+                    content_type=raw_content_type,
+                    body_schema=raw_body_schema,
                 )
             except ValueError:
                 invalid += 1

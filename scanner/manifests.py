@@ -17,7 +17,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Any
+from typing import Any, Mapping
 import urllib.parse
 
 try:
@@ -56,6 +56,11 @@ class EndpointRecord:
     query_keys: tuple[str, ...] = ()
     content_fingerprint: str | None = None
     source: str = "unknown"
+    # The declared request-body shape. The fingerprint alone makes two body shapes distinguishable
+    # but tells a later stage nothing about what to test, so a body-bearing endpoint could never
+    # become a candidate. Names only -- values never enter a manifest.
+    content_type: str | None = None
+    body_field_names: tuple[str, ...] = ()
 
     @property
     def identity(self) -> str:
@@ -107,6 +112,8 @@ class EndpointRecord:
             "concrete_path": redact_path(self.concrete_path),
             "query_keys": list(self.query_keys),
             "content_fingerprint": self.content_fingerprint,
+            "content_type": self.content_type,
+            "body_field_names": list(self.body_field_names),
             "source": self.source,
             "sensitive_path_redacted": self.has_sensitive_path_material,
         }
@@ -156,6 +163,11 @@ def normalize_endpoint(
             sort_keys=True, separators=(",", ":"), default=str,
         ).encode()
         content_fingerprint = hashlib.sha256(encoded).hexdigest()
+    declared_body_fields: tuple[str, ...] = ()
+    if isinstance(body_schema, Mapping):
+        declared_body_fields = tuple(sorted(str(key)[:200] for key in body_schema))
+    elif isinstance(body_schema, (list, tuple)):
+        declared_body_fields = tuple(sorted(str(item)[:200] for item in body_schema))
     return EndpointRecord(
         method,
         scheme,
@@ -166,6 +178,8 @@ def normalize_endpoint(
         query_keys,
         content_fingerprint,
         str(source or "unknown")[:80],
+        str(content_type).lower()[:120] if content_type else None,
+        declared_body_fields[:128],
     )
 
 

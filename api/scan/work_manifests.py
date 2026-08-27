@@ -269,7 +269,14 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
         "query_parameter_names", "source_tool", "discovery_depth", "auth_lane",
         "selected_shard", "request_ref_ids",
     }
-    if set(value) != expected:
+    # The declared request-body shape is optional so manifests written before endpoints carried it
+    # still validate on read. An endpoint that declares a body needs its field NAMES recorded, not
+    # only the content fingerprint: the fingerprint distinguishes two shapes but tells a later
+    # stage nothing about what to test, which is why no body-bearing endpoint could become a
+    # candidate. Values never appear here, only names.
+    optional = {"content_type", "body_field_names"}
+    keys = set(value)
+    if not expected <= keys or not keys <= (expected | optional):
         raise ScanWorkManifestError("endpoint manifest entry fields are invalid")
     method = str(value["method"] or "").strip().upper()
     scheme = str(value["scheme"] or "").strip().lower()
@@ -313,6 +320,12 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
         ),
         "request_ref_ids": list(_string_list(
             value["request_ref_ids"], name="request_ref_ids", maximum=64,
+        )),
+        "content_type": _token(
+            value.get("content_type"), name="content_type", optional=True,
+        ),
+        "body_field_names": list(_string_list(
+            value.get("body_field_names") or [], name="body_field_names", maximum=128,
         )),
     }
 
@@ -776,6 +789,8 @@ def endpoint_entry_from_public_record(
         "port": port,
         "canonical_path": path,
         "query_parameter_names": query_names,
+        "content_type": (str(record.get("content_type")) if record.get("content_type") else None),
+        "body_field_names": sorted(str(item) for item in record.get("body_field_names") or ()),
         "source_tool": source_tool or str(record.get("source") or "unknown"),
         "discovery_depth": int(discovery_depth),
         "auth_lane": auth_lane,
