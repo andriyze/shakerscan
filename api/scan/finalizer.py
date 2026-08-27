@@ -880,6 +880,10 @@ def finalize_scan_report(
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
             "verified_findings": 0, "suspected_findings": 0,
             "budget_reserved": {}, "budget_consumed": {}, "_statuses": [],
+            # Per-capability manifest size vs what the plan actually scheduled. A capability whose
+            # manifest holds more entries than its slices cover has work that was never attempted,
+            # and comparing attempts with slices alone reports that as complete coverage.
+            "_manifest_entries": {}, "_scheduled_entries": {},
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -900,6 +904,15 @@ def finalize_scan_report(
             row["planned_candidates"] += planned
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
+            declared = action.capability_args.get("manifest_entries")
+            if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
+                # Every slice of one capability declares the same manifest size.
+                row["_manifest_entries"][action.capability_name] = max(
+                    int(row["_manifest_entries"].get(action.capability_name, 0)), declared,
+                )
+            row["_scheduled_entries"][action.capability_name] = (
+                int(row["_scheduled_entries"].get(action.capability_name, 0)) + planned
+            )
         # Budget is real spend either way and stays aggregated for the family.
         for name, amount in result.budget_reserved.items():
             row["budget_reserved"][name] = row["budget_reserved"].get(name, 0) + int(amount)
@@ -954,6 +967,16 @@ def finalize_scan_report(
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
         )
+        # Manifest entries the plan never scheduled at all. These never became a slice, so they
+        # cannot appear in unattempted_candidates, and a family carrying them has not covered its
+        # surface however cleanly its scheduled slices ran.
+        manifest_entries = row.pop("_manifest_entries", {}) or {}
+        scheduled_entries = row.pop("_scheduled_entries", {}) or {}
+        row["manifest_candidates"] = sum(int(value) for value in manifest_entries.values())
+        row["unscheduled_candidates"] = sum(
+            max(0, int(total) - int(scheduled_entries.get(capability, 0)))
+            for capability, total in manifest_entries.items()
+        )
         action_incomplete = any(
             status not in {"success", "partial"} for status in statuses
         )
@@ -973,6 +996,9 @@ def finalize_scan_report(
             row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
             if row["required"]:
                 selected_family_gaps.append(family)
+        elif row["unscheduled_candidates"] > 0:
+            row["coverage_status"] = "partial"
+            row["reason"] = "manifest_entries_unscheduled"
         elif row["unattempted_candidates"] > 0:
             row["coverage_status"] = "partial"
             row["reason"] = "candidates_unattempted"

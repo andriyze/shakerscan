@@ -1316,6 +1316,14 @@ class ScanActionPlanCompiler:
                     {
                         **dict(capability_args),
                         "slice": {"start": start, "count": slice_count},
+                        # The manifest's full size, carried so completeness can be measured against
+                        # the work that EXISTS rather than the work that was scheduled. Budget
+                        # affordability, the batch ceiling and graph capacity can all cut `count`
+                        # below `total_batches`; without this the finalizer compares attempts with
+                        # scheduled slices and reports complete coverage over a truncated plan.
+                        "manifest_entries": int(entry_count),
+                        "scheduled_batches": int(count),
+                        "total_batches": int(total_batches),
                         "profile": f"{execution_plan.budget_profile}_batch_v1",
                         "proof_policy": (
                             "deterministic_differential_required"
