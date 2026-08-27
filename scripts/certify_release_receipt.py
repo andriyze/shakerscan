@@ -105,6 +105,17 @@ def certify_receipt(
         if isinstance(item, Mapping)
     ):
         raise CertificationError("an exact-manifest E2E area did not pass")
+    # The other three receipts each bind the source they ran against; the E2E scorecard did not,
+    # so a run that exercised a different deployment could certify this candidate. Require it to
+    # name the revision it actually tested, and the images when it recorded them.
+    e2e_subject = e2e.get("subject")
+    if not isinstance(e2e_subject, Mapping):
+        raise CertificationError("E2E scorecard does not identify the deployment it tested")
+    if e2e_subject.get("source_revision") != source_sha:
+        raise CertificationError("E2E scorecard tested a different source revision")
+    e2e_images = e2e_subject.get("images")
+    if e2e_images is not None and dict(e2e_images) != dict(sorted(images.items())):
+        raise CertificationError("E2E scorecard did not test the final release image digests")
 
     result = dict(candidate)
     result["schema_version"] = "shakerscan-release-candidate/v2"
@@ -119,6 +130,7 @@ def certify_receipt(
             "backup_restore_rollback_boundary": "pass",
             "model_intake_and_mature_subsystems": "pass",
             "source_and_image_identity": "pass",
+            "e2e_subject_binding": "pass",
         },
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),

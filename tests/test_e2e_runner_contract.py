@@ -20,12 +20,53 @@ def test_e2e_runner_writes_machine_readable_scorecard(monkeypatch, tmp_path):
         ["run_e2e.py", "--area", "fixture", "--scorecard", str(output)],
     )
 
+    # A real run reads the deployment it exercised from the live stack; stand that in, because a
+    # scorecard that cannot identify its subject is refused (see the test below).
+    monkeypatch.setattr(
+        run_e2e.H, "get",
+        lambda path, timeout=60, headers=None: (
+            200, {"source_revision": "a" * 40, "build_fingerprint": "abc123", "scanner_version": "2.0.0"},
+        ),
+    )
+
     assert run_e2e.main() == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "shakerscan-e2e-scorecard/v1"
     assert payload["gate"] == "pass"
     assert payload["areas"][0]["area"] == "fixture"
     assert payload["areas"][0]["rows"][0]["name"] == "deterministic fixture"
+    # The subject binding: a scorecard must say which deployment it exercised, or it can certify a
+    # candidate it never tested.
+    assert payload["subject"]["source_revision"] == "a" * 40
+    assert payload["subject"]["build_fingerprint"] == "abc123"
+
+
+def test_a_scorecard_whose_subject_is_unknown_cannot_pass(tmp_path, monkeypatch):
+    """An unreachable or unidentified stack must not produce a passing scorecard.
+
+    Every area could pass against some deployment; without knowing which, the result cannot
+    qualify a release candidate, so the gate fails rather than emitting an unbound pass.
+    """
+    import sys
+
+    card = run_e2e.H.Scorecard("fixture")
+    card.check("deterministic fixture", True, "ok")
+    output = tmp_path / "scorecard.json"
+    monkeypatch.setattr(run_e2e.H, "preflight", lambda: None)
+    monkeypatch.setattr(run_e2e.FX, "start", lambda port: None)
+    monkeypatch.setattr(run_e2e, "AREAS", {"fixture": lambda: card})
+    monkeypatch.setattr(
+        run_e2e.H, "get",
+        lambda path, timeout=60, headers=None: (_ for _ in ()).throw(RuntimeError("unreachable")),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["run_e2e.py", "--area", "fixture", "--scorecard", str(output)],
+    )
+
+    assert run_e2e.main() == 1
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["gate"] == "fail"
+    assert "source_revision" not in payload["subject"]
 
 
 

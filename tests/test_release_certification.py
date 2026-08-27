@@ -51,6 +51,13 @@ def _evidence(tmp_path: Path):
     e2e = {
         "schema_version": "shakerscan-e2e-scorecard/v1",
         "gate": "pass",
+        # The subject the runner records from the live stack, so a scorecard cannot certify a
+        # candidate it never tested.
+        "subject": {
+            "schema_version": "shakerscan-e2e-subject/v1",
+            "source_revision": SOURCE,
+            "images": dict(sorted(IMAGES.items())),
+        },
         "areas": [
             {"area": area, "gate": "pass", "rows": []}
             for area in ("platform", "model_intake", "ai_gate", "dast", "hunt")
@@ -107,3 +114,50 @@ def test_certification_fails_closed_on_cross_candidate_or_failed_evidence(tmp_pa
             source_sha=SOURCE,
             **paths,
         )
+
+
+# --- The E2E scorecard must have tested THIS candidate -----------------------------------------
+# The candidate, upgrade and preservation receipts each bind the source they ran against. The E2E
+# scorecard carried no identity at all, so a run dispatched from one revision could exercise a
+# different deployment and then qualify the first.
+
+def test_an_e2e_scorecard_without_a_subject_cannot_certify(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    e2e.pop("subject")
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError, match="does not identify the deployment"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+            source_sha=SOURCE, **paths,
+        )
+
+
+def test_an_e2e_scorecard_from_another_revision_cannot_certify(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    e2e["subject"]["source_revision"] = "b" * 40
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError, match="tested a different source revision"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+            source_sha=SOURCE, **paths,
+        )
+
+
+def test_an_e2e_scorecard_from_other_images_cannot_certify(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    e2e["subject"]["images"] = dict(sorted({**IMAGES, "ui": "f" * 64}.items()))
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError, match="final release image digests"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+            source_sha=SOURCE, **paths,
+        )
+
+
+def test_the_certification_records_the_subject_binding_as_a_check(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    result = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+        source_sha=SOURCE, **paths,
+    )
+    assert result["certification"]["checks"]["e2e_subject_binding"] == "pass"

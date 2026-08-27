@@ -236,6 +236,10 @@ docker exec -i "$SMOKE_CONTAINER" pg_restore \
 run_scenario scanner_dirty rollback
 
 run_operational_rollback() {
+    # The baseline API image carries no default command: v0.8.18's compose file supplies
+    # `command: ["python3", "/app/api.py"]`, and starting the image without it exits immediately,
+    # so the health loop below could only ever time out. The worker already passed its command
+    # explicitly; the API did not, which is why the rollback leg could not pass.
     docker run --detach --name "$ROLLBACK_REDIS_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
         "$REDIS_IMAGE" redis-server --requirepass scanner >/dev/null
@@ -249,7 +253,7 @@ run_operational_rollback() {
         -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
         -e RESULTS_DIR=/results \
         -v "$SMOKE_TMP/results:/results" \
-        "$BASELINE_API_IMAGE" >/dev/null
+        "$BASELINE_API_IMAGE" python3 /app/api.py >/dev/null
     docker run --detach --name "$ROLLBACK_UI_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \

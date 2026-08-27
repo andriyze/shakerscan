@@ -1844,6 +1844,40 @@ AREAS = {
 }
 
 
+def _tested_subject() -> dict[str, object]:
+    """Identify the deployment this run exercised, from the deployment itself.
+
+    Read from the live API rather than from the dispatching workflow's environment: the point of
+    the binding is that a run cannot claim to have tested a revision it never reached. Image
+    digests are supplied by the release pipeline that pinned them, and are recorded only when
+    every one is present, so a partial set cannot look like a complete attestation.
+    """
+    subject: dict[str, object] = {"schema_version": "shakerscan-e2e-subject/v1"}
+    try:
+        _, health = H.get("/health", timeout=30)
+    except Exception:  # noqa: BLE001 - an unreachable stack is simply unidentified
+        health = {}
+    if isinstance(health, dict):
+        revision = str(health.get("source_revision") or "").strip().lower()
+        if revision and revision != "unknown":
+            subject["source_revision"] = revision
+        fingerprint = str(health.get("build_fingerprint") or "").strip()
+        if fingerprint:
+            subject["build_fingerprint"] = fingerprint
+        version = str(health.get("scanner_version") or "").strip()
+        if version:
+            subject["scanner_version"] = version
+    raw_images = os.environ.get("SHAKERSCAN_E2E_IMAGE_DIGESTS", "").strip()
+    if raw_images:
+        try:
+            images = json.loads(raw_images)
+        except ValueError:
+            images = None
+        if isinstance(images, dict) and set(images) == {"scanner", "api", "ui", "signer"}:
+            subject["images"] = {str(k): str(v) for k, v in sorted(images.items())}
+    return subject
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--area", default="all", choices=["all", *AREAS.keys()])
@@ -1869,10 +1903,23 @@ def main() -> int:
         print(f"  {s['area']}: {s['passed']}/{s['total']} — gate {s['gate'].upper()}", flush=True)
         failed = failed or not c.passed
     if args.scorecard:
+        # A scorecard with no subject can certify any candidate: a run dispatched from one source
+        # revision could test a different deployment and then qualify the first. Record what was
+        # actually exercised, read from the live stack rather than from the dispatching environment,
+        # and refuse to emit a passing scorecard whose subject cannot be established.
+        subject = _tested_subject()
+        if not failed and not subject.get("source_revision"):
+            print(
+                "E2E GATE: FAIL — the tested deployment could not be identified, so this run "
+                "cannot certify a candidate",
+                flush=True,
+            )
+            failed = True
         scorecard = {
             "schema_version": "shakerscan-e2e-scorecard/v1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "gate": "fail" if failed else "pass",
+            "subject": subject,
             "areas": [card.summary() for card in cards],
         }
         scorecard_path = os.path.abspath(args.scorecard)
