@@ -163,7 +163,7 @@ def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
     assert rows["verify.xss"].requested_budget == {}
     assert rows["verify.sqli"].admission_status == "planned"
     assert rows["verify.sqli"].requested_budget == {
-        "http_requests": 80, "tool_wall_seconds": 24,
+        "http_requests": 160, "tool_wall_seconds": 30,
     }
     assert rows["finalize.report"].admission_status == "planned"
 
@@ -173,13 +173,16 @@ def test_thorough_allocator_funds_full_verifiers_before_template_breadth():
     allocation = allocate_scan_action_plan(_compile(budget), budget)
     rows = {action.action_id: action for action in allocation.plan.actions}
 
+    # One candidate funded at the per-attempt floor. The old table produced 80
+    # requests for sqlmap and 20 for dalfox, neither of which can reach a verdict,
+    # so the verifier was never actually "fully funded" despite this test's name.
     assert rows["verify.sqli"].requested_budget == {
-        "http_requests": 80,
-        "tool_wall_seconds": 24,
+        "http_requests": 160,
+        "tool_wall_seconds": 30,
     }
     assert rows["verify.xss"].requested_budget == {
-        "http_requests": 20,
-        "tool_wall_seconds": 18,
+        "http_requests": 120,
+        "tool_wall_seconds": 30,
     }
     assert rows["active.templates"].requested_budget == {
         "http_requests": 80,

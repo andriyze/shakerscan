@@ -569,9 +569,16 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
         action_scope="endpoint",
     )
     endpoint_by_id = {action.action_id: action for action in endpoint.actions}
-    assert set(endpoint_by_id) == {
-        "inputs.auth_primary", "verify.xss", "prove.xss", "finalize.report",
+    # Assert the work the shard owns, not how many actions it took to express it:
+    # a slice is sized to what its reservation funds, so the same candidates may
+    # arrive as several occurrences of the same logical verifier.
+    assert {
+        action.capability_name for action in endpoint.actions
+    } == {
+        "auth.session.establish", "xss.verify_batch",
+        "xss.browser_prove_batch", "scan.finalize",
     }
+    assert {"inputs.auth_primary", "prove.xss", "finalize.report"} <= set(endpoint_by_id)
     xss_actions = [
         action for action in endpoint.actions
         if action.capability_name == "xss.verify_batch"
@@ -580,9 +587,17 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
         action.dependencies == ("inputs.auth_primary",)
         for action in xss_actions
     )
-    assert [
-        action.capability_args["slice"] for action in xss_actions
-    ] == [{"start": 0, "count": 4}]
+    # Every candidate is covered exactly once across the slices: no gap, no
+    # duplicate, which is the property this test exists to hold.
+    covered: list[int] = []
+    for action in xss_actions:
+        window = action.capability_args["slice"]
+        covered.extend(
+            range(int(window["start"]), int(window["start"]) + int(window["count"]))
+        )
+    assert covered == sorted(covered)
+    assert len(covered) == len(set(covered)), "a candidate was sliced twice"
+    assert set(covered) == set(range(4)), f"candidates covered: {sorted(set(covered))}"
     assert all(
         action.capability_args["candidate_manifest_ref"] == candidate_ref
         and action.capability_args["endpoint_manifest_ref"] == endpoint_ref
@@ -635,7 +650,17 @@ def test_explicit_xss_family_compiles_its_minimum_executable_quota():
     ]
 
     assert len(actions) >= 1
-    assert actions[0].capability_args["slice"] == {"start": 0, "count": 20}
+    # The quota is how many candidates the family can execute, not how many one
+    # slice declares. A slice is now sized to what its own reservation funds, so
+    # the same quota is met across more batches instead of being promised in one
+    # oversized slice the budget could never pay for.
+    planned = sum(
+        int(action.capability_args["slice"]["count"]) for action in actions
+    )
+    assert planned >= 20, f"xss planned only {planned} candidates"
+    assert all(
+        int(action.capability_args["slice"]["count"]) <= 3 for action in actions
+    ), "a balanced XSS slice must stay within what its reservation funds"
     allocation = allocate_scan_action_plan(plan, _budget())
     allocated_actions = [
         action for action in allocation.plan.actions
@@ -903,4 +928,10 @@ def test_a_small_candidate_manifest_does_not_fail_a_required_family():
         ]
         assert batches, f"{entry_count} candidates compiled no XSS verification"
         # The family still runs; it simply gets the batches its work needs.
-        assert len(batches) <= max(1, (entry_count + 49) // 50) + 1
+        # A slice is sized to what its own reservation funds, so the batch count
+        # follows that size rather than the old, unfundable 50.
+        slice_size = max(
+            int(action.capability_args["slice"]["count"]) for action in batches
+        )
+        assert slice_size <= 8
+        assert len(batches) <= max(1, (entry_count + slice_size - 1) // slice_size) + 1

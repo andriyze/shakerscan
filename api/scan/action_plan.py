@@ -64,10 +64,21 @@ _BATCH_CAPABILITIES = frozenset({
     "nosqli.verify_batch",
     "authz_surface.verify_batch",
 })
+# (slice_size, reservation) per capability. For any capability with a declared
+# per-attempt floor the reservation MUST fund the whole slice:
+# reservation[dim] >= slice_size * BATCH_ATTEMPT_FLOORS[capability][dim].
+#
+# These were previously sized independently and every profile promised more than
+# it could pay for -- thorough declared 50 XSS candidates on a budget for 8, fast
+# declared 5 on a budget for 1 -- so a required verifier always left most of its
+# slice unattempted, reported its family partial, and marked the grade unreliable
+# on every scan of every profile. The sizes below are what each reservation
+# actually funds, and the reservations shrank to match, which lowers wall
+# pressure and lets the plan afford more batches over the same ceiling.
 _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     "fast": {
-        "xss.verify_batch": (5, {"http_requests": 100, "tool_wall_seconds": 90}),
-        "sqli.verify_batch": (5, {"http_requests": 400, "tool_wall_seconds": 120}),
+        "xss.verify_batch": (1, {"http_requests": 120, "tool_wall_seconds": 30}),
+        "sqli.verify_batch": (2, {"http_requests": 320, "tool_wall_seconds": 60}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
         "xss.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
@@ -79,8 +90,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
     },
     "balanced": {
-        "xss.verify_batch": (20, {"http_requests": 400, "tool_wall_seconds": 180}),
-        "sqli.verify_batch": (10, {"http_requests": 800, "tool_wall_seconds": 180}),
+        "xss.verify_batch": (3, {"http_requests": 360, "tool_wall_seconds": 90}),
+        "sqli.verify_batch": (5, {"http_requests": 800, "tool_wall_seconds": 150}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
@@ -92,8 +103,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "authz_surface.verify_batch": (20, {"http_requests": 200, "tool_wall_seconds": 150}),
     },
     "thorough": {
-        "xss.verify_batch": (50, {"http_requests": 1_000, "tool_wall_seconds": 300}),
-        "sqli.verify_batch": (25, {"http_requests": 1_800, "tool_wall_seconds": 300}),
+        "xss.verify_batch": (8, {"http_requests": 960, "tool_wall_seconds": 240}),
+        "sqli.verify_batch": (10, {"http_requests": 1_600, "tool_wall_seconds": 300}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),

@@ -496,8 +496,22 @@ def merge_parallel_work_assignments(
 
 
 def _projection_id(action_id: str) -> str:
-    head, dot, tail = action_id.rpartition(".")
-    return head if dot and len(tail) == 5 and tail.isdigit() else action_id
+    """Reduce an occurrence id to the logical action the parent authorised.
+
+    Two suffixes are occurrence markers, not distinct authority: a five-digit
+    per-endpoint occurrence and a three-digit batch index. Only the former was
+    stripped, so a child that sliced its work into more batches than the parent
+    happened to -- which is exactly what happens once a slice is sized to what
+    its reservation funds -- produced ids like ``verify.xss.001`` that the parent
+    had never projected, and the whole partition was rejected as introducing an
+    action outside parent authority.
+    """
+    projected = action_id
+    for width in (5, 3):
+        head, dot, tail = projected.rpartition(".")
+        if dot and len(tail) == width and tail.isdigit():
+            projected = head
+    return projected
 
 
 def _capability_family(capability_name: str) -> str:
