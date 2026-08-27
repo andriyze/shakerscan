@@ -306,6 +306,24 @@ if [ -z "$REPO_RAW_BASE" ]; then
             ""|*[!0-9A-Za-z._-]*) fail "stable release channel returned an unsafe version" ;;
         esac
         REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"
+        # This file carries THIS revision's file manifest, which does not describe another
+        # release's tree: pointing it at an older tag makes it request files that do not exist
+        # there. When the channel selects a version, hand over to that version's own installer --
+        # the same handover install/bootstrap.sh performs -- so the manifest and the tree always
+        # come from one revision. SHAKERSCAN_RAW_BASE is the recursion guard: the delegated
+        # installer sees it set and installs instead of resolving again.
+        delegate="$(mktemp "${TMPDIR:-/tmp}/shakerscan-installer.XXXXXX")" || \
+            fail "failed to create a temporary file for the release installer"
+        if ! curl -fsSL "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
+            rm -f -- "$delegate"
+            fail "failed to download the v${stable_version} installer"
+        fi
+        SHAKERSCAN_INSTALL_VERSION="$stable_version" \
+        SHAKERSCAN_RAW_BASE="$REPO_RAW_BASE" \
+            sh "$delegate" "$@"
+        delegate_status=$?
+        rm -f -- "$delegate"
+        exit "$delegate_status"
     fi
 fi
 
