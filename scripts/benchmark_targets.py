@@ -875,6 +875,19 @@ def apply_gates(card, fixture):
     if "retest_settled" in card:
         chk("retest_settled", card.get("retest_settled") is True,
             f"retest_settled={card.get('retest_settled')}")
+    if "min_expected_recall" in gates:
+        # Answer-key coverage, not finding volume. min_verified_high_critical counts what the scan
+        # proved; it says nothing about whether those findings are the ones the benchmark asked
+        # for, so a scan could report many verified findings while matching few expectations.
+        # Fail closed when no recall was measured: an absent number is not a met bar.
+        threshold = gates["min_expected_recall"]
+        recall = card.get("expected_recall")
+        measured = isinstance(recall, (int, float)) and not isinstance(recall, bool)
+        chk(
+            "min_expected_recall",
+            measured and float(recall) >= float(threshold),
+            f"{recall if measured else 'not measured'} >= {threshold}",
+        )
     if "min_verified_high_critical" in gates:
         n = gates["min_verified_high_critical"]
         chk("min_verified_high_critical", card["verified_high_critical"] >= n,

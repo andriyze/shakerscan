@@ -10,6 +10,7 @@ scan_options:
   budget_profile: thorough
 
 gates:
+  min_expected_recall: 0.67    # 3 of the 4 expected classes
   min_categories_found: 3            # broad category coverage
   max_unverified_high_ratio: 0.25    # do NOT inflate suspected -> Critical
   require_no_unproven_critical: true # Critical needs deterministic proof

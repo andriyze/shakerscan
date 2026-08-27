@@ -16,6 +16,7 @@ auth:
 
 # Per-target pass/fail gates.
 gates:
+  min_expected_recall: 0.67    # 6 of the 9 expected classes, the bar the finding-count gate already states
   min_verified_high_critical: 6      # >=70% of the ~9 reliably-achievable here
   require_verified_sqli: true        # Juice Shop must prove Critical SQLi
   require_browser_proven_xss: true   # and browser-proven High DOM XSS

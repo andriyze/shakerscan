@@ -6,6 +6,7 @@
     "completion_telemetry_consistent": true,
     "grade_reliable": true,
     "max_unverified_high_ratio": false,
+    "min_expected_recall": false,
     "min_verified_high_critical": false,
     "report_invariants_clean": true,
     "report_not_degraded": true,

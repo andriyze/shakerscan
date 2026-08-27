@@ -14,6 +14,7 @@ auth:
   requires_two_users: true
 
 gates:
+  min_expected_recall: 0.67    # 3 of the 4 expected classes
   min_verified_high_critical: 1
   require_verified_bola: true
   # If only one user is supplied, BOLA must report a clear blocked reason, not a pass.
