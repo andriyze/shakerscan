@@ -92,3 +92,36 @@ test('the legacy device investigation view is history only', async () => {
   assert.ok(!huntPage.includes('function LegacyDeviceRun'))
   assert.match(huntPage, /LegacyDeviceInvestigation/)
 })
+
+test('finding investigation starts a canonical Hunt, not a Research episode', async () => {
+  const { readFileSync } = await import('node:fs')
+  const path = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const findingPage = readFileSync(
+    path.join(uiRoot, 'src/app/findings/[id]/page.tsx'),
+    'utf8',
+  )
+  const client = readFileSync(path.join(uiRoot, 'src/lib/api.ts'), 'utf8')
+
+  // One investigation runtime owns this action.
+  assert.match(findingPage, /startHuntV2Native\(/)
+  assert.ok(!findingPage.includes('launchResearchEpisode'))
+  assert.ok(!findingPage.includes('getResearchReadiness'))
+  // It must land on canonical Hunt, not the legacy run page.
+  assert.match(findingPage, /router\.push\(`\/hunt\?run=/)
+  // The launch handler must not route to the legacy run page. A /deep-hunt link
+  // may still appear elsewhere on the page as read-only campaign provenance.
+  const launchHandler = findingPage.slice(
+    findingPage.indexOf('async function handleAutonomousInvestigation'),
+    findingPage.indexOf('const evidence = useMemo'),
+  )
+  assert.ok(launchHandler.length > 200)
+  assert.ok(!launchHandler.includes('/deep-hunt/'))
+  assert.ok(!launchHandler.includes('launchResearch'))
+  // The finding stays the subject of the run.
+  assert.match(findingPage, /Verify finding \$\{finding\.id\}/)
+  // The migrated client methods are gone, so nothing can start one by accident.
+  assert.ok(!client.includes('export async function launchResearchEpisode'))
+  assert.ok(!client.includes('export async function getResearchReadiness'))
+})

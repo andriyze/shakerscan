@@ -1,5 +1,6 @@
 'use client'
 
+import { startHuntV2Native } from '@/lib/huntV2'
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { BrainCircuit, Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
@@ -15,9 +16,7 @@ import {
   getFindingRetests,
   getFindingEvidence,
   getPolicyProfiles,
-  getResearchReadiness,
   getTarget,
-  launchResearchEpisode,
   retestFinding,
   retestAiFinding,
   updateFinding,
@@ -560,22 +559,29 @@ function FindingDetailContent() {
     }
     try {
       setAutonomousLoading(true)
-      const readiness = await getResearchReadiness()
-      if (!readiness.planner_ready) throw new Error('Configure an AI model before starting an autonomous investigation.')
-      if (!readiness.execution_enabled) throw new Error('Autonomous active execution is disabled by server policy.')
+      // Canonical Hunt, not a Research episode: one investigation runtime owns
+      // this. The finding is carried as the run's goal so the agent starts with
+      // the same subject the old episode bound, and the run opens on /hunt.
       const approvalReceiptId = await createTargetPolicyApproval(finding.target_id, targetUrl, 30)
-      const detail = await launchResearchEpisode({
-        subject_type: 'finding',
-        subject_id: finding.id,
-        mission_profile: 'verify_finding',
-        intensity: 'hunt',
-        approval_receipt_id: approvalReceiptId,
-        autopilot: true,
-        created_by: 'finding_detail_ui',
+      const hunt = await startHuntV2Native({
+        targetId: finding.target_id,
+        targetKind: 'web',
+        goal:
+          `Verify finding ${finding.id} on ${targetUrl}: ` +
+          `${finding.title || 'untitled finding'}. Confirm or refute it with evidence.`,
+        budgetProfile: 'balanced',
+        policy: {
+          activeTesting: true,
+          allowStateChangingHttp: false,
+          networkDiscovery: false,
+          allowOobInteractions: false,
+          authorizationConfirmed: true,
+          approvalReceiptId,
+        },
       })
       setAutonomousConfirmOpen(false)
-      toast.success(detail.reused ? 'Opened the existing autonomous investigation' : 'Autonomous investigation started')
-      router.push(`/deep-hunt/runs/${encodeURIComponent(detail.episode.id)}`)
+      toast.success('Hunt started for this finding')
+      router.push(`/hunt?run=${encodeURIComponent(hunt.hunt_id)}`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to start autonomous investigation')
     } finally {

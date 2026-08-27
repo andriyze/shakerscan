@@ -69,7 +69,7 @@
     { "caseId": "START-025", "route": "/findings/[id]", "source": "src/app/findings/[id]/page.tsx", "marker": "await retestAiFinding", "assertion": "AI-assisted replay cannot overwrite deterministic proof state." },
     { "caseId": "START-026", "route": "/hunt", "source": "src/app/hunt/page.tsx", "marker": "startHuntV2Native({", "assertion": "Target entry submits the persisted V2 Hunt policy." },
     { "caseId": "START-027", "route": "/exposure", "source": "src/app/exposure/page.tsx", "marker": "router.push(`/hunt?target=", "assertion": "Investigate carries the exact asset into canonical Hunt." },
-    { "caseId": "START-028", "route": "/findings/[id]", "source": "src/app/findings/[id]/page.tsx", "marker": "launchResearchEpisode({", "assertion": "Specialized finding verification remains target-bound and auditable." },
+    { "caseId": "START-028", "route": "/findings/[id]", "source": "src/app/findings/[id]/page.tsx", "marker": "startHuntV2Native({", "assertion": "Finding investigation starts one canonical target-bound Hunt carrying the finding as its goal; the Research episode launcher is removed, so there is no second investigation runtime to start." },
     { "caseId": "START-029", "route": "/hunt", "source": "src/app/hunt/page.tsx", "marker": "requestCollectionIds", "assertion": "API Hunt submits only selected exact-target collections." },
     { "caseId": "START-030", "route": "/hunt", "source": "src/app/hunt/page.tsx", "marker": "webTargetKind", "assertion": "Network Hunt hides incompatible collections and enforces authority." },
     { "caseId": "START-031", "route": "/hunt", "source": "src/app/hunt/page.tsx", "marker": "secondary: ''", "assertion": "Dual-principal Hunt preserves distinct profile references." },

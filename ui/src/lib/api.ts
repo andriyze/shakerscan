@@ -3774,16 +3774,6 @@ export async function createResearchEpisode(payload: ResearchEpisodeCreateReques
   return res.json()
 }
 
-export async function launchResearchEpisode(payload: ResearchEpisodeLaunchRequest): Promise<ResearchEpisodeLaunchResponse> {
-  const res = await fetch(`${API_URL}/research/launch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to launch autonomous investigation'))
-  return res.json()
-}
-
 export async function launchResearchCampaign(payload: ResearchCampaignLaunchRequest): Promise<ResearchCampaignLaunchResponse> {
   const res = await fetch(`${API_URL}/research/campaigns/launch`, {
     method: 'POST',
@@ -3801,12 +3791,6 @@ export async function controlResearchCampaign(campaignId: string, action: 'pause
     body: JSON.stringify({ action, created_by: 'research_agent_ui' }),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to ${action} research campaign`))
-  return res.json()
-}
-
-export async function getResearchReadiness(): Promise<ResearchReadiness> {
-  const res = await fetch(`${API_URL}/research/readiness`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to check autonomous investigation readiness'))
   return res.json()
 }
 
