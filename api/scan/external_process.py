@@ -56,6 +56,34 @@ BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
     "sqli.verify_batch": {"http_requests": 160, "tool_wall_seconds": 30},
 }
 
+# A request-body attempt is a different cost class, and these numbers are measured rather than
+# chosen. Against the worker's own sqlmap on a live JSON login endpoint, reaching and confirming
+# the injection took 410 HTTP requests and about 420 seconds end to end (the boolean-based blind
+# technique reports at roughly 150s; sqlmap continues to a verdict from there). The query floor
+# grants 30 seconds, which is why every body attempt in a real scan returned unproven while the
+# execution chain itself worked.
+#
+# These floors are deliberately set to what the work costs, not to what current profiles can
+# afford: `thorough` grants its sqli batch 1,600 requests and 300 seconds per ten-candidate slice,
+# so one body attempt exceeds an entire slice's wall budget. The consequence is that a body
+# candidate is reported as unattempted rather than run in a way that cannot reach a verdict --
+# which is the same principle the batch adapter already applies to query candidates. Making these
+# land needs a profile-ceiling decision, not a smaller floor.
+BATCH_ATTEMPT_BODY_FLOORS: dict[str, dict[str, int]] = {
+    "xss.verify_batch": {"http_requests": 240, "tool_wall_seconds": 120},
+    "sqli.verify_batch": {"http_requests": 480, "tool_wall_seconds": 420},
+}
+
+
+def batch_attempt_floor(capability_name: str, *, body_candidate: bool = False) -> dict[str, int]:
+    """Return the per-attempt floor for one capability, by candidate cost class."""
+    name = str(capability_name or "")
+    if body_candidate:
+        floor = BATCH_ATTEMPT_BODY_FLOORS.get(name)
+        if floor:
+            return dict(floor)
+    return dict(BATCH_ATTEMPT_FLOORS.get(name) or {})
+
 
 def batch_attempt_capacity(
     capability_name: str, budget: dict[str, int] | None,

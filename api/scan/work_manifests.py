@@ -912,6 +912,11 @@ def build_candidate_manifest(
     sqli_names = frozenset({
         "account", "category", "customer", "filter", "id", "item", "order",
         "page", "product", "record", "search", "sort", "user", "username",
+        # The authentication query is the canonical SQL injection site, and these are its canonical
+        # field names. `username` was already here while `email` -- its modern equivalent -- and
+        # `password` were not, so a login body ranked below transport plumbing like a socket.io
+        # `transport` parameter and was the first work a constrained budget dropped.
+        "email", "password", "passwd", "login", "mail",
     })
     source_points = {
         "collections.replay": (18, "exact_request_source"),

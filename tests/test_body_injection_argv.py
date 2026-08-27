@@ -113,3 +113,43 @@ def test_a_query_scan_still_treats_an_auth_failure_as_before():
     # accepts as a testable response.
     args = agent_tools._tmpl_sqlmap(URL, {})
     assert "--ignore-code" not in args
+
+
+# --- A body attempt is a different cost class -------------------------------------------------
+
+def test_a_body_attempt_gets_a_floor_matched_to_what_the_tool_needs():
+    """Measured, not guessed.
+
+    Against the worker's own sqlmap on a live JSON login endpoint, reaching and confirming the
+    injection took 410 HTTP requests and about 420 seconds. The query floor grants 30 seconds,
+    which is why every body attempt in a real scan returned unproven after ~25 while the execution
+    chain itself worked. The floor is set to what the work costs, so a body candidate is reported
+    as unattempted rather than run in a way that cannot reach a verdict.
+    """
+    from scan.external_process import batch_attempt_floor
+
+    query = batch_attempt_floor("sqli.verify_batch")
+    body = batch_attempt_floor("sqli.verify_batch", body_candidate=True)
+    assert query["tool_wall_seconds"] == 30
+    assert body["tool_wall_seconds"] >= 420, "a body attempt must be able to reach a verdict"
+    assert body["http_requests"] >= 410, "measured: 410 requests to confirm the injection"
+    assert body["http_requests"] > query["http_requests"]
+
+    # XSS body attempts cost more than query ones too, without inheriting SQLi's ceiling.
+    xss_body = batch_attempt_floor("xss.verify_batch", body_candidate=True)
+    assert xss_body["tool_wall_seconds"] > batch_attempt_floor("xss.verify_batch")["tool_wall_seconds"]
+
+
+def test_an_unknown_capability_has_no_floor_either_way():
+    from scan.external_process import batch_attempt_floor
+
+    assert batch_attempt_floor("templates.passive_batch") == {}
+    assert batch_attempt_floor("templates.passive_batch", body_candidate=True) == {}
+
+
+def test_the_adapter_selects_the_floor_by_candidate_class():
+    from tests.api_sources import definition_source
+
+    source = definition_source("_external_batch")
+    assert "batch_attempt_floor(" in source
+    assert "body_candidate=bool(body_request)" in source

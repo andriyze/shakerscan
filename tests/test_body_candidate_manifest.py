@@ -170,3 +170,28 @@ def test_both_production_call_sites_pass_their_scan_authority():
         source = definition_source(handler)
         assert "build_candidate_manifest(" in source, handler
         assert "allow_state_changing_http=" in source, handler
+
+
+def test_authentication_field_names_rank_as_injection_candidates():
+    """The authentication query is the canonical SQL injection site.
+
+    `username` was in the semantic set while `email` -- its modern equivalent -- and `password`
+    were not, so a login body scored below a socket.io `transport` parameter and a constrained
+    budget dropped exactly the candidate most likely to be vulnerable. Ranking by likelihood, not
+    by how cheap the request is to make.
+    """
+    login = build_candidate_manifest(
+        _manifest([_endpoint()]), source_action_ids=("discover.crawl",), maximum=50,
+        allow_state_changing_http=True)
+    scores = {item["parameter_name"]: item["score"] for item in login.entries}
+
+    plumbing = _endpoint(method="GET", canonical_path="/socket.io/",
+                         query_parameter_names=["transport"],
+                         content_type=None, body_field_names=[], source_tool="web.crawl")
+    transport = build_candidate_manifest(
+        _manifest([plumbing]), source_action_ids=("discover.crawl",), maximum=50).entries[0]
+
+    assert scores["email"] > transport["score"], (scores, transport["score"])
+    assert scores["password"] > transport["score"]
+    for item in login.entries:
+        assert "sqli_semantic_parameter" in item["ranking_rationale"]

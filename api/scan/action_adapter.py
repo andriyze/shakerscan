@@ -154,7 +154,7 @@ except (ImportError, ModuleNotFoundError):
 
 from .action_plan import ScanAction, ScanActionPlan
 from .capability_result import CapabilityResultReason
-from .external_process import BATCH_ATTEMPT_FLOORS
+from .external_process import BATCH_ATTEMPT_FLOORS, batch_attempt_floor
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -2301,7 +2301,9 @@ class DatabaseNeutralScanActionDispatcher:
             # the family spent its whole budget proving nothing. The manifest is
             # ranked, so funding the top of it and reporting the remainder as
             # unattempted is strictly more useful than diluting all of it.
-            floor = BATCH_ATTEMPT_FLOORS.get(action.capability_name, {})
+            floor = batch_attempt_floor(
+                action.capability_name, body_candidate=bool(body_request),
+            )
             # Check the floor against what is actually left before building the
             # slice: a dimension that has run out is absent from the slice
             # entirely, so testing only the dimensions present would let an
