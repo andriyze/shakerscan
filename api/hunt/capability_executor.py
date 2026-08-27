@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
@@ -107,6 +109,14 @@ class CapabilityExecutor:
             # An adapter exception cannot prove which in-flight browser or socket
             # operations completed. Charge the full hold and let the caller persist
             # a terminal failure rather than guessing that target traffic was zero.
+            #
+            # The exception TYPE carries no target data and is the only signal an
+            # operator gets: without it a failed capability reports a bare
+            # adapter_fault that cannot be diagnosed from the receipt or the logs.
+            print(
+                f"[hunt] capability {spec.name} adapter raised {type(exc).__name__}",
+                file=sys.stderr, flush=True,
+            )
             return CapabilityAdapterResult(
                 status="failed",
                 errors=(f"adapter_fault:{type(exc).__name__}",),
