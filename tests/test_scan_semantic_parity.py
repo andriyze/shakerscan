@@ -153,3 +153,125 @@ def test_release_comparator_cli_requires_all_three_real_placements(monkeypatch, 
     receipt = __import__("json").loads(capsys.readouterr().out)
     assert receipt["consistent"] is True
     assert receipt["truthful"] is True
+
+
+def _explanation_with_actions(actions):
+    return {
+        "plan_revision": {"revision": 1, "continuation_plan_digest": None},
+        "actions": actions,
+        "coverage": {
+            "status": "complete",
+            "optional_gaps": [],
+            "active_zero_attempt_actions": [],
+            "grade_reliability": {"reliable": True, "reasons": []},
+        },
+    }
+
+
+def _verify_action(*, ordinal, observation_count, budget):
+    return {
+        "action_id": "verify.xss.00000",
+        "ordinal": ordinal,
+        "stage": "verify_candidates",
+        "capability_name": "xss.verify_batch",
+        "dependencies": [],
+        "required": True,
+        "supporting": False,
+        "budget": {"reserved": {"http_requests": budget}},
+        "status": "success",
+        "reason_code": None,
+        "output_schema": "candidate-attempt/v1",
+        "receipt": {"parser_version": "dalfox/1"},
+        "observation": {"count": observation_count},
+    }
+
+
+def test_fan_out_occurrences_are_not_semantic_drift():
+    """One logical action may run as several occurrences under fan-out.
+
+    The comparator walked an ordered action array position by position, so a
+    parallel run that split one logical action into two occurrences reported an
+    extra array element as a semantic difference -- even though the same work
+    manifest entries were covered exactly once, the same statuses resulted, and
+    the same total budget was reserved. That made the gate fail for the topology
+    it exists to qualify.
+    """
+    local = build_scan_semantic_parity_artifact(
+        _explanation_with_actions([
+            _verify_action(ordinal=0, observation_count=4, budget=40),
+        ]),
+    )
+    parallel = build_scan_semantic_parity_artifact(
+        _explanation_with_actions([
+            _verify_action(ordinal=0, observation_count=2, budget=20),
+            _verify_action(ordinal=1, observation_count=2, budget=20),
+        ]),
+    )
+
+    comparison = compare_scan_semantic_parity({"local": local, "parallel": parallel})
+    assert comparison["consistent"] is True, comparison["comparisons"]
+
+
+def test_missing_logical_action_is_still_drift():
+    """Normalizing occurrences must not hide genuinely absent work."""
+    local = build_scan_semantic_parity_artifact(
+        _explanation_with_actions([
+            _verify_action(ordinal=0, observation_count=4, budget=40),
+        ]),
+    )
+    parallel = build_scan_semantic_parity_artifact(_explanation_with_actions([]))
+    comparison = compare_scan_semantic_parity({"local": local, "parallel": parallel})
+    assert comparison["consistent"] is False
+
+
+def test_different_total_work_is_still_drift():
+    """Occurrence-normalized totals must still catch duplicated or lost work."""
+    local = build_scan_semantic_parity_artifact(
+        _explanation_with_actions([
+            _verify_action(ordinal=0, observation_count=4, budget=40),
+        ]),
+    )
+    parallel = build_scan_semantic_parity_artifact(
+        _explanation_with_actions([
+            _verify_action(ordinal=0, observation_count=4, budget=20),
+            _verify_action(ordinal=1, observation_count=4, budget=20),
+        ]),
+    )
+    comparison = compare_scan_semantic_parity({"local": local, "parallel": parallel})
+    assert comparison["consistent"] is False
+
+
+def test_truthfulness_still_catches_a_failed_required_action():
+    """Aggregating occurrences must not weaken the truthfulness guard.
+
+    The guard reads each action's terminal state; folding occurrences into a
+    status set would silently pass a failed required action if it only looked at
+    the first one.
+    """
+    def artifact(*statuses):
+        return build_scan_semantic_parity_artifact(_explanation_with_actions([
+            dict(_verify_action(ordinal=index, observation_count=1, budget=10),
+                 status=status)
+            for index, status in enumerate(statuses)
+        ]))
+
+    assert parity_artifact_is_truthful(artifact("success")) is True
+    assert parity_artifact_is_truthful(artifact("failed")) is False
+    # One healthy occurrence must not launder a failed sibling occurrence.
+    assert parity_artifact_is_truthful(artifact("success", "failed")) is False
+
+
+def test_occurrence_counts_are_recorded_as_provenance_only():
+    single = build_scan_semantic_parity_artifact(_explanation_with_actions([
+        _verify_action(ordinal=0, observation_count=4, budget=40),
+    ]))
+    split = build_scan_semantic_parity_artifact(_explanation_with_actions([
+        _verify_action(ordinal=0, observation_count=2, budget=20),
+        _verify_action(ordinal=1, observation_count=2, budget=20),
+    ]))
+    assert single["provenance"]["action_occurrences"]["verify.xss.00000"] == 1
+    assert split["provenance"]["action_occurrences"]["verify.xss.00000"] == 2
+    # ...and the placement difference does not reach the compared body.
+    assert compare_scan_semantic_parity(
+        {"local": single, "parallel": split},
+    )["consistent"] is True

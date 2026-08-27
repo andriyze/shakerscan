@@ -61,7 +61,15 @@ def build_scan_semantic_parity_artifact(
     coverage = _object(explanation.get("coverage"))
     reliability = _object(coverage.get("grade_reliability"))
     revision = _object(explanation.get("plan_revision"))
-    actions = []
+    # Compare logical work, not the physical shape of the action array. Fan-out
+    # legitimately runs one logical action as several occurrences, and walking
+    # an ordered array position by position reported that extra element as
+    # semantic drift -- failing the gate for the topology it exists to qualify.
+    # Occurrences are aggregated here and their count is kept only as
+    # provenance, so equivalent work with a different placement compares equal
+    # while missing, duplicated, or differently-terminated work still does not.
+    aggregated: dict[str, dict[str, Any]] = {}
+    occurrences: dict[str, int] = {}
     for raw in _array(explanation.get("actions")):
         action = _object(raw)
         action_id = str(action.get("action_id") or "").strip()
@@ -69,19 +77,13 @@ def build_scan_semantic_parity_artifact(
             continue
         receipt = _object(action.get("receipt"))
         observation = _object(action.get("observation"))
-        actions.append({
+        row = aggregated.setdefault(action_id, {
             "action_id": action_id,
-            "ordinal": int(action.get("ordinal") or 0),
             "stage": str(action.get("stage") or "unknown"),
             "capability_name": str(action.get("capability_name") or "unknown"),
             "dependencies": [str(item) for item in _array(action.get("dependencies"))],
             "required": bool(action.get("required")),
             "supporting": bool(action.get("supporting")),
-            "requested_budget": _budget(_object(action.get("budget")).get("reserved")),
-            "terminal_status": str(action.get("status") or "missing"),
-            "reason_code": (
-                str(action.get("reason_code")) if action.get("reason_code") else None
-            ),
             "output_schema": (
                 str(action.get("output_schema")) if action.get("output_schema") else None
             ),
@@ -89,10 +91,30 @@ def build_scan_semantic_parity_artifact(
                 str(receipt.get("parser_version"))
                 if receipt.get("parser_version") else None
             ),
-            "observation_present": bool(observation),
-            "observation_count": int(observation.get("count") or 0),
+            "terminal_statuses": set(),
+            "reason_codes": set(),
+            "observation_present": False,
+            "observation_count": 0,
+            "requested_budget_total": {},
         })
-    actions.sort(key=lambda item: (item["ordinal"], item["action_id"]))
+        occurrences[action_id] = occurrences.get(action_id, 0) + 1
+        row["required"] = row["required"] or bool(action.get("required"))
+        row["supporting"] = row["supporting"] or bool(action.get("supporting"))
+        row["terminal_statuses"].add(str(action.get("status") or "missing"))
+        if action.get("reason_code"):
+            row["reason_codes"].add(str(action.get("reason_code")))
+        row["observation_present"] = row["observation_present"] or bool(observation)
+        row["observation_count"] += int(observation.get("count") or 0)
+        for name, amount in _budget(_object(action.get("budget")).get("reserved")).items():
+            row["requested_budget_total"][name] = (
+                row["requested_budget_total"].get(name, 0) + int(amount)
+            )
+    actions = []
+    for action_id in sorted(aggregated):
+        row = dict(aggregated[action_id])
+        row["terminal_statuses"] = sorted(row["terminal_statuses"])
+        row["reason_codes"] = sorted(row["reason_codes"])
+        actions.append(row)
 
     optional_gaps = sorted(
         (
@@ -134,13 +156,20 @@ def build_scan_semantic_parity_artifact(
     artifact["semantic_digest"] = hashlib.sha256(json.dumps(
         artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode()).hexdigest()
+    # Placement provenance: recorded so an operator can see how the work was
+    # distributed, deliberately outside the compared semantic body.
+    artifact["provenance"] = {
+        "action_occurrences": {
+            action_id: occurrences[action_id] for action_id in sorted(occurrences)
+        },
+    }
     return artifact
 
 
 def _semantic_body(artifact: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: value for key, value in dict(artifact).items()
-        if key not in {"semantic_digest"}
+        if key not in {"semantic_digest", "provenance"}
     }
 
 
@@ -201,7 +230,10 @@ def parity_artifact_is_truthful(artifact: Mapping[str, Any]) -> bool:
     """A missing/failed required action must never yield a clean reliable grade."""
     required_incomplete = any(
         bool(action.get("required"))
-        and str(action.get("terminal_status")) != "success"
+        and any(
+            str(status) != "success"
+            for status in _array(action.get("terminal_statuses"))
+        )
         for action in _array(artifact.get("actions"))
         if isinstance(action, Mapping)
     )
