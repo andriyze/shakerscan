@@ -425,6 +425,15 @@ def parse_target_id_overrides(values):
 
 
 def route_tokens(entry):
+    """Return the substrings a finding must contain to be about this expectation's route.
+
+    A declared route ALWAYS yields at least one token. The four-character floor exists to keep a
+    tiny token from matching noise, but returning an empty set was far worse than a noisy match:
+    the match loop skipped the route filter entirely when the set was empty, so a short route like
+    ``/ftp`` was credited by any finding of a compatible class -- whatever route it was about. The
+    floor now selects the PREFERRED token; the cleaned route is kept as the fallback so the
+    constraint is never silently dropped.
+    """
     toks = set()
     route = (entry.get("route") or "").lower().strip("/").split("?")[0]
     parts = [p for p in route.split("/") if p]
@@ -437,7 +446,39 @@ def route_tokens(entry):
         last = re.split(r"[?=&.#]", parts[-1])[0].strip("{}:- ")
         if len(last) >= 4 and last not in STOP:
             toks.add(last)
+        if not toks:
+            # Every part was below the floor. Keep the route itself rather than no constraint.
+            toks.update(token for token in (full, last) if token and token not in STOP)
     return {t for t in toks if t}
+
+
+def match_expectation(entry, candidates, claimed_finding_ids):
+    """Return the first candidate finding that satisfies ``entry``, or None.
+
+    ``claimed_finding_ids`` is mutated by the caller, not here: a finding already credited to
+    another expectation is skipped, because one finding satisfying several expectations inflates
+    recall exactly as much as an unrelated finding satisfying one.
+    """
+    compat = COMPAT.get(entry["family"], {entry["family"]})
+    toks = route_tokens(entry)
+    minsev = SEV_RANK.get(entry.get("min_severity", "high"), 3)
+    proof = entry.get("proof", "deterministic")
+    for candidate in candidates:
+        if str(candidate.get("finding_id")) in claimed_finding_ids:
+            continue
+        if not (set(candidate.get("classes") or ()) & compat):
+            continue
+        # A declared route is a requirement, never a hint that can evaporate.
+        if toks and not any(token in str(candidate.get("hay") or "") for token in toks):
+            continue
+        if SEV_RANK.get(candidate.get("severity"), 0) < minsev:
+            continue
+        if proof in ("verified", "browser") and not candidate.get("verified"):
+            continue
+        if proof == "browser" and not candidate.get("browser_proven"):
+            continue
+        return candidate
+    return None
 
 
 def finding_classes(hay):
@@ -718,25 +759,28 @@ def collect_scorecard(report, fixture):
 
     expected = fixture.get("expected", [])
     found, missed = [], []
+    # One finding may credit at most one expectation. Without this a single high-severity finding
+    # satisfied every expectation whose class it happened to match, inflating recall silently.
+    expectation_candidates = [
+        {
+            "finding": entry[0],
+            # Findings carry an id; fall back to position so an id-less row is still distinct.
+            "finding_id": str((entry[0] or {}).get("id") or f"index:{index}"),
+            "hay": entry[1],
+            "classes": entry[2],
+            "severity": entry[3],
+            "verified": entry[4],
+            "browser_proven": entry[5],
+        }
+        for index, entry in enumerate(high_crit)
+    ]
+    claimed_finding_ids: set[str] = set()
     for ent in expected:
-        compat = COMPAT.get(ent["family"], {ent["family"]})
-        toks = route_tokens(ent)
-        minsev = SEV_RANK.get(ent.get("min_severity", "high"), 3)
         proof = ent.get("proof", "deterministic")
-        hit = None
-        for f, hay, classes, sev, ver, browser_proven in high_crit:
-            if not (classes & compat):
-                continue
-            if toks and not any(t in hay for t in toks):
-                continue
-            if SEV_RANK.get(sev, 0) < minsev:
-                continue
-            if proof in ("verified", "browser") and not ver:
-                continue  # required proof not present
-            if proof == "browser" and not browser_proven:
-                continue
-            hit = f
-            break
+        match = match_expectation(ent, expectation_candidates, claimed_finding_ids)
+        if match is not None:
+            claimed_finding_ids.add(str(match.get("finding_id")))
+        hit = match.get("finding") if match else None
         (found if hit else missed).append({
             "id": ent["id"], "family": ent["family"], "route": ent.get("route"),
             "proof": proof, "min_severity": ent.get("min_severity", "high"),
