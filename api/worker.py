@@ -226,6 +226,7 @@ from scan.work_manifests import (
     build_candidate_manifest,
     build_canonical_scan_nuclei_template_manifest,
     build_endpoint_manifest,
+    entry_is_mutating,
     build_request_candidate_manifest,
     canonical_nuclei_options_for_manifest,
     execution_url_for_manifest_candidate,
@@ -15356,7 +15357,7 @@ def _compile_parallel_child_work_manifests(
             original["selector"] = selector
             original["selected_requests"] = request_count
             original["selected_mutating_requests"] = sum(
-                not bool(entry["safe_method"])
+                entry_is_mutating(entry)
                 for entry in child_request_manifest.entries
             )
             collection_refs.append(original)

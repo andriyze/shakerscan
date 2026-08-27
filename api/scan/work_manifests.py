@@ -105,6 +105,15 @@ _SENSITIVE_KEYS = frozenset({
 REQUEST_CLASSES = frozenset({
     "safe_read", "safe_authentication", "confirmed_mutation", "forbidden",
 })
+# A manifest ENTRY carries request_class; the raw collection index row it was
+# built from carries safe_method, which is popped during translation. Anything
+# counting mutating work off an entry must use this, not the input field.
+MUTATING_REQUEST_CLASSES = frozenset({"confirmed_mutation"})
+
+
+def entry_is_mutating(entry: Mapping[str, Any]) -> bool:
+    """True when a request manifest entry represents state-changing work."""
+    return str(entry.get("request_class") or "") in MUTATING_REQUEST_CLASSES
 
 
 class ScanWorkManifestError(ValueError):

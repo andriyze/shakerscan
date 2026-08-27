@@ -522,3 +522,60 @@ def test_work_manifest_schema_is_available_to_fresh_and_upgraded_databases():
         assert "target_binding_digest" in source
         assert "manifest_digest" in source
         assert "content_json" in source
+
+
+def test_mutating_work_is_counted_from_the_entry_class_not_the_input_field():
+    """A manifest entry has request_class; safe_method belongs to the raw row.
+
+    build_request_manifest pops safe_method and translates it into
+    request_class, and _request_entry rejects any entry carrying an unexpected
+    field. api/worker.py counted mutating child work with entry["safe_method"]
+    and raised KeyError on every parallel child that had request entries.
+    """
+    from scan.work_manifests import (
+        MUTATING_REQUEST_CLASSES, REQUEST_CLASSES, entry_is_mutating,
+    )
+
+    assert MUTATING_REQUEST_CLASSES <= REQUEST_CLASSES
+    assert entry_is_mutating({"request_class": "confirmed_mutation"})
+    assert not entry_is_mutating({"request_class": "safe_read"})
+    assert not entry_is_mutating({"request_class": "safe_authentication"})
+    # An entry never carries safe_method, so a counter reading it is a bug.
+    assert not entry_is_mutating({"safe_method": False})
+
+
+def test_request_manifest_entries_never_carry_safe_method():
+    """Guards the schema the counter depends on."""
+    import scan.work_manifests as wm
+
+    route = _endpoint_manifest().entries[0]["route_id"]
+    manifest = wm.build_request_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        source_action_ids=("inputs.collection_00",),
+        requests=[
+            {
+                "request_ref_id": "create-order",
+                "route_id": route,
+                "method": "POST",
+                "auth_lane": "primary",
+                "selected_shard": None,
+                "body_schema_digest": None,
+                "safe_method": False,
+            },
+            {
+                "request_ref_id": "get-health",
+                "route_id": route,
+                "method": "GET",
+                "auth_lane": "primary",
+                "selected_shard": None,
+                "body_schema_digest": None,
+                "safe_method": True,
+            },
+        ],
+        maximum=10,
+    )
+    for entry in manifest.entries:
+        assert "safe_method" not in entry
+        assert entry["request_class"] in wm.REQUEST_CLASSES
+    assert sum(wm.entry_is_mutating(entry) for entry in manifest.entries) == 1
