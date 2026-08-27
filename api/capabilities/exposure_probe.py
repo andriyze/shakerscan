@@ -89,7 +89,14 @@ _LISTING_RE = re.compile(
     r"(?i)<title>\s*(?:index of|directory listing)"
     r"|Directory listing for /"
 )
-_ACTUATOR_RE = re.compile(r'"(?:status|diskSpace|_links|activeProfiles)"\s*:')
+# A bare ``"status":`` is one of the most common keys in any JSON API, so it
+# matched every ordinary REST response and reported it as a high-severity
+# actuator exposure. Match only shapes an actuator actually produces: its
+# health status is a fixed enum, and the other keys are Spring-specific.
+_ACTUATOR_RE = re.compile(
+    r'"(?:diskSpace|_links|activeProfiles)"\s*:'
+    r'|"status"\s*:\s*"(?:UP|DOWN|OUT_OF_SERVICE|UNKNOWN)"'
+)
 _OPENAPI_RE = re.compile(r'"(?:swagger|openapi)"\s*:\s*"')
 _ERROR_RE = re.compile(
     r"Traceback \(most recent call last\)"

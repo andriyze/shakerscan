@@ -203,3 +203,40 @@ def test_finalizer_promotes_only_deterministic_sensitive_exposure_proof():
     assert finding["verified"] is True
     assert finding["evidence"]["canonical_capability"] == "exposure.verify_batch"
     assert finding["evidence"]["exposure_class"] == "private_key_material"
+
+
+def test_ordinary_json_apis_are_not_actuator_exposures():
+    """``"status"`` is one of the most common keys in any JSON API.
+
+    Matching it bare classified every ordinary REST response as a
+    high-severity actuator exposure, so a single application produced a page
+    of duplicate false positives -- including endpoints whose 200 body says
+    the endpoint is not supported.
+    """
+    ordinary = (
+        b'{"status":"success","data":[{"id":1,"quantity":35}]}',
+        b'{"status":"success","data":{"err":"Sorry, this endpoint is not supported."}}',
+        b'{"status":"ok"}',
+        b'{"status":200,"message":"created"}',
+    )
+    for body in ordinary:
+        assert classify_exposure(
+            path="/api/Quantitys", status=200,
+            headers={"Content-Type": "application/json"}, body=body,
+        ) is None, body
+
+
+def test_real_actuator_shapes_are_still_detected():
+    """Narrowing the pattern must not lose genuine actuator disclosure."""
+    for body in (
+        b'{"activeProfiles":["prod"],"_links":{}}',
+        b'{"status":"UP","components":{"db":{"status":"UP"}}}',
+        b'{"diskSpace":{"total":1,"free":1}}',
+    ):
+        signature = classify_exposure(
+            path="/actuator/health", status=200,
+            headers={"Content-Type": "application/json"}, body=body,
+        )
+        assert signature is not None, body
+        assert signature.exposure_class == "actuator_endpoint"
+        assert signature.severity == "high"
