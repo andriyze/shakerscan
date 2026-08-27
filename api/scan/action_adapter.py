@@ -236,6 +236,26 @@ def _exposure_observation(
     }
 
 
+def _directory_listing_child_url(directory_url: str, link: str) -> str:
+    """Resolve one listing entry against the directory that produced it.
+
+    Listing generators disagree about what their hrefs are relative to. Apache
+    and nginx emit a bare filename, which resolves against the directory. The
+    Node/Express serve-index middleware emits the path from the site root --
+    ``ftp/acquisitions.md`` for a listing of ``/ftp`` -- which resolved to
+    ``/ftp/ftp/acquisitions.md`` and was refused, so the confidential files a
+    browsable directory exposes were never actually reached.
+    """
+    base = directory_url.rstrip("/") + "/"
+    relative = link[2:] if link.startswith("./") else link
+    segments = [item for item in urllib.parse.urlsplit(base).path.split("/") if item]
+    if segments and relative.lstrip("/").startswith(f"{segments[-1]}/"):
+        # The entry repeats the directory's own segment: it is relative to the
+        # site root, so resolve it one level up instead of nesting it.
+        return urllib.parse.urljoin(base, "../" + relative.lstrip("/"))
+    return urllib.parse.urljoin(base, link)
+
+
 class DatabaseNeutralScanActionDispatcher:
     """Execute canonical actions without Redis or PostgreSQL credentials."""
 
@@ -1599,7 +1619,7 @@ class DatabaseNeutralScanActionDispatcher:
                     for link in directory_listing_links(result.response_body, limit=10):
                         if self.cancelled() or consumed["http_requests"] >= http_ceiling:
                             break
-                        child_url = urllib.parse.urljoin(probe_url.rstrip("/") + "/", link)
+                        child_url = _directory_listing_child_url(probe_url, link)
                         if urllib.parse.urlsplit(child_url).netloc != \
                                 urllib.parse.urlsplit(probe_url).netloc:
                             continue

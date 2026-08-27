@@ -1672,3 +1672,28 @@ def test_database_neutral_passive_nuclei_uses_exact_reviewed_allowlist(monkeypat
         entry["template_id"] for entry in template_manifest.entries
     }
     assert "tags" not in options
+
+
+def test_directory_listing_entries_resolve_for_both_href_conventions():
+    """Listing generators disagree about what their hrefs are relative to.
+
+    Apache and nginx emit a bare filename, which resolves against the
+    directory. The Node/Express serve-index middleware emits the path from the
+    site root -- ``ftp/acquisitions.md`` for a listing of ``/ftp`` -- which
+    resolved to ``/ftp/ftp/acquisitions.md`` and was refused, so the
+    confidential files a browsable directory exposes were never reached.
+    """
+    resolve = action_adapter_module._directory_listing_child_url
+    cases = {
+        # site-root-relative (serve-index)
+        ("http://app.test/ftp", "ftp/acquisitions.md"): "http://app.test/ftp/acquisitions.md",
+        ("http://app.test/ftp", "./ftp/quarantine"): "http://app.test/ftp/quarantine",
+        # directory-relative (apache, nginx)
+        ("http://app.test/ftp", "acquisitions.md"): "http://app.test/ftp/acquisitions.md",
+        ("http://app.test/backup/", "dump.sql"): "http://app.test/backup/dump.sql",
+        # absolute path, and a genuine subdirectory that must stay nested
+        ("http://app.test/ftp", "/ftp/legal.md"): "http://app.test/ftp/legal.md",
+        ("http://app.test/ftp", "other/file.txt"): "http://app.test/ftp/other/file.txt",
+    }
+    for (directory, link), expected in cases.items():
+        assert resolve(directory, link) == expected, (directory, link)
