@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests.api_sources import (
-    api_tree_source, definition_source, route_is_declared, route_source,
+    api_tree_source, declared_routes, definition_source, route_defining_file,
+    route_is_declared, route_source,
 )
 import sys
 import uuid
@@ -30,12 +31,18 @@ def test_request_collection_routes_are_owned_by_extracted_router():
         ("POST", "/request-collections/{collection_id}/selections"),
         ("DELETE", "/request-collections/{collection_id}/selections/{selection_id}"),
     }
-    actual = {
-        (method, str(route.path))
-        for route in request_collection_api.router.routes
-        for method in (route.methods or set())
-    }
+    # Resolved from source, not from the live router object: another test in the
+    # same interpreter installs a stubbed FastAPI whose APIRouter has no
+    # .routes, and this then failed on contamination rather than on ownership.
+    actual = set(declared_routes("/request-collections"))
     assert actual == expected
+    # Ownership is the actual claim: every one of these is declared by the
+    # extracted module, not by the composition root.
+    for method, path in sorted(expected):
+        owner = route_defining_file(method, path)
+        assert owner.name == "request_collection_api.py", (
+            f"{method} {path} is declared by {owner.name}, not the extracted router"
+        )
 
 
 def test_request_collection_router_is_not_a_monolith_wrapper():

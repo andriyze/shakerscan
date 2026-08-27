@@ -73,11 +73,16 @@ def test_broker_external_process_uses_lease_cancel_file_without_redis(monkeypatc
                 ),
             }, {}, "reviewed_template_allowlist",
         ),
-        ("dalfox", {"http_requests": 11, "tool_wall_seconds": 10}, {}, {}, "rate_time_upper_bound"),
+        # Reserved at the tool's own declared floor for the fixed conservative
+        # profile, so raising the floor cannot silently leave this below it.
         (
-            "sqlmap", {"http_requests": 21, "tool_wall_seconds": 20}, {},
+            "dalfox", dict(agent_tools.EXTERNAL_VERIFICATION_FLOORS["dalfox"]),
+            {}, {}, "fixed_conservative_profile",
+        ),
+        (
+            "sqlmap", dict(agent_tools.EXTERNAL_VERIFICATION_FLOORS["sqlmap"]), {},
             {"sqlmap_output_dir": "/tmp/shakerscan-wire-sqlmap"},
-            "rate_time_upper_bound",
+            "fixed_conservative_profile",
         ),
         (
             "nmap", {"tcp_ports_attempted": 60, "tool_wall_seconds": 10},

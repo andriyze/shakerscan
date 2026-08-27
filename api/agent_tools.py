@@ -192,6 +192,16 @@ _NMAP_SERVICE_LINE_RE = re.compile(r"^(\d{1,5}/(?:tcp|udp))\s+(\S+)\s+(\S+)(?:\s
 _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 
 
+# Minimum reservation an external verifier needs to run its fixed conservative
+# profile. Declared once so the enforcement, the error message, and the tests
+# cannot drift apart; the batch-attempt path reserves per candidate instead and
+# is deliberately not bound by these.
+EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
+    "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
+    "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
+}
+
+
 def _tmpl_httpx(url: str, opts: dict[str, Any]) -> list[str]:
     # Passive fingerprint: exactly one URL, with fallback and redirects disabled.
     return ["-u", url, "-status-code", "-title", "-tech-detect", "-web-server",
@@ -819,9 +829,13 @@ def build_enforced_scanner_plan(
                 "connection_ceiling": http, "wall_seconds": wall,
                 "workers": 3, "headless": False, "blind_oob": False,
             }
-        elif http >= 400 and wall >= 120:
-            hard = {"http_requests": 400, "tool_wall_seconds": 120}
-            timeout_seconds, timeout_ms = 120, 120_000
+        elif (
+            http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
+            and wall >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
+        ):
+            hard = dict(EXTERNAL_VERIFICATION_FLOORS["dalfox"])
+            timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["dalfox"]["tool_wall_seconds"]
+            timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             proof_inputs = {
                 "profile": "full", "targets": 1, "workers": 3,
@@ -829,8 +843,10 @@ def build_enforced_scanner_plan(
                 "parameter_mining": False, "blind_oob": False,
             }
         else:
+            floor = EXTERNAL_VERIFICATION_FLOORS["dalfox"]
             raise AgentToolError(
-                "dalfox verification requires 400 HTTP requests and 120 seconds"
+                f"dalfox verification requires {floor['http_requests']} HTTP "
+                f"requests and {floor['tool_wall_seconds']} seconds"
             )
     elif scanner == "sqlmap":
         sqlmap_output_dir = str(runtime.get("sqlmap_output_dir") or "")
@@ -845,14 +861,20 @@ def build_enforced_scanner_plan(
             timeout_seconds, timeout_ms = wall, wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
             techniques, profile = "BEUT", "batch_attempt"
-        elif http >= 900 and wall >= 300:
-            hard = {"http_requests": 900, "tool_wall_seconds": 300}
-            timeout_seconds, timeout_ms = 300, 300_000
+        elif (
+            http >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["http_requests"]
+            and wall >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
+        ):
+            hard = dict(EXTERNAL_VERIFICATION_FLOORS["sqlmap"])
+            timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
+            timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             techniques, profile = "BEUT", "full"
         else:
+            floor = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]
             raise AgentToolError(
-                "sqlmap verification requires 900 HTTP requests and 300 seconds"
+                f"sqlmap verification requires {floor['http_requests']} HTTP "
+                f"requests and {floor['tool_wall_seconds']} seconds"
             )
         proof_inputs = {
             "profile": profile, "targets": 1, "candidate_requests": 1,
