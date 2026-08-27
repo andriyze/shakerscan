@@ -10783,7 +10783,7 @@ def _scan_web_crawl_summary_from_stored(
         for item in receipt.get("observations") or []
         if isinstance(item, Mapping)
         and str(item.get("kind") or "") == "discovered_route"
-    ][:200]
+    ][:agent_tools.MAX_TOOL_RECORDS]
     return {
         "schema_version": "canonical-scan-web-crawl-execution/v1",
         "capability_name": "web.crawl",
@@ -10918,7 +10918,7 @@ def _scan_content_discovery_summary_from_stored(
         for item in receipt.get("observations") or []
         if isinstance(item, Mapping)
         and str(item.get("kind") or "") == "content_discovery"
-    ][:200]
+    ][:agent_tools.MAX_TOOL_RECORDS]
     return {
         "schema_version": "canonical-scan-content-discovery-execution/v1",
         "capability_name": "web.content_discover",

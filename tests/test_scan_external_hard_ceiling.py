@@ -164,3 +164,44 @@ def test_wire_gate_rejects_a_failed_or_zero_traffic_http_adapter():
             tool="nuclei", result=base_result,
             traffic={"traffic": [], "connections": 0},
         )
+
+
+def test_crawl_spends_its_reserved_request_budget():
+    """A reserved crawl budget must actually be usable.
+
+    The enforced plan forced rate-limit 1, so a crawl reserving 150 requests
+    emitted about 31 and discarded the rest. Against a single-page application
+    that returned paths with no query parameters, which meant candidate
+    generation produced nothing and every selected active family had no work to
+    do -- a scan that completed while testing nothing.
+    """
+    reservation = {"http_requests": 150, "tool_wall_seconds": 75}
+    plan = agent_tools.build_enforced_scanner_plan(
+        "katana",
+        "http://app.example.test:8080/",
+        {},
+        reserved_budget=reservation,
+        pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:41000",
+    )
+    hard = plan.hard_budget_dict
+    # Never exceed the reservation...
+    for name, amount in hard.items():
+        assert amount <= reservation[name], (name, amount, reservation[name])
+    # ...but actually use most of it. A crawl that spends a fifth of its budget
+    # cannot enumerate a real application.
+    assert hard["http_requests"] >= reservation["http_requests"] // 2, hard
+    assert plan.budget_proof["inputs"]["rate_per_second"] > 1
+
+    # A tiny reservation must still degrade safely rather than overspend.
+    small = {"http_requests": 2, "tool_wall_seconds": 10}
+    small_plan = agent_tools.build_enforced_scanner_plan(
+        "katana",
+        "http://app.example.test:8080/",
+        {},
+        reserved_budget=small,
+        pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:41000",
+    )
+    for name, amount in small_plan.hard_budget_dict.items():
+        assert amount <= small[name], (name, amount, small[name])

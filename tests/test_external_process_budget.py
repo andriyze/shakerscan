@@ -39,8 +39,17 @@ def test_katana_command_is_derived_from_each_reservation(http, wall):
 
     assert plan.hard_budget_dict["http_requests"] <= http
     assert plan.hard_budget_dict["tool_wall_seconds"] <= wall
-    assert plan.argv[plan.argv.index("-rate-limit") + 1] == "1"
-    assert plan.argv[plan.argv.index("-concurrency") + 1] == "1"
+    # The rate is DERIVED from the reservation rather than pinned at one. A
+    # fixed rate of one made a 150-request reservation emit about 31, which is
+    # too small to enumerate a real application's surface.
+    rate = int(plan.argv[plan.argv.index("-rate-limit") + 1])
+    duration = int(
+        plan.argv[plan.argv.index("-crawl-duration") + 1].removesuffix("s")
+    )
+    assert 1 <= rate <= agent_tools._KATANA_MAX_RATE_PER_SECOND
+    assert plan.argv[plan.argv.index("-concurrency") + 1] == str(rate)
+    # The ceiling is exactly the derived plan and still inside the reservation.
+    assert plan.hard_budget_dict["http_requests"] == rate * duration + 1
     assert plan.argv[plan.argv.index("-retry") + 1] == "0"
     assert "-disable-redirects" in plan.argv
     assert plan.budget_proof["method"] == "rate_time_upper_bound"
@@ -56,10 +65,14 @@ def test_katana_supervisor_deadline_includes_bounded_shutdown_grace():
     )
     assert crawl_seconds == 30
     assert plan.timeout_ms == 35_000
+    rate = plan.budget_proof["inputs"]["rate_per_second"]
     assert plan.hard_budget_dict == {
-        "http_requests": 31,
+        "http_requests": rate * crawl_seconds + 1,
         "tool_wall_seconds": 35,
     }
+    # A 150-request reservation must fund a materially larger crawl than the
+    # one-request-per-second floor it used to be pinned to.
+    assert plan.hard_budget_dict["http_requests"] >= 75
     assert plan.budget_proof["inputs"]["shutdown_grace_seconds"] == 5
 
 

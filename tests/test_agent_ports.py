@@ -1102,3 +1102,43 @@ if __name__ == "__main__":
             print(f"FAIL  {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+def test_katana_javascript_derived_api_routes_survive_the_record_cap():
+    """Static assets are emitted first; API routes arrive after them.
+
+    Katana fetches the bundle before it can parse it, so the parameterized
+    routes candidate generation depends on land at the end of the stream. A
+    200-record cap spent the whole budget on .js chunks and dropped them: a
+    single-page application reached the endpoint manifest with almost no query
+    parameters, so every active family ran out of work.
+    """
+    assets = [f"https://example.test/chunk-{index}.js" for index in range(400)]
+    api_routes = [
+        "https://example.test/rest/products/search?q=",
+        "https://example.test/rest/user/change-password?current=",
+        "https://example.test/api/Challenges/?key=nftMintChallenge",
+    ]
+    parsed = at.parse_scanner_output("katana", "\n".join(assets + api_routes))
+
+    # Query values are redacted; the parameter names candidate generation
+    # selects on must survive.
+    observed = {record["url"] for record in parsed["records"]}
+    for path, parameter in (
+        ("/rest/products/search", "q="),
+        ("/rest/user/change-password", "current="),
+        ("/api/Challenges/", "key="),
+    ):
+        assert any(
+            path in url and parameter in url for url in observed
+        ), f"{path}?{parameter} was dropped"
+    assert parsed["record_count"] == len(assets) + len(api_routes)
+
+
+def test_tool_output_records_stay_bounded():
+    """The cap is raised, not removed: output stays bounded for evidence."""
+    flood = "\n".join(
+        f"https://example.test/route-{index}" for index in range(at.MAX_TOOL_RECORDS + 500)
+    )
+    parsed = at.parse_scanner_output("katana", flood)
+    assert parsed["record_count"] <= at.MAX_TOOL_RECORDS

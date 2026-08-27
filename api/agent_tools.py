@@ -196,6 +196,21 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 # profile. Declared once so the enforcement, the error message, and the tests
 # cannot drift apart; the batch-attempt path reserves per candidate instead and
 # is deliberately not bound by these.
+# The reviewed katana crawl rate. The argv template documents 5 requests per
+# second; the enforced plan may go up to it but never past the reservation.
+_KATANA_MAX_RATE_PER_SECOND = 5
+
+# Compact tool output is one short record per line, not katana's JSONL mode with
+# embedded request/response bodies, so these bounds cost little memory. They must
+# stay above a real application's emitted surface: katana fetches static assets
+# first and emits the JavaScript-derived API routes afterwards, so the previous
+# 200-record cap truncated precisely the parameterized endpoints that candidate
+# generation depends on. A single-page application spent its whole record budget
+# on .js chunks and reached the endpoint manifest with almost no query
+# parameters, leaving every active family with no work to do.
+_MAX_TOOL_OUTPUT_LINES = 4_000
+MAX_TOOL_RECORDS = 1_500
+
 EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
     "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
     "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
@@ -260,7 +275,18 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # origin), 8s per-request timeout, URL-only output. Katana's JSONL records embed raw
     # request/response bodies and can exhaust the worker output cap after only a few pages.
     # The compact stream is sufficient for route discovery and keeps planner evidence bounded.
-    return ["-u", url, "-js-crawl", "-depth", "2", "-concurrency", "5",
+    #
+    # -jsluice and -kb-endpoints parse the JavaScript this crawl already fetched, so they
+    # cost no additional HTTP request and stay inside the rate-derived reservation below.
+    # Plain -js-crawl only follows link-shaped strings, which on a single-page application
+    # yields bare route paths with no query string: candidate generation tests observed
+    # query parameters, so a parameterless surface produced almost no work and every
+    # active family ran empty. Parsing the bundle recovers the parameters the client
+    # actually builds its API calls from. Endpoints extracted this way are observed in the
+    # application's own served code -- the same epistemic standing as -js-crawl output --
+    # never invented by the scanner.
+    return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
+            "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
             "-timeout", "8", "-retry", "0", "-disable-redirects", "-silent"]
 
@@ -711,21 +737,29 @@ def build_enforced_scanner_plan(
         if duration < 1:
             raise AgentToolError("katana requires two reserved HTTP requests")
         shutdown_grace = min(5, wall - duration)
-        _replace_argv_value(argv, "-rate-limit", 1)
-        _replace_argv_value(argv, "-concurrency", 1)
+        # Spend the reserved request budget instead of throttling to one request
+        # per second and discarding it. A crawl that reserves 150 requests but
+        # emits ~31 cannot enumerate a real application's surface: against an
+        # SPA it returned paths with no query parameters, so candidate
+        # generation produced nothing and every active family had no work.
+        # The rate is derived from the reservation so the hard ceiling stays
+        # exactly within it: rate * duration + 1 <= reserved http_requests.
+        rate = max(1, min(_KATANA_MAX_RATE_PER_SECOND, (http - 1) // max(1, duration)))
+        _replace_argv_value(argv, "-rate-limit", rate)
+        _replace_argv_value(argv, "-concurrency", rate)
         _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
         timeout_seconds = duration + shutdown_grace
         timeout_ms = timeout_seconds * 1_000
-        # One initial token plus one token for each elapsed second.
+        # One initial token plus the rate for each elapsed second.
         hard = {
-            "http_requests": duration + 1,
+            "http_requests": rate * duration + 1,
             "tool_wall_seconds": timeout_seconds,
         }
         mode, method = "conservative", "rate_time_upper_bound"
         proof_inputs = {
-            "rate_per_second": 1, "duration_seconds": duration,
+            "rate_per_second": rate, "duration_seconds": duration,
             "startup_burst": 1, "redirects": 0, "form_fill": False,
-            "depth": 2, "concurrency": 1,
+            "depth": 2, "concurrency": rate,
             "shutdown_grace_seconds": shutdown_grace,
         }
     elif scanner == "ffuf":
@@ -1183,7 +1217,7 @@ def parse_scanner_output(
     elif isinstance(whole, dict):
         decoded.append(whole)
     else:
-        for line in text.splitlines()[:500]:
+        for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
             try:
                 item = json.loads(line)
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -1193,7 +1227,7 @@ def parse_scanner_output(
         if scanner == "katana" and not decoded:
             # Compact Katana mode emits one absolute URL per line. Preserve only URL-shaped
             # records; banners and diagnostics are not route observations.
-            for line in text.splitlines()[:500]:
+            for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
                 candidate = line.strip()
                 try:
                     parsed_candidate = urllib.parse.urlsplit(candidate)
@@ -1204,7 +1238,7 @@ def parse_scanner_output(
 
     records: list[dict[str, Any]] = []
     seen_katana_urls: set[str] = set()
-    for item in decoded[:200]:
+    for item in decoded[:MAX_TOOL_RECORDS]:
         if scanner == "nuclei":
             info = item.get("info") if isinstance(item.get("info"), dict) else {}
             template_id = str(item.get("template-id") or item.get("template_id") or "")[:200] or None
@@ -1292,7 +1326,7 @@ def parse_scanner_output(
                 "proof_state": "candidate",
             })
     if scanner == "sqlmap":
-        for line in text.splitlines()[:500]:
+        for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
             line = line.strip()
             if "is vulnerable" in line:
                 parameter_match = re.search(
@@ -1318,7 +1352,7 @@ def parse_scanner_output(
                 })
     if scanner == "nmap":
         # -oN - human output; only "PORT STATE SERVICE [VERSION]" table rows are observations.
-        for line in text.splitlines()[:500]:
+        for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
             match = _NMAP_SERVICE_LINE_RE.match(line.strip())
             if not match:
                 continue
@@ -1334,7 +1368,7 @@ def parse_scanner_output(
     return {
         "parser": f"{scanner}-typed-v1",
         "parser_status": "parsed" if records else ("partial" if decoded else "not_applicable"),
-        "records": records[:200],
+        "records": records[:MAX_TOOL_RECORDS],
         "record_count": len(records),
     }
 
