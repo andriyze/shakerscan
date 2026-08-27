@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Awaitable, Callable, Mapping
@@ -200,8 +201,16 @@ class ScanOrchestrator:
                 reason_code=CapabilityResultReason.ADAPTER_FAILED.value,
                 charge_full_reservation=True,
             )
-        except Exception:
+        except Exception as exc:
             # Adapter exception text is intentionally not copied to durable state.
+            # The exception TYPE carries no target data and is the only signal an
+            # operator gets: without it a failed action reports a bare
+            # "adapter_failed" that cannot be diagnosed from the receipt or logs.
+            print(
+                f"[scan] action {action.action_id} adapter raised "
+                f"{type(exc).__name__}",
+                file=sys.stderr, flush=True,
+            )
             result = await self._executor.terminal_without_execution(
                 action,
                 lease,

@@ -161,6 +161,12 @@ def _fingerprint(result: ReplayTransportResult) -> tuple[int | None, int, str]:
 class NoSQLiVerifyAdapter:
     """Prove NoSQL-operator injection with a repeated sentinel differential."""
 
+    # CapabilityExecutor checks these against the registry before it runs an
+    # adapter. Without them every execution raised AttributeError and settled
+    # as a bare "adapter_failed", so this family never ran a single attempt.
+    capability_name = "nosqli.verify_batch"
+    adapter_name = "nosqli.verify_batch"
+    adapter_version = "1"
     manages_cancellation = True
 
     def __init__(

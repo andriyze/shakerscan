@@ -151,6 +151,12 @@ def _identity_signal(result: ReplayTransportResult) -> tuple[str, ...]:
 class SQLiProofAdapter:
     """Require two matching reproductions before emitting verified SQLi proof."""
 
+    # CapabilityExecutor checks these against the registry before it runs an
+    # adapter. Without them every execution raised AttributeError, so the proof
+    # escalation that promotes a suspected SQLi to verified never ran at all.
+    capability_name = "sqli.prove_batch"
+    adapter_name = "sqli.proof_batch"
+    adapter_version = "1"
     manages_cancellation = True
 
     def __init__(
