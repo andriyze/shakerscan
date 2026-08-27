@@ -152,6 +152,12 @@ def _identity_signal(result: ReplayTransportResult) -> bool:
     return False
 
 
+def _succeeded(result: ReplayTransportResult) -> bool:
+    """True when the target answered normally rather than failing the request."""
+    status = result.status_code
+    return isinstance(status, int) and 200 <= status < 300
+
+
 def _fingerprint(result: ReplayTransportResult) -> tuple[int | None, int, str]:
     return (
         result.status_code, len(result.response_body), _sha256(result.response_body),
@@ -252,6 +258,16 @@ class NoSQLiVerifyAdapter:
                 ne_prints = [_fingerprint(payload) for _, payload in pairs]
                 if (
                     all(not literal.error_code and not payload.error_code for literal, payload in pairs)
+                    # A differential is only proof when the operator was actually
+                    # interpreted as one. ``error_code`` is a transport failure, so
+                    # without this an application that simply crashes on an
+                    # unexpected object -- a SQL backend handed ``key[$ne]=`` returns
+                    # 500 where the literal returns 200 -- produced a stable,
+                    # repeatable difference and was promoted to verified. That
+                    # response proves the opposite: the operator was rejected, not
+                    # honoured. Genuine operator injection widens the match set and
+                    # still answers successfully.
+                    and all(_succeeded(literal) and _succeeded(payload) for literal, payload in pairs)
                     and literal_prints[0] == literal_prints[1]
                     and ne_prints[0] == ne_prints[1]
                     and ne_prints[0] != literal_prints[0]

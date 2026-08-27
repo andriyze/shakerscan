@@ -221,3 +221,34 @@ def test_finalizer_promotes_only_repeated_nosqli_operator_proof():
     assert finding["cwe"] == "CWE-943"
     assert finding["verified"] is True
     assert finding["evidence"]["canonical_capability"] == "nosqli.verify_batch"
+
+
+class ErroringOperatorTransport:
+    """A SQL-backed store that raises when handed an operator object."""
+
+    async def send(self, request, **_kwargs):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.url).query)
+        if any("[$ne]" in key for key in query):
+            return _result(500, b'{"error":"Internal Server Error"}')
+        return _result(200, b'{"results":[]}')
+
+
+def test_a_server_error_on_the_operator_payload_is_never_proof():
+    """A 500 proves the operator was rejected, not interpreted.
+
+    A SQL-backed endpoint handed ``key[$ne]=<sentinel>`` raises where the
+    literal answers 200. That is a stable, repeatable difference, so a
+    fingerprint-only differential promoted it to a verified NoSQL injection --
+    a false positive at the highest trust tier this scanner has.
+    """
+    result = _run(
+        _request(url="https://app.example.test/api/Challenges/?key=nftMintChallenge"),
+        {
+            "candidate_id": "b" * 64, "method": "GET",
+            "parameter_name": "key", "request_class": "safe_read",
+        },
+        ErroringOperatorTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+    assert proof["finding_verdict"] == "not_proven"
