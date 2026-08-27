@@ -125,7 +125,10 @@ async def _persist_owner_ledger(
                    result_json=COALESCE(result_json, '{}'::jsonb) || $6::jsonb,
                    finished_at=COALESCE(finished_at, NOW()), updated_at=NOW()
                WHERE scan_id=$1 AND action_id=$2
-                 AND reservation_id=$3::uuid
+                 -- scan_capability_actions.reservation_id is text; casting the
+                 -- parameter to uuid made every sweep raise "operator does not
+                 -- exist: text = uuid", so no expired hold was ever reclaimed.
+                 AND reservation_id=$3
                  AND status NOT IN (
                     'success','partial','skipped','blocked','failed','cancelled','timed_out'
                  )""",

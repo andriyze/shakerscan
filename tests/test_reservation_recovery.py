@@ -211,3 +211,24 @@ def test_worker_watchdog_wires_transactional_reservation_recovery():
     assert "BUDGET_RESERVATION_SWEEP_BATCH_SIZE" in helper
     main = source[source.index("async def async_main"):]
     assert "await sweep_stale_budget_reservations()" in main
+
+
+def test_scan_action_recovery_matches_the_declared_column_type():
+    """The sweep compared a text column to a uuid parameter.
+
+    ``scan_capability_actions.reservation_id`` is declared TEXT, so casting the
+    bound parameter to uuid made every sweep raise "operator does not exist:
+    text = uuid" before it could reclaim anything. Stale holds were therefore
+    never released and stale actions never terminalized -- silently, because
+    the watchdog only logged the error and continued.
+    """
+    schema = open("db/init.sql", encoding="utf-8").read()
+    table = schema[schema.index("CREATE TABLE scan_capability_actions ("):]
+    table = table[:table.index(");")]
+    assert "reservation_id TEXT" in table
+
+    source = open("api/runtime/reservation_recovery.py", encoding="utf-8").read()
+    statement = source[source.index("UPDATE scan_capability_actions"):]
+    statement = statement[:statement.index('"""')]
+    assert "reservation_id=$3::uuid" not in statement
+    assert "reservation_id=$3" in statement
