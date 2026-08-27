@@ -1198,10 +1198,17 @@ class ScanActionPlanCompiler:
             )
             batch_size, batch_budget = profile[capability_name]
             entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
-            total_batches = max(
-                1,
-                (entry_count + batch_size - 1) // batch_size if entry_count else 0,
-            )
+            if entry_count:
+                total_batches = max(1, (entry_count + batch_size - 1) // batch_size)
+            else:
+                # The candidate manifest is not materialized at admission: its
+                # entries arrive through the discovery continuation. Assuming a
+                # single batch here capped `count` at 1, so any profile whose
+                # published minimum is higher -- thorough requires two XSS
+                # batches -- failed to compile at all with
+                # "required batch action verify.xss exceeds plan graph capacity".
+                # Reserve the published minimum instead of guessing one.
+                total_batches = max(1, minimum_batches)
             limits = execution_plan.budget.ledger_limits()
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
@@ -1229,7 +1236,13 @@ class ScanActionPlanCompiler:
                 32,
                 max(0, _MAX_DEPENDENCIES - len(blueprints) - reserve_dependency_slots),
             )
-            if required and count < minimum_batches:
+            # minimum_batches is the profile's published intent when there is
+            # enough work, not a floor that can fail a scan for finding too few
+            # candidates. thorough asks for two XSS batches; a target that
+            # yields one batch of candidates has still run the family, and
+            # failing there is why no thorough scan could complete. Fail only
+            # when the plan cannot fit the batches the work actually needs.
+            if required and count < min(minimum_batches, total_batches):
                 raise ScanActionPlanError(
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )

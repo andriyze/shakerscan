@@ -795,3 +795,112 @@ def test_credential_action_refs_use_the_canonical_runtime_vocabulary(
     },))[0]
 
     assert reference["auth_kind"] == canonical_kind
+
+
+def test_every_budget_profile_compiles_an_explicitly_requested_active_family():
+    """A profile's published batch minimum must be reservable at admission.
+
+    The candidate manifest does not exist when the plan is first compiled -- its
+    entries arrive through the discovery continuation. total_batches was derived
+    from that empty manifest and so capped the batch count at one, while
+    thorough publishes a minimum of two XSS batches. Every thorough scan that
+    explicitly requested XSS therefore failed to compile with "required batch
+    action verify.xss exceeds plan graph capacity", which is what the benchmark
+    fixture asks for, so no thorough benchmark could ever run.
+    """
+    from api.scan.contracts import resolve_scan_contract
+
+    binding = TargetBinding(
+        target_id="t1",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    approval = "11111111-1111-4111-8111-111111111111"
+    policy = {
+        "preset": "custom",
+        "active_testing": True,
+        "include_families": ["recon", "xss", "sqli"],
+        "exclude_families": [
+            "nuclei_passive", "nuclei_active", "bola",
+            "sensitive_exposure", "nosqli", "authz_surface",
+        ],
+    }
+    batches_by_profile = {}
+    for profile in ("fast", "balanced", "thorough"):
+        contract = resolve_scan_contract(
+            budget_profile=profile, policy=policy, approval_receipt_id=approval,
+        )
+        plan = ScanActionPlanCompiler().compile(
+            scan_id=str(uuid.UUID("10000000-0000-4000-8000-000000000001")),
+            execution_plan=contract.execution_plan,
+            target_binding=binding,
+        )
+        batches_by_profile[profile] = sum(
+            1 for action in plan.actions if action.capability_name == "xss.verify_batch"
+        )
+        assert any(
+            action.capability_name == "sqli.verify_batch" for action in plan.actions
+        ), f"{profile} compiled no SQLi verification for an explicit sqli request"
+
+    assert batches_by_profile["fast"] >= 1
+    assert batches_by_profile["balanced"] >= 1
+    # thorough publishes a higher minimum and must actually get it.
+    assert batches_by_profile["thorough"] >= 2, batches_by_profile
+
+
+def test_a_small_candidate_manifest_does_not_fail_a_required_family():
+    """A profile minimum is an intent, not a floor that fails on little work.
+
+    thorough publishes a two-batch XSS minimum. The continuation compiles with
+    the REAL candidate manifest, so any target yielding fewer candidates than
+    two batches raised "required batch action verify.xss exceeds plan graph
+    capacity" and failed the whole scan -- which is why no thorough scan against
+    a modest target such as Juice Shop could complete.
+    """
+    from api.scan.contracts import resolve_scan_contract
+    from api.scan.work_manifests import (
+        WORK_MANIFEST_CONTENT_SCHEMAS, ScanWorkManifestReference,
+    )
+
+    binding = TargetBinding(
+        target_id="t1",
+        target_kind="web",
+        canonical_host="example.test",
+        allowed_origins=("https://example.test",),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+    contract = resolve_scan_contract(
+        budget_profile="thorough",
+        policy={
+            "preset": "custom",
+            "active_testing": True,
+            "include_families": ["recon", "xss", "sqli"],
+        },
+        approval_receipt_id="11111111-1111-4111-8111-111111111111",
+    )
+    for entry_count in (1, 3, 10, 60, 200):
+        reference = ScanWorkManifestReference(
+            manifest_id="00000000-0000-4000-8000-0000000000aa",
+            kind="candidate",
+            content_schema=WORK_MANIFEST_CONTENT_SCHEMAS["candidate"],
+            manifest_digest="a" * 64,
+            entry_count=entry_count,
+            status="complete",
+        ).canonical_dict()
+        plan = ScanActionPlanCompiler().compile(
+            scan_id=str(uuid.UUID("10000000-0000-4000-8000-000000000001")),
+            execution_plan=contract.execution_plan,
+            target_binding=binding,
+            candidate_manifest_ref=reference,
+        )
+        batches = [
+            action for action in plan.actions
+            if action.capability_name == "xss.verify_batch"
+        ]
+        assert batches, f"{entry_count} candidates compiled no XSS verification"
+        # The family still runs; it simply gets the batches its work needs.
+        assert len(batches) <= max(1, (entry_count + 49) // 50) + 1
