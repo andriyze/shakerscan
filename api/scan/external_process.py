@@ -34,6 +34,21 @@ _BUDGET_DIMENSIONS = frozenset({
 # too small to prove anything. Both must read the same numbers: when they drifted
 # a batch planned fifty candidates on a budget that funded eight, every run
 # reported the family partial and made the whole grade unreliable.
+# Measured against a live target, not estimated. dalfox has no request ceiling:
+# it issues roughly 1300 requests per parameter, finishing in about 10 seconds
+# unpaced and 200 seconds when paced down to the 120 requests declared below --
+# at which point the wall kills it mid-scan (exit -9) and the attempt proves
+# nothing. The declared figure is therefore still short of what the tool really
+# costs, and raising it is a product decision: at 1400 requests per candidate the
+# fast profile's 1000-request ledger affords no XSS verification at all,
+# balanced affords 3 candidates and thorough 15.
+#
+# Bounding the tool instead was tried and rejected on evidence. Against a
+# deliberately vulnerable reflector, unbounded dalfox reports a verified finding
+# with a working proof, while `--only-custom-payload` over the bundled 52
+# polyglots reports none, and `--skip-discovery -p <param>` also reports none:
+# its discovery phase is what makes detection work. Cheapening the run that way
+# trades the finding for the budget, so it is not an option.
 BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
     "xss.verify_batch": {"http_requests": 120, "tool_wall_seconds": 30},
     # Measured: sqlmap reaches a verdict on an obvious error-based injection in
