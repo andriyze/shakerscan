@@ -219,6 +219,9 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
     assert refs[0]["environment_id"] == str(environment_id)
     assert refs[0]["selection_digest"] == digest
     assert refs[0]["secret_values_visible"] is False
+    # content_type and body_field_names carry request-shape metadata that
+    # request-body candidate compilation needs. They are NAMES only: the
+    # assertions below prove no request value reaches the manifest.
     assert manifest_requests[digest] == [{
         "request_id": "get-health",
         "method": "GET",
@@ -229,9 +232,14 @@ def test_generic_collection_ref_freezes_saved_selection_and_exact_binding():
         "normalized_path": "/health",
         "auth_type": "bearer",
         "body_mode": "none",
+        "content_type": "none",
+        "body_field_names": [],
         "safe_method": True,
         "allowed_origins": origins,
     }]
+    manifest_text = json.dumps(manifest_requests[digest])
+    for secret in ("super-secret-token", "tenant-value", "Bearer "):
+        assert secret not in manifest_text
 
     with pytest.raises(api_module.HTTPException) as error:
         asyncio.run(api_module._generic_collection_refs(
@@ -374,6 +382,11 @@ def test_state_changing_selection_compiles_separate_private_request_candidates()
             "normalized_path": "/orders",
             "auth_type": "bearer",
             "body_mode": "application/json",
+            "content_type": "application/json",
+            # Field NAMES only. A body-mutation candidate cannot be compiled
+            # without knowing which fields exist, and no request value is ever
+            # carried into the manifest.
+            "body_field_names": ["item_id", "quantity"],
             "safe_method": False,
             "allowed_origins": ["https://api.example.test"],
         },)},
@@ -387,8 +400,21 @@ def test_state_changing_selection_compiles_separate_private_request_candidates()
     assert candidates is not None
     assert candidates.entries[0]["request_ref_id"] == "create-order"
     encoded = json.dumps(candidates.canonical_dict(), sort_keys=True)
+    # No request VALUE may reach the candidate manifest: not the URL query, not
+    # a body value, not a credential.
     assert "tenant=redacted" not in encoded
-    assert "application/json" not in encoded
+    assert "super-secret" not in encoded
+    assert "Bearer" not in encoded
+    # Request SHAPE is intentionally carried, because a body-mutation candidate
+    # cannot be built without it: the declared content type and the field names
+    # to mutate. The worker resolves the actual body privately at execution.
+    assert candidates.entries[0]["content_type"] == "application/json"
+    assert {entry["field_path"] for entry in candidates.entries} == {
+        "item_id", "quantity",
+    }
+    assert all(
+        entry["request_class"] == "confirmed_mutation" for entry in candidates.entries
+    )
 
 
 def test_parallel_parent_rollup_derives_progress_from_shards():
