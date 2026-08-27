@@ -1274,3 +1274,113 @@ def test_field_scoped_restored_still_fails_on_genuine_non_restore():
     # Fail-closed: if the rollback does NOT restore the field (quantity left at 42), the field-scoped
     # comparison sees $.quantity changed and restoration is NOT verified.
     assert _run_field_scoped(field_scoped=True, restore_value=42)["restoration_verified"] is False
+
+
+# --- Anonymous exposure of self-evident secret material -------------------------------------
+# `sensitive_value_present` required a server-owned protected-route receipt for EVERY anonymous
+# read. That receipt only ever exists for a route discovered during an authenticated scan pass
+# (`target_endpoints.auth_state NOT IN ('', 'anonymous', 'public', 'unknown')`), so on a target
+# with no registered credential no route is ever protected and the whole family is unreachable --
+# precisely where the bug class lives, since an endpoint that requires no authentication at all
+# has no authenticated variant to differentiate against. Provider-issued secret material carries
+# its own proof of sensitivity, so it is admitted without the route receipt. Formats that occur
+# as documentation samples (ssn, credit_card, google_api_key) and formats a public endpoint may
+# legitimately issue (jwt, bearer_token) are deliberately excluded and still need the receipt.
+
+def _anon_secret_result(body: str) -> dict:
+    return {
+        "observations": [{
+            "label": "exposed", "principal": "anonymous",
+            "response": {"status": 200, "json_keys": ["value"]},
+            "sensitive_value_categories": workflow._classify_sensitive_values(body),
+            "selfevident_secret_categories": workflow._classify_selfevident_secret_values(body),
+        }],
+        "assertion_results": [{
+            "passed": True, "predicate": "sensitive_value_present",
+            "type": "status_in", "step": "exposed",
+        }],
+    }
+
+
+def test_selfevident_secret_exposed_anonymously_needs_no_protected_route_receipt():
+    for body in (
+        '{"value":"sk_live_acme4f8a2b3cQ7xR1nW9"}',
+        '{"database_url":"postgres://svc:8Fq2xLm4Zt7Rv9Kd@db.internal:5432/app"}',
+        '{"key":"-----BEGIN RSA PRIVATE KEY-----\\nMIIEow==\\n-----END RSA PRIVATE KEY-----"}',
+    ):
+        result = _anon_secret_result(body)
+        assert result["observations"][0]["selfevident_secret_categories"], body
+        assert "sensitive_value_present" in workflow.server_corroborated_predicates(result), body
+
+
+def test_documentation_placeholders_are_not_selfevident_secrets():
+    # AWS's own documentation key and a literal-password DSN must not promote on a public route.
+    for body in (
+        '{"key":"AKIAIOSFODNN7EXAMPLE"}',
+        '{"database_url":"postgres://user:password@localhost:5432/example"}',
+        '{"database_url":"postgres://admin:changeme@db.example.com/app"}',
+    ):
+        result = _anon_secret_result(body)
+        assert not result["observations"][0]["selfevident_secret_categories"], body
+        assert "sensitive_value_present" not in workflow.server_corroborated_predicates(result), body
+
+
+def test_publicly_issuable_and_sample_prone_classes_still_require_the_route_receipt():
+    # A public token issuer legitimately returns JWTs to anonymous callers, and ssn/card patterns
+    # match documentation samples, so these keep needing the server-owned protected-route signal.
+    for body in (
+        'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij',
+        '{"ssn":"123-45-6789"}',
+        '{"card":"4111 1111 1111 1111"}',
+    ):
+        result = _anon_secret_result(body)
+        assert result["observations"][0]["sensitive_value_categories"], body
+        assert not result["observations"][0]["selfevident_secret_categories"], body
+        assert "sensitive_value_present" not in workflow.server_corroborated_predicates(result), body
+
+
+def test_selfevident_secret_still_requires_a_successful_read():
+    result = _anon_secret_result('{"value":"sk_live_acme4f8a2b3cQ7xR1nW9"}')
+    result["observations"][0]["response"] = {"status": 403, "json_keys": []}
+    assert "sensitive_value_present" not in workflow.server_corroborated_predicates(result)
+
+
+def test_single_observation_families_may_omit_the_second_step():
+    single = {
+        "proof_family": "data_exposure",
+        "steps": [{"label": "exposed", "kind": "http", "principal": "anonymous",
+                   "checkpoint": "action", "method": "GET", "path": "/api/cloud/metadata"}],
+        "assertions": [{"type": "status_in", "step": "exposed", "values": [200],
+                        "predicate": "sensitive_value_present"}],
+    }
+    normalized = workflow.normalize_workflow("https://target.test", single)
+    assert len(normalized["steps"]) == 1
+    assert normalized["proof_family"] == "data_exposure"
+
+
+def test_differential_families_still_require_two_steps():
+    # Relaxing the floor must stay scoped: a family whose verdict needs a differential or a
+    # before/after bracket cannot be proven from one observation, so the floor still applies.
+    for family in ("bola", "auth_bypass", "access_control", "mass_assignment", "workflow"):
+        one_step = {
+            "proof_family": family,
+            "steps": [{"label": "only", "kind": "http", "principal": "anonymous",
+                       "checkpoint": "action", "method": "GET", "path": "/api/thing"}],
+            "assertions": [],
+        }
+        with pytest.raises(workflow.WorkflowContractError) as exc:
+            workflow.normalize_workflow("https://target.test", one_step)
+        assert "workflow_requires_2_to_12_steps" in str(exc.value), family
+
+
+def test_one_step_workflow_still_proves_nothing_without_server_classified_material():
+    # The relaxed floor grants no verdict of its own: an empty 200 corroborates no predicate.
+    result = {
+        "observations": [{"label": "exposed", "principal": "anonymous",
+                          "response": {"status": 200, "json_keys": ["ok"]},
+                          "sensitive_value_categories": [],
+                          "selfevident_secret_categories": []}],
+        "assertion_results": [{"passed": True, "predicate": "sensitive_value_present",
+                               "type": "status_in", "step": "exposed"}],
+    }
+    assert workflow.server_corroborated_predicates(result) == set()

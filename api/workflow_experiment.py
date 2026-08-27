@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 from typing import Any, Awaitable, Callable
@@ -231,6 +232,88 @@ _SENSITIVE_VALUE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 )
 
 _CARD_CANDIDATE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
+
+# --- Self-evident secret material -----------------------------------------------------------
+# Provider-issued credential formats whose exposure to an anonymous caller is a finding on its
+# own, without the server-owned protected-route receipt that `sensitive_value_present` otherwise
+# requires. That receipt is only ever granted to a route observed under an authenticated scan
+# pass, so an endpoint that requires no authentication at all can never earn one -- and that is
+# exactly where a leaked provider secret lives. Membership is deliberately narrow:
+#   * excluded because a public endpoint may legitimately issue them: jwt, bearer_token
+#   * excluded because the pattern matches documentation samples: ssn, credit_card,
+#     google_api_key (Maps/browser keys are designed to ship publicly, restricted by referrer)
+# Each pattern captures the secret so it can be screened for placeholders and entropy; only the
+# category LABEL is ever returned, never the value.
+_SELF_EVIDENT_SECRET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
+    ("aws_access_key", re.compile(r"\b((?:AKIA|ASIA)[0-9A-Z]{16})\b")),
+    ("slack_token", re.compile(r"\b(xox[baprs]-[0-9A-Za-z-]{10,})")),
+    ("stripe_key", re.compile(r"\b(sk_live_[0-9A-Za-z]{16,})\b")),
+    ("github_token", re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{30,255})\b")),
+    ("npm_token", re.compile(r"\b(npm_[A-Za-z0-9]{30,255})\b")),
+    ("sendgrid_key", re.compile(r"\b(SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b")),
+    ("password_hash", re.compile(
+        r"(\$(?:2[aby]\$\d{2}\$[./A-Za-z0-9]{53}|argon2(?:id|i|d)\$[^\s\"\']{20,}))")),
+    ("credentialed_database_uri", re.compile(
+        r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:/?#]+:([^\s@/?#]+)@[^\s]+"
+    )),
+)
+
+# Values that match a secret's shape but carry no secret. Vendor documentation ships these
+# verbatim, so a page echoing one is not an exposure.
+_PLACEHOLDER_SECRET_TOKENS: frozenset[str] = frozenset({
+    "example", "examplekey", "placeholder", "changeme", "password", "passwd", "secret",
+    "yoursecret", "yourpassword", "yourkey", "test", "testing", "dummy", "sample", "redacted",
+    "xxxxxxxx", "notreal", "fake", "insertkeyhere", "todo",
+})
+
+
+def _shannon_entropy_bits(value: str) -> float:
+    """Return Shannon entropy in bits per character for a candidate secret."""
+    if not value:
+        return 0.0
+    counts: dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    total = float(len(value))
+    return -sum((n / total) * math.log2(n / total) for n in counts.values())
+
+
+def _is_placeholder_secret(value: str) -> bool:
+    """True when a shape-matching value is a documentation placeholder, not real secret material."""
+    stripped = value.strip()
+    if not stripped:
+        return True
+    lowered = stripped.lower()
+    if any(token in lowered for token in _PLACEHOLDER_SECRET_TOKENS):
+        return True
+    # Provider secrets are random; a short or low-entropy tail is a stand-in. The bound is applied
+    # to the random remainder so a long fixed prefix (``sk_live_``) cannot carry a value past it.
+    tail = re.sub(r"^(?:AKIA|ASIA|sk_live_|gh[pousr]_|npm_|SG\.|xox[baprs]-)", "", stripped)
+    if len(tail) < 12:
+        return True
+    return _shannon_entropy_bits(tail) < 3.0
+
+
+def _classify_selfevident_secret_values(text: str) -> list[str]:
+    """Return category labels for provider-issued secrets present as real values in a body.
+
+    Narrower than :func:`_classify_sensitive_values`: every match is screened for documentation
+    placeholders and low entropy first. Returns only labels, never the matched value.
+    """
+    if not text:
+        return []
+    sample = text[:MAX_BODY_BYTES]
+    categories: set[str] = set()
+    for label, pattern in _SELF_EVIDENT_SECRET_PATTERNS:
+        for match in pattern.finditer(sample):
+            # A pattern with no capture group (private_key) is a structural marker, not a value.
+            captured = match.group(1) if match.re.groups else None
+            if captured is None or not _is_placeholder_secret(captured):
+                categories.add(label)
+                break
+    return sorted(categories)
+
 
 
 def _luhn_ok(digits: str) -> bool:
@@ -554,6 +637,10 @@ def _server_confirms_predicate(
         if not categories or not _obs_success(target):
             return False
         if principal == "anonymous":
+            # Provider-issued secret material carries its own proof of sensitivity, so it does not
+            # need the protected-route receipt -- which a never-authenticated route can never earn.
+            if set(target.get("selfevident_secret_categories") or []):
+                return True
             return bool(target.get("trusted_protected_resource"))
         return bool(target.get("trusted_denied_access"))
     if predicate == "name_only_classification":  # refute: sensitive-looking keys, no values
@@ -956,11 +1043,25 @@ def _sensitive_body_violation(value: Any, declared: set[str]) -> str | None:
     return None
 
 
+# Proof families whose verdict rests on ONE server-classified observation. data_exposure's only
+# required predicate (`sensitive_value_present`) is derived entirely from the anonymous read, so a
+# two-step floor forced an authenticated baseline step that carries no proof -- and that no
+# credential-less target can supply, making an unauthenticated exposure unverifiable on exactly the
+# targets where that bug class lives. Every other family needs a differential (bola, auth_bypass,
+# access_control) or a before/after bracket (mass_assignment, field_constraint, workflow), so the
+# two-step floor stands for them. Relaxing the floor grants no verdict: the server still derives
+# every predicate itself, so a one-step workflow with nothing sensitive in it proves nothing.
+SINGLE_OBSERVATION_PROOF_FAMILIES: frozenset[str] = frozenset({"data_exposure"})
+
+
 def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
     steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
-    if not 2 <= len(steps) <= MAX_WORKFLOW_STEPS:
-        raise WorkflowContractError("workflow_requires_2_to_12_steps")
+    proof_family = str(payload.get("proof_family") or "workflow").strip().lower()[:80]
+    minimum_steps = 1 if proof_family in SINGLE_OBSERVATION_PROOF_FAMILIES else 2
+    if not minimum_steps <= len(steps) <= MAX_WORKFLOW_STEPS:
+        raise WorkflowContractError(
+            f"workflow_requires_{minimum_steps}_to_{MAX_WORKFLOW_STEPS}_steps")
     target_origin = _origin(target_url)
     labels: set[str] = set()
     principal_variables = _normalize_principal_variables(payload.get("principal_variables"))
@@ -1188,7 +1289,7 @@ def normalize_workflow(target_url: str, raw: Any) -> dict[str, Any]:
         "target_url": target_url,
         "timeout_seconds": timeout_seconds,
         "steps": normalized,
-        "proof_family": str(payload.get("proof_family") or "workflow").strip().lower()[:80],
+        "proof_family": proof_family,
         "principal_variables": principal_variables,
         "assertions": assertions,
         "mutating": bool(mutating_steps),
@@ -1335,6 +1436,7 @@ async def execute_workflow(
                 break
             extracted: dict[str, str] = {}
             sensitive_value_categories: list[str] = []
+            selfevident_secret_categories: list[str] = []
             submitted_fields: list[str] = []
             submitted_field_hashes: dict[str, str] = {}
             response: dict[str, Any] | None = None
@@ -1451,6 +1553,7 @@ async def execute_workflow(
                     )
                     body_text = body[:MAX_BODY_BYTES].decode(http_response.encoding or "utf-8", errors="replace")
                     sensitive_value_categories = _classify_sensitive_values(body_text)
+                    selfevident_secret_categories = _classify_selfevident_secret_values(body_text)
                     parsed: Any = None
                     try:
                         parsed = json.loads(body_text)
@@ -1514,6 +1617,7 @@ async def execute_workflow(
                 "checkpoint": step["checkpoint"], "compare_to": step["compare_to"],
                 "request": request_view, "response": response,
                 "sensitive_value_categories": sensitive_value_categories if not error else [],
+                "selfevident_secret_categories": selfevident_secret_categories if not error else [],
                 "submitted_fields": submitted_fields if not error else [],
                 "submitted_field_hashes": submitted_field_hashes if not error else {},
                 "extracted_names": sorted(extracted) if not error else [],

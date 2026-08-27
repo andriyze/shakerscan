@@ -13733,24 +13733,6 @@ configure_hunt_run_router(
 app.include_router(hunt_run_router)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # =============================================================================
 # Keyless, turn-based ReAct hunt (Gap A). The default planner_mode:"agent" is KEYLESS — the
 # current coding-agent session (Codex/Claude/OpenCode) is the planner, so the server cannot call
@@ -13761,28 +13743,6 @@ app.include_router(hunt_run_router)
 # provenance gate, same SUSPECTED persistence as the configured_ai in-process driver — only the
 # planner turn is externalized. No API key required.
 # =============================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # =============================================================================
@@ -13841,20 +13801,23 @@ def _materialize_authbypass_verification_workflow(route: str) -> dict[str, Any]:
     }
 
 
-def _materialize_dataexposure_verification_workflow(route: str) -> dict[str, Any]:
-    """Build a data_exposure family_proof workflow: an authenticated baseline read and an anonymous
-    read of the SAME resource. The moat's `sensitive_value_present` predicate gates on a successful
-    anonymous read of a server-deemed non-public route with an entropy-tightened sensitive value
-    (Tier-0), so benign/example values cannot promote. No object ids / captured refs needed."""
+def _materialize_dataexposure_verification_workflow(
+    route: str, *, include_owner_baseline: bool = True
+) -> dict[str, Any]:
+    """Build a data_exposure family_proof workflow: an anonymous read, optionally preceded by an
+    authenticated baseline read of the SAME resource. `sensitive_value_present` is derived entirely
+    from the anonymous step (a successful read carrying provider-issued secret material, or a
+    sensitive value on a server-deemed non-public route), so the baseline is reviewer context and
+    never proof. Omitting it when no principal resolves is what makes an unauthenticated exposure
+    verifiable on a credential-less target — the shape this family exists to catch."""
     base = str(route)
+    steps = [{"label": "exposed", "kind": "http", "principal": "anonymous",
+              "checkpoint": "action", "method": "GET", "path": base}]
+    if include_owner_baseline:
+        steps.insert(0, {"label": "owner", "kind": "http", "principal": "user1",
+                         "checkpoint": "before", "method": "GET", "path": base})
     return {
-        "proof_family": "data_exposure",
-        "steps": [
-            {"label": "owner", "kind": "http", "principal": "user1", "checkpoint": "before",
-             "method": "GET", "path": base},
-            {"label": "exposed", "kind": "http", "principal": "anonymous", "checkpoint": "action",
-             "method": "GET", "path": base},
-        ],
+        "proof_family": "data_exposure", "steps": steps,
         "assertions": copy.deepcopy(_EXPERIMENT_WORKFLOW_TEMPLATES["data_exposure"]["assertions"]),
     }
 
@@ -14054,14 +14017,12 @@ async def _resolve_approved_invariant_contract(
     return None
 
 
-
-
-# Families the bridge can currently verify. bola needs distinct captured object refs; auth_bypass
-# and data_exposure are anon-vs-authed reads of a fixed route (no object ids); create-based
-# mass_assignment reuses the proven server materializer; access_control is a role-differential read
-# gated on an operator-APPROVED invariant contract (the role oracle a bare authz finding lacks) and
-# verified by the invariant binder. Every family is verified by the UNCHANGED family_proof two-run
-# moat — the bridge only supplies routes/bindings, never a verdict.
+# Families the bridge can verify. bola needs distinct captured object refs; auth_bypass and
+# data_exposure read a fixed route (no object ids); create-based mass_assignment reuses the proven
+# server materializer; access_control/field_constraint/workflow are gated on an operator-APPROVED
+# invariant contract (the oracle a bare finding lacks) and verified by the invariant binder. Every
+# family is verified by the UNCHANGED family_proof two-run moat — the bridge supplies routes and
+# bindings, never a verdict.
 _AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control", "field_constraint", "workflow"})
 # Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs;
 # field_constraint writes an out-of-bounds value then restores; workflow_transition attempts a
@@ -14136,7 +14097,13 @@ async def _agent_verification_workflow_for(
     if family == "auth_bypass":
         return _materialize_authbypass_verification_workflow(path), route, "GET", {}
     if family == "data_exposure":
-        return _materialize_dataexposure_verification_workflow(path), route, "GET", {}
+        try:
+            baseline = bool(conn is not None and (await _resolve_workflow_principal_contexts(
+                conn, target_uuid, {"user1"})).get("user1"))
+        except WorkflowContractError:
+            baseline = False  # no usable credential: the proof-inert baseline is simply omitted
+        return (_materialize_dataexposure_verification_workflow(
+            path, include_owner_baseline=baseline), route, "GET", {})
     if family == "access_control":
         # Verifiable ONLY against an operator-APPROVED access_control invariant contract for this route
         # (the role oracle a bare authz finding lacks). None -> 422 -> the finding stays SUSPECTED; the

@@ -21145,3 +21145,48 @@ def test_model_intake_report_summary_preserves_only_safe_file_identity():
     assert scanner["summary"]["files_scanned"] == 2
     assert scanner["summary"]["scanned_files"] == ["modeling.py"]
     assert scanner["subject"]["sha256"] == "d" * 64
+
+
+def test_data_exposure_proof_does_not_require_an_inert_authenticated_baseline():
+    # The `owner` step is `checkpoint: "before"`: no assertion names it and no predicate reads it
+    # (`sensitive_value_present` is derived from the anonymous step alone). Requiring it anyway made
+    # `_resolve_workflow_principal_contexts` fail with `principal_context_missing:user1` on every
+    # target with no registered credential -- so an endpoint that requires no authentication at all,
+    # the commonest shape of this bug class, could never be verified. conn=None stands in for a
+    # target with no resolvable principal.
+    workflow, route, method, metadata = asyncio.run(
+        api_module._agent_verification_workflow_for(
+            None, uuid.uuid4(), "data_exposure", "/api/secrets/fetch", "GET",
+        )
+    )
+    assert route == "/api/secrets/fetch" and method == "GET" and metadata == {}
+    principals = {step["principal"] for step in workflow["steps"]}
+    assert principals == {"anonymous"}, "a credential-less target must need no principal context"
+    assert [step["label"] for step in workflow["steps"]] == ["exposed"]
+
+
+def test_data_exposure_baseline_is_included_when_a_principal_resolves_and_stays_proof_inert():
+    with_baseline = api_module._materialize_dataexposure_verification_workflow(
+        "/api/secrets/fetch", include_owner_baseline=True)
+    labels = [step["label"] for step in with_baseline["steps"]]
+    assert labels == ["owner", "exposed"]
+    assert with_baseline["steps"][0]["principal"] == "user1"
+    assert with_baseline["steps"][0]["checkpoint"] == "before"
+
+    # Regression guard for the fix above: the baseline must stay proof-inert. If an assertion ever
+    # names it, the credential becomes load-bearing and omitting it would weaken the proof -- so
+    # this test fails and forces that decision to be made deliberately rather than by drift.
+    asserted_steps = {
+        str(assertion.get("step") or "") for assertion in with_baseline["assertions"]
+    } | {
+        str(assertion.get("control") or "") for assertion in with_baseline["assertions"]
+    } | {
+        str(assertion.get("candidate") or "") for assertion in with_baseline["assertions"]
+    }
+    assert "owner" not in asserted_steps
+
+    # Both shapes carry the identical assertion set, so the proof is the same either way.
+    without = api_module._materialize_dataexposure_verification_workflow(
+        "/api/secrets/fetch", include_owner_baseline=False)
+    assert without["assertions"] == with_baseline["assertions"]
+    assert without["proof_family"] == with_baseline["proof_family"] == "data_exposure"
