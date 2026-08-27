@@ -4117,6 +4117,7 @@ configure_operations_router(
     results_dir=lambda: RESULTS_DIR,
     get_scan=lambda *a, **k: get_scan(*a, **k),
     worker_freshness_snapshot=lambda *a, **k: _worker_freshness_snapshot(*a, **k),
+    load_refuter_work_summary=lambda *a, **k: _load_refuter_work_summary(*a, **k),
 )
 app.include_router(operations_router)
 try:
@@ -6973,9 +6974,6 @@ try:
         configure_agent_router,
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
-        AgentHuntReplyRequest,
-        AgentHuntRequest,
-        AgentHuntSessionStartRequest,
         AgentToolExecuteRequest,
         AgentVerifyRequest,
         _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
@@ -7006,7 +7004,6 @@ try:
         _agent_planner_reply,
         _agent_planner_turn_token_reservation,
         _agent_resolve_ref,
-        _agent_run_final_status,
         _agent_run_summary_receipt,
         _agent_seed_state,
         _agent_tool_diff,
@@ -7021,7 +7018,6 @@ try:
         _resolve_agent_target_addresses,
         _resolve_hunt_origin,
         _resolve_hunt_tool_url,
-        _run_agent_hunt,
         cancel_agent_hunt_session,
         execute_agent_tool_endpoint,
         get_agent_context_pack,
@@ -7029,9 +7025,6 @@ try:
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
-        run_agent_hunt_endpoint,
-        start_agent_hunt_session,
-        submit_agent_hunt_reply,
         verify_suspected_agent_finding,
     )
 except ModuleNotFoundError:  # package import in host-side tests
@@ -7039,9 +7032,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         configure_agent_router,
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
-        AgentHuntReplyRequest,
-        AgentHuntRequest,
-        AgentHuntSessionStartRequest,
         AgentToolExecuteRequest,
         AgentVerifyRequest,
         _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
@@ -7072,7 +7062,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         _agent_planner_reply,
         _agent_planner_turn_token_reservation,
         _agent_resolve_ref,
-        _agent_run_final_status,
         _agent_run_summary_receipt,
         _agent_seed_state,
         _agent_tool_diff,
@@ -7087,7 +7076,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         _resolve_agent_target_addresses,
         _resolve_hunt_origin,
         _resolve_hunt_tool_url,
-        _run_agent_hunt,
         cancel_agent_hunt_session,
         execute_agent_tool_endpoint,
         get_agent_context_pack,
@@ -7095,9 +7083,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
-        run_agent_hunt_endpoint,
-        start_agent_hunt_session,
-        submit_agent_hunt_reply,
         verify_suspected_agent_finding,
     )
 configure_agent_router(
@@ -13399,220 +13384,24 @@ def _research_episode_uses_agent_loop(episode: Any) -> bool:
 
 
 async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
-    """Run one bounded LLM ReAct hunt bound to a research episode (target / objective / budget /
-    approval), then complete the episode. This is the durable deep-hunt driver for agent_loop
-    episodes: it reuses the episode lifecycle (lease + heartbeat + status, managed by the
-    autopilot controller) but swaps the menu planner for the autonomous tool loop. SUSPECTED
-    findings persist; the family_proof VERIFIED moat is untouched."""
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM research_episodes WHERE id=$1", uuid.UUID(episode_id))
-        if not row:
-            return {"accepted": True, "agent_loop": True, "error": "episode_not_found"}
-        target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", row["target_id"])
-    target_url = str((target or {}).get("url") or "")
-    if not target_url:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE research_episodes SET status='failed', stop_reason='target_missing', "
-                "updated_at=NOW() WHERE id=$1 "
-                "AND status NOT IN ('cancelled','failed','completed','budget_exhausted','blocked')",
-                row["id"],
-            )
-        return {
-            "accepted": True,
-            "agent_loop": True,
-            "error": "target_missing",
-            "episode_id": episode_id,
-        }
-    # Respect operator deactivation: a soft-deleted (deactivated) target must not keep being hunted
-    # by an in-flight campaign. Stop cleanly rather than send more requests. (External-audit P1.)
-    if not (target or {}).get("is_active"):
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE research_episodes SET status='blocked', stop_reason='target_deactivated', "
-                "updated_at=NOW() WHERE id=$1 AND status NOT IN ('cancelled','failed','completed')",
-                row["id"],
-            )
-        return {"accepted": True, "agent_loop": True, "error": "target_deactivated", "episode_id": episode_id}
-    raw_budget_limits = _decode_json_value(row["budget_limits"]) or {}
-    budget = _research_normalize_budget_limits(
-        raw_budget_limits,
-        max_steps=int(raw_budget_limits.get("steps") or 1),
-    )
-    # Episodes created before the wire ceiling existed must not become either unbounded or
-    # unusable after an upgrade. Derive one conservative, finite compatibility ceiling once
-    # from their already-authorized request allowance.
-    if "wire_requests" not in raw_budget_limits:
-        request_allowance = max(0, int(budget.get("requests") or 0))
-        budget["wire_requests"] = (
-            min(3600, max(450, request_allowance * 7)) if request_allowance else 0
-        )
-    budget_used_before = _research_normalize_budget_used(
-        _decode_json_value(row["budget_used"]) or {}
-    )
-    execution_mode = str(row["execution_mode"] or "read_only")
-    approval_receipt_id = str(row["approval_receipt_id"]) if row["approval_receipt_id"] else None
-    # A gated episode with a bound approval receipt (and the server execute switch on) unlocks
-    # write/active tools; otherwise the hunt stays read-only.
-    allow = execution_mode == "gated" and bool(approval_receipt_id) and _ai_ops_execute_enabled()
-    if allow:
-        # Re-validate the approval receipt AT HUNT TIME, not only at launch: a deep_hunt campaign
-        # runs for hours and a receipt bound at launch may expire or be denied mid-campaign.
-        async with db_pool.acquire() as conn:
-            receipt_row = await conn.fetchrow(
-                "SELECT denial_reason, expires_at FROM approval_receipts WHERE id=$1",
-                _optional_uuid(approval_receipt_id),
-            )
-        allow = bool(receipt_row) and not receipt_row.get("denial_reason")
-        if allow and receipt_row.get("expires_at"):
-            async with db_pool.acquire() as conn:
-                allow = bool(await conn.fetchval("SELECT $1::timestamptz > NOW()", receipt_row["expires_at"]))
-    remaining_steps = max(0, int(budget.get("steps") or 0) - int(budget_used_before.get("steps") or 0))
-    remaining_actions = max(0, int(budget.get("actions") or 0) - int(budget_used_before.get("actions") or 0))
-    remaining_active_actions = max(
-        0,
-        int(budget.get("active_actions") or 0) - int(budget_used_before.get("active_actions") or 0),
-    )
-    remaining_requests = max(
-        0,
-        int(budget.get("requests") or 0) - int(budget_used_before.get("requests") or 0),
-    )
-    remaining_wire_requests = max(
-        0,
-        int(budget.get("wire_requests") or 0) - int(budget_used_before.get("wire_requests") or 0),
-    )
-    remaining_seconds = max(
-        0,
-        int(budget.get("seconds") or 0) - int(budget_used_before.get("seconds") or 0),
-    )
-    remaining_model_tokens = max(
-        0,
-        int(budget.get("model_tokens") or 0) - int(budget_used_before.get("model_tokens") or 0),
-    )
-    max_iters = min(remaining_steps, _AGENT_HUNT_MAX_ITERATIONS)
+    """Fail closed: the legacy Agent Hunt engine this drove has been deleted.
 
-    async def _episode_cancelled() -> bool:
-        async with db_pool.acquire() as conn:
-            return bool(await conn.fetchval(
-                "SELECT cancel_requested FROM research_episodes WHERE id=$1", row["id"]))
-
-    # Run-once durability guard (External-audit P1 — the configured_ai in-process loop is not
-    # per-turn checkpointed, so a mid-hunt API restart re-leases this episode and would RE-RUN the
-    # whole hunt, re-issuing tool calls and — for a gated episode — create-MA POSTs). Claim a durable
-    # agent_hunt_runs row for this episode; if a non-terminal ('planning') claim already exists, a
-    # prior run died in flight, so FAIL CLOSED (do not re-run / duplicate state-changing work) rather
-    # than resume. A fresh relaunch is the operator's recourse.
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            prior = await conn.fetchrow(
-                "SELECT id, status FROM agent_hunt_runs WHERE episode_id=$1 "
-                "ORDER BY created_at DESC LIMIT 1 FOR UPDATE", row["id"])
-            if prior is not None and str(prior["status"]) == "planning":
-                await conn.execute(
-                    "UPDATE agent_hunt_runs SET status='failed', stop_reason='interrupted_no_resume', "
-                    "updated_at=NOW() WHERE id=$1", prior["id"])
-                await conn.execute(
-                    "UPDATE research_episodes SET status='failed', stop_reason='hunt_interrupted_no_resume', "
-                    "updated_at=NOW() WHERE id=$1 "
-                    "AND status NOT IN ('cancelled','failed','completed','budget_exhausted','blocked')",
-                    row["id"])
-                return {"accepted": True, "agent_loop": True, "episode_id": episode_id,
-                        "status": "failed", "stop_reason": "hunt_interrupted_no_resume"}
-            claim = await conn.fetchrow(
-                "INSERT INTO agent_hunt_runs (target_id, episode_id, objective, status, planner_mode, "
-                "max_iterations, allow_write, allow_active, approval_receipt_id, token_budget, created_by) "
-                "VALUES ($1,$2,$3,'planning','configured_ai',$4,$5,$5,$6,6000,$7) RETURNING id",
-                row["target_id"], row["id"], str(row["objective"] or "")[:2000], max_iters, allow,
-                _optional_uuid(approval_receipt_id) if approval_receipt_id else None,
-                f"deep_hunt_episode:{episode_id}")
-    checkpoint_run_id = claim["id"]
-
-    result = await _run_agent_hunt(
-        row["target_id"], target_url, str(row["objective"] or ""),
-        max_iterations=max_iters, created_by=f"deep_hunt_episode:{episode_id}",
-        allow_write=allow, allow_active=allow, approval_receipt_id=approval_receipt_id,
-        persist=True, should_stop=_episode_cancelled,
-        request_budget_limit=remaining_requests,
-        wire_request_budget_limit=remaining_wire_requests,
-        action_budget_limit=remaining_actions,
-        active_action_budget_limit=remaining_active_actions,
-        wall_time_budget_seconds=remaining_seconds,
-        model_token_budget_limit=remaining_model_tokens,
-        research_episode_id=str(row["id"]),
-        agent_hunt_run_id=str(checkpoint_run_id),
-    )
-    suspected = sum(1 for g in result.get("findings", []) if g.get("tier") == "suspected")
-    net_new = int(result.get("net_new_count") or 0)
-    verified = int(result.get("verified_count") or 0)
-    stop_reason = str(result.get("stop_reason") or "")
-    iterations = int(result.get("iterations") or 0)
-    tool_calls = int(result.get("tool_calls_made") or 0)
-    request_units = int(result.get("request_units_used") or 0)
-    wire_requests = int(result.get("wire_requests_reserved") or 0)
-    active_actions = int(result.get("active_actions_used") or 0)
-    verify_requests = int(result.get("auto_verify_requests_reserved") or 0)
-    verify_actions = int(result.get("auto_verify_actions_reserved") or 0)
-    verify_active_actions = int(result.get("auto_verify_active_actions_reserved") or 0)
-    verify_seconds = int(result.get("auto_verify_seconds_reserved") or 0)
-    elapsed_seconds = int(result.get("elapsed_seconds") or 0)
-    model_tokens = int(result.get("model_tokens_used") or 0)
-    # Map the loop's stop reason to the correct terminal state so the campaign's failed/blocked
-    # handling and episode ceilings are not fed a false "completed". (External-audit P2.)
-    if stop_reason.startswith("budget_exhausted"):
-        final_status, event_type = "budget_exhausted", "episode_budget_exhausted"
-    elif stop_reason.startswith("planner_error") or stop_reason == "empty_replies":
-        final_status, event_type = "failed", "episode_failed"
-    elif stop_reason == "model_declined":
-        final_status, event_type = "blocked", "episode_blocked"
-    elif stop_reason == "cancelled":
-        final_status, event_type = "cancelled", "episode_cancelled"
-    else:
-        final_status, event_type = "completed", "episode_completed"
-    # Record durable usage so campaign aggregate budgets actually see agent-loop work (was zero).
-    # Conservative: one request/action per executed tool call; active only when the episode was
-    # gated for writes/active tools. (External-audit P1.)
-    used = budget_used_before
-    used = {**used,
-            "steps": int(used.get("steps") or 0) + iterations,
-            "actions": int(used.get("actions") or 0) + tool_calls + verify_actions,
-            "active_actions": int(used.get("active_actions") or 0) + active_actions + verify_active_actions,
-            "requests": int(used.get("requests") or 0) + request_units + verify_requests,
-            "wire_requests": int(used.get("wire_requests") or 0) + wire_requests,
-            "seconds": int(used.get("seconds") or 0) + elapsed_seconds + verify_seconds,
-            "model_tokens": int(used.get("model_tokens") or 0) + model_tokens}
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            # Only emit the terminal event if THIS update actually transitioned the episode, so a
-            # concurrent cancel does not get a contradictory "completed" event written after it.
-            transitioned = await conn.fetchval(
-                "UPDATE research_episodes SET status=$2, stop_reason=$3, step_count=step_count+$4, "
-                "budget_used=$5::jsonb, updated_at=NOW() "
-                "WHERE id=$1 AND status NOT IN ('cancelled','failed','completed') RETURNING id",
-                row["id"], final_status,
-                f"agent_hunt: {suspected} suspected ({net_new} net-new, {verified} auto-verified), "
-                f"{tool_calls} tool calls, stop={stop_reason}",
-                iterations, json.dumps(used),
-            )
-            # Release the run-once claim ATOMICALLY with the episode terminalization: if the process
-            # crashes before this transaction commits, the claim stays 'planning' (fail-closed -> a
-            # re-lease refuses to re-run), never 'completed' with the episode still runnable (which
-            # would repeat target traffic). (External-audit P1 — claim replay window.)
-            await conn.execute(
-                "UPDATE agent_hunt_runs SET status='completed', stop_reason=$2, updated_at=NOW() WHERE id=$1",
-                checkpoint_run_id, stop_reason[:120])
-            if transitioned:
-                await _record_research_event(
-                    conn, row["id"], event_type=event_type, status=final_status,
-                    summary=f"Autonomous agent hunt ({final_status}): {suspected} suspected findings "
-                            f"({net_new} net-new, {verified} auto-verified)",
-                    details={
-                        "iterations": iterations, "tool_calls_made": tool_calls,
-                        "http_evidence": result.get("http_evidence_count"),
-                        "stop_reason": stop_reason, "allow_active": allow, "verified": verified,
-                    },
-                )
-    return {"accepted": True, "agent_loop": True, "episode_id": episode_id, "status": final_status,
-            "suspected": suspected, "net_new": net_new, "verified": verified, "stop_reason": stop_reason}
+    This was the Research autopilot's bridge into the legacy keyless hunt loop.
+    It called _run_agent_hunt, which no longer exists, and it inserted new
+    agent_hunt_runs rows -- a new write to a quarantined legacy table. Both are
+    retired. The episode is completed with an explicit migration reason instead
+    of crashing the autopilot loop, and the surrounding Research runtime is
+    removed with the rest of its lifecycle (playbook Phase 3).
+    """
+    return {
+        "accepted": False,
+        "agent_loop": True,
+        "status": "failed",
+        "stop_reason": "legacy_hunt_engine_removed",
+        "error": "legacy_hunt_engine_removed",
+        "canonical_replacement": "/hunts",
+        "episode_id": str(episode_id),
+    }
 
 
 

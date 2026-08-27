@@ -36,8 +36,22 @@ def _reject_monolith_imports(relative: str) -> None:
 
 
 def _product_module_files() -> tuple[Path, ...]:
+    """Every product module, including the extracted route packages.
+
+    The cycle check originally covered only the five hand-listed packages, so
+    the extracted routers were invisible to it: operations imported
+    _load_refuter_work_summary from arsenal_routes, which imports operations,
+    and the cycle only surfaced when a third module happened to import
+    agent_routes first. Discover the packages instead of listing them.
+    """
     files: list[Path] = []
-    for package in ("scan", "hunt", "runtime", "capabilities", "worker_handlers"):
+    packages = {"scan", "hunt", "runtime", "capabilities", "worker_handlers"}
+    packages.update(
+        path.name
+        for path in (ROOT / "api").iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    )
+    for package in sorted(packages):
         files.extend((ROOT / "api" / package).rglob("*.py"))
     files.extend(
         ROOT / "api" / name
@@ -84,9 +98,17 @@ def _local_import_graph() -> dict[str, set[str]]:
                 candidates.extend(
                     f"{imported}.{alias.name}" for alias in node.names if imported
                 )
-            graph[name].update(
-                candidate for candidate in candidates if candidate in modules
-            )
+            # Runtime containers import the flat form ("arsenal_routes.router")
+            # and only fall back to the package-relative form, so resolve both
+            # spellings to the same node. Matching only the api.-prefixed name
+            # let a flat-only import create an invisible cycle edge.
+            resolved = set()
+            for candidate in candidates:
+                if candidate in modules:
+                    resolved.add(candidate)
+                elif f"api.{candidate}" in modules:
+                    resolved.add(f"api.{candidate}")
+            graph[name].update(resolved)
     return graph
 
 

@@ -95,8 +95,102 @@ def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
     product = (root / "docs" / "product-model.md").read_text()
 
     assert "app.add_middleware(LegacyHuntIsolationMiddleware)" in api
-    assert route_is_declared("POST", "/agent/hunt/{target_id}")
+    # The Agent Hunt write handlers are DELETED, not merely isolated, so this no
+    # longer requires them to exist -- see the deletion proofs below. The
+    # middleware remains for the surfaces still pending removal in later phases.
+    assert not route_is_declared("POST", "/agent/hunt/{target_id}")
     assert route_is_declared("POST", "/devices/{device_id}/agent/session")
     assert route_is_declared("POST", "/research/launch")
     assert "It is not a Hunt launcher" in product
     assert "A Hunt request creates one `/hunts` run" in product
+
+
+def test_no_non_cancel_write_exists_under_the_legacy_agent_hunt_surface():
+    """The legacy write handlers are deleted, not merely blocked.
+
+    Keeping full handler bodies behind a 410 middleware preserves dead attack
+    surface, imports, request models, database writes, and maintenance cost.
+    The middleware stays as the migration response, but there must be nothing
+    left for it to guard.
+    """
+    from tests.api_sources import declared_routes
+
+    offenders = [
+        f"{method} {path}"
+        for method, path in declared_routes("/agent/hunt")
+        if method not in {"GET", "HEAD", "OPTIONS"}
+        and not path.rstrip("/").endswith("/cancel")
+    ]
+    assert not offenders, (
+        f"legacy Agent Hunt still declares non-cancel writes: {offenders}"
+    )
+
+
+def test_deleted_legacy_agent_hunt_symbols_are_gone_from_the_api_tree():
+    """The handlers and everything reachable only from them are removed."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    for symbol in (
+        "async def run_agent_hunt_endpoint", "async def start_agent_hunt_session",
+        "async def submit_agent_hunt_reply", "async def _run_agent_hunt(",
+        "class AgentHuntRequest", "class AgentHuntSessionStartRequest",
+        "class AgentHuntReplyRequest",
+    ):
+        assert symbol not in source, f"{symbol} survived the legacy Hunt deletion"
+
+
+def test_legacy_agent_hunt_writes_return_410_without_invoking_the_old_engine():
+    """The migration response must not reach any former handler."""
+    from hunt.legacy import LegacyHuntIsolationMiddleware, legacy_hunt_write_blocked
+
+    for method, path in (
+        ("POST", "/agent/hunt/target-1"),
+        ("POST", "/agent/hunt/target-1/session"),
+        ("POST", "/agent/hunt/session/run-1/reply"),
+    ):
+        assert legacy_hunt_write_blocked(path, method), f"{method} {path} is not blocked"
+
+    # History and cancellation stay reachable for the migration window.
+    for method, path in (
+        ("GET", "/agent/hunt/runs"),
+        ("GET", "/agent/hunt/session/run-1"),
+        ("POST", "/agent/hunt/session/run-1/cancel"),
+    ):
+        assert not legacy_hunt_write_blocked(path, method), (
+            f"{method} {path} must remain available during the migration window"
+        )
+
+    sent: list[dict] = []
+
+    async def _never_called(scope, receive, send):  # pragma: no cover - must not run
+        raise AssertionError("the legacy Hunt engine was invoked")
+
+    async def _send(message):
+        sent.append(message)
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    import asyncio
+
+    middleware = LegacyHuntIsolationMiddleware(_never_called)
+    asyncio.run(middleware(
+        {"type": "http", "method": "POST", "path": "/agent/hunt/target-1", "headers": []},
+        _receive,
+        _send,
+    ))
+    assert sent and sent[0]["status"] == 410
+    headers = dict(sent[0]["headers"])
+    assert headers.get(b"deprecation") == b"true"
+    assert b"/hunts" in headers.get(b"link", b"")
+
+
+def test_no_new_legacy_agent_hunt_rows_are_written():
+    """The quarantined table must not gain rows once its engine is deleted."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    assert "INSERT INTO agent_hunt_runs" not in source, (
+        "a legacy agent_hunt_runs insert survives; the surface is read-only"
+    )

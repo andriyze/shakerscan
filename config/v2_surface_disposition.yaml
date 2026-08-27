@@ -71,9 +71,6 @@ surfaces:
     sunset: 2026-09-30
     caller_telemetry: required
     pending_write_removals:
-      - POST /agent/hunt/session/{run_id}/reply
-      - POST /agent/hunt/{target_id}
-      - POST /agent/hunt/{target_id}/session
     routes: ["/agent/hunt", "/agent/hunt/*"]
     files: ["api/agent_routes/router.py", "api/hunt/legacy.py"]
 

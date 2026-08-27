@@ -35,21 +35,6 @@
     "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post"
   },
   {
-    "path": "/agent/hunt/session/{run_id}/reply",
-    "method": "post",
-    "operation_id": "submit_agent_hunt_reply_agent_hunt_session__run_id__reply_post"
-  },
-  {
-    "path": "/agent/hunt/{target_id}",
-    "method": "post",
-    "operation_id": "run_agent_hunt_endpoint_agent_hunt__target_id__post"
-  },
-  {
-    "path": "/agent/hunt/{target_id}/session",
-    "method": "post",
-    "operation_id": "start_agent_hunt_session_agent_hunt__target_id__session_post"
-  },
-  {
     "path": "/agent/tools/readiness",
     "method": "get",
     "operation_id": "get_agent_tool_readiness_agent_tools_readiness_get"

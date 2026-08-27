@@ -18901,16 +18901,6 @@ def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_fil
     assert "autonomous_workflow" in api_module._source_type_filter_sql("dast")
 
 
-def test_keyless_hunt_request_distinguishes_passive_discovery_from_deep_hunt():
-    passive = api_module.AgentHuntSessionStartRequest()
-    active = api_module.AgentHuntSessionStartRequest(
-        mode="deep_hunt",
-        approval_receipt_id=str(uuid.uuid4()),
-    )
-
-    assert passive.mode == "read_only"
-    assert active.mode == "deep_hunt"
-
 
 def test_agent_hunt_public_shape_exposes_product_mode_and_capability_boundary():
     passive = api_module._agent_hunt_run_public({

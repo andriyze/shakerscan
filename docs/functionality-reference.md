@@ -1434,8 +1434,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 398 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 335 | `api/**/*.py` |
+| Public REST operations | 395 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 332 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1465,9 +1465,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/agent/hunt/runs` | `list_agent_hunt_runs` |
 | `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |
 | `POST` | `/agent/hunt/session/{run_id}/cancel` | `cancel_agent_hunt_session` |
-| `POST` | `/agent/hunt/session/{run_id}/reply` | `submit_agent_hunt_reply` |
-| `POST` | `/agent/hunt/{target_id}` | `run_agent_hunt_endpoint` |
-| `POST` | `/agent/hunt/{target_id}/session` | `start_agent_hunt_session` |
 | `GET` | `/agent/tools/readiness` | `get_agent_tool_readiness` |
 | `POST` | `/agent/tools/{target_id}/execute` | `execute_agent_tool_endpoint` |
 | `GET` | `/agents/local` | `local_agents` |

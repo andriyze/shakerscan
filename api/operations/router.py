@@ -44,7 +44,6 @@ try:
     from artifact_storage import storage_health as artifact_storage_health
     from job_queue import clear_unleased, pending_depth, queue_payloads
     from schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
-    from arsenal_routes.router import _load_refuter_work_summary
     from scan.compatibility import record_compatibility_call
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
@@ -59,7 +58,6 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..artifact_storage import storage_health as artifact_storage_health
     from ..job_queue import clear_unleased, pending_depth, queue_payloads
     from ..schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
-    from ..arsenal_routes.router import _load_refuter_work_summary
     from ..scan.compatibility import record_compatibility_call
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 
@@ -2525,3 +2523,8 @@ def _ai_requirement_applies(requirement: dict[str, Any], target_type: str) -> bo
 
 def _worker_freshness_snapshot(*a: Any, **k: Any) -> Any:
     return _dep("worker_freshness_snapshot")(*a, **k)
+
+
+async def _load_refuter_work_summary(*a: Any, **k: Any) -> Any:
+    """Injected: importing it from arsenal_routes made operations cyclic."""
+    return await _dep("load_refuter_work_summary")(*a, **k)

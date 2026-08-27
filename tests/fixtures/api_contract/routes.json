@@ -49,27 +49,6 @@
     "name": "cancel_agent_hunt_session"
   },
   {
-    "path": "/agent/hunt/session/{run_id}/reply",
-    "methods": [
-      "POST"
-    ],
-    "name": "submit_agent_hunt_reply"
-  },
-  {
-    "path": "/agent/hunt/{target_id}",
-    "methods": [
-      "POST"
-    ],
-    "name": "run_agent_hunt_endpoint"
-  },
-  {
-    "path": "/agent/hunt/{target_id}/session",
-    "methods": [
-      "POST"
-    ],
-    "name": "start_agent_hunt_session"
-  },
-  {
     "path": "/agent/tools/readiness",
     "methods": [
       "GET"

@@ -84,6 +84,6 @@ def test_the_deletion_backlog_only_shrinks():
         len(surface.get("pending_write_removals") or ())
         for surface in manifest_data["surfaces"]
     )
-    assert backlog <= 41, (
+    assert backlog <= 38, (
         f"the pending write-removal backlog grew to {backlog}; it may only shrink"
     )

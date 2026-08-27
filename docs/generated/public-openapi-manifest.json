@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 171,
+  "component_schema_count": 168,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -23,9 +23,6 @@
     "AgentContextPackRequest": "b4074a180bcaca334dd41f78175c63faa57ff20c6f18dae86d5adf2d72aeef6b",
     "AgentDecisionTraceRequest": "d66adb099903f4250044bf4fb5eae6bccf5cf02a383ccdf4a9d52f540818ec51",
     "AgentDecisionTraceStep": "6776a0d4fdd8168c9e1ea68343b639f30ab821ba38917d543abd2d08f11beb3a",
-    "AgentHuntReplyRequest": "96481e6243f42f7e3c7e627927b2f5c8443b3440a8cab0197bc7d12ecb34f312",
-    "AgentHuntRequest": "73817f556a16fbb06191ffc6bcc4e750d84f93fa4cfcc0659e299c9bb42667cd",
-    "AgentHuntSessionStartRequest": "3d916ed287aec3f1a54a6d0319e7ae90836f89e926408a70429fe3ef8cdeffb0",
     "AgentToolExecuteRequest": "a25c8d8d3ddf8b94b7d3a527327979bbc56d25119d3e9c3db5fdea8de990faab",
     "AgentVerifyRequest": "a99c2287b259ff8facfbb60e9deab79bb2188b9063111fb47b601475347a830f",
     "ApprovalReceiptRequest": "3126e2c8534118b4bf15e9ae1d5c5fd56ca78de37a1d51952e1162b7f4d6899a",
@@ -177,9 +174,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "144af3faf58012b44711b0ea975e79a0640d8ca04c71621b09c2b1deaab7c98b",
+  "contract_sha256": "2aa0af6e524951bfa8181c593afe697858b4722901fa5b19b4d75eb5cdbb7f97",
   "openapi": "3.1.0",
-  "operation_count": 388,
+  "operation_count": 385,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2863,45 +2860,6 @@
       "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post",
       "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
       "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /agent/hunt/session/{run_id}/reply": {
-      "deprecated": false,
-      "operation_id": "submit_agent_hunt_reply_agent_hunt_session__run_id__reply_post",
-      "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
-      "request_schema_sha256": "e78f503f870958f72352b38494210b20c88f3993cfb1d6125863e3d68443b5d3",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /agent/hunt/{target_id}": {
-      "deprecated": false,
-      "operation_id": "run_agent_hunt_endpoint_agent_hunt__target_id__post",
-      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
-      "request_schema_sha256": "d1a6fe7a977d9e48a03d4f09f6086b00f003ddb24144afe73d2b86e4a78e3de2",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /agent/hunt/{target_id}/session": {
-      "deprecated": false,
-      "operation_id": "start_agent_hunt_session_agent_hunt__target_id__session_post",
-      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
-      "request_schema_sha256": "4a78ec5a3a2f29ea1251a95a1773b01f5f065d7fad83b4781f10961c21138b16",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
