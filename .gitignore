@@ -10,6 +10,8 @@ results/benchmark-runs/*
 !results/benchmark-runs/*.json
 
 # Environment
+.venv/
+venv/
 .env
 .env.local
 .env.*

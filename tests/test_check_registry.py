@@ -363,3 +363,38 @@ def test_families_requiring_credentials_are_declared_in_the_registry():
     bola = r.get_check_family("bola")
     assert authz is not None and authz.requires_credentials
     assert bola is not None and bola.requires_credentials and bola.requires_auth_states
+
+
+def test_explicitly_named_families_satisfy_the_lab_deep_gate():
+    """Canonical ``POST /scans`` rejects the legacy ``exploit_depth`` key.
+
+    The Lab/deep gate was therefore unsatisfiable through the V2 API and the
+    implemented ``sensitive_exposure`` and ``nosqli`` families could never be
+    selected at all. Naming an active-only family explicitly already requires
+    ``active_testing`` at contract resolution, so it stands in for the boolean.
+    """
+    lab_gated = ["sensitive_exposure", "nosqli"]
+    assert r.scan_family_precondition_errors(lab_gated, {}, exploit_depth=False)
+    assert r.scan_family_precondition_errors(
+        lab_gated, {}, exploit_depth=False, deep_intent_families=lab_gated,
+    ) == []
+
+
+def test_deep_intent_covers_only_the_families_actually_named():
+    """A family pulled in by a preset is not covered by another family's intent."""
+    unmet = r.scan_family_precondition_errors(
+        ["sensitive_exposure", "nosqli"], {},
+        exploit_depth=False, deep_intent_families=["sensitive_exposure"],
+    )
+    assert any("nosqli" in message for message in unmet)
+    assert not any("sensitive_exposure" in message for message in unmet)
+
+
+def test_deep_intent_never_substitutes_for_missing_credentials():
+    """Naming a family cannot conjure the principals it requires."""
+    unmet = r.scan_family_precondition_errors(
+        ["authz_surface", "bola"], {},
+        exploit_depth=True, deep_intent_families=["authz_surface", "bola"],
+    )
+    assert any("authz_surface" in message for message in unmet)
+    assert any("bola" in message for message in unmet)

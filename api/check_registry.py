@@ -893,6 +893,7 @@ def scan_family_precondition_errors(
     options: dict[str, Any],
     *,
     exploit_depth: bool,
+    deep_intent_families: Any = (),
 ) -> list[str]:
     """Return every unmet prerequisite across a V2 Scan's selected families.
 
@@ -901,11 +902,27 @@ def scan_family_precondition_errors(
     was admitted with no credentials and the compiler then silently omitted the
     action. The product rule is that a selected family with a missing
     prerequisite must be rejected before queueing, never quietly dropped.
+
+    ``deep_intent_families`` carries the families a V2 operator named
+    explicitly. ``exploit_depth`` is a legacy V1 request key that canonical
+    ``POST /scans`` rejects outright, so the Lab/deep gate was unsatisfiable
+    there and the implemented ``sensitive_exposure`` and ``nosqli`` families
+    could never be selected at all. Naming an active-only family explicitly
+    already requires ``active_testing`` at contract resolution, which makes it
+    a stronger statement of deep intent than the boolean it replaces. Families
+    pulled in by a preset rather than named are not covered by it.
     """
+    explicit = {
+        str(item or "").strip().lower()
+        for item in deep_intent_families or ()
+        if str(item or "").strip()
+    }
     errors: list[str] = []
     for family in families or ():
+        name = str(family or "").strip() or None
         error = family_precondition_error(
-            str(family or "").strip() or None, options, exploit_depth=exploit_depth,
+            name, options,
+            exploit_depth=exploit_depth or (name or "").lower() in explicit,
         )
         if error and error not in errors:
             errors.append(error)
