@@ -116,6 +116,10 @@ jobs:
           PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
             tests/test_api_characterization.py
 
+      - name: Verify the public installer ships its whole import closure
+        run: |
+          python scripts/check_installed_import_closure.py
+
       - name: Enforce V2 surface dispositions
         run: |
           python scripts/check_surface_dispositions.py
