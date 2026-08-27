@@ -169,17 +169,17 @@ jobs:
           gh run download "$PARITY_RUN_ID" \
             -n "parity-identity-$CANDIDATE_SHA" -D /tmp/parity-identity
           python3 - <<'PY'
-import json, os, sys
-with open('/tmp/parity-identity/parity-identity.json', encoding='utf-8') as fh:
-    identity = json.load(fh)
-expected = os.environ['CANDIDATE_SHA']
-if identity.get('candidate_sha') != expected or identity.get('resolved_head_sha') != expected:
-    sys.exit(
-        'Parity identity mismatch: '
-        f"claimed={identity.get('candidate_sha')} "
-        f"checked_out={identity.get('resolved_head_sha')} expected={expected}"
-    )
-PY
+          import json, os, sys
+          with open('/tmp/parity-identity/parity-identity.json', encoding='utf-8') as fh:
+              identity = json.load(fh)
+          expected = os.environ['CANDIDATE_SHA']
+          if identity.get('candidate_sha') != expected or identity.get('resolved_head_sha') != expected:
+              sys.exit(
+                  'Parity identity mismatch: '
+                  f"claimed={identity.get('candidate_sha')} "
+                  f"checked_out={identity.get('resolved_head_sha')} expected={expected}"
+              )
+          PY
 
       - name: Download exact-SHA E2E scorecard
         env:
