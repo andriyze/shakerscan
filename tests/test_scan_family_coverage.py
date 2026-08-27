@@ -231,3 +231,44 @@ def test_a_failed_proof_is_reported_without_failing_its_verifier():
     assert row["coverage_status"] == "complete"
     assert report["coverage"]["selected_family_gaps"] == []
     assert row["proof_escalation"]["status"] == "failed"
+
+
+def test_an_unfundable_proof_is_reported_as_unavailable_not_failed():
+    """An endpoint shard carries no browser budget.
+
+    Its optional XSS browser proof is skipped for insufficient plan budget. That
+    is a real limit on what was proved and must be visible, but it is neither a
+    proof failure nor evidence that the verifier did not run -- parallel XSS
+    would otherwise look identical to a broken one.
+    """
+    from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
+    from tests.test_scan_orchestrator import _result
+
+    xss = _batch_action("verify.xss", "xss.verify_batch", 0, count=2)
+    prove = _batch_action(
+        "prove.xss", "xss.browser_prove_batch", 1, count=2, required=False,
+    )
+    final = _action("finalize.report", 2, dependencies=(xss.action_id, prove.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(xss, prove, final),
+    )
+    results = {
+        xss.action_id: _result_with_observation_count(xss, 2),
+        prove.action_id: _result(
+            prove,
+            status=CapabilityResultStatus.SKIPPED,
+            reason=CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET,
+        ),
+    }
+    observations = {xss.action_id: (_attempt("c1"), _attempt("c2")), prove.action_id: ()}
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    row = _family(report, "xss")
+    assert row["coverage_status"] == "complete"
+    assert report["coverage"]["selected_family_gaps"] == []
+    assert row["proof_escalation"]["status"] == "unavailable"
+    assert row["proof_escalation"]["reason"] == "insufficient_plan_budget"

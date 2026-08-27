@@ -45,6 +45,12 @@ _TRAFFIC_BUDGETS = frozenset({
 # action that was correctly skipped as not_applicable mark a fully-executed
 # family incomplete -- raising a selected-family gap and making the whole grade
 # unreliable for work that had succeeded.
+# A skip for one of these means the escalation was never able to run, not that
+# it ran and produced nothing.
+_PROOF_UNAVAILABLE_REASONS = frozenset({
+    "insufficient_plan_budget",
+    "placement_unavailable",
+})
 _PROOF_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
     "sqli.prove_batch",
@@ -932,6 +938,16 @@ def finalize_scan_report(
             # escalation and says nothing about whether the family ran.
             proof["status"] = "not_applicable"
             proof["reason"] = "no_proof_eligible_candidate"
+        elif all(
+            status == "skipped" and reason in _PROOF_UNAVAILABLE_REASONS
+            for status, reason in zip(proof_statuses, proof_reasons or proof_statuses)
+        ):
+            # The escalation could not be placed or funded -- an endpoint shard
+            # carries no browser budget, for instance. That is a real limit on
+            # what was proved and must be stated, but it is not a failure of the
+            # verifier and not evidence that the family did not run.
+            proof["status"] = "unavailable"
+            proof["reason"] = (sorted(set(proof_reasons)) or ["proof_unavailable"])[0]
         else:
             proof["status"] = "failed"
             proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
