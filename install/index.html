@@ -8,6 +8,8 @@ INSTALL_URL="https://install.shakerscan.com"
 CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"
 RELEASE_ASSET_ROOT="${SHAKERSCAN_RELEASE_ASSET_ROOT:-https://github.com/andriyze/shakerscan/releases/download}"
 REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-}"
+# Files this installer owns, so an upgrade can remove what the new version retired.
+OWNED_MANIFEST_NAME=".shakerscan-installed-files"
 INSTALL_VERSION="${SHAKERSCAN_INSTALL_VERSION:-}"
 INSTALL_DIR="${SHAKERSCAN_HOME:-$HOME/.shakerscan}"
 BIN_DIR="${SHAKERSCAN_BIN_DIR:-$HOME/.local/bin}"
@@ -115,6 +117,11 @@ download() {
         fail "failed to download $src"
     fi
     mv "$tmp" "$staged_dst"
+    # Record what this version owns. Committing with an overlaying copy left files behind that a
+    # later release no longer ships -- an upgrade kept retired command files that then looked
+    # installed and supported. Only paths a previous installer wrote are ever removed, so operator
+    # data in the same tree (results, .env, backups) is never touched.
+    printf '%s\n' "$relative" >> "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
 }
 
 cleanup_install_stage() {
@@ -123,10 +130,38 @@ cleanup_install_stage() {
     fi
 }
 
+prune_retired_files() {
+    # The previous manifest must be read from the copy taken BEFORE the commit: `cp -R` overwrites
+    # it with the new one, after which previous and staged are identical and nothing is ever pruned.
+    previous="$1"
+    staged="$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
+    [ -f "$previous" ] || return 0
+    [ -f "$staged" ] || return 0
+    while IFS= read -r retired_relative; do
+        [ -n "$retired_relative" ] || continue
+        # Refuse anything that could escape the installation directory, whatever a previous
+        # manifest happens to contain.
+        case "$retired_relative" in
+            /*|*..*) continue ;;
+        esac
+        if ! grep -Fxq -- "$retired_relative" "$staged"; then
+            rm -f -- "$INSTALL_DIR/$retired_relative"
+        fi
+    done < "$previous"
+}
+
 commit_staged_downloads() {
     [ -n "$INSTALL_STAGE" ] && [ -d "$INSTALL_STAGE" ] || \
         fail "installer staging directory is unavailable"
+    previous_manifest="$INSTALL_STAGE/.previous-owned-files"
+    if [ -f "$INSTALL_DIR/$OWNED_MANIFEST_NAME" ]; then
+        cp "$INSTALL_DIR/$OWNED_MANIFEST_NAME" "$previous_manifest"
+    fi
+    # Put the new version in place first, then remove what it no longer ships: an interrupted
+    # commit leaves a complete newer tree plus some stale files, never a tree with holes in it.
     cp -R "$INSTALL_STAGE/." "$INSTALL_DIR/"
+    prune_retired_files "$previous_manifest"
+    rm -f -- "$INSTALL_DIR/.previous-owned-files"
     cleanup_install_stage
     INSTALL_STAGE=""
 }
