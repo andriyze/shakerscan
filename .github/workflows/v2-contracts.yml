@@ -78,7 +78,7 @@ jobs:
               ui/*|scripts/generate_scan_contract.py|scripts/generate_hunt_contract.py|tests/test_ui_*|tests/test_scan_contract_generation.py)
                 ui=true
                 ;;
-              api/api.py|api/*/router.py|api/*/*_router.py|api/scan/contracts.py|tests/test_scan_openapi_contract.py|.github/workflows/v2-contracts.yml)
+              api/api.py|api/*/router.py|api/*/*_router.py|api/scan/contracts.py|config/v2_surface_disposition.yaml|scripts/check_surface_dispositions.py|tests/test_scan_openapi_contract.py|.github/workflows/v2-contracts.yml)
                 backend=true
                 ui=true
                 ;;
@@ -115,6 +115,10 @@ jobs:
           python scripts/check_module_size.py
           PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
             tests/test_api_characterization.py
+
+      - name: Enforce V2 surface dispositions
+        run: |
+          python scripts/check_surface_dispositions.py
 
       - name: Reject canonical target-transport bypasses
         run: |

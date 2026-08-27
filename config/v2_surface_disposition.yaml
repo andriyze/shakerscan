@@ -1,0 +1,371 @@
+# V2 surface disposition manifest.
+#
+# Every public route on the API app must map to exactly one surface here before
+# it may be deleted, moved, or extended. The disposition -- not the fact that a
+# route currently exists -- decides whether it survives V2.
+#
+# Enforced by scripts/check_surface_dispositions.py.
+#
+# Dispositions:
+#   DELETE_NOW            duplicate/dead execution; remove now
+#   QUARANTINE_READ_ONLY  history must stay readable; no new writes
+#   MERGE_THEN_DELETE     unique behaviour moves to the canonical owner first
+#   KEEP_AND_SPLIT        intentional domain, poor module boundary
+#   KEEP_CANONICAL        this is the V2 authority
+#   ARCHIVE_DOC_ONLY      historical context only
+schema_version: v2-surface-disposition/v1
+source_head: 061a6d40106104d17a8983feec01236bc7cf1c05
+
+surfaces:
+  # ---------------------------------------------------------------- canonical
+  - id: canonical-scan
+    owner: scan
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/scans", "/scans/*", "/scan/contracts", "/scan/contracts/*"]
+
+  - id: canonical-hunt
+    owner: hunt
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/hunts", "/hunts/*"]
+
+  - id: credentials
+    owner: credentials
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/credential-profiles", "/credential-profiles/*"]
+
+  - id: request-collections
+    owner: request-collections
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/request-collections", "/request-collections/*"]
+
+  - id: policy-profiles
+    owner: policy-profiles
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/policy-profiles", "/policy-profiles/*"]
+
+  - id: composition-root
+    owner: platform
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/", "/health", "/metrics/*"]
+
+  # ------------------------------------------------------------ legacy: delete
+  - id: legacy-agent-hunt
+    owner: compatibility
+    disposition: QUARANTINE_READ_ONLY
+    canonical_replacement: /hunts
+    new_writes_allowed: false
+    historical_reads_required: true
+    cancellation_required: true
+    sunset: 2026-09-30
+    caller_telemetry: required
+    pending_write_removals:
+      - POST /agent/hunt/session/{run_id}/reply
+      - POST /agent/hunt/{target_id}
+      - POST /agent/hunt/{target_id}/session
+    routes: ["/agent/hunt", "/agent/hunt/*"]
+    files: ["api/agent_routes/router.py", "api/hunt/legacy.py"]
+
+  - id: legacy-device-agent
+    owner: compatibility
+    disposition: QUARANTINE_READ_ONLY
+    canonical_replacement: /hunts
+    new_writes_allowed: false
+    historical_reads_required: true
+    cancellation_required: true
+    sunset: 2026-09-30
+    caller_telemetry: required
+    pending_write_removals:
+      - POST /device-agent/session/{run_id}/reply
+      - POST /device-agent/session/{run_id}/shell-plans/{plan_id}/confirm
+      - POST /devices/{device_id}/agent/session
+    routes:
+      - /device-agent
+      - /device-agent/*
+      - /devices/{device_id}/agent/session
+    files: ["api/devices/router.py"]
+
+  - id: v1-read-compatibility
+    owner: compatibility
+    disposition: QUARANTINE_READ_ONLY
+    canonical_replacement: /scans and /findings
+    new_writes_allowed: false
+    historical_reads_required: true
+    cancellation_required: false
+    caller_telemetry: required
+    excluded_from_generated_clients: true
+    routes: ["/api/v1/*"]
+    files: ["api/operations/router.py"]
+
+  # --------------------------------------------------------- merge then delete
+  - id: research-runtime
+    owner: hunt
+    disposition: MERGE_THEN_DELETE
+    canonical_replacement: /hunts
+    new_writes_allowed: false
+    historical_reads_required: true
+    unique_capabilities:
+      - prioritized security leads
+      - hypothesis score and priority
+      - expected signal and falsifier
+      - analyst decision record
+      - mission yield metrics
+    pending_write_removals:
+      - POST /research/campaigns/launch
+      - POST /research/campaigns/{campaign_id}/control
+      - POST /research/episodes
+      - POST /research/episodes/{episode_id}/cancel
+      - POST /research/episodes/{episode_id}/decisions
+      - POST /research/episodes/{episode_id}/observe
+      - POST /research/episodes/{episode_id}/plan-step
+      - POST /research/episodes/{episode_id}/settle
+      - POST /research/launch
+      - PUT /research/episodes/{episode_id}/autopilot
+    routes: ["/research", "/research/*"]
+    files: ["api/research_routes/router.py"]
+
+  - id: agent-tools-and-context
+    owner: operations
+    disposition: MERGE_THEN_DELETE
+    canonical_replacement: operations capability catalog and Hunt context pack
+    new_writes_allowed: false
+    pending_write_removals:
+      - POST /agent/tools/{target_id}/execute
+      - POST /agents/local/plan
+      - POST /agents/local/plan/parse
+      - POST /agents/local/test
+    routes: ["/agent/tools", "/agent/tools/*", "/agent/context/*", "/agents/local", "/agents/local/*"]
+    files: ["api/agent_routes/router.py", "api/local_agent_routes/router.py"]
+
+  - id: agent-findings-and-verification
+    owner: findings
+    disposition: MERGE_THEN_DELETE
+    canonical_replacement: /findings and the deterministic verifier
+    new_writes_allowed: false
+    pending_write_removals:
+      - POST /agent/findings/{finding_id}/verify
+    routes: ["/agent/findings/*"]
+    files: ["api/agent_routes/router.py"]
+
+  - id: arsenal-investigations
+    owner: investigations
+    disposition: MERGE_THEN_DELETE
+    canonical_replacement: investigations and evidence
+    new_writes_allowed: false
+    pending_write_removals:
+      - POST /arsenal/campaign-actions/{campaign_action_id}/authz-promote
+      - POST /arsenal/campaign-actions/{campaign_action_id}/authz-replay
+      - POST /arsenal/campaigns
+      - POST /arsenal/campaigns/{campaign_id}/actions
+      - POST /arsenal/context-packs
+      - POST /arsenal/context-packs/from-target
+      - POST /arsenal/decision-traces
+      - POST /arsenal/hypotheses
+      - POST /arsenal/hypotheses/from-benchmark
+      - POST /arsenal/hypotheses/from-plan
+      - POST /arsenal/hypotheses/source-ingest
+      - POST /arsenal/hypotheses/{hypothesis_id}/claim
+      - POST /arsenal/hypotheses/{hypothesis_id}/plan-campaign
+      - POST /arsenal/hypotheses/{hypothesis_id}/reconcile-proof
+      - POST /arsenal/hypotheses/{hypothesis_id}/signals
+      - POST /arsenal/hypotheses/{hypothesis_id}/transition
+      - POST /arsenal/refuter-reviews
+      - POST /arsenal/refuter-reviews/queue-from-summary
+      - POST /arsenal/refuter-reviews/{refuter_review_id}/derive-verdict
+      - POST /arsenal/refuter-reviews/{refuter_review_id}/execute
+    routes:
+      - /arsenal/hypotheses
+      - /arsenal/hypotheses/*
+      - /arsenal/refuter-reviews
+      - /arsenal/refuter-reviews/*
+      - /arsenal/findings/*
+      - /arsenal/context-packs
+      - /arsenal/context-packs/*
+      - /arsenal/decision-traces
+      - /arsenal/campaigns
+      - /arsenal/campaigns/*
+      - /arsenal/campaign-actions
+      - /arsenal/campaign-actions/*
+    files: ["api/arsenal_routes/router.py"]
+
+  # ----------------------------------------------------------- keep and split
+  - id: arsenal-operations
+    owner: arsenal
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/arsenal", "/arsenal/*"]
+    files: ["api/arsenal_routes/router.py"]
+
+  - id: model-intake
+    owner: model-intake
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/model-intake", "/model-intake/*"]
+    files: ["api/model_intake/router.py"]
+
+  - id: ai-gate
+    owner: ai-gate
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/ai", "/ai/*"]
+    files: ["api/ai_targets/router.py", "api/ai_gate/catalog_router.py"]
+
+  - id: devices
+    owner: devices
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/devices", "/devices/*", "/device-policies", "/device-policies/*", "/device-scans"]
+    files: ["api/devices/router.py"]
+
+  - id: targets-and-asm
+    owner: targets
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/targets", "/targets/*", "/domains", "/asm/*"]
+    files: ["api/targets/router.py"]
+
+  - id: findings
+    owner: findings
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/findings", "/findings/*", "/finding-exceptions", "/finding-exceptions/*"]
+    files: ["api/finding_routes/router.py", "api/finding_exceptions/router.py"]
+
+  - id: evidence
+    owner: evidence
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/evidence", "/evidence/*"]
+    files: ["api/evidence_routes/router.py"]
+
+  - id: retests
+    owner: findings
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: false
+    routes: ["/retests/*"]
+    files: ["api/retest_routes/router.py"]
+
+  - id: investigation-candidates
+    owner: investigations
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: false
+    routes: ["/investigation/*"]
+    files: ["api/investigation_routes/router.py"]
+
+  - id: fleet
+    owner: fleet
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/fleet", "/fleet/*", "/workers"]
+    files: ["api/fleet_routes/router.py", "api/api.py"]
+
+  - id: schedules
+    owner: schedules
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/schedules", "/schedules/*"]
+    files: ["api/schedules/router.py"]
+
+  - id: exposure
+    owner: exposure
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/exposure", "/exposure/*"]
+    files: ["api/exposure/router.py"]
+
+  - id: interactive
+    owner: interactive
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/session", "/session/*", "/sessions"]
+    files: ["api/interactive/router.py"]
+
+  - id: settings
+    owner: settings
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/settings", "/settings/*"]
+    files: ["api/settings_routes/router.py"]
+
+  - id: operations
+    owner: operations
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes:
+      - /discovery
+      - /discovery/*
+      - /gungnir/*
+      - /queue/*
+      - /results
+      - /results/*
+      - /system/*
+      - /timeline
+      - /dashboard
+      - /artifacts/*
+    files: ["api/operations/router.py"]
+
+  - id: workflow-experiments
+    owner: test-builder
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    notes: >-
+      Bounded operator-authored test plans. Retained, but must move with the
+      Test Builder when the Research runtime is retired; it must not remain a
+      Research-owned execution surface.
+    routes: ["/experiments/*"]
+    files: ["api/research_routes/router.py"]
+
+  # ------------------------------------------------- separate host services
+  - id: model-intake-runner-service
+    owner: model-intake
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    standalone_service: true
+    routes: ["/internal/model-intake/runner/*"]
+    files: ["api/model_intake_runner_service.py"]
+
+  - id: model-intake-signer-service
+    owner: model-intake
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    standalone_service: true
+    routes: ["/internal/model-intake/admissions/*"]
+    files: ["api/model_intake_signer_service.py"]
+
+  - id: model-intake-admission-webhook
+    owner: model-intake
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: true
+    standalone_service: true
+    routes: ["/validate"]
+    files: ["api/model_intake_admission_webhook.py"]
