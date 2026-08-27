@@ -302,7 +302,7 @@ def test_a_timed_out_batch_reports_a_timeout_not_truncated_output():
     """
     import pathlib
 
-    from api.scan.capability_result import CapabilityResultReason
+    from scan.capability_result import CapabilityResultReason
 
     adapter = (
         pathlib.Path(__file__).resolve().parent.parent
@@ -324,7 +324,7 @@ def test_the_planner_and_the_adapter_share_one_set_of_floors():
     worth starting. When those read different numbers, a batch declares more
     candidates than its own reservation can pay for and reports partial forever.
     """
-    from api.scan.external_process import BATCH_ATTEMPT_FLOORS, batch_attempt_capacity
+    from scan.external_process import BATCH_ATTEMPT_FLOORS, batch_attempt_capacity
 
     assert agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS["dalfox"] == (
         BATCH_ATTEMPT_FLOORS["xss.verify_batch"]

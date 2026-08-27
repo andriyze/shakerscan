@@ -532,7 +532,7 @@ def test_mutating_work_is_counted_from_the_entry_class_not_the_input_field():
     field. api/worker.py counted mutating child work with entry["safe_method"]
     and raised KeyError on every parallel child that had request entries.
     """
-    from scan.work_manifests import (
+    from api.scan.work_manifests import (
         MUTATING_REQUEST_CLASSES, REQUEST_CLASSES, entry_is_mutating,
     )
 
@@ -546,7 +546,7 @@ def test_mutating_work_is_counted_from_the_entry_class_not_the_input_field():
 
 def test_request_manifest_entries_never_carry_safe_method():
     """Guards the schema the counter depends on."""
-    import scan.work_manifests as wm
+    import api.scan.work_manifests as wm
 
     route = _endpoint_manifest().entries[0]["route_id"]
     manifest = wm.build_request_manifest(
