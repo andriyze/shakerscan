@@ -1,4 +1,8 @@
 from pathlib import Path
+
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
 import sys
 
 
@@ -20,7 +24,7 @@ def test_shipped_skill_routes_admission_away_from_legacy_preflight():
 
 def test_model_intake_skill_covers_the_same_controlled_api_and_planner_catalog():
     reference = (ROOT / "skills/shakerscan/references/model-intake.md").read_text()
-    api_source = (ROOT / "api/api.py").read_text()
+    api_source = api_tree_source()
     required_routes = (
         "/model-intake/submissions",
         "/static-runs",

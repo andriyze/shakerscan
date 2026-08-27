@@ -40,3 +40,26 @@ export const HUNT_SESSION_NON_AUTONOMOUS_NOTICE =
   'This agent session is open for planner actions. It does not investigate ' +
   'autonomously and is not running background traffic; network activity occurs ' +
   'only when your coding agent submits a permitted capability call.'
+
+
+/**
+ * Capacity tooltip for the dashboard worker chip.
+ *
+ * When Fleet is disabled there are no remote workers, so the label must not
+ * qualify the count as "local" or mention "remote" -- doing so implies a
+ * multi-node deployment that does not exist.
+ */
+export function workerCapacityLabel(options: {
+  fleetEnabled: boolean
+  totalAvailable: number
+  localAvailable: number
+  remoteAvailable: number
+}): string {
+  const { fleetEnabled, totalAvailable, localAvailable, remoteAvailable } = options
+  if (fleetEnabled) {
+    return `${totalAvailable} available: ${localAvailable} local, ${remoteAvailable} remote`
+  }
+  const noun = pluralize(localAvailable, 'worker')
+  const verb = localAvailable === 1 ? 'is' : 'are'
+  return `${localAvailable} current-build ${noun} ${verb} schedulable`
+}

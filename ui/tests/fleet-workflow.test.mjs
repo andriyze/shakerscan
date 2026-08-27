@@ -40,3 +40,28 @@ test('dashboard distinguishes logical scans, worker jobs, and worker processes',
   assert.match(dashboard, /workers · limit/)
   assert.doesNotMatch(dashboard, /\{workerCount\} running · max/)
 })
+
+
+test('worker capacity copy never implies remote workers when Fleet is off', async () => {
+  const { workerCapacityLabel } = await import('../src/lib/labels.ts')
+  // Fleet disabled: no "local"/"remote" qualifier, because there is no second
+  // node to distinguish from. Saying "N local workers" implies a fleet exists.
+  for (const n of [0, 1, 2, 7]) {
+    const label = workerCapacityLabel({
+      fleetEnabled: false, totalAvailable: n, localAvailable: n, remoteAvailable: 0,
+    })
+    assert.doesNotMatch(label, /\blocal\b/)
+    assert.doesNotMatch(label, /\bremote\b/)
+    assert.match(label, new RegExp(`^${n} current-build worker`))
+  }
+  assert.match(
+    workerCapacityLabel({ fleetEnabled: false, totalAvailable: 1, localAvailable: 1, remoteAvailable: 0 }),
+    /1 current-build worker is schedulable/,
+  )
+  // Fleet enabled: the split is meaningful and remote is reported last.
+  const fleet = workerCapacityLabel({
+    fleetEnabled: true, totalAvailable: 5, localAvailable: 3, remoteAvailable: 2,
+  })
+  assert.match(fleet, /5 available: 3 local, 2 remote/)
+  assert.ok(fleet.indexOf('local') < fleet.indexOf('remote'))
+})

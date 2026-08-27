@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { workerCountLabel } from '@/lib/labels'
+import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
 import Link from 'next/link'
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
 import {
@@ -309,9 +309,12 @@ export default function Dashboard() {
           <div
             id="workers"
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
-            title={workersError || (fleetEnabled
-              ? `${totalAvailable} available: ${localAvailable} local, ${remoteAvailable} remote`
-              : `${localAvailable} current-build workers are schedulable`)}
+            title={workersError || workerCapacityLabel({
+              fleetEnabled,
+              totalAvailable,
+              localAvailable,
+              remoteAvailable,
+            })}
           >
             <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">

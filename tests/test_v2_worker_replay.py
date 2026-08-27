@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.api_sources import (
+    api_tree_source, definition_source, route_is_declared, route_source,
+)
+
 from api.runtime.budget_reservations import DurableBudgetReservation
 from api.runtime.models import TargetBinding
 from api.runtime.pinned_http_replay import PinnedAiohttpReplayTransport
@@ -223,10 +227,7 @@ def test_pinned_replay_fails_over_in_stable_order_and_reports_the_real_peer():
 
 
 def test_hunt_api_never_decrypts_collection_replay_payloads():
-    source = open("api/api.py", encoding="utf-8").read()
-    start = source.index("async def _enqueue_hunt_replay_capability")
-    end = source.index("\n\nasync def _validate_hunt_credential_references", start)
-    replay_helper = source[start:end]
+    replay_helper = definition_source("_enqueue_hunt_replay_capability")
     assert "decrypt_secret" not in replay_helper
     assert '"type": "request_collection_replay"' in replay_helper
     assert "expected_payload_sha256" in replay_helper
