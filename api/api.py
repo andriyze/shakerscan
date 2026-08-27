@@ -10980,6 +10980,9 @@ def _compile_scan_admission_surface_work_manifests(
     candidate_manifest = build_candidate_manifest(
         endpoint_manifest,
         source_action_ids=("admission.surface",),
+        # A body field can only be reached by a state-changing request, so it enters the manifest
+        # only when the scan actually holds that authority.
+        allow_state_changing_http=bool(scan_contract.policy.allow_state_changing_http),
         maximum=max(
             1,
             min(
@@ -11011,10 +11014,6 @@ def _compile_scan_template_work_manifest(
         target_binding_digest=target_binding.digest,
         include_active=policy.active_testing and active_enabled,
     )
-
-
-
-
 
 
 async def _parse_public_json_model(

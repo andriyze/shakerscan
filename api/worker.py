@@ -15281,6 +15281,7 @@ def _compile_parallel_child_work_manifests(
     candidate_manifest = build_candidate_manifest(
         endpoint_manifest,
         source_action_ids=("parallel.plan",),
+        allow_state_changing_http=bool(parent_job.execution_plan.policy.allow_state_changing_http),
         maximum=max(
             1,
             min(

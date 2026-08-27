@@ -349,13 +349,21 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         name="query_parameter_names",
         maximum=64,
     )
-    if parameter not in query_names:
-        raise ScanWorkManifestError(
-            "candidate parameter is absent from query_parameter_names"
-        )
     body_names = _string_list(
         value["body_field_names"], name="body_field_names", maximum=128,
     )
+    # A candidate names exactly one injection point, and it must exist where the entry says it is.
+    # body_field_names being non-empty is what marks the candidate as testing a request body.
+    in_body = bool(body_names)
+    if in_body:
+        if parameter not in body_names:
+            raise ScanWorkManifestError(
+                "candidate parameter is absent from body_field_names"
+            )
+    elif parameter not in query_names:
+        raise ScanWorkManifestError(
+            "candidate parameter is absent from query_parameter_names"
+        )
     content_type = _token(
         value["content_type"], name="content_type", optional=True,
     )
@@ -364,7 +372,12 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if not family_hints or not set(family_hints) <= {"xss", "sqli"}:
         raise ScanWorkManifestError("candidate family_hints are invalid")
-    expected_id = _digest({"route_id": route, "method": method, "parameter_name": parameter})
+    identity: dict[str, Any] = {
+        "route_id": route, "method": method, "parameter_name": parameter,
+    }
+    if in_body:
+        identity["location"] = "body"
+    expected_id = _digest(identity)
     if _hex(value["candidate_id"], name="candidate_id") != expected_id:
         raise ScanWorkManifestError("candidate_id does not match candidate identity")
     lane = _token(value["auth_lane"], name="auth_lane", optional=True)
@@ -879,8 +892,14 @@ def build_candidate_manifest(
     *,
     source_action_ids: Sequence[str],
     maximum: int,
+    allow_state_changing_http: bool = False,
 ) -> ScanWorkManifest:
-    """Rank every query candidate and freeze the deterministic bounded top set."""
+    """Rank every candidate and freeze the deterministic bounded top set.
+
+    Body fields are injection points too -- for most modern APIs the only ones -- but reaching them
+    needs a state-changing request, so they are admitted only when the scan holds that authority.
+    The default is closed: a caller that does not state its authority gets the query-only surface.
+    """
     if endpoint_manifest.kind is not ScanWorkManifestKind.ENDPOINT:
         raise ScanWorkManifestError("candidate source must be an endpoint manifest")
     limit = _integer(maximum, name="candidate maximum", minimum=1, maximum=20_000)
@@ -908,11 +927,11 @@ def build_candidate_manifest(
     }
 
     def ranked_candidate(
-        endpoint: Mapping[str, Any], parameter: str,
+        endpoint: Mapping[str, Any], parameter: str, *, in_body: bool = False,
     ) -> dict[str, Any]:
         normalized_name = parameter.lower().replace("-", "_")
         score = 30
-        rationale = ["parameterized_query"]
+        rationale = ["parameterized_body" if in_body else "parameterized_query"]
         source_score, source_reason = source_points.get(
             str(endpoint["source_tool"]), (2, "other_admitted_source"),
         )
@@ -921,6 +940,12 @@ def build_candidate_manifest(
         if endpoint["method"] == "GET":
             score += 8
             rationale.append("synthetic_get_supported")
+        elif in_body:
+            # A body field is a first-class injection point -- most modern APIs have no other --
+            # but reaching it requires a state-changing request, so it ranks below an equivalent
+            # query parameter rather than above it.
+            score += 4
+            rationale.append("state_changing_request_required")
         if endpoint["request_ref_ids"]:
             score += 18
             rationale.append("exact_request_reference")
@@ -933,11 +958,16 @@ def build_candidate_manifest(
         if normalized_name in sqli_names or normalized_name.endswith("_id"):
             score += 10
             rationale.append("sqli_semantic_parameter")
-        candidate_id = _digest({
+        identity: dict[str, Any] = {
             "route_id": endpoint["route_id"],
             "method": endpoint["method"],
             "parameter_name": parameter,
-        })
+        }
+        if in_body:
+            # Only a body candidate carries the location, so a query candidate's id is byte-identical
+            # to what earlier builds produced and stored manifests still validate.
+            identity["location"] = "body"
+        candidate_id = _digest(identity)
         return {
             "candidate_id": candidate_id,
             "route_id": endpoint["route_id"],
@@ -945,8 +975,13 @@ def build_candidate_manifest(
             "canonical_path": endpoint["canonical_path"],
             "parameter_name": parameter,
             "query_parameter_names": list(endpoint["query_parameter_names"]),
-            "body_field_names": [],
-            "content_type": None,
+            "body_field_names": (
+                list(endpoint.get("body_field_names") or ()) if in_body else []
+            ),
+            "content_type": (
+                (str(endpoint.get("content_type")) if endpoint.get("content_type") else None)
+                if in_body else None
+            ),
             "family_hints": ["xss", "sqli"],
             "source_tool": endpoint["source_tool"],
             "source_observation_ref": None,
@@ -966,10 +1001,19 @@ def build_candidate_manifest(
     selected: list[tuple[tuple[int, int], dict[str, Any]]] = []
     candidate_count = 0
     for endpoint in endpoint_manifest.entries:
+        # A non-GET endpoint used to be skipped outright, so an application whose injectable
+        # surface is a JSON body produced no candidates at all. Query parameters and declared body
+        # fields are both injection points; the planner decides which it holds authority to test.
+        locations: list[tuple[str, bool]] = [
+            (str(name), False) for name in endpoint["query_parameter_names"]
+        ]
         if endpoint["method"] != "GET":
-            continue
-        for parameter in endpoint["query_parameter_names"]:
-            candidate = ranked_candidate(endpoint, str(parameter))
+            locations = (
+                [(str(name), True) for name in endpoint.get("body_field_names") or ()]
+                if allow_state_changing_http else []
+            )
+        for parameter, in_body in locations:
+            candidate = ranked_candidate(endpoint, parameter, in_body=in_body)
             candidate_count += 1
             heap_key = (
                 int(candidate["score"]),
@@ -1497,3 +1541,78 @@ def execution_url_for_manifest_candidate(
     return execution_url_for_endpoint(
         endpoint, parameter_name=str(candidate["parameter_name"]),
     )
+
+
+def execution_request_for_manifest_candidate(
+    endpoint_manifest: ScanWorkManifest,
+    candidate_manifest: ScanWorkManifest,
+    index: int,
+) -> dict[str, Any]:
+    """Resolve one candidate into the exact request that tests it.
+
+    A query candidate is fully described by a URL, which is why the older resolver returns one. A
+    body candidate is not: the field lives in a request body, so the caller needs the method, the
+    content type and the field set as well. Both are resolved here against the immutable endpoint
+    manifest, so a candidate can never name a field its own endpoint does not declare.
+    """
+    if (
+        endpoint_manifest.kind is not ScanWorkManifestKind.ENDPOINT
+        or candidate_manifest.kind is not ScanWorkManifestKind.CANDIDATE
+    ):
+        raise ScanWorkManifestError(
+            "candidate execution requires endpoint and candidate manifests"
+        )
+    if (
+        endpoint_manifest.target_binding_digest
+        != candidate_manifest.target_binding_digest
+    ):
+        raise ScanWorkManifestError("candidate and endpoint target authority differs")
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ScanWorkManifestError("candidate manifest index is invalid")
+    try:
+        candidate = candidate_manifest.entries[index]
+    except IndexError as exc:
+        raise ScanWorkManifestError(
+            "candidate manifest index is outside immutable content"
+        ) from exc
+    body_fields = list(candidate.get("body_field_names") or ())
+    if not body_fields:
+        return {
+            "method": "GET",
+            "url": execution_url_for_manifest_candidate(
+                endpoint_manifest, candidate_manifest, index,
+            ),
+            "content_type": None,
+            "field_name": str(candidate["parameter_name"]),
+            "body_field_names": [],
+        }
+    endpoint = next(
+        (
+            item for item in endpoint_manifest.entries
+            if item["route_id"] == candidate["route_id"]
+        ),
+        None,
+    )
+    if endpoint is None:
+        raise ScanWorkManifestError(
+            "candidate route is absent from its endpoint manifest"
+        )
+    declared = list(endpoint.get("body_field_names") or ())
+    if (
+        endpoint["method"] != candidate["method"]
+        or endpoint["canonical_path"] != candidate["canonical_path"]
+        or str(candidate["parameter_name"]) not in declared
+        or sorted(body_fields) != sorted(declared)
+    ):
+        raise ScanWorkManifestError(
+            "candidate identity conflicts with its endpoint manifest"
+        )
+    return {
+        "method": str(endpoint["method"]),
+        "url": execution_url_for_endpoint(endpoint, parameter_name=None),
+        "content_type": (
+            str(candidate["content_type"]) if candidate.get("content_type") else None
+        ),
+        "field_name": str(candidate["parameter_name"]),
+        "body_field_names": sorted(declared),
+    }
