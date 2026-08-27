@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .run_service import agent_tools
 from .cancellation import HuntCancellationWatch
+from .settlement import blocked_actual_charges as _hunt_blocked_actual
 from .device_policy import DeviceHuntPolicyState
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -991,6 +992,13 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
 
 
+# Mirror of the fan-out `_device_verify_candidate_tool` performs. A test pins these against the
+# values it actually passes, so the reservation cannot drift away from the traffic it authorizes.
+_DEVICE_VERIFICATION_WEB_CONTRACTS: frozenset[str] = frozenset({"device.tls", "device.auth_bypass"})
+_DEVICE_VERIFICATION_WEB_SCAN_TYPE = "standard"
+_DEVICE_VERIFICATION_MAX_WEB_ORIGINS = 8
+
+
 class HuntCandidateVerifyRequest(BaseModel):
     """Optional body for a candidate verification.
 
@@ -1553,7 +1561,22 @@ async def _execute_hunt_capability_lifecycle(
                         contract_id = str(
                             candidate_record["verifier_contract_id"] or ""
                         )
-                        charges["device_fragility_points"] = 1
+                        # A device verification performs no traffic itself: it queues a device scan
+                        # that sweeps the inventory profile's ports and may fan out to web children
+                        # with their own imported-request ceilings. A flat parent charge let a small
+                        # reservation authorize all of it, so the Hunt's budget bound the parent
+                        # action and nothing beneath it. Charge the complete fan-out instead, derived
+                        # from the same constants it uses, so an unaffordable fan-out is refused at
+                        # reservation rather than discovered as downstream traffic.
+                        charges.update(device_agent.device_verification_fanout_budget(
+                            contract_id=contract_id,
+                            web_scan_type=_DEVICE_VERIFICATION_WEB_SCAN_TYPE,
+                            max_web_origins=(
+                                _DEVICE_VERIFICATION_MAX_WEB_ORIGINS
+                                if contract_id in _DEVICE_VERIFICATION_WEB_CONTRACTS
+                                else 0
+                            ),
+                        ))
                         if contract_id == "device.service_exposure":
                             locus = _hunt_json(
                                 candidate_record["canonical_locus"], {}
@@ -1564,10 +1587,6 @@ async def _execute_hunt_capability_lifecycle(
                                 else "tcp_ports_attempted"
                             )
                             charges[transport_dimension] = 1
-                        elif contract_id not in {
-                            "device.control_authorization", "device.firmware_advisory",
-                        }:
-                            charges["http_requests"] = 40
                     else:
                         charges["http_requests"] = 24
                         charges["browser_actions"] = 12
@@ -2439,21 +2458,14 @@ async def _execute_hunt_capability_lifecycle(
                     if dimension in charges:
                         actual_charges[dimension] = int(charges[dimension])
             if status == "blocked":
-                for dimension in charges:
-                    if dimension not in {"agent_actions", "active_actions"}:
-                        actual_charges[dimension] = 0
-                if device_http_attempted:
-                    actual_charges["http_requests"] = min(
-                        1, int(charges.get("http_requests") or 0)
-                    )
-                    actual_charges["device_fragility_points"] = min(
-                        1,
-                        int(charges.get("device_fragility_points") or 0),
-                    )
-                    actual_charges["tool_wall_seconds"] = min(
-                        int(charges.get("tool_wall_seconds") or 0),
-                        max(1, elapsed_wall),
-                    )
+                actual_charges = _hunt_blocked_actual(
+                    charges,
+                    actual_charges,
+                    executed=capability_execution is not None,
+                    enqueued=bool(device_queue_enqueued),
+                    device_http_attempted=bool(device_http_attempted),
+                    elapsed_wall=elapsed_wall,
+                )
             if (
                 is_device_queue
                 and not device_queue_enqueued

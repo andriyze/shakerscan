@@ -37,6 +37,76 @@ except ModuleNotFoundError:  # pragma: no cover - package import in host tests
         match_advisories,
     )
 
+try:
+    from scanner_tools.device_posture import INVENTORY_UDP_PORTS, PROFILES as DEVICE_SCAN_PROFILES
+    from scanner_tools.device_web import IMPORTED_REQUEST_LIMITS
+    from scanner_tools.device_application import REQUEST_BUDGETS as DEVICE_PROBE_BUDGETS
+except ModuleNotFoundError:  # pragma: no cover - package import in host tests
+    from scanner.scanner_tools.device_posture import INVENTORY_UDP_PORTS, PROFILES as DEVICE_SCAN_PROFILES
+    from scanner.scanner_tools.device_web import IMPORTED_REQUEST_LIMITS
+    from scanner.scanner_tools.device_application import REQUEST_BUDGETS as DEVICE_PROBE_BUDGETS
+
+
+# Contracts that answer from stored evidence and queue no device traffic at all.
+NON_QUEUEING_VERIFIER_CONTRACTS: frozenset[str] = frozenset({
+    "device.control_authorization",
+    "device.firmware_advisory",
+})
+
+# The verification fan-out uses the `inventory` profile; see _device_verify_candidate_tool.
+VERIFICATION_SCAN_PROFILE = "inventory"
+
+
+def _inventory_tcp_port_count() -> int:
+    """Return how many TCP ports the verification fan-out's profile sweeps."""
+    profile = DEVICE_SCAN_PROFILES.get(VERIFICATION_SCAN_PROFILE)
+    arguments = tuple(getattr(profile, "tcp_args", ()) or ())
+    for index, argument in enumerate(arguments):
+        if str(argument) == "-p-":
+            return 65_535
+        if str(argument) == "--top-ports":
+            try:
+                return int(arguments[index + 1])
+            except (IndexError, TypeError, ValueError):
+                break
+    # An unrecognised port specification is charged as a full sweep: under-reserving is what let
+    # the fan-out escape the Hunt's budget in the first place.
+    return 65_535
+
+
+def device_verification_fanout_budget(
+    *, contract_id: str, web_scan_type: str = "standard", max_web_origins: int = 0,
+) -> dict[str, int]:
+    """Return the complete downstream budget one device candidate verification can queue.
+
+    A device verification does not do its own traffic: it queues a device scan, and that scan
+    sweeps the inventory profile's ports and may fan out to `max_web_origins` web children, each
+    with its own imported-request ceiling. Charging the Hunt a flat parent cost let a small
+    reservation authorize all of that, so budget-before-execution held for the parent action and
+    nothing beneath it. Deriving the charge from the same constants the fan-out uses keeps the two
+    from drifting apart: raise a child ceiling and the parent's reservation rises with it.
+    """
+    contract = str(contract_id or "")
+    if contract in NON_QUEUEING_VERIFIER_CONTRACTS:
+        return {}
+    budget: dict[str, int] = {"device_fragility_points": 1}
+    if contract == "device.service_exposure":
+        # One fixed transport/port probe; the caller adds the transport dimension it verifies.
+        budget["http_requests"] = 0
+        budget["tcp_ports_attempted"] = 1
+        return budget
+    budget["tcp_ports_attempted"] = _inventory_tcp_port_count()
+    budget["udp_ports_attempted"] = len(INVENTORY_UDP_PORTS)
+    # Every queued web child may replay up to its scan type's imported-request ceiling, and the
+    # scan itself probes the device application surface.
+    per_child = int(IMPORTED_REQUEST_LIMITS.get(str(web_scan_type), IMPORTED_REQUEST_LIMITS["standard"]))
+    origins = max(0, int(max_web_origins))
+    budget["http_requests"] = (
+        origins * per_child
+        + int(DEVICE_PROBE_BUDGETS.get(VERIFICATION_SCAN_PROFILE, 8))
+    )
+    return {name: int(amount) for name, amount in budget.items() if int(amount) >= 0}
+
 
 CALLABLE_TOOL_NAMES = {
     "inspect_device",
