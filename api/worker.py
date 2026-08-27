@@ -55,7 +55,7 @@ from retest_contract import (
     run_schema_migrations,
     validate_retest_job_payload,
 )
-from runtime.json_fields import json_array_field, json_object_field
+from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
 import parallel_scan
 import asm_inventory
 import family_proof
@@ -3006,19 +3006,12 @@ def _add_parent_union_finding(union: dict[str, dict], fingerprint: str, finding:
 
 
 def _strip_null_bytes(value):
-    """Recursively remove NUL (\\x00) from strings. PostgreSQL text/JSONB cannot
-    store \\u0000 — asyncpg raises UntranslatableCharacterError, which crashed
-    finding persistence and left the scan stuck mid-finalize (until the stale
-    checker reaped it, discarding ALL results). NUL bytes reach findings via binary
-    content harvested through the encoded-null-byte file-exposure bypass and other
-    raw response captures. Stripping at the DB-write boundary fixes it universally."""
-    if isinstance(value, str):
-        return value.replace("\x00", "") if "\x00" in value else value
-    if isinstance(value, dict):
-        return {k: _strip_null_bytes(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_strip_null_bytes(v) for v in value]
-    return value
+    """Recursively remove NUL from strings bound for PostgreSQL.
+
+    Kept as the worker-local name for the shared DB-boundary sanitizer: NUL
+    reaches findings through binary content captured by raw response reads,
+    and asyncpg rejects it for text and jsonb alike."""
+    return strip_null_bytes(value)
 
 
 async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, evidence_redacted,

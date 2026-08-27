@@ -232,3 +232,29 @@ def test_scan_action_recovery_matches_the_declared_column_type():
     statement = statement[:statement.index('"""')]
     assert "reservation_id=$3::uuid" not in statement
     assert "reservation_id=$3" in statement
+
+
+def test_null_bytes_are_stripped_before_a_postgres_write():
+    """PostgreSQL text and jsonb both reject ``\\u0000``.
+
+    A probe that reads binary content -- a ``.pyc`` or ``.bak`` inside an
+    exposed directory -- captures NUL, and asyncpg then fails the whole
+    statement. That cost an entire batch action every attempt it had already
+    completed, rather than the single observation carrying the byte.
+    """
+    from api.runtime.json_fields import strip_null_bytes
+
+    payload = {
+        "url": "http://app.test/ftp/encrypt.pyc",
+        "excerpt": "head\x00tail",
+        "nested": [{"body": "\x00\x00"}, ("tuple\x00item",)],
+        "clean": "nothing to strip",
+        "count": 3,
+    }
+    stripped = strip_null_bytes(payload)
+    assert stripped["excerpt"] == "headtail"
+    assert stripped["nested"][0]["body"] == ""
+    assert stripped["nested"][1] == ["tupleitem"]
+    assert stripped["clean"] == "nothing to strip"
+    assert stripped["count"] == 3
+    assert "\x00" not in json.dumps(stripped)

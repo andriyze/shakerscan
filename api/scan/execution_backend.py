@@ -43,6 +43,7 @@ try:  # Preserve one class identity under api.scan.* host imports.
         ObservationStoreError,
         PostgresObservationManifestStore,
     )
+    from ..runtime.json_fields import strip_null_bytes
     from ..runtime.receipts import CapabilityReceipt
     from ..runtime.reservation_store import PostgresBudgetReservationStore
 except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
@@ -50,6 +51,7 @@ except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
         ObservationStoreError,
         PostgresObservationManifestStore,
     )
+    from runtime.json_fields import strip_null_bytes
     from runtime.receipts import CapabilityReceipt
     from runtime.reservation_store import PostgresBudgetReservationStore
 
@@ -1138,11 +1140,16 @@ class PostgresScanExecutionBackend:
             str(name): max(0, int(amount))
             for name, amount in dict(attempt.get("budget_consumed") or {}).items()
         }
-        observations = [
+        # Binary content captured by a probe carries NUL, which jsonb rejects
+        # outright; one such byte failed the whole batch action and discarded
+        # every attempt it had already checkpointed.
+        observations = strip_null_bytes([
             dict(item) for item in attempt.get("observations") or ()
             if isinstance(item, Mapping)
-        ]
-        errors = [str(item)[:500] for item in attempt.get("errors") or ()][:20]
+        ])
+        errors = strip_null_bytes(
+            [str(item)[:500] for item in attempt.get("errors") or ()][:20]
+        )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO scan_action_attempt_checkpoints (

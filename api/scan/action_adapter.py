@@ -1563,6 +1563,10 @@ class DatabaseNeutralScanActionDispatcher:
         http_ceiling = int(action.requested_budget.get("http_requests") or 0)
         wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         attempted = resumed = 0
+        # Directory-listing follow-up is bounded independently of the sweep so a
+        # browsable directory can never starve the probe list that found it.
+        follow_up_ceiling = max(10, http_ceiling // 10)
+        follow_up_spent = 0
 
         async def probe(url: str, ordinal: int) -> Any:
             nonlocal consumed
@@ -1619,6 +1623,14 @@ class DatabaseNeutralScanActionDispatcher:
                     for link in directory_listing_links(result.response_body, limit=10):
                         if self.cancelled() or consumed["http_requests"] >= http_ceiling:
                             break
+                        # Follow-up gets a small fixed share of the batch, not
+                        # whatever the primary sweep has not spent yet. Letting
+                        # it borrow against the remainder drained the ceiling on
+                        # one directory's children and abandoned the rest of the
+                        # sweep, costing this batch /ftp and /metrics.
+                        if follow_up_spent >= follow_up_ceiling:
+                            break
+                        follow_up_spent += 1
                         child_url = _directory_listing_child_url(probe_url, link)
                         if urllib.parse.urlsplit(child_url).netloc != \
                                 urllib.parse.urlsplit(probe_url).netloc:
