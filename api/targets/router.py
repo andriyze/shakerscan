@@ -62,6 +62,7 @@ try:
     from scan.contracts import (
         bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
+    from action_scope import scope_origin_matches_target
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -95,6 +96,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.contracts import (
         bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
+    from ..action_scope import scope_origin_matches_target
     from ..scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from ..scan.manifest_store import PostgresScanManifestStore
     from ..secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -661,6 +663,19 @@ async def create_target(request: TargetCreate):
             if target_note:
                 response['warning'] = target_note
                 response['original_url'] = request.url
+            # Web identity is host-level, so a different scheme or port resolves to an existing
+            # target rather than creating a new one. That merge is deliberate, but returning only
+            # an id let a caller believe it had registered the origin it asked for: a scope receipt
+            # and a Hunt were then bound to one application while the work ran against another on
+            # the same host, and the result looked correct. Say so explicitly.
+            if not scope_origin_matches_target(request.url, row['url']):
+                response['origin_merged'] = True
+                response['requested_url'] = request.url
+                response['warning'] = (
+                    f"{request.url} resolves to the existing host-level target {row['url']}; "
+                    "web targets are identified by host, so scans, scope receipts and Hunts bound "
+                    "to this id address that origin, not the one requested."
+                )
             return response
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Target already exists")

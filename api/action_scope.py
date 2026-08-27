@@ -117,6 +117,34 @@ def _receipt_id(input_payload: dict[str, Any], verdict: str, blocked_by: tuple[s
     return digest[:32]
 
 
+def scope_origin_matches_target(scope_url: Any, target_url: Any) -> bool:
+    """True when a scope URL and its bound target describe the same origin.
+
+    Web target identity is host-level, so `http://host:1111` and `http://host:2222` resolve to one
+    target row. That merge is deliberate, but it means a scope receipt can be written for an origin
+    the scan will never touch: the receipt then attests to a subject nobody examined. Path is
+    ignored -- narrowing a scope to a route is legitimate -- while scheme, host and port must agree.
+    An unparseable or absent side is not a match: unknown identity is exactly what must not be
+    attested to.
+    """
+    def origin(value: Any) -> tuple[str, str, int] | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = urllib.parse.urlsplit(text)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            scheme = parsed.scheme.lower()
+            if scheme not in {"http", "https"} or not host:
+                return None
+            port = parsed.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            return None
+        return scheme, host, int(port)
+
+    left, right = origin(scope_url), origin(target_url)
+    return bool(left and right and left == right)
+
 def evaluate_scope(
     raw_url: str,
     *,

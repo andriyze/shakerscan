@@ -72,7 +72,10 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 try:
     from evidence_routes.router import EvidenceInstanceRequest, _validate_evidence_retention_preview_payload
-    from action_scope import _decode_json_value, evaluate_scope, receipt_to_dict
+    from action_scope import (
+        _decode_json_value, evaluate_scope, receipt_to_dict,
+        scope_origin_matches_target as _scope_origin_matches_target,
+    )
     from api_utils import LEGACY_SCAN_WRITE_FIELDS, _ARSENAL_CREATED_BY_CONTEXT, _clean_string_list, _int_or_none, _json_safe_row, _optional_uuid, _uuid_or_400, utc_now, utc_now_iso
     from http_experiment import ExperimentContractError, execute_experiment
     from request_models import HypothesisRequest, ScanAdvancedLimits, ScanOptions
@@ -89,7 +92,10 @@ try:
     from targets import router as _targets
 except ModuleNotFoundError:  # package import in host-side tests
     from ..evidence_routes.router import EvidenceInstanceRequest, _validate_evidence_retention_preview_payload
-    from ..action_scope import _decode_json_value, evaluate_scope, receipt_to_dict
+    from ..action_scope import (
+        _decode_json_value, evaluate_scope, receipt_to_dict,
+        scope_origin_matches_target as _scope_origin_matches_target,
+    )
     from ..api_utils import LEGACY_SCAN_WRITE_FIELDS, _ARSENAL_CREATED_BY_CONTEXT, _clean_string_list, _int_or_none, _json_safe_row, _optional_uuid, _uuid_or_400, utc_now, utc_now_iso
     from ..http_experiment import ExperimentContractError, execute_experiment
     from ..request_models import HypothesisRequest, ScanAdvancedLimits, ScanOptions
@@ -368,6 +374,22 @@ async def arsenal_scope_preview(req: ScopePreviewRequest):
             target_uuid = uuid.UUID(str(req.target_id))
         except ValueError:
             raise HTTPException(status_code=400, detail="target_id must be a UUID when supplied")
+        async with _pool().acquire() as conn:
+            bound_target = await conn.fetchrow(
+                "SELECT url FROM targets WHERE id=$1", target_uuid,
+            )
+        if not bound_target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        if not _scope_origin_matches_target(req.url, bound_target["url"]):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "scope URL origin does not match the bound target, which resolves to "
+                    f"{bound_target['url']}. Web targets are identified by host, so a different "
+                    "scheme or port resolves to the same target row; a receipt written for another "
+                    "origin would attest to a subject the scan never reaches."
+                ),
+            )
     receipt = evaluate_scope(
         req.url,
         allowed_hosts=req.allowed_hosts,
