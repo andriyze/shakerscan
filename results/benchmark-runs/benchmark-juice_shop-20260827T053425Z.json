@@ -8,7 +8,7 @@
     "stale": 0,
     "pending": 0,
     "fingerprints": [
-      "4bd13722cbd2ee87"
+      "3020b68af10c8c36"
     ]
   },
   "fleet_uniform": true,
@@ -16,8 +16,8 @@
   "seed_hypotheses": false,
   "targets": [
     {
-      "total_findings": 203,
-      "verified_high_critical": 12,
+      "total_findings": 196,
+      "verified_high_critical": 5,
       "verified_high_critical_families": [
         "sensitive_exposure"
       ],
@@ -69,14 +69,6 @@
           "proof": "deterministic",
           "min_severity": "high",
           "evidence": "Sensitive exposure: metrics endpoint"
-        },
-        {
-          "id": "exposed-confidential",
-          "family": "sensitive_exposure",
-          "route": "/ftp/acquisitions.md",
-          "proof": "deterministic",
-          "min_severity": "high",
-          "evidence": "Sensitive exposure: confidential file"
         }
       ],
       "expected_missed": [
@@ -116,6 +108,14 @@
           "id": "bfla-users",
           "family": "broken_access_control",
           "route": "/api/Users",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "exposed-confidential",
+          "family": "sensitive_exposure",
+          "route": "/ftp/acquisitions.md",
           "proof": "deterministic",
           "min_severity": "high",
           "evidence": null
@@ -255,6 +255,21 @@
           }
         },
         {
+          "id": "benchmark-miss:juice-shop:exposed-confidential",
+          "benchmark": "juice-shop",
+          "expectation_id": "exposed-confidential",
+          "family": "sensitive_exposure",
+          "route": "/ftp/acquisitions.md",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "detector_gap",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": null,
+          "developer_note": "No focused-family executor currently maps this benchmark family; improve the generic detector or add a registered executor before this miss can be campaign-queued."
+        },
+        {
           "id": "benchmark-miss:juice-shop:nosqli-reviews",
           "benchmark": "juice-shop",
           "expectation_id": "nosqli-reviews",
@@ -290,28 +305,28 @@
         "telemetry_anomalies": [],
         "families": {}
       },
-      "expected_recall": 0.33,
+      "expected_recall": 0.22,
       "family_coverage": [
         {
           "family": "nosqli",
-          "reason": null,
+          "reason": "zero_attempts",
           "required": true,
           "selected": true,
           "batch_actions": 1,
           "budget_consumed": {
-            "http_requests": 16,
-            "tool_wall_seconds": 4
+            "http_requests": 32,
+            "tool_wall_seconds": 29
           },
           "budget_reserved": {
             "http_requests": 32,
             "tool_wall_seconds": 29
           },
-          "coverage_status": "complete",
+          "coverage_status": "partial",
           "verified_findings": 0,
           "planned_candidates": 4,
           "suspected_findings": 0,
-          "attempted_candidates": 4,
-          "unattempted_candidates": 0
+          "attempted_candidates": 0,
+          "unattempted_candidates": 4
         },
         {
           "family": "nuclei_passive",
@@ -321,7 +336,7 @@
           "batch_actions": 4,
           "budget_consumed": {
             "http_requests": 1351,
-            "tool_wall_seconds": 193
+            "tool_wall_seconds": 194
           },
           "budget_reserved": {
             "http_requests": 1351,
@@ -341,7 +356,7 @@
           "selected": true,
           "batch_actions": 3,
           "budget_consumed": {
-            "http_requests": 239,
+            "http_requests": 229,
             "tool_wall_seconds": 225
           },
           "budget_reserved": {
@@ -349,10 +364,10 @@
             "tool_wall_seconds": 579
           },
           "coverage_status": "complete",
-          "verified_findings": 12,
+          "verified_findings": 5,
           "planned_candidates": 193,
           "suspected_findings": 0,
-          "attempted_candidates": 222,
+          "attempted_candidates": 220,
           "unattempted_candidates": 0
         },
         {
@@ -401,12 +416,14 @@
         }
       ],
       "selected_family_gaps": [
+        "nosqli",
         "sqli",
         "xss"
       ],
-      "family_attempt_failures": [],
+      "family_attempt_failures": [
+        "nosqli"
+      ],
       "attempted_families": [
-        "nosqli",
         "nuclei_passive",
         "sensitive_exposure",
         "sqli",
@@ -421,7 +438,7 @@
       "report_degraded": false,
       "report_invariant_violations": [],
       "two_user": false,
-      "scan_id": "71b6897a-3bdb-403a-9e36-2bcc9e4e280e",
+      "scan_id": "400ef582-61cc-47a3-a64b-7891b06c5c71",
       "target": "juice_shop",
       "gates": [
         {
@@ -446,8 +463,8 @@
         },
         {
           "gate": "selected_families_attempted",
-          "pass": true,
-          "detail": "all selected families attempted"
+          "pass": false,
+          "detail": "zero-attempt families: nosqli"
         },
         {
           "gate": "report_not_degraded",
@@ -456,8 +473,8 @@
         },
         {
           "gate": "min_verified_high_critical",
-          "pass": true,
-          "detail": "12 >= 6"
+          "pass": false,
+          "detail": "5 >= 6"
         },
         {
           "gate": "max_unverified_high_ratio",
@@ -478,8 +495,8 @@
       "passed": false,
       "scorecards": {
         "scan_finish": {
-          "total_findings": 203,
-          "verified_high_critical": 12,
+          "total_findings": 196,
+          "verified_high_critical": 5,
           "verified_high_critical_families": [
             "sensitive_exposure"
           ],
@@ -531,14 +548,6 @@
               "proof": "deterministic",
               "min_severity": "high",
               "evidence": "Sensitive exposure: metrics endpoint"
-            },
-            {
-              "id": "exposed-confidential",
-              "family": "sensitive_exposure",
-              "route": "/ftp/acquisitions.md",
-              "proof": "deterministic",
-              "min_severity": "high",
-              "evidence": "Sensitive exposure: confidential file"
             }
           ],
           "expected_missed": [
@@ -578,6 +587,14 @@
               "id": "bfla-users",
               "family": "broken_access_control",
               "route": "/api/Users",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
               "proof": "deterministic",
               "min_severity": "high",
               "evidence": null
@@ -717,6 +734,21 @@
               }
             },
             {
+              "id": "benchmark-miss:juice-shop:exposed-confidential",
+              "benchmark": "juice-shop",
+              "expectation_id": "exposed-confidential",
+              "family": "sensitive_exposure",
+              "route": "/ftp/acquisitions.md",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "detector_gap",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": null,
+              "developer_note": "No focused-family executor currently maps this benchmark family; improve the generic detector or add a registered executor before this miss can be campaign-queued."
+            },
+            {
               "id": "benchmark-miss:juice-shop:nosqli-reviews",
               "benchmark": "juice-shop",
               "expectation_id": "nosqli-reviews",
@@ -752,28 +784,28 @@
             "telemetry_anomalies": [],
             "families": {}
           },
-          "expected_recall": 0.33,
+          "expected_recall": 0.22,
           "family_coverage": [
             {
               "family": "nosqli",
-              "reason": null,
+              "reason": "zero_attempts",
               "required": true,
               "selected": true,
               "batch_actions": 1,
               "budget_consumed": {
-                "http_requests": 16,
-                "tool_wall_seconds": 4
+                "http_requests": 32,
+                "tool_wall_seconds": 29
               },
               "budget_reserved": {
                 "http_requests": 32,
                 "tool_wall_seconds": 29
               },
-              "coverage_status": "complete",
+              "coverage_status": "partial",
               "verified_findings": 0,
               "planned_candidates": 4,
               "suspected_findings": 0,
-              "attempted_candidates": 4,
-              "unattempted_candidates": 0
+              "attempted_candidates": 0,
+              "unattempted_candidates": 4
             },
             {
               "family": "nuclei_passive",
@@ -783,7 +815,7 @@
               "batch_actions": 4,
               "budget_consumed": {
                 "http_requests": 1351,
-                "tool_wall_seconds": 193
+                "tool_wall_seconds": 194
               },
               "budget_reserved": {
                 "http_requests": 1351,
@@ -803,7 +835,7 @@
               "selected": true,
               "batch_actions": 3,
               "budget_consumed": {
-                "http_requests": 239,
+                "http_requests": 229,
                 "tool_wall_seconds": 225
               },
               "budget_reserved": {
@@ -811,10 +843,10 @@
                 "tool_wall_seconds": 579
               },
               "coverage_status": "complete",
-              "verified_findings": 12,
+              "verified_findings": 5,
               "planned_candidates": 193,
               "suspected_findings": 0,
-              "attempted_candidates": 222,
+              "attempted_candidates": 220,
               "unattempted_candidates": 0
             },
             {
@@ -863,12 +895,14 @@
             }
           ],
           "selected_family_gaps": [
+            "nosqli",
             "sqli",
             "xss"
           ],
-          "family_attempt_failures": [],
+          "family_attempt_failures": [
+            "nosqli"
+          ],
           "attempted_families": [
-            "nosqli",
             "nuclei_passive",
             "sensitive_exposure",
             "sqli",
