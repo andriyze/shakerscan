@@ -19241,8 +19241,12 @@ async def _execute_agent_scanner_process(
         name,
         stdout,
         allowed_host=(
+            # Every crawl tool, not just the non-headless one. A browser follows
+            # the page's own third-party links, so without this filter off-origin
+            # URLs entered the observations and the runtime destination re-check
+            # correctly failed the whole scan as out of scope.
             urllib.parse.urlsplit(registered_target).hostname
-            if name == "katana"
+            if name in agent_tools.KATANA_TOOLS
             else None
         ),
     )

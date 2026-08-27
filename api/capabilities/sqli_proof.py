@@ -43,7 +43,11 @@ _SQL_ERROR_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
     r"unclosed quotation mark after the character string",
     r"postgresql.{0,40}(?:error|exception)",
     r"pg_query\(\)",
-    r"sqlite(?:3)?(?:error|_exception)",
+    # SQLITE_ERROR is the constant SQLite itself emits, and the separator was
+    # not optional: the pattern matched "sqlite3_exception" but not the far more
+    # common "SQLITE_ERROR", so an error-based injection that reproduced its
+    # differential twice was still withheld for want of a signature.
+    r"sqlite(?:3)?[ _-]?(?:error|exception)",
     r"ora-\d{4,5}",
     r"sqlstate\[[0-9a-z]+\]",
     r"syntax error.{0,80}(?:sql|query|database)",
@@ -297,6 +301,9 @@ class SQLiProofAdapter:
         } for control, payload in proof_pairs]
         observation = {
             "kind": "sqli_proof",
+            # The route is already value-free immutable manifest content, and a
+            # verified injection that cannot say where it is is not actionable.
+            "canonical_path": self.candidate.get("canonical_path"),
             "candidate_id": self.candidate.get("candidate_id"),
             "request_ref_id": self.candidate.get("request_ref_id"),
             "method": self.request.method,

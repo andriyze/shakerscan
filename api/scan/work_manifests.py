@@ -882,6 +882,10 @@ def build_candidate_manifest(
     source_points = {
         "collections.replay": (18, "exact_request_source"),
         "known_endpoints": (14, "admission_declared_source"),
+        # A request the application itself issued at run time is stronger
+        # evidence than a route parsed out of its source: the parameters are the
+        # ones the client actually sends, not ones inferred from a string.
+        "web.browser_crawl": (16, "browser_observed_source"),
         "web.crawl": (12, "crawler_observed_source"),
         "web.content_discover": (8, "content_discovery_source"),
         "web.probe": (6, "probe_observed_source"),

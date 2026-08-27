@@ -18,6 +18,7 @@ def test_durable_scanner_capability_set_is_explicit():
     assert scanners == {
         "sqli.verify",
         "templates.scan",
+        "web.browser_crawl",
         "web.content_discover",
         "web.crawl",
         "web.probe",

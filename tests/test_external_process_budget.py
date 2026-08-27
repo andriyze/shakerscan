@@ -238,3 +238,50 @@ def test_passive_nuclei_plan_rejects_a_forged_request_ceiling():
             pinned_address=PIN,
             pinned_proxy_url=PROXY,
         )
+
+
+def _batch_plan(tool, reserved):
+    paths = {"sqlmap_output_dir": "/tmp/sqlmap-scratch"} if tool == "sqlmap" else None
+    return agent_tools.build_enforced_scanner_plan(
+        tool, "https://app.example.test/search?q=1", {"_batch_attempt": True},
+        reserved_budget=reserved, runtime_paths=paths,
+    )
+
+
+def test_a_batched_attempt_is_paced_to_spend_what_it_reserved():
+    """The wall is the only runtime enforcement these tools have.
+
+    Nothing counts their requests, so the inter-request delay is what keeps
+    real traffic inside the reservation. A fixed one-second delay made the wall
+    bind long before the requests did: sqlmap needs roughly a hundred requests
+    to reach a verdict on an obvious injection and takes about two seconds
+    unpaced, but at one second apiece no slice a batch could afford let it
+    finish, so every attempt returned unproven.
+    """
+    plan = _batch_plan("sqlmap", {"http_requests": 160, "tool_wall_seconds": 30})
+    argv = list(plan.argv)
+    delay = float(argv[argv.index("--delay") + 1])
+    hard = dict(plan.hard_budget)
+    assert hard["http_requests"] <= 160 and hard["tool_wall_seconds"] <= 30
+    # The pacing must let the reserved requests fit inside the reserved wall.
+    assert delay * hard["http_requests"] <= hard["tool_wall_seconds"] + 1
+    # ...and still be slow enough that the wall bounds the traffic.
+    assert delay > 0
+
+
+def test_pacing_never_claims_more_requests_than_the_wall_can_cover():
+    """A wall too short for the reservation must lower the claim, not the delay."""
+    delay, affordable = agent_tools._batch_attempt_pacing(10_000, 5, minimum_seconds=0.05)
+    assert delay == 0.05
+    assert affordable <= int(5 / 0.05)
+    assert affordable < 10_000
+
+
+def test_both_batched_verifiers_declare_a_reachable_floor():
+    """Below its floor an attempt cannot reach a verdict and is not worth starting."""
+    for tool in ("sqlmap", "dalfox"):
+        floor = agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS[tool]
+        plan = _batch_plan(tool, floor)
+        hard = dict(plan.hard_budget)
+        assert hard["http_requests"] >= 100, tool
+        assert hard["tool_wall_seconds"] >= 20, tool

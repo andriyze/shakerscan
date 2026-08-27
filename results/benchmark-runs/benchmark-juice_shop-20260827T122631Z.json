@@ -8,7 +8,7 @@
     "stale": 0,
     "pending": 0,
     "fingerprints": [
-      "dc8ee7d92c199e5d"
+      "4cc2d73bac61159d"
     ]
   },
   "fleet_uniform": true,
@@ -16,11 +16,10 @@
   "seed_hypotheses": false,
   "targets": [
     {
-      "total_findings": 214,
-      "verified_high_critical": 13,
+      "total_findings": 213,
+      "verified_high_critical": 12,
       "verified_high_critical_families": [
-        "sensitive_exposure",
-        "sqli"
+        "sensitive_exposure"
       ],
       "browser_proven_high_critical_families": [],
       "suspected_high_critical": 0,
@@ -342,7 +341,7 @@
           "selected": true,
           "batch_actions": 3,
           "budget_consumed": {
-            "http_requests": 263,
+            "http_requests": 258,
             "tool_wall_seconds": 239
           },
           "budget_reserved": {
@@ -358,24 +357,24 @@
         },
         {
           "family": "sqli",
-          "reason": "candidates_unattempted",
+          "reason": "action_incomplete",
           "required": true,
           "selected": true,
           "batch_actions": 2,
           "budget_consumed": {
-            "http_requests": 804,
-            "tool_wall_seconds": 151
+            "http_requests": 936,
+            "tool_wall_seconds": 156
           },
           "budget_reserved": {
             "http_requests": 1040,
             "tool_wall_seconds": 250
           },
           "coverage_status": "partial",
-          "verified_findings": 1,
+          "verified_findings": 0,
           "planned_candidates": 26,
           "suspected_findings": 0,
-          "attempted_candidates": 6,
-          "unattempted_candidates": 20
+          "attempted_candidates": 13,
+          "unattempted_candidates": 13
         },
         {
           "family": "xss",
@@ -384,9 +383,9 @@
           "selected": true,
           "batch_actions": 2,
           "budget_consumed": {
-            "http_requests": 240,
+            "http_requests": 260,
             "browser_actions": 0,
-            "tool_wall_seconds": 60
+            "tool_wall_seconds": 78
           },
           "budget_reserved": {
             "http_requests": 910,
@@ -397,11 +396,12 @@
           "verified_findings": 0,
           "planned_candidates": 26,
           "suspected_findings": 0,
-          "attempted_candidates": 2,
-          "unattempted_candidates": 24
+          "attempted_candidates": 13,
+          "unattempted_candidates": 13
         }
       ],
       "selected_family_gaps": [
+        "sqli",
         "xss"
       ],
       "family_attempt_failures": [],
@@ -421,7 +421,7 @@
       "report_degraded": false,
       "report_invariant_violations": [],
       "two_user": false,
-      "scan_id": "8dbb05a9-127b-4aa6-97bf-11725c83eb68",
+      "scan_id": "6187c8d3-64c3-4c4b-98e3-c3e7c713bfbf",
       "target": "juice_shop",
       "gates": [
         {
@@ -457,7 +457,7 @@
         {
           "gate": "min_verified_high_critical",
           "pass": true,
-          "detail": "13 >= 6"
+          "detail": "12 >= 6"
         },
         {
           "gate": "max_unverified_high_ratio",
@@ -466,8 +466,8 @@
         },
         {
           "gate": "require_verified_sqli",
-          "pass": true,
-          "detail": "verified SQLi present"
+          "pass": false,
+          "detail": "no verified SQLi"
         },
         {
           "gate": "require_browser_proven_xss",
@@ -478,11 +478,10 @@
       "passed": false,
       "scorecards": {
         "scan_finish": {
-          "total_findings": 214,
-          "verified_high_critical": 13,
+          "total_findings": 213,
+          "verified_high_critical": 12,
           "verified_high_critical_families": [
-            "sensitive_exposure",
-            "sqli"
+            "sensitive_exposure"
           ],
           "browser_proven_high_critical_families": [],
           "suspected_high_critical": 0,
@@ -804,7 +803,7 @@
               "selected": true,
               "batch_actions": 3,
               "budget_consumed": {
-                "http_requests": 263,
+                "http_requests": 258,
                 "tool_wall_seconds": 239
               },
               "budget_reserved": {
@@ -820,24 +819,24 @@
             },
             {
               "family": "sqli",
-              "reason": "candidates_unattempted",
+              "reason": "action_incomplete",
               "required": true,
               "selected": true,
               "batch_actions": 2,
               "budget_consumed": {
-                "http_requests": 804,
-                "tool_wall_seconds": 151
+                "http_requests": 936,
+                "tool_wall_seconds": 156
               },
               "budget_reserved": {
                 "http_requests": 1040,
                 "tool_wall_seconds": 250
               },
               "coverage_status": "partial",
-              "verified_findings": 1,
+              "verified_findings": 0,
               "planned_candidates": 26,
               "suspected_findings": 0,
-              "attempted_candidates": 6,
-              "unattempted_candidates": 20
+              "attempted_candidates": 13,
+              "unattempted_candidates": 13
             },
             {
               "family": "xss",
@@ -846,9 +845,9 @@
               "selected": true,
               "batch_actions": 2,
               "budget_consumed": {
-                "http_requests": 240,
+                "http_requests": 260,
                 "browser_actions": 0,
-                "tool_wall_seconds": 60
+                "tool_wall_seconds": 78
               },
               "budget_reserved": {
                 "http_requests": 910,
@@ -859,11 +858,12 @@
               "verified_findings": 0,
               "planned_candidates": 26,
               "suspected_findings": 0,
-              "attempted_candidates": 2,
-              "unattempted_candidates": 24
+              "attempted_candidates": 13,
+              "unattempted_candidates": 13
             }
           ],
           "selected_family_gaps": [
+            "sqli",
             "xss"
           ],
           "family_attempt_failures": [],

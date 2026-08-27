@@ -2371,7 +2371,10 @@ def test_worker_runs_subdomain_discovery_inside_the_fixed_surface_stage():
     assert "class DatabaseNeutralScanActionDispatcher" in dispatcher
     assert '"ports.discover", "service.fingerprint", "subdomains.discover"' in dispatcher
     assert "return await self._network(action, heartbeat)" in dispatcher
-    assert '"web.probe", "web.crawl", "web.content_discover"' in dispatcher
+    # Membership, not formatting: asserting one exact source line meant adding a
+    # capability to the set broke the test purely by rewrapping it.
+    for external in ("web.probe", "web.crawl", "web.browser_crawl", "web.content_discover"):
+        assert f'"{external}"' in dispatcher
     assert "return await self._external(action, heartbeat)" in dispatcher
     assert "run_scan(" not in dispatcher
     assert "_execute_scan_subdomain_discovery(" not in standalone

@@ -913,6 +913,21 @@ class ScanActionPlanCompiler:
                 required=crawl_required,
                 supporting=needs_candidates,
             )
+            # Runtime observation of the application's own requests. A
+            # single-page application builds its API calls in JavaScript, so the
+            # static crawl above sees the route but never the query the client
+            # actually sends, and candidates are only ever made from observed
+            # parameters. Supporting, never required: a target with no browser
+            # runtime must still complete its scan on the static crawl alone.
+            add(
+                "discover.browser_crawl",
+                "discover_surface",
+                "web.browser_crawl",
+                {"endpoint_manifest_ref": endpoint_ref or None, "read_only": True},
+                dependencies=("discover.web_probe",),
+                required=False,
+                supporting=needs_candidates,
+            )
             if self._family_enabled(execution_plan, "recon"):
                 add(
                     "discover.web_content",

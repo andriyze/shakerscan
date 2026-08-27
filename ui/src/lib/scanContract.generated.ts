@@ -184,6 +184,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "capabilities": [
         "web.probe",
         "web.crawl",
+        "web.browser_crawl",
         "web.content_discover"
       ],
       "default_enabled": true,

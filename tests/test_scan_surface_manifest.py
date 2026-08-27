@@ -65,7 +65,8 @@ def test_surface_manifest_unifies_producers_and_redacts_values():
     assert manifest["endpoint_count"] == 7
     assert set(manifest["producers"]) == {
         "seed", "known_endpoints", "collections.replay", "web.probe",
-        "web.crawl", "web.content_discover", "subdomains.discover",
+        "web.crawl", "web.browser_crawl", "web.content_discover",
+        "subdomains.discover",
     }
     assert secret not in encoded
     assert "owner" in encoded

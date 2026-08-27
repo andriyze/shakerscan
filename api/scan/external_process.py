@@ -31,6 +31,10 @@ _BUDGET_DIMENSIONS = frozenset({
 _PROOF_METHODS = frozenset({
     "exact_request_count",
     "rate_time_upper_bound",
+    # A headless crawl bounds total egress over its time box rather than the
+    # crawler's own request rate: the browser fetches every subresource of every
+    # page it opens, and katana's rate limiter does not govern those.
+    "browser_rate_time_upper_bound",
     "exact_wordlist",
     "reviewed_template_allowlist",
     "fixed_conservative_profile",

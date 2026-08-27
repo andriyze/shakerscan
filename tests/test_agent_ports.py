@@ -343,7 +343,8 @@ def test_run_tool_schema_is_compatibility_only_and_never_callable():
     run_tool = next(schema for schema in schemas if schema["name"] == "run_tool")
     name_schema = run_tool["parameters"]["properties"]["name"]
     assert set(name_schema["enum"]) == {
-        "httpx", "nuclei", "katana", "ffuf", "dalfox", "sqlmap", "nmap", "naabu",
+        "httpx", "nuclei", "katana", "katana_headless", "ffuf", "dalfox",
+        "sqlmap", "nmap", "naabu",
     }
     assert "dalfox" in name_schema["description"] and "sqlmap" in name_schema["description"]
     assert "nmap" in name_schema["description"] and "naabu" in name_schema["description"]

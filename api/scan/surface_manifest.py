@@ -74,8 +74,15 @@ def build_scan_surface_manifest(
     crawl: Mapping[str, Any],
     content: Mapping[str, Any],
     max_endpoints: int,
+    browser: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Normalize every fixed-stage surface producer without retaining URL values."""
+    """Normalize every fixed-stage surface producer without retaining URL values.
+
+    ``browser`` is optional: the headless crawl is a supporting producer that a
+    target without a browser runtime simply does not run, and an absent summary
+    is recorded as skipped rather than treated as a failure.
+    """
+    browser = browser if isinstance(browser, Mapping) else {"status": "skipped"}
     limit = max(1, min(100_000, int(max_endpoints)))
     manifest = EndpointManifest(auto_persist=False)
     allowed_origins = {
@@ -186,6 +193,15 @@ def build_scan_surface_manifest(
             if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
         ),
         summary=crawl,
+    )
+    collect(
+        "web.browser_crawl",
+        (
+            (item.get("method") or "GET", item.get("url"))
+            for item in browser.get("observations") or ()
+            if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
+        ),
+        summary=browser,
     )
     collect(
         "web.content_discover",

@@ -126,3 +126,32 @@ def test_safe_authentication_proof_detects_json_identity_without_leaking_it():
     assert proof["session_state_discarded"] is True
     assert "worker-secret" not in json.dumps(result.__dict__, default=str)
 
+
+
+def test_sqlite_error_constants_are_recognised_signatures():
+    """SQLITE_ERROR is what SQLite itself emits.
+
+    The separator was not optional, so the pattern matched
+    ``sqlite3_exception`` but missed ``SQLITE_ERROR``. An error-based injection
+    that reproduced its 200/500 differential twice, byte-identically, was still
+    withheld for want of a database signature.
+    """
+    from api.capabilities.sqli_proof import _SQL_ERROR_PATTERNS
+
+    def matched(text):
+        return any(pattern.search(text) for pattern in _SQL_ERROR_PATTERNS)
+
+    for body in (
+        'SQLITE_ERROR: near "\'%\'": syntax error',
+        "sqlite3_exception",
+        "SQLiteError: bad query",
+        "sqlite error",
+    ):
+        assert matched(body), body
+
+    for benign in (
+        "a benign sentence about sql lite products",
+        "SQLITE_CONSTRAINT",
+        "no database words here",
+    ):
+        assert not matched(benign), benign

@@ -8,7 +8,7 @@
     "stale": 0,
     "pending": 0,
     "fingerprints": [
-      "dc8ee7d92c199e5d"
+      "d1a2afe9c0dd900c"
     ]
   },
   "fleet_uniform": true,
@@ -342,7 +342,7 @@
           "selected": true,
           "batch_actions": 3,
           "budget_consumed": {
-            "http_requests": 263,
+            "http_requests": 253,
             "tool_wall_seconds": 239
           },
           "budget_reserved": {
@@ -421,7 +421,7 @@
       "report_degraded": false,
       "report_invariant_violations": [],
       "two_user": false,
-      "scan_id": "8dbb05a9-127b-4aa6-97bf-11725c83eb68",
+      "scan_id": "008f2f00-74aa-497b-8e10-890acc94f3ba",
       "target": "juice_shop",
       "gates": [
         {
@@ -804,7 +804,7 @@
               "selected": true,
               "batch_actions": 3,
               "budget_consumed": {
-                "http_requests": 263,
+                "http_requests": 253,
                 "tool_wall_seconds": 239
               },
               "budget_reserved": {

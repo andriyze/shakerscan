@@ -200,6 +200,19 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 # second; the enforced plan may go up to it but never past the reservation.
 _KATANA_MAX_RATE_PER_SECOND = 5
 
+# The image's own Chromium. Katana downloads its own browser when this is absent,
+# which a worker with no general egress cannot do: it then reports a completed
+# crawl with zero endpoints rather than failing, so the path must be explicit.
+_SYSTEM_CHROME_PATH = "/usr/bin/chromium"
+# A browser fetches the subresources of every page it opens, and those are not
+# governed by katana's own crawl rate. This is the reviewed ceiling on total
+# egress per second for a headless crawl at concurrency 4, used to derive a
+# conservative upper bound over the time box rather than counting page assets.
+_BROWSER_MAX_REQUESTS_PER_SECOND = 10
+# Both crawl tools are the same binary with the same compact output, so every
+# branch that parses, meters, or pins katana must cover the headless variant.
+KATANA_TOOLS = frozenset({"katana", "katana_headless"})
+
 # Compact tool output is one short record per line, not katana's JSONL mode with
 # embedded request/response bodies, so these bounds cost little memory. They must
 # stay above a real application's emitted surface: katana fetches static assets
@@ -214,6 +227,19 @@ MAX_TOOL_RECORDS = 1_500
 EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
     "dalfox": {"http_requests": 400, "tool_wall_seconds": 120},
     "sqlmap": {"http_requests": 900, "tool_wall_seconds": 300},
+}
+# The smallest slice on which one batched attempt can still reach a verdict.
+# A batch divided its reservation evenly across every ranked candidate, so a
+# manifest with more candidates gave each of them less: thirteen candidates
+# left sqlmap twelve seconds apiece, every attempt returned partial/unproven,
+# and the family spent its entire budget proving nothing. Below these floors an
+# attempt is not worth starting -- funding the top of a ranked manifest and
+# reporting the rest as unattempted is strictly better than diluting all of it.
+EXTERNAL_BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
+    "dalfox": {"http_requests": 120, "tool_wall_seconds": 30},
+    # Measured: sqlmap reaches a verdict on an obvious error-based injection in
+    # about a hundred requests, so a slice below that cannot prove anything.
+    "sqlmap": {"http_requests": 160, "tool_wall_seconds": 30},
 }
 
 
@@ -289,6 +315,29 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
             "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
             "-timeout", "8", "-retry", "0", "-disable-redirects", "-silent"]
+
+
+def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
+    # Same-origin crawl driven by a real browser, so the application's own runtime
+    # requests are observed rather than inferred from its source. A single-page
+    # application builds its API calls in JavaScript at run time: static parsing
+    # recovers the route but not the query the client actually sends, and candidate
+    # generation only tests parameters that were observed. -xhr-extraction records
+    # those requests.
+    #
+    # Read-only and same-host, exactly like the static crawl: GET only, form
+    # auto-fill stays OFF, field-scope fqdn never crosses origin. The browser is the
+    # image's own Chromium (-system-chrome-path) because katana otherwise downloads
+    # one, which a no-egress worker cannot do and which would silently return zero
+    # endpoints. -no-sandbox is required to run Chromium as the container's user; the
+    # page is untrusted content, but it is the same content the scanner already
+    # fetches, and egress stays pinned by the proxy build_scanner_argv attaches.
+    return ["-u", url, "-headless", "-no-sandbox",
+            "-system-chrome-path", _SYSTEM_CHROME_PATH,
+            "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
+            "-depth", "2", "-concurrency", "4",
+            "-rate-limit", "5", "-crawl-duration", "45s", "-field-scope", "fqdn",
+            "-timeout", "10", "-retry", "0", "-disable-redirects", "-silent"]
 
 
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
@@ -372,6 +421,7 @@ _SCANNER_BUILDERS = {
     "httpx": _tmpl_httpx,
     "nuclei": _tmpl_nuclei,
     "katana": _tmpl_katana,
+    "katana_headless": _tmpl_katana_headless,
     "ffuf": _tmpl_ffuf,
     "dalfox": _tmpl_dalfox,
     "sqlmap": _tmpl_sqlmap,
@@ -538,6 +588,7 @@ _HTTP_HEADER_SCANNER_FLAGS: dict[str, str] = {
     "httpx": "-H",
     "nuclei": "-H",
     "katana": "-H",
+    "katana_headless": "-H",
     "ffuf": "-H",
     "dalfox": "--header",
 }
@@ -614,6 +665,7 @@ def build_scanner_argv(
             "httpx": ["-http-proxy", pinned_proxy_url],
             "nuclei": ["-proxy", pinned_proxy_url, "-proxy-internal"],
             "katana": ["-proxy", pinned_proxy_url],
+            "katana_headless": ["-proxy", pinned_proxy_url],
             "ffuf": ["-x", pinned_proxy_url],
             "dalfox": ["--proxy", pinned_proxy_url],
             "sqlmap": [f"--proxy={pinned_proxy_url}"],
@@ -625,7 +677,7 @@ def build_scanner_argv(
             pin_args = ["-H", f"Host: {host_header}", "-sni-name", hostname]
         elif name == "nuclei":
             pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
-        elif name == "katana":
+        elif name in KATANA_TOOLS:
             pin_args = ["-H", f"Host: {host_header}"]
         elif name == "ffuf":
             pin_args = ["-H", f"Host: {host_header}", "-sni", hostname]
@@ -645,6 +697,29 @@ def build_scanner_argv(
         argv,
         int(template["default_timeout_ms"]),
     )
+
+
+def _batch_attempt_pacing(http: int, wall: int, *, minimum_seconds: float) -> tuple[float, int]:
+    """Pace one batched attempt so its wall is a true bound on its requests.
+
+    Nothing counts requests at run time for these tools: the wall is the only
+    enforcement, so the inter-request delay is what keeps actual traffic inside
+    the reservation. A fixed one-second delay made the wall bind long before the
+    requests did -- sqlmap needs about a hundred requests to reach a verdict on
+    an obvious injection and spends two seconds doing so unpaced, but at one
+    second apiece it could not finish inside any slice a batch could afford, so
+    every attempt returned unproven. Pacing the reservation across the wall lets
+    the attempt spend what it reserved and no more.
+    """
+    requests = max(1, int(http))
+    seconds = max(1, int(wall))
+    delay = seconds / requests
+    if delay < minimum_seconds:
+        # Too little wall to pace this many requests: keep the floor and admit
+        # the smaller number the wall can actually cover.
+        delay = minimum_seconds
+        requests = max(1, int(seconds / delay))
+    return delay, min(int(http), requests)
 
 
 def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
@@ -762,6 +837,42 @@ def build_enforced_scanner_plan(
             "depth": 2, "concurrency": rate,
             "shutdown_grace_seconds": shutdown_grace,
         }
+    elif scanner == "katana_headless":
+        http = int(reservation.get("http_requests") or 0)
+        # A browser needs a longer teardown window than the bare crawler: it has
+        # a Chromium process group to close before katana can exit cleanly.
+        if wall < 12:
+            raise AgentToolError(
+                "headless crawl requires twelve reserved wall-clock seconds"
+            )
+        shutdown_grace = 10
+        # The bound is egress over the time box, not a count of page assets. A
+        # browser fetches every subresource of every page it opens and katana's
+        # crawl rate does not govern those, so counting only crawl requests would
+        # understate real traffic and let the run exceed its own reservation.
+        # Deriving the duration from the reservation keeps the ceiling inside it:
+        # rate_per_second * duration + 1 <= reserved http_requests.
+        affordable = (http - 1) // _BROWSER_MAX_REQUESTS_PER_SECOND
+        duration = min(60, affordable, wall - shutdown_grace)
+        if duration < 1:
+            raise AgentToolError(
+                "headless crawl requires a reservation covering one bounded second"
+            )
+        _replace_argv_value(argv, "-crawl-duration", f"{duration}s")
+        timeout_seconds = duration + shutdown_grace
+        timeout_ms = timeout_seconds * 1_000
+        hard = {
+            "http_requests": _BROWSER_MAX_REQUESTS_PER_SECOND * duration + 1,
+            "tool_wall_seconds": timeout_seconds,
+        }
+        mode, method = "conservative", "browser_rate_time_upper_bound"
+        proof_inputs = {
+            "rate_per_second": _BROWSER_MAX_REQUESTS_PER_SECOND,
+            "duration_seconds": duration, "startup_burst": 1,
+            "redirects": 0, "form_fill": False, "depth": 2, "concurrency": 4,
+            "shutdown_grace_seconds": shutdown_grace,
+            "browser": "system_chromium",
+        }
     elif scanner == "ffuf":
         wordlist_path = str(runtime.get("ffuf_wordlist") or "")
         try:
@@ -855,12 +966,17 @@ def build_enforced_scanner_plan(
     elif scanner == "dalfox":
         http = int(reservation.get("http_requests") or 0)
         if batch_attempt and http >= 1:
-            hard = {"http_requests": http, "tool_wall_seconds": wall}
+            delay_seconds, affordable = _batch_attempt_pacing(
+                http, wall, minimum_seconds=0.05,
+            )
+            _replace_argv_value(argv, "--delay", str(max(1, int(delay_seconds * 1_000))))
+            hard = {"http_requests": affordable, "tool_wall_seconds": wall}
             timeout_seconds, timeout_ms = wall, wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
             proof_inputs = {
                 "profile": "batch_attempt", "targets": 1,
-                "connection_ceiling": http, "wall_seconds": wall,
+                "connection_ceiling": affordable, "wall_seconds": wall,
+                "delay_ms": max(1, int(delay_seconds * 1_000)),
                 "workers": 3, "headless": False, "blind_oob": False,
             }
         elif (
@@ -891,7 +1007,11 @@ def build_enforced_scanner_plan(
         _replace_argv_value(argv, "--retries", 0)
         http = int(reservation.get("http_requests") or 0)
         if batch_attempt and http >= 1:
-            hard = {"http_requests": http, "tool_wall_seconds": wall}
+            delay_seconds, affordable = _batch_attempt_pacing(
+                http, wall, minimum_seconds=0.05,
+            )
+            _replace_argv_value(argv, "--delay", f"{delay_seconds:.3f}")
+            hard = {"http_requests": affordable, "tool_wall_seconds": wall}
             timeout_seconds, timeout_ms = wall, wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
             techniques, profile = "BEUT", "batch_attempt"
@@ -1157,7 +1277,7 @@ def scanner_request_settlement(name: str, stdout: str) -> dict[str, Any]:
             "observed_minimum": actual,
             "source": "scanner_counter",
         }
-    if scanner == "katana":
+    if scanner in KATANA_TOOLS:
         # Katana's compact stream is a discovery feed, not a wire log.  In
         # particular, JavaScript parsing can emit many same-origin routes that
         # Katana never fetched.  Treating those routes as a lower bound on HTTP
@@ -1224,7 +1344,7 @@ def parse_scanner_output(
                 continue
             if isinstance(item, dict):
                 decoded.append(item)
-        if scanner == "katana" and not decoded:
+        if scanner in KATANA_TOOLS and not decoded:
             # Compact Katana mode emits one absolute URL per line. Preserve only URL-shaped
             # records; banners and diagnostics are not route observations.
             for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
@@ -1257,7 +1377,7 @@ def parse_scanner_output(
                 "matcher_name": str(item.get("matcher-name") or item.get("matcher_name") or "")[:200] or None,
                 "proof_state": "candidate",
             })
-        elif scanner == "katana":
+        elif scanner in KATANA_TOOLS:
             request = item.get("request") if isinstance(item.get("request"), dict) else {}
             observed_url = _public_observed_url(
                 item.get("url") or item.get("endpoint") or request.get("endpoint")

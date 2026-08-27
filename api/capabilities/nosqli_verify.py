@@ -293,6 +293,9 @@ class NoSQLiVerifyAdapter:
         } for literal, payload in proof_pairs]
         observation = {
             "kind": "nosqli_proof",
+            # The route is already value-free immutable manifest content, and a
+            # verified injection that cannot say where it is is not actionable.
+            "canonical_path": self.candidate.get("canonical_path"),
             "candidate_id": self.candidate.get("candidate_id"),
             "request_ref_id": self.candidate.get("request_ref_id"),
             "method": self.request.method,

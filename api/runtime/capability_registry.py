@@ -512,6 +512,23 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
+            "web.browser_crawl",
+            "Bounded same-host headless browse that observes the application's own "
+            "runtime requests.",
+            "external_tool", "read_only", _HTTP_TARGETS, "katana", "1",
+            None, {"http_requests": 600, "tool_wall_seconds": 150},
+            {
+                "network_reachability": True,
+                "binary": "katana",
+                "browser_runtime": "system_chromium",
+            },
+            _http_principal_schema(),
+            "katana-lines/v1", ("crawl_observation",),
+            "katana", "katana_headless", 150_000,
+            ("-version",), ("/opt/tools/katana",),
+            hunt_executor="worker_scanner",
+        ),
+        CapabilitySpec(
             "web.content_discover", "Bounded content discovery using a bundled wordlist.",
             "external_tool", "read_only", _HTTP_TARGETS, "ffuf", "1",
             None, {"http_requests": 220, "tool_wall_seconds": 75},

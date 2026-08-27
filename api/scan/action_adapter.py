@@ -2032,6 +2032,7 @@ class DatabaseNeutralScanActionDispatcher:
         tool_by_capability = {
             "web.probe": "httpx",
             "web.crawl": "katana",
+            "web.browser_crawl": "katana_headless",
             "web.content_discover": "ffuf",
             "templates.scan": "nuclei",
             "templates.passive_scan": "nuclei",
@@ -2258,11 +2259,23 @@ class DatabaseNeutralScanActionDispatcher:
                 name: max(0, int(limit) - int(consumed.get(name, 0)))
                 for name, limit in action.requested_budget.items()
             }
+            # Never divide the reservation below what one attempt needs to
+            # reach a verdict. An even split gave each of thirteen candidates
+            # twelve seconds of sqlmap, so every attempt returned unproven and
+            # the family spent its whole budget proving nothing. The manifest is
+            # ranked, so funding the top of it and reporting the remainder as
+            # unattempted is strictly more useful than diluting all of it.
+            floor = agent_tools.EXTERNAL_BATCH_ATTEMPT_FLOORS.get(tool, {})
             sub_budget = {
-                name: max(1, amount // remaining_attempts)
+                name: max(1, floor.get(name, 1), amount // remaining_attempts)
                 for name, amount in remaining_budget.items() if amount > 0
             }
             if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
+                break
+            if any(
+                sub_budget[name] > remaining_budget.get(name, 0)
+                for name in floor if name in sub_budget
+            ):
                 break
             parsed = urllib.parse.urlsplit(execution_target)
             registered_target = urllib.parse.urlunsplit(
@@ -2499,7 +2512,8 @@ class DatabaseNeutralScanActionDispatcher:
         }:
             return await self._network(action, heartbeat)
         if action.capability_name in {
-            "web.probe", "web.crawl", "web.content_discover", "templates.scan",
+            "web.probe", "web.crawl", "web.browser_crawl",
+            "web.content_discover", "templates.scan",
             "templates.passive_scan",
             "xss.verify", "sqli.verify",
         }:

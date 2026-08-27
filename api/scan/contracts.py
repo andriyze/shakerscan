@@ -53,7 +53,9 @@ SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
     "thorough": {"xss": 100, "sqli": 50, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
-    "recon": ("web.probe", "web.crawl", "web.content_discover"),
+    "recon": (
+        "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
+    ),
     "nuclei_passive": ("templates.passive_batch",),
     "nuclei_active": ("templates.active_batch",),
     "xss": ("xss.verify_batch", "xss.request_verify_batch"),

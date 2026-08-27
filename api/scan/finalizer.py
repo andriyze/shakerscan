@@ -348,9 +348,17 @@ def _findings_for_action(
                     "Verified SQL injection authentication bypass"
                     if auth_bypass else "Verified SQL injection"
                 ),
-                severity="critical" if auth_bypass else "high",
+                # A proven SQL injection is critical whether or not it also
+                # bypasses authentication: the proof is a repeated differential
+                # carrying a database error signature, which means the parameter
+                # reaches the query engine. Rating that "high" understated the
+                # most severe class this scanner can prove deterministically.
+                severity="critical",
                 cwe="CWE-89",
-                url=None,
+                # The value-free route the proof actually exercised. A verified
+                # injection with no location is not actionable for an operator,
+                # and cannot be attributed to the endpoint it was proved on.
+                url=item.get("canonical_path"),
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
@@ -447,7 +455,8 @@ def _findings_for_action(
                 ),
                 severity="critical" if auth_bypass else "high",
                 cwe="CWE-943",
-                url=None,
+                # Same as the SQL proof: report the route it was proved on.
+                url=item.get("canonical_path"),
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),

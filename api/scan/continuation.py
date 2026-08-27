@@ -608,6 +608,7 @@ def build_discovery_continuation_manifests(
         subdomains=summary(("discover.subdomains",)),
         probe=summary(("discover.web_probe",)),
         crawl=summary(("discover.web_crawl",)),
+        browser=summary(("discover.browser_crawl",)),
         content=summary(("discover.web_content",)),
         max_endpoints=allocation.max_endpoint_entries,
     )
