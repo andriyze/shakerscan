@@ -1620,12 +1620,19 @@ def run_hunt() -> H.Scorecard:
     # authority, receipts and lifecycle; none of them ran the loop the product exists for, so a
     # Hunt that could never promote anything would still have passed this area.
     try:
+        # These two routes exist only on the fixture server. Running them against the
+        # configured Hunt target -- Juice Shop in CI -- meant the positive case probed a
+        # 404 and could never verify, while the negative case passed for the wrong
+        # reason: nothing was promoted because nothing was found. The pair tests the
+        # candidate-to-finding bridge, so it is bound to the fixture that actually serves
+        # the evidence, exactly as the API and network Hunt areas already are.
+        verify_target_id, verify_scope_id, verify_approval_id = _hunt_fixture_authority()
         status, run = H.post("/hunts", _hunt_start_payload(
-            target_id,
+            verify_target_id,
             goal="Verify an anonymous credential exposure end to end.",
             active=True,
-            scope_id=scope_id,
-            approval_id=approval_id,
+            scope_id=verify_scope_id,
+            approval_id=verify_approval_id,
         ))
         verify_hunt_id = str(run.get("hunt_id") or "")
 
