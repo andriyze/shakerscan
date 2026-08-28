@@ -59,3 +59,58 @@ def test_a_failed_rollback_still_fails_the_smoke():
     source = _source()
     assert 'echo "previous-stable API/UI did not become healthy after rollback" >&2' in source
     assert source.count("exit 1") >= 2
+
+
+# --- The candidate must run on the database it just upgraded ----------------------------------
+# Applying candidate migrations through helper code proves the schema moves; it does not prove the
+# release runs on it. The smoke booted only the PREVIOUS stack, so an upgrade that migrated cleanly
+# and then could not serve would have passed.
+
+def test_the_candidate_stack_boots_against_the_upgraded_database():
+    source = _source()
+    assert "run_operational_candidate()" in source
+    body = source[source.index("run_operational_candidate()"):]
+    for image_var in ("$CANDIDATE_API_IMAGE", "$CANDIDATE_UI_IMAGE", "$SCANNER_IMAGE"):
+        assert image_var in body[:4000], image_var
+    # Against the dirty upgraded database, not a clean one: that is the operator's real case.
+    assert "scanner_dirty" in body[:4000]
+
+
+def test_the_candidate_is_health_checked_on_both_api_and_ui():
+    body = _source()[_source().index("run_operational_candidate()"):]
+    assert "curl -sf http://127.0.0.1:8080/health" in body[:4000]
+    assert "curl -sf http://127.0.0.1:3000/" in body[:4000]
+    assert "candidate API/UI did not become healthy" in body[:4000]
+
+
+def test_pre_upgrade_rows_are_still_served_by_the_candidate():
+    body = _source()[_source().index("run_operational_candidate()"):]
+    assert "upgrade.example.test" in body[:4000], (
+        "a migration that loses historical rows must fail here"
+    )
+
+
+def test_queued_and_leased_redis_work_must_survive_the_upgrade():
+    source = _source()
+    assert "seed_redis_upgrade_work()" in source
+    assert "assert_redis_work_survived()" in source
+    body = source[source.index("assert_redis_work_survived()"):]
+    # Work may be claimed by the candidate worker, but it must not simply vanish.
+    assert "queued work disappeared across the upgrade without being leased" in body[:1500]
+    # An existing lease belongs to the worker that took it.
+    assert "an existing worker lease was overwritten by the candidate" in body[:1500]
+
+
+def test_the_candidate_runs_before_the_rollback_leg():
+    # Rollback restores a pre-upgrade dump, so the candidate has to be exercised first or it never
+    # sees the upgraded state at all.
+    source = _source()
+    assert source.index("run_operational_candidate\n") < source.index("run_scenario scanner_dirty rollback")
+
+
+def test_every_candidate_container_is_cleaned_up():
+    source = _source()
+    cleanup = source[source.index("cleanup() {"):source.index("trap cleanup")]
+    for name in ("$CANDIDATE_WORKER_CONTAINER", "$CANDIDATE_UI_CONTAINER",
+                 "$CANDIDATE_API_CONTAINER", "$CANDIDATE_REDIS_CONTAINER"):
+        assert name in cleanup, name

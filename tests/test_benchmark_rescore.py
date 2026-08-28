@@ -212,6 +212,10 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     # primary principal was minted; nuclei_active is excluded.
     assert scan_body["policy"] == {
         "active_testing": True,
+        # nosqli probes mutate by design and a request-body injection candidate is a
+        # state-changing request, so without this the plan grants zero state_changing_requests and
+        # admission rejects the whole submission -- the benchmark could not run at all.
+        "allow_state_changing_http": True,
         "include_families": [
             "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
             "nosqli", "authz_surface",

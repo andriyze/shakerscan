@@ -89,3 +89,92 @@ def test_fixtures_with_an_answer_key_declare_a_recall_threshold():
         assert "min_expected_recall" in gates, f"{path.name} has an answer key but no recall gate"
         threshold = gates["min_expected_recall"]
         assert isinstance(threshold, (int, float)) and 0 < threshold <= 1, path.name
+
+
+def test_the_benchmark_grants_the_authority_its_answer_key_requires():
+    """`nosqli-reviews` is in the answer key and nosqli probes mutate by design.
+
+    Without `allow_state_changing_http` the plan grants zero state_changing_requests and admission
+    rejects the whole submission -- the benchmark could not submit a scan at all, and the
+    expectation it was measuring against was structurally unreachable. Request-body injection
+    candidates need the same authority.
+    """
+    import importlib.util, sys as _sys
+    from pathlib import Path as _Path
+    import inspect
+
+    spec = importlib.util.spec_from_file_location(
+        "benchmark_submit_under_test", _Path(__file__).resolve().parents[1] / "scripts" / "benchmark_targets.py")
+    module = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    source = inspect.getsource(module.submit_target)
+    assert '"allow_state_changing_http": True' in source
+    assert '"nosqli"' in source, "the answer key expects nosqli, so the family must be selected"
+
+
+# --- Declared gaps, not a lowered number ------------------------------------------------------
+# Shipping what the engine proves does not mean pretending the answer key is smaller. The
+# expectations still describe what a competent DAST should find; the classes not yet reachable are
+# named, so the benchmark stays a regression detector at the level actually shipped.
+
+def _card_with(missed_ids, **extra):
+    card = _card(0.44)
+    card["expected_missed"] = [{"id": item} for item in missed_ids]
+    card.update(extra)
+    return card
+
+
+def _gaps_fixture(*ids, recall=0.4):
+    return {
+        "gates": {
+            "min_expected_recall": recall,
+            "known_expectation_gaps": [{"id": item, "reason": "not yet reachable"} for item in ids],
+        },
+        "expected": [],
+    }
+
+
+def test_a_declared_gap_does_not_fail_the_gate():
+    card = _card_with(["sqli-login", "xss-dom-search"])
+    gates = _result(card, _gaps_fixture("sqli-login", "xss-dom-search"))
+    assert gates["no_undeclared_expectation_misses"]["pass"] is True
+
+
+def test_an_undeclared_miss_still_fails():
+    # The point of the list: a class that used to be found and now is not must still fail.
+    card = _card_with(["sqli-login", "sqli-search"])
+    gates = _result(card, _gaps_fixture("sqli-login"))
+    entry = gates["no_undeclared_expectation_misses"]
+    assert entry["pass"] is False
+    assert "sqli-search" in entry["detail"]
+
+
+def test_closing_a_gap_is_recorded_not_penalised():
+    card = _card_with(["sqli-login"])
+    _result(card, _gaps_fixture("sqli-login", "xss-dom-search"))
+    assert card["closed_expectation_gaps"] == ["xss-dom-search"]
+
+
+def test_the_recall_gate_still_applies_alongside_declared_gaps():
+    # Declaring every expectation a gap must not make the benchmark unconditionally green.
+    card = _card_with(["a", "b"])
+    card["expected_recall"] = 0.1
+    gates = _result(card, _gaps_fixture("a", "b", recall=0.4))
+    assert gates["no_undeclared_expectation_misses"]["pass"] is True
+    assert gates["min_expected_recall"]["pass"] is False
+
+
+def test_every_declared_gap_states_why_and_is_a_real_expectation():
+    import yaml
+
+    for path in sorted(FIXTURES.glob("*.yaml")):
+        fixture = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        gaps = (fixture.get("gates") or {}).get("known_expectation_gaps") or []
+        expected_ids = {str(item.get("id")) for item in fixture.get("expected") or []}
+        for gap in gaps:
+            assert isinstance(gap, dict), f"{path.name}: a gap must record its reason"
+            assert gap.get("reason"), f"{path.name}: {gap.get('id')} has no reason"
+            assert str(gap.get("id")) in expected_ids, (
+                f"{path.name}: {gap.get('id')} is not an expectation in this fixture"
+            )

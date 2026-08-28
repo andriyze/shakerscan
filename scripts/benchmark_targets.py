@@ -875,6 +875,26 @@ def apply_gates(card, fixture):
     if "retest_settled" in card:
         chk("retest_settled", card.get("retest_settled") is True,
             f"retest_settled={card.get('retest_settled')}")
+    if "known_expectation_gaps" in gates:
+        # Lowering a recall number to whatever the engine currently reaches erases the gap. Naming
+        # the classes it cannot yet prove keeps the answer key intact -- it still describes what a
+        # competent DAST should find -- while making the benchmark a regression detector at the
+        # level actually shipped: a NEW miss fails even though the declared ones do not.
+        declared = {
+            str(item.get("id") or item) for item in gates["known_expectation_gaps"]
+        }
+        missed_ids = {str(item.get("id")) for item in (card.get("expected_missed") or [])}
+        undeclared = sorted(missed_ids - declared)
+        chk(
+            "no_undeclared_expectation_misses",
+            not undeclared,
+            "only declared gaps missed" if not undeclared
+            else "undeclared misses: " + ", ".join(undeclared),
+        )
+        # An improvement is not a failure, but it should be visible so the gap list can shrink.
+        closed = sorted(declared - missed_ids)
+        if closed:
+            card.setdefault("closed_expectation_gaps", closed)
     if "min_expected_recall" in gates:
         # Answer-key coverage, not finding volume. min_verified_high_critical counts what the scan
         # proved; it says nothing about whether those findings are the ones the benchmark asked
@@ -1019,6 +1039,14 @@ def submit_target(name, api, do_auth):
         "budget_profile": budget_profile,
         "policy": {
             "active_testing": True,
+            # nosqli probes mutate by design, and a request-body injection candidate is a
+            # state-changing request by definition. Without this the plan grants zero
+            # state_changing_requests and admission rejects the whole submission with
+            # "reserved_budget exceeds the plan budget" -- so the benchmark could not run at all,
+            # and its own answer key's nosqli expectation was structurally unreachable. The
+            # benchmark holds an approval receipt for an authorized target, which is exactly the
+            # authority this represents.
+            "allow_state_changing_http": True,
             "include_families": include_families,
             "exclude_families": ["nuclei_active"],
         },
