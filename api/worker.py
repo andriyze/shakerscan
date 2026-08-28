@@ -548,28 +548,27 @@ def _write_scanner_auth_config_file(config: dict[str, Any]) -> str | None:
         raise
 
 
-_RECEIPT_SENSITIVE_KEYS = {
-    "authorization",
-    "authorization_header",
-    "auth_header",
-    "bearer_token",
-    "cookie",
-    "cookies",
-    "credential",
-    "password",
-    "private_key",
-    "secret",
-    "signature",
-    "token",
-}
+# Worker tool receipts are redacted by the same rule as capability receipts. This module
+# used to carry a third copy of the key-set -- exact matches only -- so `api_key`,
+# `access_token`, `aws_secret_access_key`, `refresh_token`, `client_secret` and
+# `session_token` were all persisted in the clear. Two copies had already been unified;
+# this one was missed because nothing looked for a third.
+try:
+    from runtime.receipts import key_is_sensitive as _receipt_key_is_sensitive
+except ModuleNotFoundError:  # package import in host-side tests
+    from .runtime.receipts import key_is_sensitive as _receipt_key_is_sensitive
 
 
 def _redact_receipt_value(value: Any) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, nested in value.items():
-            normalized = str(key).strip().lower()
-            out[key] = "***" if normalized in _RECEIPT_SENSITIVE_KEYS and nested not in (None, "", [], {}) else _redact_receipt_value(nested)
+            out[key] = (
+                "***"
+                if _receipt_key_is_sensitive(key, item=nested)
+                and nested not in (None, "", [], {})
+                else _redact_receipt_value(nested)
+            )
         return out
     if isinstance(value, list):
         return [_redact_receipt_value(item) for item in value]

@@ -117,3 +117,35 @@ def test_the_flag_is_initialised_before_the_attempt_loop():
         isinstance(node.value, ast.Constant) and node.value.value is False
         for node in assigns
     ), "attempt_timed_out is never initialised to False"
+
+
+def test_replaying_checkpoints_does_not_launder_failure_into_success():
+    """Every attempt of a wall-killed batch is checkpointed, so a restart replayed them
+    all and produced a clean success receipt for a batch that proved nothing."""
+    def _replay(prior_statuses, declared):
+        terminal_failure = False
+        timed_out = False
+        attempted = 0
+        for status in prior_statuses:
+            attempted += 1
+            if status not in SUCCESS_STATUSES:
+                terminal_failure = True
+            if status in {"timed_out", "partial"}:
+                timed_out = True
+        unattempted = max(0, declared - attempted)
+        partial = unattempted > 0 or terminal_failure
+        return ("partial" if partial else "success", timed_out)
+
+    assert _replay(["partial", "partial"], 2) == ("partial", True)
+    assert _replay(["success", "success"], 2) == ("success", False)
+
+
+def test_the_external_batch_resume_branch_reads_the_prior_status():
+    start = SOURCE.index("    async def _external_batch(")
+    nxt = SOURCE.find("\n    async def ", start + 10)
+    body = SOURCE[start:nxt if nxt != -1 else len(SOURCE)]
+    resume = body[body.index("prior = completed.get(attempt_id)"):]
+    head = resume[:1200]
+    assert 'prior.get("status")' in head, "the resume branch ignores the checkpointed outcome"
+    assert "terminal_failure = True" in head
+    assert "attempt_timed_out = True" in head

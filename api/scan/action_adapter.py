@@ -2324,6 +2324,16 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
+                # A resumed attempt keeps the outcome its checkpoint recorded. Counting it
+                # as merely "attempted" let a restart launder failure into success: every
+                # attempt of a wall-killed batch is checkpointed, so replaying them all
+                # produced terminal_failure=False, timed_out=False, unattempted=0 -- a
+                # clean success receipt for a batch that had proven nothing.
+                prior_status = str(prior.get("status") or "success")
+                if prior_status not in {"success", "succeeded", "completed"}:
+                    terminal_failure = True
+                if prior_status in {"timed_out", "partial"}:
+                    attempt_timed_out = True
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
