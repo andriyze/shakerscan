@@ -8,8 +8,11 @@ BASELINE_IMAGE="${BASELINE_IMAGE:-shakerscan/shakerscan-scanner@sha256:1bfdd22e8
 BASELINE_API_IMAGE="${BASELINE_API_IMAGE:-shakerscan/shakerscan-api@sha256:9349c5c0b4dc59c4c43de0583770ed03a996df6601adf49b175d40747a7f4a0a}"
 BASELINE_UI_IMAGE="${BASELINE_UI_IMAGE:-shakerscan/shakerscan-ui@sha256:7811dd9ff647c546fe695cc139171694e90b2bc26a725ec6b0534fe94c8ce7bb}"
 SCANNER_IMAGE="${SCANNER_IMAGE:-shakerscan-scanner:upgrade-smoke}"
-CANDIDATE_API_IMAGE="${CANDIDATE_API_IMAGE:-shakerscan-api}"
-CANDIDATE_UI_IMAGE="${CANDIDATE_UI_IMAGE:-shakerscan-ui}"
+# Untagged defaults resolve to `:latest`, which is whatever happens to be on the host
+# -- so the smoke could pass while qualifying an upgrade the release does not ship, or
+# fail on a clean runner where no such image exists. Callers name the exact candidate.
+CANDIDATE_API_IMAGE="${CANDIDATE_API_IMAGE:-shakerscan-api:upgrade-smoke}"
+CANDIDATE_UI_IMAGE="${CANDIDATE_UI_IMAGE:-shakerscan-ui:upgrade-smoke}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7.4.11-alpine3.21@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf}"
 UPGRADE_FERNET_KEY="${UPGRADE_FERNET_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}"
@@ -26,6 +29,16 @@ UPGRADE_QUEUED_ID="upgrade-smoke-queued-$$"
 UPGRADE_LEASED_ID="upgrade-smoke-leased-$$"
 UPGRADE_QUEUED_JOB="{\"scan_id\":\"$UPGRADE_QUEUED_ID\",\"job_id\":\"$UPGRADE_QUEUED_ID\"}"
 SMOKE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-upgrade-smoke.XXXXXX")"
+
+# A candidate image that is not present locally must stop the run, not be pulled from a
+# registry: the point of this smoke is to qualify the images this build just produced.
+for candidate_image in "$SCANNER_IMAGE" "$CANDIDATE_API_IMAGE" "$CANDIDATE_UI_IMAGE"; do
+    if ! docker image inspect "$candidate_image" >/dev/null 2>&1; then
+        echo "upgrade smoke: candidate image is not built locally: $candidate_image" >&2
+        echo "build it first, or name the right one via SCANNER_IMAGE / CANDIDATE_API_IMAGE / CANDIDATE_UI_IMAGE" >&2
+        exit 1
+    fi
+done
 
 cleanup() {
     docker rm -f "$CANDIDATE_WORKER_CONTAINER" "$CANDIDATE_UI_CONTAINER" \

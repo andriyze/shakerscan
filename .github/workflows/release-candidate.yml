@@ -288,9 +288,6 @@ jobs:
             shakerscan-scanner:release-candidate \
             /tmp/verify-installed-runtime.py
 
-      - name: Verify clean and dirty schema upgrades
-        run: SCANNER_IMAGE=shakerscan-scanner:release-candidate scripts/upgrade_smoke.sh
-
       - name: Set up supported Node runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
@@ -305,13 +302,29 @@ jobs:
           npm --prefix ui run test:unit
           npm --prefix ui run build
 
-      - name: Exercise the complete curl-installed stack
+      - name: Build the candidate UI image
         env:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           docker build \
             --build-arg NEXT_PUBLIC_APP_VERSION="$VERSION" \
             -f ui/Dockerfile -t shakerscan-ui:release-candidate ui
+
+      # Every candidate image is named explicitly. The smoke used to receive only
+      # SCANNER_IMAGE and fall back to the bare `shakerscan-api` / `shakerscan-ui`
+      # defaults -- i.e. `:latest` -- so it qualified an upgrade the release does not
+      # ship, and on a clean runner the UI image did not exist here at all.
+      - name: Verify clean and dirty schema upgrades
+        run: |
+          SCANNER_IMAGE=shakerscan-scanner:release-candidate \
+          CANDIDATE_API_IMAGE=shakerscan-api:release-candidate \
+          CANDIDATE_UI_IMAGE=shakerscan-ui:release-candidate \
+          scripts/upgrade_smoke.sh
+
+      - name: Exercise the complete curl-installed stack
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
           docker tag shakerscan-scanner:release-candidate "shakerscan-scanner:$VERSION"
           docker tag shakerscan-api:release-candidate "shakerscan-api:$VERSION"
           docker tag shakerscan-ui:release-candidate "shakerscan-ui:$VERSION"
