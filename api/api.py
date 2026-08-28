@@ -602,6 +602,7 @@ try:
         build_discovery_continuation_manifests,
         merge_scan_action_continuation,
         policy_constrained_hold_budget,
+        scan_submission_hold_budget,
     )
     from scan.stage_store import (
         PostgresScanStageCheckpointStore,
@@ -726,6 +727,7 @@ except ModuleNotFoundError:
         build_discovery_continuation_manifests,
         merge_scan_action_continuation,
         policy_constrained_hold_budget,
+        scan_submission_hold_budget,
     )
     from api.scan.stage_store import (
         PostgresScanStageCheckpointStore,
@@ -10853,14 +10855,13 @@ def _compile_scan_admission_action_authority(
         for capability in scan_family_capabilities(family)
     }
     required_holds = (*required_capabilities, "scan.finalize")
-    reserved_budget: dict[str, int] = {}
-    for capability_name in required_holds:
-        hold_budget = policy_constrained_hold_budget(
-            agent_tools.CAPABILITY_REGISTRY, capability_name,
-            allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
-        )
-        for name, amount in hold_budget.items():
-            reserved_budget[name] = reserved_budget.get(name, 0) + amount
+    # Hold room for the LARGEST single required capability, capped at what this profile
+    # owns -- not the sum of them all. See scan_submission_hold_budget for why.
+    reserved_budget = scan_submission_hold_budget(
+        agent_tools.CAPABILITY_REGISTRY, required_holds,
+        allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
+        limits=scan_contract.budget.ledger_limits(),
+    )
 
     raw_parent = ScanActionPlanCompiler().compile(
         scan_id=scan_id,
@@ -10898,8 +10899,6 @@ def _compile_scan_admission_action_authority(
         }
         if shortages:
             raise ScanBudgetAllocationError(capability_name, shortages)
-        for name, amount in hold_budget.items():
-            remaining[name] = remaining.get(name, 0) - amount
 
     parent_plan = parent_allocation.plan
     continuation = ScanContinuationAllocation(

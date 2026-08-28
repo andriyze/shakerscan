@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import uuid
 
 try:
@@ -59,6 +59,44 @@ _LEGACY_CONTINUATION_CAPABILITIES = (
 
 class ScanContinuationError(ValueError):
     """A continuation differs from its frozen parent or budget authority."""
+
+
+def scan_submission_hold_budget(
+    registry: Any,
+    required_capabilities: Sequence[str],
+    *,
+    allow_state_changing_http: bool,
+    limits: Mapping[str, int],
+) -> dict[str, int]:
+    """Room to keep back for required work while the parent plan is allocated.
+
+    The hold is the largest single required capability per dimension, capped at what the
+    profile owns -- not the sum across all of them.
+
+    Summing worked only while no capability declared a mutation cost. The moment
+    `xss.verify_batch` (1,000) and `sqli.verify_batch` (1,800) declared theirs, the sum
+    reached 3,000 against ceilings of 200 / 800 / 2,000, so every state-changing scan on
+    every profile was rejected at submission with "reserved_budget exceeds the plan
+    budget" -- including the body-injection path those costs were added to enable.
+
+    The cap matters for the same reason: a registry cost is profile-independent and a
+    ceiling is not, so `sqli.verify_batch` asks for 1,800 whatever profile invoked it and
+    no `fast` ledger can set that aside. The hold means "keep back as much as this budget
+    can". Nothing is weakened by either change: the real allocation still reserves every
+    action's own budget and refuses any action that does not fit.
+    """
+    held: dict[str, int] = {}
+    for capability_name in required_capabilities:
+        hold_budget = policy_constrained_hold_budget(
+            registry, capability_name,
+            allow_state_changing_http=allow_state_changing_http,
+        )
+        for name, amount in hold_budget.items():
+            held[name] = max(held.get(name, 0), int(amount))
+    return {
+        name: min(amount, int(limits.get(name, 0)))
+        for name, amount in held.items()
+    }
 
 
 def policy_constrained_hold_budget(
