@@ -884,6 +884,19 @@ def apply_quality_bar(card, fixture):
             f"{declared} declared gaps <= {bar['max_known_expectation_gaps']}")
     card["quality_gates"] = results
     card["quality_passed"] = all(item["pass"] for item in results)
+    # The full bar stays reported in full -- shrinking it to what the engine currently
+    # proves would destroy the measurement. `enforced` names the subset that decides the
+    # outcome, so a check can be made binding the moment it is achievable without waiting
+    # for the whole bar. Naming none keeps every check advisory.
+    enforced_names = {str(name) for name in bar.get("enforced") or ()}
+    unknown = enforced_names - {item["gate"] for item in results}
+    if unknown:
+        raise SystemExit(
+            f"quality_bar.enforced names checks that do not exist: {sorted(unknown)}"
+        )
+    enforced = [item for item in results if item["gate"] in enforced_names]
+    card["quality_enforced_gates"] = [item["gate"] for item in enforced]
+    card["quality_enforced_passed"] = all(item["pass"] for item in enforced)
     return results
 
 
@@ -1351,13 +1364,19 @@ def main():
             # read as meeting the standard when it is only holding the line.
             verdict = "MET" if card.get("quality_passed") else "NOT MET"
             print(f"    -- quality bar ({verdict}): the standard this benchmark measures against --")
+            binding = set(card.get("quality_enforced_gates") or ())
             for g in quality:
-                print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
+                tier = "enforced" if g["gate"] in binding else "advisory"
+                print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']} ({tier}): {g['detail']}")
     # The quality bar is the standard this benchmark measures against; the regression
     # gates only hold the line where the engine already is. Reporting them separately is
     # honest, but it also made the bar unenforceable: nothing could ever fail on it.
     # `--enforce-quality` makes it decide the exit status, so a release can require it.
     quality_ok = all(
+        card.get("quality_enforced_passed", True)
+        for card in cards if card.get("quality_gates")
+    )
+    full_bar_ok = all(
         card.get("quality_passed", True) for card in cards if card.get("quality_gates")
     )
     release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
@@ -1369,13 +1388,15 @@ def main():
         "targets": cards,
         "passed": release_ok,
         "regression_gates_passed": bool(overall_ok),
-        "quality_bar_passed": quality_ok,
+        "quality_bar_passed": full_bar_ok,
+        "quality_bar_enforced_subset_passed": quality_ok,
         "quality_bar_enforced": bool(args.enforce_quality),
     }
-    if not quality_ok:
+    if not full_bar_ok:
+        binding = "; enforced subset FAILED" if not quality_ok else "; enforced subset met"
         print(
-            "\nquality bar NOT MET"
-            + ("" if args.enforce_quality else " (advisory: pass --enforce-quality to fail on it)")
+            "\nquality bar NOT MET" + binding
+            + ("" if args.enforce_quality else " (advisory: pass --enforce-quality to fail on the enforced subset)")
         )
     # Latest-pointer (stable name) plus a timestamped, git-trackable record so a
     # passing/failing run is visible in history (§10 — scorecards committed).

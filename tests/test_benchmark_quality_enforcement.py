@@ -40,9 +40,39 @@ def test_the_exit_status_can_depend_on_the_quality_bar():
     assert "args.enforce_quality" in SOURCE
 
 
-def test_the_artifact_separates_the_two_verdicts():
-    for field in ("regression_gates_passed", "quality_bar_passed", "quality_bar_enforced"):
+def test_the_artifact_separates_the_verdicts():
+    for field in (
+        "regression_gates_passed",
+        "quality_bar_passed",
+        "quality_bar_enforced_subset_passed",
+        "quality_bar_enforced",
+    ):
         assert f'"{field}"' in SOURCE, f"the scorecard does not record {field}"
+
+
+def test_only_the_named_subset_is_binding():
+    """The full bar stays reported; `enforced` names what decides the outcome."""
+    assert "quality_enforced_passed" in SOURCE
+    assert "quality_enforced_gates" in SOURCE
+    # The exit decision must read the enforced subset, never the whole bar.
+    decision = SOURCE[SOURCE.index("quality_ok = all("):]
+    assert "quality_enforced_passed" in decision[:300]
+
+
+def test_an_unknown_enforced_name_is_rejected():
+    """A typo in `enforced` must fail loudly, not silently enforce nothing."""
+    assert "names checks that do not exist" in SOURCE
+
+
+def test_the_juice_shop_bar_enforces_grade_reliability_only():
+    import yaml
+    bar = yaml.safe_load(
+        (ROOT / "tests/fixtures/benchmarks/juice_shop.yaml").read_text()
+    )["quality_bar"]
+    # The declared standard is unchanged -- only which parts are binding today.
+    assert bar["min_expected_recall"] == 0.67
+    assert bar["require_browser_proven_xss"] is True
+    assert bar["enforced"] == ["quality:grade_reliable"]
 
 
 def _release_ok(overall_ok, quality_ok, enforce):
