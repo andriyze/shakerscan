@@ -149,3 +149,30 @@ def test_the_external_batch_resume_branch_reads_the_prior_status():
     assert 'prior.get("status")' in head, "the resume branch ignores the checkpointed outcome"
     assert "terminal_failure = True" in head
     assert "attempt_timed_out = True" in head
+
+
+def test_a_timed_out_dependency_still_lets_proof_escalate():
+    """Proof depends on verification having produced candidates, not on a clean status.
+
+    `verify.sqli` had always been timing out; batch receipts simply overwrote `timed_out`
+    with False. The moment they told the truth, its status became TIMED_OUT, which the
+    dependency gate did not accept, so `prove.sqli` was blocked as dependency_failed and
+    the one verified SQLi on Juice Shop disappeared. Preserving trustworthy partial output
+    on timeout is the engine's own rule; the gate was the thing out of step with it.
+    """
+    import sys
+    sys.path.insert(0, str(ROOT / "api"))
+    from scan.capability_result import CapabilityResultStatus
+    from scan.orchestrator import _DEPENDENCY_SATISFIED
+
+    assert CapabilityResultStatus.TIMED_OUT in _DEPENDENCY_SATISFIED
+    assert CapabilityResultStatus.PARTIAL in _DEPENDENCY_SATISFIED
+    assert CapabilityResultStatus.SUCCESS in _DEPENDENCY_SATISFIED
+    # A dependency that never ran must still block.
+    for blocked in (
+        CapabilityResultStatus.FAILED,
+        CapabilityResultStatus.SKIPPED,
+        CapabilityResultStatus.BLOCKED,
+        CapabilityResultStatus.CANCELLED,
+    ):
+        assert blocked not in _DEPENDENCY_SATISFIED, blocked

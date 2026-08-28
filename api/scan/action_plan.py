@@ -104,21 +104,19 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     },
     "thorough": {
         "xss.verify_batch": (8, {"http_requests": 960, "tool_wall_seconds": 240}),
-        # One body attempt costs 480 mutations against a 500 ceiling, so `thorough` funds
-        # exactly one and the rest of the slice stays query-only. Reserving nothing meant
-        # the floor could never be met and a body candidate could never run at all; taking
-        # more would leave no mutation authority for anything else in the plan. `fast` and
-        # `balanced` cannot fund one inside their 20- and 100-request ceilings, so they
-        # reserve none and report body candidates unattempted, which is the truthful
-        # outcome rather than a silent skip.
-        "sqli.verify_batch": (
-            10,
-            {
-                "http_requests": 1_920,
-                "state_changing_requests": 480,
-                "tool_wall_seconds": 690,
-            },
-        ),
+        # No state_changing_requests reservation here, and the reason is measured rather
+        # than chosen. This budget is charged PER BATCH ACTION and a thorough plan admits
+        # several required SQLi batches, so reserving the 480 mutations one body attempt
+        # costs made the second batch unadmittable against the 500 ceiling -- and a
+        # required action that cannot fit fails the whole scan. It did: every thorough
+        # scan died at admission with "verify.sqli.001 exceeds the plan budget", taking
+        # Juice Shop recall from 4/9 to 0/9.
+        #
+        # Dividing 500 across the batches leaves each below the 480 an attempt needs, so
+        # body SQLi is unfundable at this ceiling either way. Raising
+        # max_state_changing_requests is a mutation-authority decision, not a tuning knob,
+        # so body candidates stay unattempted until it is taken deliberately.
+        "sqli.verify_batch": (10, {"http_requests": 1_920, "tool_wall_seconds": 690}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),

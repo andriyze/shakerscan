@@ -95,44 +95,21 @@ def test_the_helper_builds_a_well_formed_body_for_each_content_type():
         adapter.execution_request_for_manifest_candidate = original
 
 
-def test_a_body_attempt_is_charged_to_the_state_changing_ledger():
-    """`max_state_changing_requests` exists to bound mutation traffic and never decremented.
+def test_mutation_metering_is_a_recorded_gap_not_a_silent_one():
+    """`max_state_changing_requests` does not yet decrement for body attempts.
 
-    Every request a body attempt sends is a mutation, so its state-changing cost equals its
-    request cost. The body floors omitted the dimension, so a body attempt consumed nothing
-    from the ceiling that exists to bound it. (The permission was always enforced --
-    `work_manifests` only creates a body candidate when `allow_state_changing_http` is set
-    -- so this was missing accounting, not missing authority.)
+    Charging it is correct in principle and was tried: the budget is reserved per batch
+    action, a thorough plan admits several required SQLi batches, and one attempt costs
+    480 against a 500 ceiling -- so the second batch became unadmittable and every
+    thorough scan failed at admission, taking recall from 4/9 to 0/9. The gap is recorded
+    here so it cannot be mistaken for an oversight or quietly reintroduced the same way.
     """
-    from scan.external_process import BATCH_ATTEMPT_BODY_FLOORS, batch_attempt_floor
-
-    for capability, floor in BATCH_ATTEMPT_BODY_FLOORS.items():
-        assert floor["state_changing_requests"] == floor["http_requests"], capability
-        resolved = batch_attempt_floor(capability, body_candidate=True)
-        assert resolved["state_changing_requests"] == floor["state_changing_requests"]
-        # A query attempt sends no mutations and must not be charged for any.
-        assert "state_changing_requests" not in batch_attempt_floor(capability)
-
-
-def test_only_a_profile_that_can_fund_a_body_attempt_reserves_for_one():
-    from scan.action_plan import _BATCH_PROFILES
-    from scan.contracts import BUDGET_PROFILES
     from scan.external_process import BATCH_ATTEMPT_BODY_FLOORS
 
-    for profile, batches in _BATCH_PROFILES.items():
-        ceiling = BUDGET_PROFILES[profile].ledger_limits()["state_changing_requests"]
-        for capability, floor in BATCH_ATTEMPT_BODY_FLOORS.items():
-            entry = batches.get(capability)
-            if entry is None:
-                continue
-            reserved = int(entry[1].get("state_changing_requests", 0))
-            assert reserved <= ceiling, (
-                f"{profile}/{capability} reserves {reserved} mutations against a "
-                f"{ceiling} ceiling"
-            )
-            if reserved:
-                assert reserved >= floor["state_changing_requests"], (
-                    f"{profile}/{capability} reserves {reserved}, below the "
-                    f"{floor['state_changing_requests']} one attempt costs -- it could "
-                    "never fund the attempt it reserved for"
-                )
+    for capability, floor in BATCH_ATTEMPT_BODY_FLOORS.items():
+        assert "state_changing_requests" not in floor, (
+            f"{capability} declares mutation cost per batch again -- confirm a required "
+            "second batch still admits before keeping this"
+        )
+    source = (ROOT / "api" / "scan" / "external_process.py").read_text(encoding="utf-8")
+    assert "deliberately ABSENT" in source, "the gap must stay documented where it lives"

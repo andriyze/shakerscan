@@ -8,7 +8,7 @@
     "stale": 0,
     "pending": 0,
     "fingerprints": [
-      "e483822715d3933c"
+      "63f537b85b2ee605"
     ]
   },
   "fleet_uniform": true,
@@ -16,12 +16,9 @@
   "seed_hypotheses": false,
   "targets": [
     {
-      "total_findings": 8,
-      "verified_high_critical": 8,
-      "verified_high_critical_families": [
-        "sensitive_exposure",
-        "sqli"
-      ],
+      "total_findings": 0,
+      "verified_high_critical": 0,
+      "verified_high_critical_families": [],
       "browser_proven_high_critical_families": [],
       "suspected_high_critical": 0,
       "false_positive_risk": 0.0,
@@ -54,33 +51,16 @@
       },
       "timeout": false,
       "error": null,
-      "expected_found": [
+      "expected_found": [],
+      "expected_missed": [
         {
           "id": "sqli-search",
           "family": "sqli",
           "route": "/rest/products/search",
           "proof": "verified",
           "min_severity": "critical",
-          "evidence": "Verified SQL injection"
+          "evidence": null
         },
-        {
-          "id": "exposed-metrics",
-          "family": "sensitive_exposure",
-          "route": "/metrics",
-          "proof": "deterministic",
-          "min_severity": "high",
-          "evidence": "Sensitive exposure: metrics endpoint"
-        },
-        {
-          "id": "exposed-ftp-listing",
-          "family": "sensitive_exposure",
-          "route": "/ftp",
-          "proof": "deterministic",
-          "min_severity": "high",
-          "evidence": "Sensitive exposure: directory listing"
-        }
-      ],
-      "expected_missed": [
         {
           "id": "sqli-login",
           "family": "sqli",
@@ -114,6 +94,22 @@
           "evidence": null
         },
         {
+          "id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
+          "id": "exposed-ftp-listing",
+          "family": "sensitive_exposure",
+          "route": "/ftp",
+          "proof": "deterministic",
+          "min_severity": "high",
+          "evidence": null
+        },
+        {
           "id": "exposed-confidential",
           "family": "sensitive_exposure",
           "route": "/ftp/acquisitions.md",
@@ -131,6 +127,29 @@
         }
       ],
       "benchmark_followups": [
+        {
+          "id": "benchmark-miss:juice-shop:sqli-search",
+          "benchmark": "juice-shop",
+          "expectation_id": "sqli-search",
+          "family": "sqli",
+          "route": "/rest/products/search",
+          "proof_required": "verified",
+          "min_severity": "critical",
+          "status": "ready",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sqli",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
         {
           "id": "benchmark-miss:juice-shop:sqli-login",
           "benchmark": "juice-shop",
@@ -233,6 +252,52 @@
           }
         },
         {
+          "id": "benchmark-miss:juice-shop:exposed-metrics",
+          "benchmark": "juice-shop",
+          "expectation_id": "exposed-metrics",
+          "family": "sensitive_exposure",
+          "route": "/metrics",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sensitive_exposure",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
+          "id": "benchmark-miss:juice-shop:exposed-ftp-listing",
+          "benchmark": "juice-shop",
+          "expectation_id": "exposed-ftp-listing",
+          "family": "sensitive_exposure",
+          "route": "/ftp",
+          "proof_required": "deterministic",
+          "min_severity": "high",
+          "status": "ready",
+          "operator_hints": [],
+          "blocked_by": [],
+          "reason": "missing_verified_benchmark_expectation",
+          "next_test_action": {
+            "command": "scan.focused_family",
+            "risk_tier": "active",
+            "parameters": {
+              "target": "http://host.docker.internal:3001",
+              "check_family": "sensitive_exposure",
+              "budget_profile": "thorough",
+              "no_early_stop": true
+            }
+          }
+        },
+        {
           "id": "benchmark-miss:juice-shop:exposed-confidential",
           "benchmark": "juice-shop",
           "expectation_id": "exposed-confidential",
@@ -291,175 +356,17 @@
         "telemetry_anomalies": [],
         "families": {}
       },
-      "expected_recall": 0.33,
-      "family_coverage": [
-        {
-          "family": "nosqli",
-          "reason": null,
-          "required": true,
-          "selected": true,
-          "batch_actions": 1,
-          "budget_consumed": {
-            "http_requests": 52,
-            "tool_wall_seconds": 13
-          },
-          "budget_reserved": {
-            "http_requests": 104,
-            "tool_wall_seconds": 94
-          },
-          "coverage_status": "complete",
-          "proof_escalation": {
-            "reason": null,
-            "status": "not_planned",
-            "actions": 0,
-            "attempted_candidates": 0
-          },
-          "verified_findings": 0,
-          "planned_candidates": 13,
-          "suspected_findings": 0,
-          "manifest_candidates": 13,
-          "attempted_candidates": 13,
-          "unattempted_candidates": 0,
-          "unscheduled_candidates": 0
-        },
-        {
-          "family": "nuclei_passive",
-          "reason": "action_incomplete",
-          "required": true,
-          "selected": true,
-          "batch_actions": 5,
-          "budget_consumed": {
-            "http_requests": 1470,
-            "tool_wall_seconds": 252
-          },
-          "budget_reserved": {
-            "http_requests": 1470,
-            "tool_wall_seconds": 252
-          },
-          "coverage_status": "partial",
-          "proof_escalation": {
-            "reason": null,
-            "status": "not_planned",
-            "actions": 0,
-            "attempted_candidates": 0
-          },
-          "verified_findings": 0,
-          "planned_candidates": 210,
-          "suspected_findings": 0,
-          "manifest_candidates": 210,
-          "attempted_candidates": 210,
-          "unattempted_candidates": 0,
-          "unscheduled_candidates": 0
-        },
-        {
-          "family": "sensitive_exposure",
-          "reason": null,
-          "required": true,
-          "selected": true,
-          "batch_actions": 3,
-          "budget_consumed": {
-            "http_requests": 246,
-            "tool_wall_seconds": 242
-          },
-          "budget_reserved": {
-            "http_requests": 1575,
-            "tool_wall_seconds": 630
-          },
-          "coverage_status": "complete",
-          "proof_escalation": {
-            "reason": null,
-            "status": "not_planned",
-            "actions": 0,
-            "attempted_candidates": 0
-          },
-          "verified_findings": 7,
-          "planned_candidates": 210,
-          "suspected_findings": 0,
-          "manifest_candidates": 210,
-          "attempted_candidates": 238,
-          "unattempted_candidates": 0,
-          "unscheduled_candidates": 0
-        },
-        {
-          "family": "sqli",
-          "reason": "action_incomplete",
-          "required": true,
-          "selected": true,
-          "batch_actions": 2,
-          "budget_consumed": {
-            "http_requests": 2514,
-            "tool_wall_seconds": 779
-          },
-          "budget_reserved": {
-            "http_requests": 2600,
-            "tool_wall_seconds": 991
-          },
-          "coverage_status": "partial",
-          "proof_escalation": {
-            "reason": null,
-            "status": "complete",
-            "actions": 1,
-            "attempted_candidates": 2
-          },
-          "verified_findings": 1,
-          "planned_candidates": 13,
-          "suspected_findings": 0,
-          "manifest_candidates": 13,
-          "attempted_candidates": 13,
-          "unattempted_candidates": 0,
-          "unscheduled_candidates": 0
-        },
-        {
-          "family": "xss",
-          "reason": "action_incomplete",
-          "required": true,
-          "selected": true,
-          "batch_actions": 2,
-          "budget_consumed": {
-            "http_requests": 1560,
-            "browser_actions": 0,
-            "tool_wall_seconds": 230
-          },
-          "budget_reserved": {
-            "http_requests": 2210,
-            "browser_actions": 26,
-            "tool_wall_seconds": 702
-          },
-          "coverage_status": "partial",
-          "proof_escalation": {
-            "reason": "no_proof_eligible_candidate",
-            "status": "not_applicable",
-            "actions": 1,
-            "attempted_candidates": 0
-          },
-          "verified_findings": 0,
-          "planned_candidates": 13,
-          "suspected_findings": 0,
-          "manifest_candidates": 13,
-          "attempted_candidates": 13,
-          "unattempted_candidates": 0,
-          "unscheduled_candidates": 0
-        }
-      ],
-      "selected_family_gaps": [
-        "nuclei_passive",
-        "sqli",
-        "xss"
-      ],
+      "expected_recall": 0.0,
+      "family_coverage": [],
+      "selected_family_gaps": [],
       "family_attempt_failures": [],
-      "attempted_families": [
-        "nosqli",
-        "nuclei_passive",
-        "sensitive_exposure",
-        "sqli",
-        "xss"
-      ],
-      "canonical_grade_reliable": false,
+      "attempted_families": [],
+      "canonical_grade_reliable": null,
       "phase": "scan_finish",
       "resolved_budget": null,
       "invariant_violations": null,
       "active_execution_failed": false,
-      "grade_reliable": false,
+      "grade_reliable": null,
       "report_degraded": false,
       "report_invariant_violations": [],
       "two_user": false,
@@ -477,7 +384,7 @@
         {
           "gate": "quality:min_expected_recall",
           "pass": false,
-          "detail": "0.33 >= 0.67"
+          "detail": "0.0 >= 0.67"
         },
         {
           "gate": "quality:require_browser_proven_xss",
@@ -487,7 +394,7 @@
         {
           "gate": "quality:grade_reliable",
           "pass": false,
-          "detail": "grade_reliable=False"
+          "detail": "grade_reliable=None"
         },
         {
           "gate": "quality:max_known_expectation_gaps",
@@ -500,7 +407,7 @@
         "quality:grade_reliable"
       ],
       "quality_enforced_passed": false,
-      "scan_id": "dc3ddc48-fbe3-4059-8f6d-9b805909c8fa",
+      "scan_id": "5355afd7-8ee0-41cb-ab21-37351f5a71dc",
       "target": "juice_shop",
       "gates": [
         {
@@ -516,7 +423,7 @@
         {
           "gate": "grade_reliable_recorded",
           "pass": true,
-          "detail": "grade_reliable=False (not gated by this fixture)"
+          "detail": "grade_reliable=None (not gated by this fixture)"
         },
         {
           "gate": "active_execution_ok",
@@ -536,17 +443,17 @@
         {
           "gate": "no_undeclared_expectation_misses",
           "pass": false,
-          "detail": "undeclared misses: exposed-confidential"
+          "detail": "undeclared misses: exposed-confidential, exposed-ftp-listing, exposed-metrics, sqli-search"
         },
         {
           "gate": "min_expected_recall",
           "pass": false,
-          "detail": "0.33 >= 0.44"
+          "detail": "0.0 >= 0.44"
         },
         {
           "gate": "min_verified_high_critical",
-          "pass": true,
-          "detail": "8 >= 6"
+          "pass": false,
+          "detail": "0 >= 6"
         },
         {
           "gate": "max_unverified_high_ratio",
@@ -555,19 +462,16 @@
         },
         {
           "gate": "require_verified_sqli",
-          "pass": true,
-          "detail": "verified SQLi present"
+          "pass": false,
+          "detail": "no verified SQLi"
         }
       ],
       "passed": false,
       "scorecards": {
         "scan_finish": {
-          "total_findings": 8,
-          "verified_high_critical": 8,
-          "verified_high_critical_families": [
-            "sensitive_exposure",
-            "sqli"
-          ],
+          "total_findings": 0,
+          "verified_high_critical": 0,
+          "verified_high_critical_families": [],
           "browser_proven_high_critical_families": [],
           "suspected_high_critical": 0,
           "false_positive_risk": 0.0,
@@ -600,33 +504,16 @@
           },
           "timeout": false,
           "error": null,
-          "expected_found": [
+          "expected_found": [],
+          "expected_missed": [
             {
               "id": "sqli-search",
               "family": "sqli",
               "route": "/rest/products/search",
               "proof": "verified",
               "min_severity": "critical",
-              "evidence": "Verified SQL injection"
+              "evidence": null
             },
-            {
-              "id": "exposed-metrics",
-              "family": "sensitive_exposure",
-              "route": "/metrics",
-              "proof": "deterministic",
-              "min_severity": "high",
-              "evidence": "Sensitive exposure: metrics endpoint"
-            },
-            {
-              "id": "exposed-ftp-listing",
-              "family": "sensitive_exposure",
-              "route": "/ftp",
-              "proof": "deterministic",
-              "min_severity": "high",
-              "evidence": "Sensitive exposure: directory listing"
-            }
-          ],
-          "expected_missed": [
             {
               "id": "sqli-login",
               "family": "sqli",
@@ -660,6 +547,22 @@
               "evidence": null
             },
             {
+              "id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
+              "id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof": "deterministic",
+              "min_severity": "high",
+              "evidence": null
+            },
+            {
               "id": "exposed-confidential",
               "family": "sensitive_exposure",
               "route": "/ftp/acquisitions.md",
@@ -677,6 +580,29 @@
             }
           ],
           "benchmark_followups": [
+            {
+              "id": "benchmark-miss:juice-shop:sqli-search",
+              "benchmark": "juice-shop",
+              "expectation_id": "sqli-search",
+              "family": "sqli",
+              "route": "/rest/products/search",
+              "proof_required": "verified",
+              "min_severity": "critical",
+              "status": "ready",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sqli",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
             {
               "id": "benchmark-miss:juice-shop:sqli-login",
               "benchmark": "juice-shop",
@@ -779,6 +705,52 @@
               }
             },
             {
+              "id": "benchmark-miss:juice-shop:exposed-metrics",
+              "benchmark": "juice-shop",
+              "expectation_id": "exposed-metrics",
+              "family": "sensitive_exposure",
+              "route": "/metrics",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sensitive_exposure",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
+              "id": "benchmark-miss:juice-shop:exposed-ftp-listing",
+              "benchmark": "juice-shop",
+              "expectation_id": "exposed-ftp-listing",
+              "family": "sensitive_exposure",
+              "route": "/ftp",
+              "proof_required": "deterministic",
+              "min_severity": "high",
+              "status": "ready",
+              "operator_hints": [],
+              "blocked_by": [],
+              "reason": "missing_verified_benchmark_expectation",
+              "next_test_action": {
+                "command": "scan.focused_family",
+                "risk_tier": "active",
+                "parameters": {
+                  "target": "http://host.docker.internal:3001",
+                  "check_family": "sensitive_exposure",
+                  "budget_profile": "thorough",
+                  "no_early_stop": true
+                }
+              }
+            },
+            {
               "id": "benchmark-miss:juice-shop:exposed-confidential",
               "benchmark": "juice-shop",
               "expectation_id": "exposed-confidential",
@@ -837,175 +809,17 @@
             "telemetry_anomalies": [],
             "families": {}
           },
-          "expected_recall": 0.33,
-          "family_coverage": [
-            {
-              "family": "nosqli",
-              "reason": null,
-              "required": true,
-              "selected": true,
-              "batch_actions": 1,
-              "budget_consumed": {
-                "http_requests": 52,
-                "tool_wall_seconds": 13
-              },
-              "budget_reserved": {
-                "http_requests": 104,
-                "tool_wall_seconds": 94
-              },
-              "coverage_status": "complete",
-              "proof_escalation": {
-                "reason": null,
-                "status": "not_planned",
-                "actions": 0,
-                "attempted_candidates": 0
-              },
-              "verified_findings": 0,
-              "planned_candidates": 13,
-              "suspected_findings": 0,
-              "manifest_candidates": 13,
-              "attempted_candidates": 13,
-              "unattempted_candidates": 0,
-              "unscheduled_candidates": 0
-            },
-            {
-              "family": "nuclei_passive",
-              "reason": "action_incomplete",
-              "required": true,
-              "selected": true,
-              "batch_actions": 5,
-              "budget_consumed": {
-                "http_requests": 1470,
-                "tool_wall_seconds": 252
-              },
-              "budget_reserved": {
-                "http_requests": 1470,
-                "tool_wall_seconds": 252
-              },
-              "coverage_status": "partial",
-              "proof_escalation": {
-                "reason": null,
-                "status": "not_planned",
-                "actions": 0,
-                "attempted_candidates": 0
-              },
-              "verified_findings": 0,
-              "planned_candidates": 210,
-              "suspected_findings": 0,
-              "manifest_candidates": 210,
-              "attempted_candidates": 210,
-              "unattempted_candidates": 0,
-              "unscheduled_candidates": 0
-            },
-            {
-              "family": "sensitive_exposure",
-              "reason": null,
-              "required": true,
-              "selected": true,
-              "batch_actions": 3,
-              "budget_consumed": {
-                "http_requests": 246,
-                "tool_wall_seconds": 242
-              },
-              "budget_reserved": {
-                "http_requests": 1575,
-                "tool_wall_seconds": 630
-              },
-              "coverage_status": "complete",
-              "proof_escalation": {
-                "reason": null,
-                "status": "not_planned",
-                "actions": 0,
-                "attempted_candidates": 0
-              },
-              "verified_findings": 7,
-              "planned_candidates": 210,
-              "suspected_findings": 0,
-              "manifest_candidates": 210,
-              "attempted_candidates": 238,
-              "unattempted_candidates": 0,
-              "unscheduled_candidates": 0
-            },
-            {
-              "family": "sqli",
-              "reason": "action_incomplete",
-              "required": true,
-              "selected": true,
-              "batch_actions": 2,
-              "budget_consumed": {
-                "http_requests": 2514,
-                "tool_wall_seconds": 779
-              },
-              "budget_reserved": {
-                "http_requests": 2600,
-                "tool_wall_seconds": 991
-              },
-              "coverage_status": "partial",
-              "proof_escalation": {
-                "reason": null,
-                "status": "complete",
-                "actions": 1,
-                "attempted_candidates": 2
-              },
-              "verified_findings": 1,
-              "planned_candidates": 13,
-              "suspected_findings": 0,
-              "manifest_candidates": 13,
-              "attempted_candidates": 13,
-              "unattempted_candidates": 0,
-              "unscheduled_candidates": 0
-            },
-            {
-              "family": "xss",
-              "reason": "action_incomplete",
-              "required": true,
-              "selected": true,
-              "batch_actions": 2,
-              "budget_consumed": {
-                "http_requests": 1560,
-                "browser_actions": 0,
-                "tool_wall_seconds": 230
-              },
-              "budget_reserved": {
-                "http_requests": 2210,
-                "browser_actions": 26,
-                "tool_wall_seconds": 702
-              },
-              "coverage_status": "partial",
-              "proof_escalation": {
-                "reason": "no_proof_eligible_candidate",
-                "status": "not_applicable",
-                "actions": 1,
-                "attempted_candidates": 0
-              },
-              "verified_findings": 0,
-              "planned_candidates": 13,
-              "suspected_findings": 0,
-              "manifest_candidates": 13,
-              "attempted_candidates": 13,
-              "unattempted_candidates": 0,
-              "unscheduled_candidates": 0
-            }
-          ],
-          "selected_family_gaps": [
-            "nuclei_passive",
-            "sqli",
-            "xss"
-          ],
+          "expected_recall": 0.0,
+          "family_coverage": [],
+          "selected_family_gaps": [],
           "family_attempt_failures": [],
-          "attempted_families": [
-            "nosqli",
-            "nuclei_passive",
-            "sensitive_exposure",
-            "sqli",
-            "xss"
-          ],
-          "canonical_grade_reliable": false,
+          "attempted_families": [],
+          "canonical_grade_reliable": null,
           "phase": "scan_finish",
           "resolved_budget": null,
           "invariant_violations": null,
           "active_execution_failed": false,
-          "grade_reliable": false,
+          "grade_reliable": null,
           "report_degraded": false,
           "report_invariant_violations": [],
           "two_user": false,
@@ -1023,7 +837,7 @@
             {
               "gate": "quality:min_expected_recall",
               "pass": false,
-              "detail": "0.33 >= 0.67"
+              "detail": "0.0 >= 0.67"
             },
             {
               "gate": "quality:require_browser_proven_xss",
@@ -1033,7 +847,7 @@
             {
               "gate": "quality:grade_reliable",
               "pass": false,
-              "detail": "grade_reliable=False"
+              "detail": "grade_reliable=None"
             },
             {
               "gate": "quality:max_known_expectation_gaps",

@@ -25,9 +25,17 @@ from .execution_backend import (
 
 
 _TERMINAL_STATUSES = frozenset(item.value for item in CapabilityResultStatus)
+# A timed-out action that produced usable output satisfies a dependency, exactly as a
+# partial one does -- "preserve trustworthy partial output on timeout where safe" is the
+# rule the whole engine is built on, and a timeout is how a partial batch most often ends.
+# Omitting it mattered the moment batch receipts stopped overwriting `timed_out` with
+# False: `verify.sqli` had always been timing out, and once it said so, `prove.sqli` was
+# blocked as dependency_failed and Juice Shop lost its one verified SQLi. The dependency
+# gate was reading a flag that used to be a lie.
 _DEPENDENCY_SATISFIED = frozenset({
     CapabilityResultStatus.SUCCESS,
     CapabilityResultStatus.PARTIAL,
+    CapabilityResultStatus.TIMED_OUT,
 })
 
 
