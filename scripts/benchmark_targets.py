@@ -1229,6 +1229,9 @@ def main():
     ap.add_argument("--rescore-after-retest", action="store_true",
                     help="after the scan, wait for the auto-retest wave then re-score from live verdicts (§6)")
     ap.add_argument("--retest-wait", type=int, default=900, help="max seconds to wait for the retest wave to settle")
+    ap.add_argument("--enforce-quality", action="store_true",
+                    help="fail the run when the declared quality bar is not met, not only "
+                         "when a regression gate breaks; release qualification should set this")
     ap.add_argument("--allow-stale-fleet", action="store_true",
                     help="run even if the worker fleet is not uniform (NOT recommended — §10 gate)")
     ap.add_argument("--seed-hypotheses", action="store_true",
@@ -1350,13 +1353,30 @@ def main():
             print(f"    -- quality bar ({verdict}): the standard this benchmark measures against --")
             for g in quality:
                 print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
+    # The quality bar is the standard this benchmark measures against; the regression
+    # gates only hold the line where the engine already is. Reporting them separately is
+    # honest, but it also made the bar unenforceable: nothing could ever fail on it.
+    # `--enforce-quality` makes it decide the exit status, so a release can require it.
+    quality_ok = all(
+        card.get("quality_passed", True) for card in cards if card.get("quality_gates")
+    )
+    release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
     run = {
-        **artifact_metadata(bool(overall_ok)),
+        **artifact_metadata(release_ok),
         "fleet": fleet, "fleet_uniform": uniform,
         "rescore_after_retest": args.rescore_after_retest,
         "seed_hypotheses": args.seed_hypotheses,
-        "targets": cards, "passed": overall_ok,
+        "targets": cards,
+        "passed": release_ok,
+        "regression_gates_passed": bool(overall_ok),
+        "quality_bar_passed": quality_ok,
+        "quality_bar_enforced": bool(args.enforce_quality),
     }
+    if not quality_ok:
+        print(
+            "\nquality bar NOT MET"
+            + ("" if args.enforce_quality else " (advisory: pass --enforce-quality to fail on it)")
+        )
     # Latest-pointer (stable name) plus a timestamped, git-trackable record so a
     # passing/failing run is visible in history (§10 — scorecards committed).
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -1366,7 +1386,7 @@ def main():
     open(latest, "w").write(payload)
     open(archive, "w").write(payload)
     print(f"\nwrote {latest}\nwrote {archive}")
-    return 0 if overall_ok else 1
+    return 0 if release_ok else 1
 
 
 if __name__ == "__main__":
