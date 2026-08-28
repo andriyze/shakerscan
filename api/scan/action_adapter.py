@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
-from typing import Any, Awaitable, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 import urllib.parse
 
 try:
@@ -207,6 +207,32 @@ class ObservationBackend(Protocol):
     async def checkpoint_batch_attempt(
         self, action_id: str, attempt: Mapping[str, Any],
     ) -> None: ...
+
+
+_BATCH_SUCCESS_STATUSES = frozenset({"success", "succeeded", "completed"})
+
+
+def batch_outcome(
+    attempt_statuses: Sequence[str], unattempted: int,
+) -> tuple[str, bool, bool]:
+    """Return (status, partial, timed_out) for a batch from its attempts.
+
+    Every batch handler decided this independently and all of them looked only at
+    `unattempted`, so a batch whose every attempt failed or was wall-killed -- with each
+    candidate duly started -- reported `success` with `timed_out=False`. That is how a
+    family showed complete coverage while proving nothing.
+
+    A completed attempt that reached "not proven" is still a success: not finding a
+    vulnerability is a result. An attempt that never finished is not.
+    """
+    failed = any(
+        str(status) not in _BATCH_SUCCESS_STATUSES for status in attempt_statuses
+    )
+    timed_out = any(
+        str(status) in {"timed_out", "partial"} for status in attempt_statuses
+    )
+    partial = bool(unattempted) or failed
+    return ("partial" if partial else "success", partial, timed_out)
 
 
 class ScanActionAdapterError(RuntimeError):
@@ -1024,6 +1050,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = 0
+        attempt_statuses: list[str] = []
         resumed = 0
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
@@ -1034,6 +1061,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
+                attempt_statuses.append(str(prior.get("status") or "success"))
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1126,6 +1154,7 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
+            attempt_statuses.append(str(result.status))
             attempted += 1
             observations.extend(attempt_observations)
             errors.extend(str(item) for item in result.errors)
@@ -1153,16 +1182,19 @@ class DatabaseNeutralScanActionDispatcher:
                 else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
             )
             batch_errors.insert(0, stated)
+        _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
+            attempt_statuses, unattempted,
+        )
         return self._receipt(
             action,
-            status="partial" if unattempted else "success",
+            status=_batch_status,
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
             errors=tuple(batch_errors),
             consumed=consumed,
-            partial=bool(unattempted),
-            timed_out=False,
+            partial=_batch_partial,
+            timed_out=_batch_timed_out,
             redacted_execution={
                 "action_id": action.action_id,
                 "manifest_digest": manifest_digest,
@@ -1229,6 +1261,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
+        attempt_statuses: list[str] = []
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             if candidate_id not in candidate_signals:
@@ -1240,6 +1273,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
+                attempt_statuses.append(str(prior.get("status") or "success"))
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1294,6 +1328,7 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
+            attempt_statuses.append(str(result.status))
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
@@ -1307,12 +1342,15 @@ class DatabaseNeutralScanActionDispatcher:
             for _index, candidate in rows
         )
         unattempted = max(0, eligible - attempted)
+        _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
+            attempt_statuses, unattempted,
+        )
         return self._receipt(
-            action, status="partial" if unattempted else "success",
+            action, status=_batch_status,
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at, observations=tuple(observations),
             errors=tuple(errors[:20]), consumed=consumed,
-            partial=bool(unattempted), timed_out=False,
+            partial=_batch_partial, timed_out=_batch_timed_out,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
@@ -1384,6 +1422,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
+        attempt_statuses: list[str] = []
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
@@ -1398,6 +1437,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
+                attempt_statuses.append(str(prior.get("status") or "success"))
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1487,6 +1527,7 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
+            attempt_statuses.append(str(result.status))
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
@@ -1500,12 +1541,15 @@ class DatabaseNeutralScanActionDispatcher:
             for _index, candidate in rows
         )
         unattempted = max(0, eligible - attempted)
+        _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
+            attempt_statuses, unattempted,
+        )
         return self._receipt(
-            action, status="partial" if unattempted else "success",
+            action, status=_batch_status,
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at, observations=tuple(observations),
             errors=tuple(errors[:20]), consumed=consumed,
-            partial=bool(unattempted), timed_out=False,
+            partial=_batch_partial, timed_out=_batch_timed_out,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
@@ -1750,6 +1794,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
+        attempt_statuses: list[str] = []
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
@@ -1762,6 +1807,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
+                attempt_statuses.append(str(prior.get("status") or "success"))
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1851,6 +1897,7 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
+            attempt_statuses.append(str(result.status))
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
@@ -1860,12 +1907,15 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed.get(name, 0) + int(amount),
                 )
         unattempted = max(0, len(rows) - attempted)
+        _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
+            attempt_statuses, unattempted,
+        )
         return self._receipt(
-            action, status="partial" if unattempted else "success",
+            action, status=_batch_status,
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at, observations=tuple(observations),
             errors=tuple(errors[:20]), consumed=consumed,
-            partial=bool(unattempted), timed_out=False,
+            partial=_batch_partial, timed_out=_batch_timed_out,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
@@ -1921,6 +1971,7 @@ class DatabaseNeutralScanActionDispatcher:
         wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         errors: list[str] = []
         attempted = resumed = 0
+        attempt_statuses: list[str] = []
 
         def probe_of(result: Any) -> PrincipalProbe:
             content_type = next((
@@ -1966,6 +2017,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
+                attempt_statuses.append(str(prior.get("status") or "success"))
                 comparisons.append(RouteComparison(
                     route_id=route_id, url=str(prior.get("url") or ""),
                     anonymous=tuple(
@@ -2014,6 +2066,10 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if not self.cancelled():
                 await checkpoint_attempt(action.action_id, checkpoint)
+            # This family's attempts are in-process cross-principal comparisons: there is
+            # no external process to be cut off, so the checkpoint's own status is the
+            # attempt outcome.
+            attempt_statuses.append(str(checkpoint.get("status") or "success"))
             attempted += 1
 
         # A finding needs proof the app gates function access somewhere; without an
@@ -2035,12 +2091,15 @@ class DatabaseNeutralScanActionDispatcher:
             if proven is not None:
                 observations.append(proven)
         unattempted = max(0, len(window) - attempted)
+        _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
+            attempt_statuses, unattempted,
+        )
         return self._receipt(
-            action, status="partial" if unattempted else "success",
+            action, status=_batch_status,
             parser_version=AUTHZ_SURFACE_PARSER_VERSION,
             started_at=started_at, observations=tuple(observations),
             errors=tuple(errors[:20]), consumed=consumed,
-            partial=bool(unattempted), timed_out=False,
+            partial=_batch_partial, timed_out=_batch_timed_out,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
@@ -2249,6 +2308,7 @@ class DatabaseNeutralScanActionDispatcher:
         attempted = 0
         resumed = 0
         terminal_failure = False
+        attempt_timed_out = False
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
@@ -2430,8 +2490,16 @@ class DatabaseNeutralScanActionDispatcher:
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
-            if result.status in {"failed", "timed_out"}:
+            # Any attempt that did not succeed counts. A timed-out external tool is
+            # normalized to "partial" upstream, and "partial" was absent from this set --
+            # so a batch in which every single attempt timed out, with every candidate
+            # started, aggregated to unattempted=0, terminal_failure=False and reported
+            # `success` with `timed_out=False`. That is how a family showed complete
+            # coverage while proving nothing at all.
+            if result.status not in {"success", "succeeded", "completed"}:
                 terminal_failure = True
+            if result.status in {"timed_out", "partial"} or getattr(result, "timed_out", False):
+                attempt_timed_out = True
             if result.status == "cancelled":
                 break
         unattempted = max(0, len(rows) - attempted)
@@ -2468,7 +2536,9 @@ class DatabaseNeutralScanActionDispatcher:
             errors=tuple(batch_errors[:21]),
             consumed=consumed,
             partial=partial,
-            timed_out=False,
+            # Never overwrite a real timeout with False: the batch inherits it from its
+            # attempts, so a wall-killed run stays visible as one.
+            timed_out=attempt_timed_out,
             redacted_execution={
                 "action_id": action.action_id,
                 "profile": action.capability_args.get("profile"),
