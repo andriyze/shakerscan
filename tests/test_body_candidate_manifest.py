@@ -51,16 +51,25 @@ def _manifest(entries):
     )
 
 
-def test_a_json_body_endpoint_produces_one_candidate_per_field():
+def test_a_json_body_endpoint_produces_one_candidate_for_the_whole_body():
+    """One candidate, not one per field.
+
+    The verifier tests every field in a single run and stops at the first vulnerable one, so
+    per-field candidates cost N runs for the coverage of one. Measured: testing both fields of a
+    login body costs the same 410 requests as testing either alone. Worse, when two fields tied on
+    score, which one received the budget came down to a digest comparison -- and on Juice Shop that
+    picked `password` while the injection was in `email`.
+    """
     manifest = build_candidate_manifest(
         _manifest([_endpoint()]), source_action_ids=("discover.crawl",), maximum=50,
         allow_state_changing_http=True)
-    fields = sorted(item["parameter_name"] for item in manifest.entries)
-    assert fields == ["email", "password"]
-    for item in manifest.entries:
-        assert item["method"] == "POST"
-        assert item["content_type"] == "application/json"
-        assert list(item["body_field_names"]) == ["email", "password"]
+    assert len(manifest.entries) == 1
+    entry = manifest.entries[0]
+    assert entry["method"] == "POST"
+    assert entry["content_type"] == "application/json"
+    # The whole body is carried and tested; the anchor only labels the candidate.
+    assert list(entry["body_field_names"]) == ["email", "password"]
+    assert entry["parameter_name"] == "email", "the likeliest field anchors the identity"
 
 
 def test_query_candidates_are_unchanged():
@@ -86,13 +95,12 @@ def test_a_body_candidate_resolves_to_a_request_not_a_url():
     candidates = build_candidate_manifest(
         endpoints, source_action_ids=("discover.crawl",), maximum=50,
         allow_state_changing_http=True)
-    index = next(i for i, item in enumerate(candidates.entries)
-                 if item["parameter_name"] == "password")
+    index = 0
     request = execution_request_for_manifest_candidate(endpoints, candidates, index)
     assert request["method"] == "POST"
     assert request["url"] == "https://target.test/rest/user/login"
     assert request["content_type"] == "application/json"
-    assert request["field_name"] == "password"
+    assert request["field_name"] == "email"
     # Every declared field is present so the body is well-formed; only the tested field is marked.
     assert sorted(request["body_field_names"]) == ["email", "password"]
 
@@ -183,7 +191,8 @@ def test_authentication_field_names_rank_as_injection_candidates():
     login = build_candidate_manifest(
         _manifest([_endpoint()]), source_action_ids=("discover.crawl",), maximum=50,
         allow_state_changing_http=True)
-    scores = {item["parameter_name"]: item["score"] for item in login.entries}
+    assert len(login.entries) == 1
+    login_score = login.entries[0]["score"]
 
     plumbing = _endpoint(method="GET", canonical_path="/socket.io/",
                          query_parameter_names=["transport"],
@@ -191,7 +200,6 @@ def test_authentication_field_names_rank_as_injection_candidates():
     transport = build_candidate_manifest(
         _manifest([plumbing]), source_action_ids=("discover.crawl",), maximum=50).entries[0]
 
-    assert scores["email"] > transport["score"], (scores, transport["score"])
-    assert scores["password"] > transport["score"]
+    assert login_score > transport["score"], (login_score, transport["score"])
     for item in login.entries:
         assert "sqli_semantic_parameter" in item["ranking_rationale"]

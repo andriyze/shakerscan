@@ -2379,9 +2379,14 @@ class DatabaseNeutralScanActionDispatcher:
                 cancelled=self.cancelled,
             )
             attempt_observations = tuple({
-                **dict(item),
-                "attempt_id": attempt_id,
-                "candidate_id": candidate_id,
+                # The tool parsers read the tool's own output, which names the vulnerable parameter
+                # but not the endpoint. Without the locus a finding has no route, so it cannot be
+                # matched to an expectation, routed to a verifier (an unresolved route abstains by
+                # design), or acted on by an operator. The adapter resolved the request, so it
+                # supplies what the parser cannot -- and never overwrites a locus the parser set.
+                "url": execution_target,
+                "method": body_request.get("method", "GET"),
+                **dict(item), "attempt_id": attempt_id, "candidate_id": candidate_id,
             } for item in result.observations)
             proof_state = next((
                 str(item.get("proof_state"))

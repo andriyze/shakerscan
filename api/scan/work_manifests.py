@@ -887,6 +887,20 @@ def build_endpoint_manifest(
     )
 
 
+def _body_field_rank(name: str) -> int:
+    """Rank one body field by how likely it is to be the injectable one.
+
+    Only decides which field anchors a body candidate's identity and ranking; every declared field
+    is tested regardless, so a wrong guess here costs nothing but a less representative label.
+    """
+    normalized = str(name).lower().replace("-", "_")
+    if normalized in {"email", "username", "user", "login", "mail", "id"}:
+        return 2
+    if normalized.endswith("_id") or normalized in {"password", "passwd", "search", "query", "q"}:
+        return 1
+    return 0
+
+
 def build_candidate_manifest(
     endpoint_manifest: ScanWorkManifest,
     *,
@@ -1013,9 +1027,16 @@ def build_candidate_manifest(
             (str(name), False) for name in endpoint["query_parameter_names"]
         ]
         if endpoint["method"] != "GET":
+            # ONE candidate for the whole declared body, not one per field. The verifier tests
+            # every field in a single run and stops at the first vulnerable one, so per-field
+            # candidates cost N runs for the coverage of one -- and when two fields tied on score,
+            # which one got the budget came down to a digest comparison. Measured: testing both
+            # fields of a login body costs the same 410 requests as testing either alone. The
+            # highest-ranked field anchors the candidate's identity; the whole body is tested.
+            body_fields = [str(name) for name in endpoint.get("body_field_names") or ()]
             locations = (
-                [(str(name), True) for name in endpoint.get("body_field_names") or ()]
-                if allow_state_changing_http else []
+                [(max(body_fields, key=lambda name: (_body_field_rank(name), name)), True)]
+                if allow_state_changing_http and body_fields else []
             )
         for parameter, in_body in locations:
             candidate = ranked_candidate(endpoint, parameter, in_body=in_body)

@@ -37,7 +37,8 @@ def test_dalfox_sends_the_body_and_targets_one_field():
         "injection_field": "password",
     })
     assert "-X" in args and args[args.index("-X") + 1] == "POST"
-    assert "-p" in args and args[args.index("-p") + 1] == "password"
+    # Every declared field is offered, not just the anchor: the tool tests them in one run.
+    assert [args[i + 1] for i, item in enumerate(args) if item == "-p"] == ["email", "password"]
     body = args[args.index("-d") + 1]
     decoded = json.loads(body)
     assert sorted(decoded) == ["email", "password"], "every declared field must be present"
@@ -59,7 +60,7 @@ def test_sqlmap_sends_the_body_and_targets_one_field():
     assert "--data" in args
     decoded = json.loads(args[args.index("--data") + 1])
     assert sorted(decoded) == ["email", "password"]
-    assert "-p" in args and args[args.index("-p") + 1] == "email"
+    assert args[args.index("-p") + 1] == "email,password"
 
 
 def test_a_form_content_type_produces_a_form_body():
@@ -153,3 +154,23 @@ def test_the_adapter_selects_the_floor_by_candidate_class():
     source = definition_source("_external_batch")
     assert "batch_attempt_floor(" in source
     assert "body_candidate=bool(body_request)" in source
+
+
+
+def test_a_tool_finding_carries_the_endpoint_the_adapter_resolved():
+    """The tool names the parameter; only the adapter knows the endpoint.
+
+    sqlmap's output line is `(custom) POST parameter 'JSON email' is vulnerable` -- no URL. A
+    finding built from that alone has no route, so it cannot be matched to a benchmark
+    expectation, routed to a verifier (an unresolved route abstains by design), or acted on. The
+    adapter resolved the request, so it supplies the locus, and never overwrites one the parser
+    did establish.
+    """
+    from tests.api_sources import definition_source
+
+    source = definition_source("_external_batch")
+    block = source[source.index("attempt_observations = tuple("):]
+    stamp = block.index('"url": execution_target')
+    spread = block.index("**dict(item)")
+    assert stamp < spread, "a parser-supplied locus must win over the adapter's default"
+    assert '"method": body_request.get("method", "GET")' in block

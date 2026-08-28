@@ -31,7 +31,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .run_service import agent_tools
-from .cancellation import HuntCancellationWatch
+from .cancellation import (
+    HuntCancellationWatch,
+    record_cancellable_job,
+    signal_cancelled_jobs,
+)
 from .settlement import blocked_actual_charges as _hunt_blocked_actual
 from .device_policy import DeviceHuntPolicyState
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
@@ -3006,6 +3010,9 @@ async def _enqueue_canonical_network_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
+    # A worker-placed job polls this key, and its id exists only here, so a Hunt cancellation can
+    # reach it only if the id is recorded against the Hunt now.
+    record_cancellable_job(redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id, "type": "canonical_network_capability",
         "capability_name": capability_name, "capability_input": dict(capability_input),
@@ -3061,6 +3068,7 @@ async def _enqueue_canonical_http_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
+    record_cancellable_job(redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id,
         "type": "canonical_http_capability",

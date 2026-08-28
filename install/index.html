@@ -157,10 +157,26 @@ commit_staged_downloads() {
     if [ -f "$INSTALL_DIR/$OWNED_MANIFEST_NAME" ]; then
         cp "$INSTALL_DIR/$OWNED_MANIFEST_NAME" "$previous_manifest"
     fi
-    # Put the new version in place first, then remove what it no longer ships: an interrupted
-    # commit leaves a complete newer tree plus some stale files, never a tree with holes in it.
-    cp -R "$INSTALL_STAGE/." "$INSTALL_DIR/"
+    # Move each staged file into place by rename. A recursive copy writes over a live file in
+    # chunks, so an interruption can leave a half-written executable that still looks installed --
+    # a claim an earlier version of this comment made and `cp -R` never supported. A rename cannot
+    # do that: every file is either the old one or the new one, never part of both. The tree can
+    # still be a mix of versions if the run is interrupted, which the manifest records; no
+    # individual file is ever corrupt.
+    while IFS= read -r staged_relative; do
+        [ -n "$staged_relative" ] || continue
+        case "$staged_relative" in
+            /*|*..*) continue ;;
+        esac
+        staged_source="$INSTALL_STAGE/$staged_relative"
+        [ -f "$staged_source" ] || continue
+        mkdir -p "$(dirname "$INSTALL_DIR/$staged_relative")"
+        mv -f -- "$staged_source" "$INSTALL_DIR/$staged_relative"
+    done < "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
+    # Prune before the manifest moves: prune_retired_files compares the previous manifest against
+    # the staged one, and moving it first leaves nothing to compare against.
     prune_retired_files "$previous_manifest"
+    mv -f -- "$INSTALL_STAGE/$OWNED_MANIFEST_NAME" "$INSTALL_DIR/$OWNED_MANIFEST_NAME"
     rm -f -- "$INSTALL_DIR/.previous-owned-files"
     cleanup_install_stage
     INSTALL_STAGE=""
@@ -383,7 +399,10 @@ mkdir -p "$INSTALL_DIR/skills/research-agent/agents"
 mkdir -p "$INSTALL_DIR/skills/shakerscan/agents" "$INSTALL_DIR/skills/shakerscan/references"
 mkdir -p "$INSTALL_DIR/.claude/agents" "$INSTALL_DIR/.claude/commands" "$INSTALL_DIR/.claude/hooks"
 touch "$INSTALL_DIR/.env"
-INSTALL_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-install.XXXXXX")"
+# Stage inside the installation directory, not $TMPDIR: a rename is atomic only within one
+# filesystem, and $TMPDIR is frequently a different one. Placing the stage here is what lets each
+# file be moved into place by rename rather than copied byte by byte over a live file.
+INSTALL_STAGE="$(mktemp -d "$INSTALL_DIR/.shakerscan-install.XXXXXX")"
 trap cleanup_install_stage EXIT HUP INT TERM
 
 say "Downloading ShakerScan runtime files..."

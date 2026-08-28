@@ -229,8 +229,11 @@ async def hunt_run_or_404(
 class HuntRunService:
     """Own read/list/finish/cancel/resume persistence for canonical Hunts."""
 
-    def __init__(self, pool_provider):
+    def __init__(self, pool_provider, redis_provider=None):
         self._pool_provider = pool_provider
+        # Optional so existing construction and tests are unchanged; without it a cancellation
+        # still stops the Hunt and its scans, it simply cannot reach worker-placed capability jobs.
+        self._redis_provider = redis_provider
 
     def _pool(self):
         pool = self._pool_provider()
@@ -366,8 +369,19 @@ class HuntRunService:
                          AND status IN ('pending','queued','running')""",
                     [uuid.UUID(item) for item in cancelled_ids],
                 )
+        # A worker-placed capability polls `agent_tool_cancel:{job_id}` for a job id minted at
+        # queue time, so cancelling the Hunt and its scans still left that traffic running. Signal
+        # every job this Hunt queued. Idempotent: an already-set flag is harmless and a finished
+        # job never reads it.
+        signalled: list[str] = []
+        if self._redis_provider is not None:
+            try:
+                signalled = signal_cancelled_jobs(self._redis_provider(), run_uuid)
+            except Exception:  # noqa: BLE001 - the Hunt is cancelled either way
+                signalled = []
         payload = public_hunt_run(row)
         payload["cancelled_scan_ids"] = cancelled_ids
+        payload["cancelled_job_ids"] = signalled
         return payload
 
     async def resume(self, hunt_id: str) -> dict[str, Any]:

@@ -104,7 +104,7 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     },
     "thorough": {
         "xss.verify_batch": (8, {"http_requests": 960, "tool_wall_seconds": 240}),
-        "sqli.verify_batch": (10, {"http_requests": 1_600, "tool_wall_seconds": 300}),
+        "sqli.verify_batch": (10, {"http_requests": 1_920, "tool_wall_seconds": 690}),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),

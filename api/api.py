@@ -13517,7 +13517,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     return _hunt_public(row)
 
 
-_hunt_run_service = HuntRunService(lambda: db_pool)
+_hunt_run_service = HuntRunService(lambda: db_pool, get_redis)
 configure_hunt_run_router(
     lambda: _hunt_run_service,
     start_handler=_start_hunt_v2,

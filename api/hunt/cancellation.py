@@ -94,4 +94,65 @@ class HuntCancellationWatch:
         return _beat
 
 
-__all__ = ["CANCELLING_STATUSES", "DEFAULT_REFRESH_SECONDS", "HuntCancellationWatch"]
+# --- Worker-placed capability jobs ------------------------------------------------------------
+# Not every Hunt capability runs inline. A worker-placed one polls `agent_tool_cancel:{job_id}`
+# with a job id minted fresh at queue time, so a Hunt cancellation cannot reconstruct it -- and
+# `HuntRunService.cancel` therefore left queued capability traffic running while the Hunt itself
+# read as cancelled. The ids are recorded against the Hunt when queued so cancellation can reach
+# them. Redis holds them because the job and the key already live there and share its lifetime.
+
+JOB_SET_PREFIX = "hunt_cancel_jobs:"
+JOB_CANCEL_PREFIX = "agent_tool_cancel:"
+JOB_SET_TTL_SECONDS = 86_400
+
+
+def record_cancellable_job(redis_client: Any, hunt_id: Any, job_id: Any, *, ttl: int = JOB_SET_TTL_SECONDS) -> None:
+    """Remember one queued capability job so a Hunt cancellation can signal it."""
+    hunt = str(hunt_id or "").strip()
+    job = str(job_id or "").strip()
+    if not redis_client or not hunt or not job:
+        return
+    key = f"{JOB_SET_PREFIX}{hunt}"
+    try:
+        redis_client.sadd(key, job)
+        redis_client.expire(key, max(60, int(ttl)))
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail the queue path
+        return
+
+
+def signal_cancelled_jobs(redis_client: Any, hunt_id: Any, *, ttl: int = 3_600) -> list[str]:
+    """Set the cancel flag every worker-placed job of this Hunt polls. Returns the ids signalled.
+
+    Idempotent by construction: setting an already-set flag is harmless, and a job that has since
+    finished simply never reads it.
+    """
+    hunt = str(hunt_id or "").strip()
+    if not redis_client or not hunt:
+        return []
+    key = f"{JOB_SET_PREFIX}{hunt}"
+    try:
+        members = redis_client.smembers(key) or ()
+    except Exception:  # noqa: BLE001 - an unreadable set must not block the cancellation itself
+        return []
+    signalled: list[str] = []
+    for raw in members:
+        job = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+        if not job:
+            continue
+        try:
+            redis_client.set(f"{JOB_CANCEL_PREFIX}{job}", "1", ex=max(60, int(ttl)))
+        except Exception:  # noqa: BLE001 - signal as many as possible
+            continue
+        signalled.append(job)
+    return sorted(signalled)
+
+
+__all__ = [
+    "CANCELLING_STATUSES",
+    "DEFAULT_REFRESH_SECONDS",
+    "HuntCancellationWatch",
+    "JOB_CANCEL_PREFIX",
+    "JOB_SET_PREFIX",
+    "record_cancellable_job",
+    "signal_cancelled_jobs",
+]

@@ -105,3 +105,32 @@ def test_a_manifest_entry_cannot_escape_the_installation_directory(tmp_path):
     _install(tmp_path, ["api/kept.py"])
     assert outside.exists(), "a relative escape in the manifest must be refused"
     assert Path("/etc/passwd").exists()
+
+
+def test_files_are_moved_into_place_not_copied_over_live_ones():
+    """A recursive copy writes over a live file in chunks.
+
+    An interruption can therefore leave a half-written executable that still looks installed. An
+    earlier version of the commit comment claimed `cp -R` guaranteed a complete tree; it does not.
+    A rename does guarantee each file is either the old one or the new one. The tree can still be a
+    mix of versions if the run is interrupted -- the manifest records what was placed -- but no
+    individual file is ever corrupt.
+    """
+    source = INSTALLER.read_text(encoding="utf-8")
+    assert 'cp -R "$INSTALL_STAGE/." "$INSTALL_DIR/"' not in source
+    assert 'mv -f -- "$staged_source" "$INSTALL_DIR/$staged_relative"' in source
+
+
+def test_the_stage_shares_a_filesystem_with_the_installation():
+    # A rename is atomic only within one filesystem, and $TMPDIR is frequently a different one.
+    source = INSTALLER.read_text(encoding="utf-8")
+    assert 'mktemp -d "$INSTALL_DIR/.shakerscan-install.XXXXXX"' in source
+    assert 'mktemp -d "${TMPDIR:-/tmp}/shakerscan-install' not in source
+
+
+def test_a_staged_path_cannot_escape_the_installation_directory(tmp_path):
+    # The move loop reads paths from a manifest on disk, so it applies the same refusal the prune
+    # does rather than trusting them.
+    source = INSTALLER.read_text(encoding="utf-8")
+    move_block = source[source.index("while IFS= read -r staged_relative"):]
+    assert "/*|*..*) continue ;;" in move_block[:600]
