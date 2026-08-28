@@ -25,15 +25,39 @@ _ZERO_COST_RESERVATION_CAPABILITIES = frozenset({"scan.finalize"})
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_UNSET = object()
+_EXACT_SENSITIVE_KEYS = frozenset({
+    "access_key", "access_key_id", "access_token", "api_key", "apikey",
+    "aws_access_key_id", "client_secret", "key", "private_key", "refresh_token",
+    "session_id", "session_token",
+})
+# A word part here names a secret on its own, so any key containing it is masked.
+# `api`, `key`, `access` and `signature` are deliberately NOT in this set: as bare
+# words they are far more often metadata than secret material, and masking on them
+# destroyed real evidence -- `object_key` (a storage path), `matched_signature` (which
+# detector fired), and the whole TLS certificate posture block (`..._public_key_bits`,
+# `..._signature_algorithm`). They are matched below in the narrower forms that do
+# name secrets.
 _SENSITIVE_PARTS = frozenset({
     "authorization", "auth", "bearer", "cookie", "credential", "password", "passwd",
-    "private", "secret", "signature", "token", "api", "key", "access", "refresh",
+    "private", "secret", "token", "refresh", "credentials",
 })
-_SENSITIVE_KEY_RE = re.compile(
-    r"(?:^|[_-])(?:authorization|auth|bearer|cookie|credential|password|passwd|"
-    r"private[_-]?key|secret|signature|token|api[_-]?key)(?:$|[_-])",
-    re.IGNORECASE,
-)
+# `key` names secret material only when another part says which key it is.
+_KEY_QUALIFIER_PARTS = frozenset({
+    "access", "api", "auth", "client", "consumer", "encryption", "hmac", "host",
+    "master", "private", "secret", "session", "shared", "sign", "signing", "ssh",
+})
+# A key ending in one of these, or opening with one, states a fact ABOUT a value
+# rather than carrying it: an algorithm name, a bit count, a boolean. A secret is
+# never any of these, so masking them only ever removed evidence.
+_VALUE_DESCRIPTOR_SUFFIXES = frozenset({
+    "algorithm", "bits", "count", "expired", "hash", "kind", "length", "matches",
+    "present", "remaining", "size", "state", "status", "type", "valid", "visible",
+})
+_VALUE_DESCRIPTOR_PREFIXES = frozenset({"has", "is"})
+# These read as descriptors wherever they appear, not only first:
+# `certificate_weak_signature` is a verdict about the signature, not the signature.
+_VALUE_DESCRIPTOR_MARKERS = frozenset({"expected", "matched", "observed", "weak"})
 _INLINE_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(bearer)\s+[^\s,;]+"),
     re.compile(
@@ -48,18 +72,50 @@ _INLINE_SECRET_PATTERNS = (
 )
 
 
-def _key_is_sensitive(value: Any) -> bool:
+def _key_parts(value: Any) -> tuple[str, ...]:
     expanded = _CAMEL_BOUNDARY_RE.sub("_", str(value or ""))
-    parts = tuple(
-        part for part in re.split(r"[^A-Za-z0-9]+", expanded.lower()) if part
+    return tuple(part for part in re.split(r"[^A-Za-z0-9]+", expanded.lower()) if part)
+
+
+def _describes_a_value(parts: tuple[str, ...]) -> bool:
+    """True when the key names a property of a value rather than the value."""
+    return bool(parts) and (
+        parts[-1] in _VALUE_DESCRIPTOR_SUFFIXES
+        or parts[0] in _VALUE_DESCRIPTOR_PREFIXES
+        or any(part in _VALUE_DESCRIPTOR_MARKERS for part in parts)
     )
-    return bool(
-        any(part in _SENSITIVE_PARTS for part in parts)
-        or "_".join(parts) in {
-            "access_token", "refresh_token", "api_key", "private_key",
-            "client_secret", "session_id", "session_token",
-        }
-    )
+
+
+def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
+    """True when the key names secret material that must not be stored.
+
+    ``item`` is the value the key holds, when it is known. A secret is a string:
+    a bool or a number under a secret-shaped name is a fact about the secret --
+    ``secret_values_visible: False`` is a safety claim, and masking it to the
+    truthy ``"***"`` inverted the very claim it recorded.
+    """
+    parts = _key_parts(value)
+    if not parts:
+        return False
+    joined = "_".join(parts)
+    describes = _describes_a_value(parts)
+    if item is not _UNSET and isinstance(item, (bool, int, float)) and describes:
+        return False
+    if any(part in _SENSITIVE_PARTS for part in parts):
+        return True
+    if joined in _EXACT_SENSITIVE_KEYS:
+        return True
+    if describes:
+        return False
+    if "key" in parts and any(part in _KEY_QUALIFIER_PARTS for part in parts):
+        return True
+    return "signature" in parts
+
+
+# Retained under the private name because both this module and the runtime
+# hardening patch consumed it; they now share this one implementation so the two
+# key-sets cannot drift apart again.
+_key_is_sensitive = key_is_sensitive
 
 
 def _normalize_budget(values: Mapping[str, int], *, allow_zero: bool) -> dict[str, int]:
@@ -95,7 +151,7 @@ def _redact_string(value: str) -> str:
 
 def redact_receipt_value(value: Any, *, key: str | None = None) -> Any:
     """Return stable JSON-safe receipt material with secret values removed."""
-    if key and (_key_is_sensitive(key) or _SENSITIVE_KEY_RE.search(str(key))):
+    if key and key_is_sensitive(key, item=value):
         return "***" if value not in (None, "", [], {}, ()) else value
     if isinstance(value, Mapping):
         return {

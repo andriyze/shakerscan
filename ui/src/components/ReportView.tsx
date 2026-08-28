@@ -3949,17 +3949,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       )}
 
-      {!attack_chains && findings.length > 0 && !isAIScan && !isModelIntakeScan && (
-        <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-          <h2 className="text-2xl font-bold mb-2">Attack Chain Analysis</h2>
-          <p className="text-gray-400 text-sm">
-            Attack chain analysis unavailable for this scan. The scanner may not have included chain analysis or an error prevented it from running.
-          </p>
-        </div>
-      )}
-
       {/* Scan Metadata & Coverage */}
-      {(scan_metadata.completed_at || scan_metadata.scanner_version || scan_metadata.schema_version || coverage.modules_completed || Object.keys(scan_metadata).length > 2) && (
+      {(scan_metadata.scanner_version || scan_metadata.schema_version || scan_metadata.completed_at
+        || scan_metadata.duration_seconds !== undefined || coverage.coverage_percentage !== undefined
+        || coverage.modules_completed?.length > 0 || scan_metadata.checks_skipped?.length > 0
+        || (scan_metadata.options && Object.keys(scan_metadata.options).length > 0)) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Scan Metadata</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

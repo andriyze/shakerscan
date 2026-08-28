@@ -48,6 +48,27 @@ class WorkerPrivateHTTPResponse:
         return dict(self._cookies)
 
 
+# The response headers that describe a target's security posture. Fixed and public: naming them
+# here rather than accepting a caller-supplied list keeps the capability's declared input contract
+# unchanged while making the posture observable.
+_SECURITY_POSTURE_HEADERS: tuple[str, ...] = (
+    "strict-transport-security",
+    "content-security-policy",
+    "content-security-policy-report-only",
+    "x-frame-options",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+    "cross-origin-opener-policy",
+    "cross-origin-embedder-policy",
+    "cross-origin-resource-policy",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "server",
+    "x-powered-by",
+)
+
+
 def _origin(value: Any) -> str | None:
     try:
         parsed = urllib.parse.urlsplit(str(value or "").strip())
@@ -389,6 +410,16 @@ async def execute_bound_http_request(
         ][:50],
         elapsed_ms=round((time.perf_counter() - started) * 1_000),
     )
+    # Security posture headers are recorded on every response rather than being selected by the
+    # caller. They are a fixed, public, value-free-by-nature set, and the scan's `http.request`
+    # contract accepts only method/path/follow_redirects -- so without this the posture data a DAST
+    # exists to report (HSTS, CSP, frame options...) was fetched and then discarded, and the report
+    # lost the certificate/header sections operators had in 0.8.18.
+    summary["security_headers"] = {
+        name: str(response.headers[name])[:2_000]
+        for name in _SECURITY_POSTURE_HEADERS
+        if name in response.headers
+    }
     summary["set_cookie_metadata"] = [
         {
             "secure": "secure" in value.lower(),

@@ -20,10 +20,7 @@ from . import receipts as _receipts
 
 _APPLIED_MARKER = "_shakerscan_v2_hardening_applied"
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_SENSITIVE_PARTS = frozenset({
-    "authorization", "auth", "bearer", "cookie", "credential", "password", "passwd",
-    "private", "secret", "signature", "token", "api", "key", "access", "refresh",
-})
+
 _TERMINAL_RECEIPT_STATUSES = frozenset({
     "blocked", "cancelled", "completed", "failed", "partial", "success", "succeeded",
     "timed_out",
@@ -31,20 +28,11 @@ _TERMINAL_RECEIPT_STATUSES = frozenset({
 _SUCCESS_RECEIPT_STATUSES = frozenset({"completed", "success", "succeeded"})
 
 
-def _normalize_sensitive_key(value: Any) -> tuple[str, ...]:
-    expanded = _CAMEL_BOUNDARY_RE.sub("_", str(value or ""))
-    return tuple(part for part in re.split(r"[^A-Za-z0-9]+", expanded.lower()) if part)
-
-
-def _key_is_sensitive(value: Any) -> bool:
-    parts = _normalize_sensitive_key(value)
-    joined = "_".join(parts)
-    if any(part in _SENSITIVE_PARTS for part in parts):
-        return True
-    return joined in {
-        "access_token", "refresh_token", "api_key", "private_key", "client_secret",
-        "session_id", "session_token",
-    }
+# This module patches the receipt redactor at import time, so it must decide
+# "is this key a secret" exactly as the receipt module does. It used to answer with
+# its own copy of the key-set; the two drifted, and the copy here is what masked the
+# TLS certificate block. There is now one implementation, imported from receipts.
+_key_is_sensitive = _receipts.key_is_sensitive
 
 
 def _redact_url_path(path: str) -> str:
@@ -81,7 +69,7 @@ def _redact_string(value: str) -> str:
 
 
 def _redact_receipt_value(value: Any, *, key: str | None = None) -> Any:
-    if key and _key_is_sensitive(key):
+    if key and _key_is_sensitive(key, item=value):
         return "***" if value not in (None, "", [], {}, ()) else value
     if isinstance(value, Mapping):
         return {

@@ -29,6 +29,15 @@ _SEVERITY_WEIGHT = {
 # A>=90, B>=80, C>=70, D>=60, F<60 -- so one critical is an F however few findings there are, one
 # high cannot exceed C, and one medium cannot exceed B. Low and informational have no ceiling: a
 # single low-severity issue is not a reason to fail an application, though it still costs weight.
+# Reported as missing when absent from a response, so the report says what is not there rather
+# than only what is.
+_EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
+    "content-security-policy",
+    "referrer-policy",
+    "strict-transport-security",
+    "x-content-type-options",
+    "x-frame-options",
+)
 _SEVERITY_SCORE_CEILING = {
     "critical": 40,
     "high": 70,
@@ -791,6 +800,139 @@ def _score(findings: Sequence[Mapping[str, Any]]) -> tuple[int, str]:
     return score, grade
 
 
+def _posture_sections(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """Project the recon observations into the documented report posture sections.
+
+    The V2 report carried only score and grade, so `result.tls.certificate`,
+    `result.http.security_headers`, `result.dns` and `result.discovery.tech` -- all documented in
+    AGENTS.md and all present in 0.8.18 -- silently disappeared. The data was never lost: the
+    baseline HTTP, TLS, DNS and probe actions all record it. It was simply never projected. This
+    reads what those actions already produced; it performs no network, filesystem or clock access,
+    exactly like the rest of finalization.
+    """
+    http_section: dict[str, Any] = {}
+    tls_section: dict[str, Any] = {}
+    dns_section: dict[str, Any] = {}
+    technologies: list[dict[str, Any]] = []
+    seen_tech: set[str] = set()
+
+    for action_id, rows in observations.items():
+        for row in rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "http_observation" and str(action_id) == "baseline.http":
+                response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+                headers = (
+                    response.get("security_headers")
+                    if isinstance(response.get("security_headers"), Mapping) else {}
+                )
+                http_section = {
+                    "status": response.get("status"),
+                    "http_version": response.get("http_version"),
+                    "content_type": response.get("content_type"),
+                    "security_headers": dict(headers),
+                    "missing_security_headers": sorted(
+                        name for name in _EXPECTED_SECURITY_HEADERS if name not in headers
+                    ),
+                    "set_cookie_metadata": list(row.get("set_cookie_metadata") or ()),
+                    "csp_evaluation": _evaluate_csp(headers.get("content-security-policy")),
+                }
+            elif kind == "tls_protocol":
+                # The observation carries certificate facts as flat `certificate_*` fields; the
+                # documented report path is `result.tls.certificate`, so they are gathered rather
+                # than passed through. Written against the real observation, not an assumed shape.
+                certificate = {
+                    key[len("certificate_"):]: value
+                    for key, value in row.items()
+                    if key.startswith("certificate_") and value is not None
+                }
+                candidate = {
+                    key: row.get(key) for key in (
+                        "protocol", "cipher", "cipher_bits", "weak_cipher",
+                        "alpn_protocol", "origin", "port", "status",
+                    ) if row.get(key) is not None
+                }
+                if certificate:
+                    candidate["certificate"] = certificate
+                # A scan inspects several origins; keep the first successful handshake and let a
+                # later one replace only an unsuccessful record.
+                if candidate and (
+                    not tls_section or (
+                        str(tls_section.get("status")) != "success"
+                        and str(candidate.get("status")) == "success"
+                    )
+                ):
+                    tls_section = candidate
+            elif kind == "dns_posture":
+                dns_section = {
+                    "records": dict(row.get("records") or {}),
+                    "query_count": row.get("query_count"),
+                    "bound_addresses": dict(row.get("bound_addresses") or {}),
+                    "errors": list(row.get("errors") or ()),
+                }
+            elif kind == "http_fingerprint":
+                for item in row.get("technologies") or ():
+                    name = str((item or {}).get("name") if isinstance(item, Mapping) else item)
+                    if name and name not in seen_tech:
+                        seen_tech.add(name)
+                        technologies.append(
+                            dict(item) if isinstance(item, Mapping) else {"name": name}
+                        )
+                if row.get("webserver") and str(row["webserver"]) not in seen_tech:
+                    seen_tech.add(str(row["webserver"]))
+                    technologies.append({"name": str(row["webserver"]), "source": "webserver"})
+
+    sections: dict[str, Any] = {}
+    if http_section:
+        sections["http"] = http_section
+    if tls_section:
+        sections["tls"] = tls_section
+    if dns_section:
+        sections["dns"] = dns_section
+    if technologies:
+        sections["discovery"] = {"tech": {"items": technologies}}
+    return sections
+
+
+def _evaluate_csp(policy: Any) -> dict[str, Any]:
+    """Grade a Content-Security-Policy without network or clock access.
+
+    Absent is reported as absent rather than as a failing grade: the two are different findings and
+    conflating them makes a site with no policy look like one with a broken policy.
+    """
+    text = str(policy or "").strip()
+    if not text:
+        return {"present": False, "grade": None, "score": None, "issues": []}
+    lowered = text.lower()
+    directives = {
+        part.split()[0]: part.split()[1:]
+        for part in (item.strip() for item in lowered.split(";")) if part
+    }
+    issues: list[str] = []
+    if "'unsafe-inline'" in lowered:
+        issues.append("script-src allows 'unsafe-inline'")
+    if "'unsafe-eval'" in lowered:
+        issues.append("script-src allows 'unsafe-eval'")
+    if "default-src" not in directives and "script-src" not in directives:
+        issues.append("no default-src or script-src directive")
+    if any("*" == value for values in directives.values() for value in values):
+        issues.append("a directive allows any origin")
+    if "object-src" not in directives and "default-src" not in directives:
+        issues.append("no object-src or default-src directive")
+    score = max(0, 100 - 20 * len(issues))
+    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+    return {
+        "present": True,
+        "grade": grade,
+        "score": score,
+        "issues": issues,
+        "directives": {name: list(values) for name, values in directives.items()},
+    }
+
+
 def finalize_scan_report(
     *,
     plan: ScanActionPlan,
@@ -1207,6 +1349,7 @@ def finalize_scan_report(
             "grade": rendered_grade,
             "grade_reliable": grade_reliable,
             "score_policy": "verified_and_suspected_severity_ceiling/v2",
+            **_posture_sections(observations),
         },
         "coverage": {
             "status": coverage_status,
