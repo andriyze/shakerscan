@@ -178,3 +178,40 @@ def test_every_declared_gap_states_why_and_is_a_real_expectation():
             assert str(gap.get("id")) in expected_ids, (
                 f"{path.name}: {gap.get('id')} is not an expectation in this fixture"
             )
+
+
+def test_the_reliable_grade_gate_defaults_strict():
+    # A fixture that says nothing must still require a reliable grade; only an explicit opt-out
+    # turns it into a recorded value.
+    strict = _result(_card(0.9), {"gates": {}, "expected": []})
+    assert "grade_reliable" in strict
+
+    card = _card(0.9)
+    card["grade_reliable"] = False
+    assert _result(card, {"gates": {}, "expected": []})["grade_reliable"]["pass"] is False
+
+    relaxed = _result(card, {"gates": {"require_reliable_grade": False}, "expected": []})
+    assert "grade_reliable" not in relaxed
+    # Still reported, so an opt-out cannot hide the value.
+    assert "grade_reliable=False" in relaxed["grade_reliable_recorded"]["detail"]
+
+
+def test_bfla_is_only_selected_when_two_principals_exist():
+    """A cross-principal differential cannot run with one principal.
+
+    Selecting it anyway guarantees zero attempts, which then fails the mandatory family-attempt
+    gate for a reason that has nothing to do with the engine -- exactly what the tracked scorecard
+    reported as `zero-attempt families: authz_surface`.
+    """
+    import importlib.util, inspect, sys as _sys
+    from pathlib import Path as _Path
+
+    spec = importlib.util.spec_from_file_location(
+        "benchmark_authz_under_test",
+        _Path(__file__).resolve().parents[1] / "scripts" / "benchmark_targets.py")
+    module = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    source = inspect.getsource(module.submit_target)
+    assert "if len(minted_tokens) >= 2:" in source
+    assert 'include_families.append("authz_surface")' in source

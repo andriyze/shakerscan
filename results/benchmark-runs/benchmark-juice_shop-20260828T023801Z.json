@@ -468,6 +468,16 @@
       "report_degraded": false,
       "report_invariant_violations": [],
       "two_user": false,
+      "principal_validation_client_claim": {
+        "schema_version": "benchmark_principal_validation_v1",
+        "contexts_configured": [
+          "user1"
+        ],
+        "distinct_identity_claims_validated": false,
+        "identity_fingerprints": [],
+        "validation_method": null,
+        "authenticated_responses_accepted": null
+      },
       "scan_id": "1ed76fac-0a70-46fd-8c3a-39c298745362",
       "target": "juice_shop",
       "gates": [
@@ -482,9 +492,9 @@
           "detail": "clean"
         },
         {
-          "gate": "grade_reliable_recorded",
-          "pass": true,
-          "detail": "grade_reliable=False (not gated by this fixture)"
+          "gate": "grade_reliable",
+          "pass": false,
+          "detail": "grade_reliable=False"
         },
         {
           "gate": "active_execution_ok",
@@ -502,14 +512,9 @@
           "detail": "report_degraded=False"
         },
         {
-          "gate": "no_undeclared_expectation_misses",
-          "pass": true,
-          "detail": "only declared gaps missed"
-        },
-        {
           "gate": "min_expected_recall",
-          "pass": true,
-          "detail": "0.44 >= 0.44"
+          "pass": false,
+          "detail": "0.44 >= 0.67"
         },
         {
           "gate": "min_verified_high_critical",
@@ -525,6 +530,11 @@
           "gate": "require_verified_sqli",
           "pass": true,
           "detail": "verified SQLi present"
+        },
+        {
+          "gate": "require_browser_proven_xss",
+          "pass": false,
+          "detail": "no browser-proven XSS"
         }
       ],
       "passed": false,
@@ -981,7 +991,17 @@
           "grade_reliable": false,
           "report_degraded": false,
           "report_invariant_violations": [],
-          "two_user": false
+          "two_user": false,
+          "principal_validation_client_claim": {
+            "schema_version": "benchmark_principal_validation_v1",
+            "contexts_configured": [
+              "user1"
+            ],
+            "distinct_identity_claims_validated": false,
+            "identity_fingerprints": [],
+            "validation_method": null,
+            "authenticated_responses_accepted": null
+          }
         }
       }
     }

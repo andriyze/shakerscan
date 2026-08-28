@@ -4,13 +4,13 @@
   "gates": {
     "active_execution_ok": true,
     "completion_telemetry_consistent": true,
-    "grade_reliable": true,
+    "grade_reliable_recorded": true,
     "max_unverified_high_ratio": false,
     "min_expected_recall": false,
     "min_verified_high_critical": false,
+    "no_undeclared_expectation_misses": false,
     "report_invariants_clean": true,
     "report_not_degraded": true,
-    "require_browser_proven_xss": false,
     "require_verified_sqli": false,
     "selected_families_attempted": true
   },
