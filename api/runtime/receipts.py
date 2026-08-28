@@ -106,17 +106,26 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     if joined in _NON_SECRET_HEADER_NAMES:
         return False
     describes = _describes_a_value(parts)
-    if item is not _UNSET and isinstance(item, (bool, int, float)) and describes:
+    # Only a bool. A descriptor name over a boolean is a statement about a secret --
+    # `secret_values_visible: False` -- and a secret is never True or False. Numbers are
+    # deliberately not exempted here: they are covered below, where the rule can see
+    # whether the name actually qualifies a credential.
+    if item is not _UNSET and isinstance(item, bool) and describes:
         return False
     if any(part in _SENSITIVE_PARTS for part in parts):
         return True
     if joined in _EXACT_SENSITIVE_KEYS:
         return True
-    if describes:
-        return False
+    # A qualified key is credential material whatever adjective precedes it. This test
+    # runs BEFORE the descriptor exemption: with the order reversed, `observed_access_key`
+    # and `matched_api_key` were exempted by their leading adjective and stored in the
+    # clear, because a descriptor marker was allowed to outrank the qualifier that
+    # identifies the secret.
     if "key" in parts and any(part in _KEY_QUALIFIER_PARTS for part in parts):
         return True
-    return "signature" in parts
+    # `signature` is the one family where a descriptor genuinely wins: an algorithm name
+    # or a verdict about a signature is not the signature.
+    return "signature" in parts and not describes
 
 
 # Retained under the private name because both this module and the runtime

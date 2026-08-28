@@ -853,6 +853,10 @@ def _certificate_section(row: Mapping[str, Any]) -> dict[str, Any]:
     if flat.get("sha256"):
         certificate["fingerprints"] = {"sha256": flat["sha256"]}
     if dns_names:
+        # Published under both names: `dns_names` is what the observation calls it and
+        # `sans` is what the report contract and the UI read. Emitting only the former
+        # meant the SAN list was collected and never displayed.
+        certificate["sans"] = list(dns_names)
         certificate["wildcard"] = any(name.startswith("*.") for name in dns_names)
     return certificate
 
@@ -938,6 +942,13 @@ def _posture_sections(
                     response.get("security_headers")
                     if isinstance(response.get("security_headers"), Mapping) else {}
                 )
+                # A request that never completed observed nothing. Reporting its empty
+                # header set as `missing_security_headers` published five confirmed
+                # findings from a failure -- the UI renders each one red -- so posture is
+                # published only behind an observed status. Absent is not failing; that
+                # rule already governed the TLS and CSP sections and this one skipped it.
+                if response.get("status") in (None, ""):
+                    continue
                 http_section = {
                     "status": response.get("status"),
                     "security_headers": {

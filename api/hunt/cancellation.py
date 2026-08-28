@@ -106,6 +106,13 @@ JOB_CANCEL_PREFIX = "agent_tool_cancel:"
 JOB_SET_TTL_SECONDS = 86_400
 
 
+# A missing method or a misspelled name is a broken feature, not an unreachable Redis.
+# Catching both alike is what hid the fact that `signal_cancelled_jobs` was never imported
+# into the cancel path: every cancellation raised NameError, reported nothing signalled,
+# and looked exactly like a Hunt that had queued no jobs.
+_CODING_ERRORS = (AttributeError, NameError, TypeError)
+
+
 def record_cancellable_job(redis_client: Any, hunt_id: Any, job_id: Any, *, ttl: int = JOB_SET_TTL_SECONDS) -> None:
     """Remember one queued capability job so a Hunt cancellation can signal it."""
     hunt = str(hunt_id or "").strip()
@@ -116,6 +123,8 @@ def record_cancellable_job(redis_client: Any, hunt_id: Any, job_id: Any, *, ttl:
     try:
         redis_client.sadd(key, job)
         redis_client.expire(key, max(60, int(ttl)))
+    except _CODING_ERRORS:
+        raise
     except Exception:  # noqa: BLE001 - bookkeeping must never fail the queue path
         return
 
@@ -132,6 +141,8 @@ def signal_cancelled_jobs(redis_client: Any, hunt_id: Any, *, ttl: int = 3_600) 
     key = f"{JOB_SET_PREFIX}{hunt}"
     try:
         members = redis_client.smembers(key) or ()
+    except _CODING_ERRORS:
+        raise
     except Exception:  # noqa: BLE001 - an unreadable set must not block the cancellation itself
         return []
     signalled: list[str] = []
@@ -141,6 +152,8 @@ def signal_cancelled_jobs(redis_client: Any, hunt_id: Any, *, ttl: int = 3_600) 
             continue
         try:
             redis_client.set(f"{JOB_CANCEL_PREFIX}{job}", "1", ex=max(60, int(ttl)))
+        except _CODING_ERRORS:
+            raise
         except Exception:  # noqa: BLE001 - signal as many as possible
             continue
         signalled.append(job)

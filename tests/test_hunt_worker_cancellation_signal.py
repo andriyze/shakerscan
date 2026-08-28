@@ -162,3 +162,134 @@ def test_cancel_signals_and_reports_what_it_reached():
     source = definition_source("cancel")
     assert "signal_cancelled_jobs(" in source
     assert 'payload["cancelled_job_ids"] = signalled' in source
+
+
+# ---------------------------------------------------------------------------
+# Executing the cancel path, not reading it.
+#
+# The tests above search `HuntRunService.cancel` for the name of the signalling
+# function. That is exactly what let a missing import ship: the call raised
+# NameError on every cancellation, a blanket `except Exception` swallowed it,
+# and the response reported an empty `cancelled_job_ids` as though the Hunt had
+# queued no jobs. Source text said the fix was there; nothing ran it.
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+import sys  # noqa: E402
+import uuid as _uuid  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "api"))
+
+from hunt.cancellation import record_cancellable_job  # noqa: E402
+from hunt.run_service import HuntRunService  # noqa: E402
+
+
+class _FakeRedis:
+    """Enough of the client for the job-set and cancel-flag calls."""
+
+    def __init__(self):
+        self.sets: dict[str, set[str]] = {}
+        self.strings: dict[str, str] = {}
+
+    def sadd(self, key, *values):
+        self.sets.setdefault(key, set()).update(str(v) for v in values)
+
+    def smembers(self, key):
+        return {value.encode() for value in self.sets.get(key, set())}
+
+    def expire(self, key, ttl):
+        return True
+
+    def set(self, key, value, **kwargs):
+        self.strings[key] = str(value)
+
+    def setex(self, key, ttl, value):
+        self.strings[key] = str(value)
+
+
+class _FakeRow(dict):
+    pass
+
+
+class _FakeConnection:
+    def __init__(self, hunt_row):
+        self._hunt_row = hunt_row
+
+    async def fetchrow(self, query, *args):
+        return self._hunt_row
+
+    async def fetch(self, query, *args):
+        return []
+
+    async def execute(self, query, *args):
+        return None
+
+
+class _FakeAcquire:
+    def __init__(self, connection):
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePool:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def acquire(self):
+        return _FakeAcquire(self._connection)
+
+
+def test_cancel_actually_writes_worker_cancel_flags():
+    hunt_id = _uuid.uuid4()
+    redis = _FakeRedis()
+    # Two capability jobs this Hunt queued.
+    record_cancellable_job(redis, hunt_id, "job-alpha")
+    record_cancellable_job(redis, hunt_id, "job-beta")
+
+    row = _FakeRow({
+        "id": hunt_id, "status": "cancelled", "target_id": _uuid.uuid4(),
+        "objective": "o", "budget_profile": "fast", "stop_reason": "cancelled",
+        "created_at": None, "updated_at": None, "completed_at": None,
+    })
+    service = HuntRunService(lambda: _FakePool(_FakeConnection(row)), lambda: redis)
+
+    payload = asyncio.run(service.cancel(str(hunt_id)))
+
+    assert sorted(payload["cancelled_job_ids"]) == ["job-alpha", "job-beta"], (
+        "cancel reported no signalled jobs; the signalling call did not run"
+    )
+    for job_id in ("job-alpha", "job-beta"):
+        assert f"agent_tool_cancel:{job_id}" in redis.strings, job_id
+
+
+def test_a_coding_error_in_signalling_is_not_swallowed():
+    """An unreachable Redis is tolerated; a broken call must surface.
+
+    The blanket handler treated both the same, which is why a NameError looked
+    like "Redis had nothing to signal" for as long as it shipped.
+    """
+    hunt_id = _uuid.uuid4()
+    row = _FakeRow({
+        "id": hunt_id, "status": "cancelled", "target_id": _uuid.uuid4(),
+        "objective": "o", "budget_profile": "fast", "stop_reason": "cancelled",
+        "created_at": None, "updated_at": None, "completed_at": None,
+    })
+
+    class _BrokenRedis:
+        def smembers(self, key):
+            raise AttributeError("client has no smembers")
+
+    service = HuntRunService(
+        lambda: _FakePool(_FakeConnection(row)), lambda: _BrokenRedis(),
+    )
+    try:
+        asyncio.run(service.cancel(str(hunt_id)))
+    except AttributeError:
+        return
+    raise AssertionError("a coding error in signalling was swallowed")

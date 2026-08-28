@@ -3954,8 +3954,10 @@ def test_asm_campaign_timeline_routes_auth_blockers_to_prefilled_session():
 
     assert timeline[0]["remediation"] == {
         "kind": "configure_auth",
-        "label": "Configure auth session",
-        "href": "/interactive?target=https%3A%2F%2Fapp.example.test%2Fapi%3Ftenant%3Done&target_id=target-1",
+        # Interactive Testing has no page in V2; a target's auth is configured by binding
+        # an exact-target credential profile.
+        "label": "Configure target credentials",
+        "href": "/credentials?target=https%3A%2F%2Fapp.example.test%2Fapi%3Ftenant%3Done&target_id=target-1",
     }
 
 

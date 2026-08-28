@@ -875,7 +875,10 @@ def apply_quality_bar(card, fixture):
         chk("quality:require_browser_proven_xss", ok,
             "browser XSS present" if ok else "no browser-proven XSS")
     if bar.get("require_reliable_grade"):
-        chk("quality:grade_reliable", card.get("grade_reliable") is not False,
+        # `is not False` let an absent value pass: a scorecard that never recorded the
+        # field satisfied a reliability check it had no evidence for. Unknown is not
+        # reliable.
+        chk("quality:grade_reliable", card.get("grade_reliable") is True,
             f"grade_reliable={card.get('grade_reliable')}")
     if "max_known_expectation_gaps" in bar:
         declared = len((fixture.get("gates") or {}).get("known_expectation_gaps") or [])
@@ -923,7 +926,7 @@ def apply_gates(card, fixture):
     # legitimately report partial, so the fixture decides whether it is a failure. Default remains
     # strict: a fixture that says nothing still requires a reliable grade.
     if gates.get("require_reliable_grade", True):
-        chk("grade_reliable", card.get("grade_reliable") is not False,
+        chk("grade_reliable", card.get("grade_reliable") is True,
             f"grade_reliable={card.get('grade_reliable')}")
     else:
         chk("grade_reliable_recorded", True,

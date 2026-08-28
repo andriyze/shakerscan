@@ -14,6 +14,11 @@ agent_tools = importlib.import_module(
     "agent_tools" if __package__ == "hunt" else "api.agent_tools"
 )
 
+try:
+    from hunt.cancellation import signal_cancelled_jobs
+except ModuleNotFoundError:  # package import in host-side tests
+    from .cancellation import signal_cancelled_jobs
+
 
 HUNT_RUN_STATUSES = frozenset({
     "created",
@@ -377,7 +382,14 @@ class HuntRunService:
         if self._redis_provider is not None:
             try:
                 signalled = signal_cancelled_jobs(self._redis_provider(), run_uuid)
-            except Exception:  # noqa: BLE001 - the Hunt is cancelled either way
+            except (AttributeError, NameError, TypeError):
+                # A programming error must never look like an unreachable Redis. The
+                # blanket handler that used to sit here swallowed a missing import, so
+                # this call raised NameError on every cancellation, wrote no cancel keys,
+                # and still returned an empty list as though there had been nothing to
+                # signal.
+                raise
+            except Exception:  # noqa: BLE001 - Redis is unreachable; the Hunt is cancelled either way
                 signalled = []
         payload = public_hunt_run(row)
         payload["cancelled_scan_ids"] = cancelled_ids

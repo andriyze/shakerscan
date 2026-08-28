@@ -118,3 +118,13 @@ def test_the_benchmark_is_not_in_the_build_test_loop():
         if not path.exists():
             continue
         assert "benchmark_targets" not in path.read_text(encoding="utf-8"), name
+
+
+def test_an_unknown_grade_reliability_does_not_pass():
+    """`is not False` let a scorecard with no recorded value satisfy the check.
+
+    A benchmark run that never captured `grade_reliable` produced None, which is not
+    False, so the reliability gate passed on absent evidence. Unknown is not reliable.
+    """
+    assert "card.get(\"grade_reliable\") is True" in SOURCE
+    assert "card.get(\"grade_reliable\") is not False" not in SOURCE

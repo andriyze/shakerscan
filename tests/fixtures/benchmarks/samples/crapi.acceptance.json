@@ -4,7 +4,7 @@
   "gates": {
     "active_execution_ok": true,
     "completion_telemetry_consistent": true,
-    "grade_reliable": true,
+    "grade_reliable": false,
     "min_expected_recall": false,
     "min_verified_high_critical": false,
     "report_invariants_clean": true,

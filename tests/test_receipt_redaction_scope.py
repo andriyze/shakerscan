@@ -84,13 +84,55 @@ def test_a_secret_string_is_masked_even_under_a_descriptor_name():
     assert redact_receipt_value({"password_hash": "$2b$12$abcdef"})["password_hash"] == MASK
 
 
-def test_descriptor_exemption_needs_a_non_string_value_or_a_weak_name():
-    # A number under a secret name is a fact about it; a string is the thing itself.
+def test_the_descriptor_exemption_is_deliberately_narrow():
+    """Numbers lost their free pass under a strongly-named key.
+
+    They used to get one, and the same rule exempted `observed_access_key`, which stored
+    an AWS key in the clear. Masking a length loses information; not masking a credential
+    loses the secret, so the ambiguous case now resolves toward masking. A name that
+    qualifies nothing -- `certificate_public_key_bits` -- is still kept, because "public"
+    is not a credential qualifier.
+    """
     assert key_is_sensitive("certificate_public_key_bits", item=2048) is False
-    assert key_is_sensitive("secret_length", item=32) is False
+    assert key_is_sensitive("secret_length", item=32) is True
     assert key_is_sensitive("secret_length", item="32-chars-of-actual-material") is True
 
 
 def test_empty_values_are_left_alone_rather_than_masked():
     assert redact_receipt_value({"password": ""}) == {"password": ""}
     assert redact_receipt_value({"token": None}) == {"token": None}
+
+
+# A descriptor marker must never outrank the qualifier that identifies a credential.
+# With the checks in the wrong order these were stored in the clear: the leading
+# adjective exempted the key before anything looked at "access" or "api".
+ADJECTIVE_PREFIXED_SECRETS = (
+    "observed_access_key", "matched_api_key", "expected_private_key",
+    "weak_api_key", "observed_client_secret", "matched_bearer_token",
+    "matched_session_key", "observed_password", "expected_secret",
+)
+
+
+def test_a_descriptor_prefix_does_not_exempt_a_credential():
+    for name in ADJECTIVE_PREFIXED_SECRETS:
+        assert key_is_sensitive(name, item="AKIAEXAMPLE"), name
+        assert redact_receipt_value({name: "AKIAEXAMPLE"})[name] == MASK, name
+
+
+def test_a_descriptor_prefix_still_exempts_a_fact_about_a_secret():
+    # The exemption exists for these and must keep working.
+    assert redact_receipt_value({"matched_signature": "rule-name"}) == {
+        "matched_signature": "rule-name",
+    }
+    assert redact_receipt_value({"certificate_weak_signature": False}) == {
+        "certificate_weak_signature": False,
+    }
+    assert redact_receipt_value({"secret_values_visible": False}) == {
+        "secret_values_visible": False,
+    }
+
+
+def test_only_a_bool_gets_the_descriptor_exemption_over_a_secret_name():
+    """A number under a credential name is not automatically a fact about it."""
+    assert key_is_sensitive("observed_access_key", item=1234) is True
+    assert key_is_sensitive("secret_values_visible", item=False) is False

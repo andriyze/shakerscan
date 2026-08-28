@@ -14,8 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 API = ROOT / "api"
 APP = ROOT / "ui" / "src" / "app"
 
-# `"href": "/x"` (dict literal) and `href="/x"` (keyword argument).
-HREF_RE = re.compile(r'"href"\s*:\s*"(/[^"]*)"|\bhref\s*=\s*"(/[^"]*)"')
+# `"href": "/x"`, `href="/x"`, and the f-string forms of both. The first version of
+# this matched only plain string literals, so `f"/interactive{suffix}"` -- a live link to
+# a page that had just been deleted -- sailed straight through it.
+HREF_RE = re.compile(
+    r'"href"\s*:\s*f?"(/[^"{]*)'
+    r'|\bhref\s*=\s*f?"(/[^"{]*)'
+)
 
 
 def _emitted_paths() -> dict[str, set[str]]:

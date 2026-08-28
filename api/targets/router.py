@@ -3991,7 +3991,11 @@ def _build_asm_campaign_timeline(
             if target_id:
                 params.append(f"target_id={urllib.parse.quote(str(target_id), safe='')}")
             suffix = f"?{'&'.join(params)}" if params else ""
-            return {"kind": "configure_auth", "label": "Configure auth session", "href": f"/interactive{suffix}"}
+            return {
+                "kind": "configure_auth",
+                "label": "Configure target credentials",
+                "href": f"/credentials{suffix}",
+            }
         if "worker_stale" in blocker or "stale_worker" in blocker:
             return {"kind": "workers", "label": "Review workers", "href": "/#workers"}
         policy_or_rate_blocker = (
