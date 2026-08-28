@@ -104,14 +104,25 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "authz_surface.verify_batch": (20, {"http_requests": 200, "tool_wall_seconds": 150}),
     },
     "thorough": {
-        "xss.verify_batch": (8, {"http_requests": 960, "tool_wall_seconds": 240}),
+        # 8 candidates in 240 seconds is 30 each, and dalfox paced to its request floor
+        # needs about 200 -- so every attempt was wall-killed and the family proved
+        # nothing while the plan left wall unused. Reservations already claim 2,882 of the
+        # 3,600 ceiling, so the fix is fewer candidates with enough time each, not more
+        # time for all of them: the manifest is ranked, so the attempts that do run are
+        # the ones most likely to matter.
+        "xss.verify_batch": (4, {"http_requests": 600, "tool_wall_seconds": 480}),
         # The 2,000-unit active ceiling admits multiple required batches while
         # retaining a conservative one-body-attempt hold in each slice.
-        "sqli.verify_batch": (10, {
-            "http_requests": 1_920, "state_changing_requests": 480,
-            "tool_wall_seconds": 690,
+        # 10 candidates in 690 seconds is 69 each against sqlmap's measured ~150 to reach a
+        # verdict, so verify.sqli timed out on every run. Six at 130 each fits the same
+        # ceiling and still funds one body attempt beside five query attempts.
+        "sqli.verify_batch": (6, {
+            "http_requests": 1_280, "state_changing_requests": 480,
+            "tool_wall_seconds": 780,
         }),
-        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
+        # All five passive batches hit their 60-second slice exactly and timed out. 120
+        # lets a 50-template sweep finish; breadth still ranks below proof for budget.
+        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 120}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
