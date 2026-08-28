@@ -61,3 +61,29 @@ def test_the_candidate_ui_image_is_built_before_the_smoke_runs():
         "the smoke runs before the candidate UI image exists, so it can only test "
         "some other image or fail on a clean runner"
     )
+
+
+def test_the_candidate_boots_on_the_upgraded_database_before_the_baseline_is_restored():
+    """The rollback leg could not pass while a healthy candidate existed.
+
+    The pre-upgrade dump was restored BEFORE the candidate stack booted, so the candidate
+    ran against the baseline schema, re-applied its V2 migrations, and the rollback
+    assertions that follow -- which require the V2 tables and migration markers to be
+    absent -- were then guaranteed to fail. A successful boot broke the next check by
+    construction. The restore belongs between the two.
+    """
+    source = SMOKE.read_text(encoding="utf-8")
+    boot = source.index("run_operational_candidate\n")
+    restore = source.index("pg_restore", boot)
+    rollback = source.index("run_scenario scanner_dirty rollback")
+    assert boot < restore < rollback, (
+        "the pre-upgrade restore must happen after the candidate proves it serves the "
+        "upgraded database and before the rollback assertions require the baseline schema"
+    )
+
+
+def test_the_upgraded_database_is_verified_before_the_candidate_boots():
+    source = SMOKE.read_text(encoding="utf-8")
+    verify = source.index("run_scenario scanner_dirty verify_dirty")
+    boot = source.index("run_operational_candidate\n")
+    assert verify < boot

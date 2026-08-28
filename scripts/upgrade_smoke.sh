@@ -252,11 +252,6 @@ if [ "$ready" -ne 1 ]; then
 fi
 run_scenario scanner_dirty verify_dirty
 
-docker exec "$SMOKE_CONTAINER" dropdb -U scanner scanner_dirty
-docker exec "$SMOKE_CONTAINER" createdb -U scanner scanner_dirty
-docker exec -i "$SMOKE_CONTAINER" pg_restore \
-    -U scanner -d scanner_dirty --exit-on-error \
-    < "$SMOKE_TMP/scanner_dirty.before-upgrade.dump" >/dev/null
 # --- Candidate full stack against the upgraded database -------------------------------------
 # Applying candidate migrations through helper code proves the schema moves; it does not prove the
 # release runs on it. Boot the candidate API, UI and worker against the dirty upgraded database and
@@ -356,6 +351,17 @@ run_operational_candidate() {
 
 mkdir -p "$SMOKE_TMP/results"
 run_operational_candidate
+
+# Restore the pre-upgrade dump only now. The candidate has to prove it serves the
+# UPGRADED database -- that is what the block above says it is for -- and the rollback
+# assertions below require the baseline schema, so the restore belongs between them. It
+# used to sit before the candidate boot, which meant the candidate re-migrated the
+# database to V2 and the rollback check then demanded V2 be absent from it.
+docker exec "$SMOKE_CONTAINER" dropdb -U scanner scanner_dirty
+docker exec "$SMOKE_CONTAINER" createdb -U scanner scanner_dirty
+docker exec -i "$SMOKE_CONTAINER" pg_restore \
+    -U scanner -d scanner_dirty --exit-on-error \
+    < "$SMOKE_TMP/scanner_dirty.before-upgrade.dump" >/dev/null
 
 run_scenario scanner_dirty rollback
 
