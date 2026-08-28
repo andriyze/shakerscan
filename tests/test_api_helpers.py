@@ -2637,9 +2637,10 @@ def test_dashboard_action_center_prioritizes_server_derived_items(monkeypatch):
     assert by_id["deploy-gate-blockers"]["actions"][0]["href"] == "/findings?status=active&severity=critical"
     assert by_id["worker-build-freshness"]["count"] == 2
     assert by_id["worker-build-freshness"]["actions"][0]["label"] == "Adjust workers"
-    assert by_id["policy-exception-hygiene"]["count"] == 6
-    assert by_id["policy-exception-hygiene"]["href"] == "/exceptions"
-    assert by_id["policy-exception-hygiene"]["actions"][0]["href"] == "/exceptions?queue_filter=expired"
+    # The exceptions queue has no UI in V2, so the action center no longer routes
+    # anyone to it; a recommendation whose only affordance is a dead link is worse
+    # than none.
+    assert "policy-exception-hygiene" not in by_id
     assert by_id["asm-coverage-gaps"]["href"] == "/asm?target_id=11111111-1111-4111-8111-111111111111"
     assert by_id["asm-coverage-gaps"]["actions"][0]["label"] == "Improve coverage"
     assert by_id["next-asm-schedule"]["priority"] == "info"
@@ -2971,7 +2972,6 @@ def test_dashboard_product_status_summarizes_cross_product_state():
         "asm",
         "ai_gate",
         "model_intake",
-        "exceptions",
         "deployment",
         "workers",
     ]
@@ -2992,23 +2992,29 @@ def test_dashboard_product_status_summarizes_cross_product_state():
     assert by_id["model_intake"]["href"] == "/model-intake?remediate=trust"
     assert by_id["model_intake"]["actions"][0]["label"] == "Fix trust"
     assert by_id["model_intake"]["actions"][1]["href"] == "/findings?source_type=model_intake&status=active"
-    assert by_id["exceptions"]["href"] == "/exceptions?queue_filter=expired"
-    assert by_id["exceptions"]["actions"][1]["href"] == "/exceptions?queue_filter=expiring"
+    # V2 removed the exceptions UI, so the dashboard no longer offers a card whose
+    # every affordance was a link into it.
+    assert "exceptions" not in by_id
     assert by_id["deployment"]["primary_count"] == 1
     assert by_id["workers"]["status"] == "critical"
     assert by_id["workers"]["metadata"]["total"] == 5
 
 
-def test_dashboard_product_status_links_missing_exception_controls():
+def test_dashboard_product_status_omits_the_removed_exceptions_card():
+    """Exception hygiene has no UI in V2; the card only ever linked into one."""
     snapshot = {"available": False}
     items = asyncio.run(api_module._build_dashboard_product_status(
         _ProductStatusConn(exceptions={"expired": 0, "expiring": 0, "weak_records": 3}),
         worker_snapshot=snapshot,
     ))
-    by_id = {item["id"]: item for item in items}
 
-    assert by_id["exceptions"]["status"] == "warning"
-    assert by_id["exceptions"]["actions"][0]["href"] == "/exceptions?queue_filter=missing_controls"
+    assert not [item for item in items if item["id"] == "exceptions"]
+    assert not [
+        action
+        for item in items
+        for action in item.get("actions") or []
+        if str(action.get("href") or "").startswith("/exceptions")
+    ]
 
 
 # ----- run_due_schedules --------------------------------------------------

@@ -1824,9 +1824,6 @@ function ModelIntakeSettingsContent() {
               <a href="#model-intake-trust-remediation" className="rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20">
                 Trust controls
               </a>
-              <Link href="/exceptions?queue_filter=expired" className="rounded border border-gray-700 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-800">
-                Exception hygiene
-              </Link>
             </div>
           </div>
         </div>

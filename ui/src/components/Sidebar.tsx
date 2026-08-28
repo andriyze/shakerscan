@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Braces, Compass, Crosshair, FileArchive, KeyRound, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldAlert, ShieldCheck, TriangleAlert, Wand2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, Boxes, Braces, Compass, FileArchive, KeyRound, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldCheck, TriangleAlert, X } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
 import {
@@ -77,12 +77,6 @@ const navGroups: {
           </svg>
         ),
       },
-      {
-        href: '/interactive',
-        label: 'Interactive Testing',
-        icon: <Crosshair className="w-5 h-5" />,
-        advanced: true,
-      },
     ],
   },
   {
@@ -125,7 +119,6 @@ const navGroups: {
     advanced: true,
     items: [
       { href: '/settings/policy-profiles', label: 'Policy Profiles', icon: <ShieldCheck className="w-5 h-5" /> },
-      { href: '/exceptions', label: 'Exceptions Queue', icon: <ShieldAlert className="w-5 h-5" /> },
     ],
   },
   {
@@ -133,7 +126,6 @@ const navGroups: {
     advanced: true,
     items: [
       { href: '/settings/arsenal', label: 'Command Arsenal', icon: <Boxes className="w-5 h-5" /> },
-      { href: '/settings/ai-ops-router', label: 'AI Ops Router', icon: <Wand2 className="w-5 h-5" /> },
     ],
   },
 ]
@@ -196,7 +188,7 @@ function NavContent({
     }))
     .filter((group) => group.items.length > 0)
   // Only the Settings landing lights the gear. The /settings/* sub-routes
-  // (research-agent, arsenal, ai-ops-router) belong to their own nav groups.
+  // (research-agent, arsenal) belong to their own nav groups.
   const settingsActive = pathname === '/settings'
 
   const isActive = (href: string) => {

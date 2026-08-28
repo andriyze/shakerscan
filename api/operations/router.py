@@ -1681,78 +1681,6 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
     try:
         row = await conn.fetchrow("""
             SELECT
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND expires_at IS NOT NULL
-                      AND expires_at <= NOW()
-                ) AS expired,
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND expires_at > NOW()
-                      AND expires_at <= NOW() + INTERVAL '7 days'
-                ) AS expiring,
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND (owner IS NULL OR owner = '' OR approver IS NULL OR approver = ''
-                           OR compensating_controls IS NULL OR compensating_controls = '')
-                ) AS weak_records
-            FROM finding_exceptions
-        """)
-        counts = _record_map(row)
-        expired = int(counts.get("expired") or 0)
-        expiring = int(counts.get("expiring") or 0)
-        weak = int(counts.get("weak_records") or 0)
-        if expired:
-            status = "critical"
-            summary = f"{expired} policy exception(s) are expired."
-            href = "/exceptions?queue_filter=expired"
-        elif expiring or weak:
-            status = "warning"
-            summary = f"{expiring} expiring soon; {weak} missing owner, approver, or controls."
-            href = "/exceptions"
-        else:
-            status = "ok"
-            summary = "No exception hygiene blockers detected."
-            href = "/exceptions"
-        exception_actions = []
-        if expired:
-            exception_actions.append({"label": "Expired", "href": "/exceptions?queue_filter=expired", "variant": "primary"})
-        elif weak:
-            exception_actions.append({"label": "Missing controls", "href": "/exceptions?queue_filter=missing_controls", "variant": "primary"})
-        elif expiring:
-            exception_actions.append({"label": "Expiring soon", "href": "/exceptions?queue_filter=expiring", "variant": "primary"})
-        else:
-            exception_actions.append({"label": "All exceptions", "href": "/exceptions", "variant": "primary"})
-        if expiring and exception_actions[0]["href"] != "/exceptions?queue_filter=expiring":
-            exception_actions.append({"label": "Expiring soon", "href": "/exceptions?queue_filter=expiring", "variant": "secondary"})
-        elif weak and exception_actions[0]["href"] != "/exceptions?queue_filter=missing_controls":
-            exception_actions.append({"label": "Missing controls", "href": "/exceptions?queue_filter=missing_controls", "variant": "secondary"})
-        else:
-            exception_actions.append({"label": "All exceptions", "href": "/exceptions", "variant": "secondary"})
-        items.append(_dashboard_product_status_item(
-            item_id="exceptions",
-            label="Exceptions",
-            status=status,
-            summary=summary,
-            href=href,
-            primary_count=expired,
-            primary_label="expired",
-            secondary_count=expiring + weak,
-            secondary_label="hygiene",
-            actions=exception_actions,
-        ))
-    except Exception:
-        items.append(_dashboard_product_status_item(
-            item_id="exceptions",
-            label="Exceptions",
-            status="info",
-            summary="Exception status unavailable.",
-            href="/exceptions",
-        ))
-
-    try:
-        row = await conn.fetchrow("""
-            SELECT
                 COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS critical,
                 COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS high
             FROM findings
@@ -2020,52 +1948,6 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
                     "lookback_days": SCHEDULE_HEALTH_LOOKBACK_DAYS,
                     "schedule_ids": [str(schedule.get("id")) for schedule in unhealthy[:10]],
                 },
-            ))
-    except Exception:
-        pass
-
-    try:
-        exceptions = await conn.fetchrow("""
-            SELECT
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND expires_at IS NOT NULL
-                      AND expires_at <= NOW()
-                ) AS expired,
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND expires_at > NOW()
-                      AND expires_at <= NOW() + INTERVAL '7 days'
-                ) AS expiring,
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND (owner IS NULL OR owner = '' OR approver IS NULL OR approver = ''
-                           OR compensating_controls IS NULL OR compensating_controls = '')
-                ) AS weak_records
-            FROM finding_exceptions
-        """)
-        exception_map = _record_map(exceptions)
-        expired = int(exception_map.get("expired") or 0)
-        expiring = int(exception_map.get("expiring") or 0)
-        weak_records = int(exception_map.get("weak_records") or 0)
-        if expired or expiring or weak_records:
-            items.append(_action_center_item(
-                item_id="policy-exception-hygiene",
-                priority="high" if expired else "medium",
-                category="Policy exceptions",
-                title="Policy exceptions need review",
-                detail=(
-                    f"{expired} expired, {expiring} expiring within 7 days, "
-                    f"{weak_records} missing owner/approver or compensating controls."
-                ),
-                href="/exceptions",
-                action_label="Review exceptions",
-                actions=[
-                    {"label": "Expired", "href": "/exceptions?queue_filter=expired", "variant": "primary"},
-                    {"label": "Expiring", "href": "/exceptions?queue_filter=expiring", "variant": "secondary"},
-                    {"label": "Missing controls", "href": "/exceptions?queue_filter=missing_controls", "variant": "secondary"},
-                ],
-                count=expired + expiring + weak_records,
             ))
     except Exception:
         pass

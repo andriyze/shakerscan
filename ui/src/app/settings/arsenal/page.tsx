@@ -372,12 +372,6 @@ function CampaignActionRow({
                 ))}
               </select>
             </label>
-            <a
-              href="/interactive"
-              className="rounded-md border border-gray-700 px-3 py-2 text-xs font-medium text-gray-300 hover:border-blue-400 hover:text-white"
-            >
-              Sessions
-            </a>
             <Button
               size="sm"
               variant="secondary"

@@ -1342,14 +1342,11 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/findings/{id}` | Evidence, raw request/response, proof/retest history, notes, status, deletion, and remediation |
 | `/evidence` | Evidence-instance inventory, single-object inspection, content-free export manifests/bundles, and immutable-preview, exact-approval retention cleanup |
 | `/credentials` | Metadata-only management for encrypted, exact-target-bound Web, API, network, and device credential profiles, including principal slots, rotation, expiry, capability bounds, and deactivation |
-| `/interactive` | Browser sessions, credential profiles, principals, authorization expectations, endpoint replay, and manual findings |
 | `/schedules` | Recurring normal scans and target-scoped ASM waves; evidence cleanup is interactive-only and legacy retention schedules are disabled |
 | `/settings` | AI provider, scan execution, and automation policy settings |
 | `/ai-gate` | AI target/principal lifecycle, inventory, readiness, probe packs, scans, longitudinal history, and durable AI surface inventory |
-| `/settings/ai-ops-router` | Natural-language → safe API plan preview, with confirmation-gated execution |
 | `/model-intake` | Reference resolution, trust preview/anchors, presets, policy selection, and intake submission |
 | `/settings/policy-profiles` | Deployment policy profile lifecycle across DAST, AI Gate, and Model Intake |
-| `/exceptions` | Finding-exception queue, repair, expiry visibility, and lifecycle sweep |
 | `/settings/arsenal` | Command contracts, receipts, plans, actions, hypotheses (claim/signal/plan-campaign, from-plan/from-benchmark generators), refuters, tools, local agents, context packs, and traces |
 | `/hunt` | Launch and inspect the canonical target-kind-aware Hunt runtime through `/hunts/*`, with exact-target generic primary, secondary, service, and SSH credential-profile selection |
 | `/deep-hunt` | Compatibility redirect to `/hunt` |
@@ -1370,7 +1367,7 @@ Several workflows that were previously API-only now have UI surfaces: the cross-
 (`/timeline`), read-only mission campaign list/detail (`/campaigns`), evidence browsing plus content-free
 manifest/bundle export and approval-gated retention sweeps (`/evidence`), the durable AI surface inventory
 (inside `/ai-gate`), hypothesis claim/signal/plan-campaign and the from-plan/from-benchmark
-generators (inside `/settings/arsenal`), the natural-language AI Operations Router (`/settings/ai-ops-router`),
+generators (inside `/settings/arsenal`), the natural-language AI Operations Router (`POST /ai/ops/route`, API only),
 and the one-click operational actions batch scan (`/scan/new`), target dedupe (`/targets`), queue emergency
 clear (`/`), and ASM inventory prune (`/asm`).
 
@@ -1447,7 +1444,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 357 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
-| UI pages | 39 | `ui/src/app/` |
+| UI pages | 36 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2537,14 +2534,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/devices/policies` | `ui/src/app/devices/policies/page.tsx` |
 | `/docs` | `ui/src/app/docs/page.tsx` |
 | `/evidence` | `ui/src/app/evidence/page.tsx` |
-| `/exceptions` | `ui/src/app/exceptions/page.tsx` |
 | `/exposure` | `ui/src/app/exposure/page.tsx` |
 | `/findings/{id}` | `ui/src/app/findings/[id]/page.tsx` |
 | `/findings/candidates` | `ui/src/app/findings/candidates/page.tsx` |
 | `/findings` | `ui/src/app/findings/page.tsx` |
 | `/fleet` | `ui/src/app/fleet/page.tsx` |
 | `/hunt` | `ui/src/app/hunt/page.tsx` |
-| `/interactive` | `ui/src/app/interactive/page.tsx` |
 | `/model-intake` | `ui/src/app/model-intake/page.tsx` |
 | `/` | `ui/src/app/page.tsx` |
 | `/request-collections` | `ui/src/app/request-collections/page.tsx` |
@@ -2552,7 +2547,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/scans/{id}` | `ui/src/app/scans/[id]/page.tsx` |
 | `/scans` | `ui/src/app/scans/page.tsx` |
 | `/schedules` | `ui/src/app/schedules/page.tsx` |
-| `/settings/ai-ops-router` | `ui/src/app/settings/ai-ops-router/page.tsx` |
 | `/settings/arsenal` | `ui/src/app/settings/arsenal/page.tsx` |
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
