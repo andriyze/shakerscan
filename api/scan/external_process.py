@@ -75,20 +75,20 @@ BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
 # exactly this traffic never decremented, so it bounded nothing. The permission itself was
 # always enforced: `work_manifests` only creates a body candidate when
 # `allow_state_changing_http` is set. What was missing was the accounting.
-# `state_changing_requests` is deliberately ABSENT, and this is a known gap rather than an
-# oversight. Every request a body attempt sends is a mutation, so charging the dimension
-# here is correct in principle -- but the budget is reserved PER BATCH ACTION, a thorough
-# plan admits several required SQLi batches, and one attempt costs 480 against a 500
-# ceiling. Declaring it made the second batch unadmittable and a required action that
-# cannot fit fails the entire scan: every thorough scan died at admission and Juice Shop
-# recall went from 4/9 to 0/9. Dividing the ceiling across the batches leaves each below
-# what one attempt needs, so the dimension cannot be metered per batch at this ceiling at
-# all. Closing it needs either a higher mutation-authority ceiling -- a safety decision,
-# not a tuning knob -- or metering at execution against the plan ledger instead of
-# reserving per batch.
+# The active profile ceilings deliberately fund this cost class. That keeps the
+# mutation ledger authoritative without making a required second batch
+# unadmittable; query-only attempts settle zero mutation units.
 BATCH_ATTEMPT_BODY_FLOORS: dict[str, dict[str, int]] = {
-    "xss.verify_batch": {"http_requests": 240, "tool_wall_seconds": 120},
-    "sqli.verify_batch": {"http_requests": 480, "tool_wall_seconds": 420},
+    "xss.verify_batch": {
+        "http_requests": 240,
+        "state_changing_requests": 240,
+        "tool_wall_seconds": 120,
+    },
+    "sqli.verify_batch": {
+        "http_requests": 480,
+        "state_changing_requests": 480,
+        "tool_wall_seconds": 420,
+    },
 }
 
 
@@ -338,6 +338,18 @@ RESERVATION_SCALED_PROFILES: Mapping[
     ),
     "sqli.verify": (
         {"http_requests": 900, "tool_wall_seconds": 300},
+    ),
+    # Family-partitioned shards can retain deterministic query verification even when their
+    # immutable sub-budget cannot fund the much larger request-body floor. Body candidates remain
+    # visible as unattempted; they are never silently executed against this smaller hold.
+    "xss.verify_batch": (
+        {"http_requests": 120, "tool_wall_seconds": 30},
+    ),
+    "sqli.verify_batch": (
+        {"http_requests": 160, "tool_wall_seconds": 30},
+    ),
+    "sqli.prove_batch": (
+        {"http_requests": 8, "tool_wall_seconds": 30},
     ),
 }
 

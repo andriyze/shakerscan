@@ -842,7 +842,7 @@ def run_ai_gate() -> H.Scorecard:
 JUICE_SHOP = os.environ.get("SHAKERSCAN_E2E_DAST_TARGET", f"http://{HONEY_HOST}:3001")
 HUNT_WEB_TARGET = os.environ.get(
     "SHAKERSCAN_E2E_HUNT_TARGET",
-    os.environ.get("SHAKERSCAN_E2E_DAST_TARGET", FIXTURES_BASE),
+    FIXTURES_BASE,
 )
 
 

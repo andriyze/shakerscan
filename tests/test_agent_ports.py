@@ -304,10 +304,14 @@ def test_same_origin_path_guard():
 def test_header_filter_drops_auth():
     filtered = at.filter_request_headers({
         "Authorization": "Bearer x", "Cookie": "s=1", "X-Api-Key": "k",
+        "Observed-Access-Key": "ak", "X-Private_Key": "pk",
+        "X-Signing-Key": "sk",
         "X-Forwarded-For": "1.2.3.4", "Accept": "application/json", "X-Custom": "ok",
     })
     assert "Authorization" not in filtered and "Cookie" not in filtered
     assert "X-Api-Key" not in filtered and "X-Forwarded-For" not in filtered
+    assert "Observed-Access-Key" not in filtered
+    assert "X-Private_Key" not in filtered and "X-Signing-Key" not in filtered
     assert filtered.get("Accept") == "application/json"
     assert filtered.get("X-Custom") == "ok"
 

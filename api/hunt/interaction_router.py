@@ -33,8 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .run_service import agent_tools
 from .cancellation import (
     HuntCancellationWatch,
-    record_cancellable_job,
-    signal_cancelled_jobs,
+    record_cancellable_job_durable,
 )
 from .settlement import blocked_actual_charges as _hunt_blocked_actual
 from .device_policy import DeviceHuntPolicyState
@@ -3012,7 +3011,7 @@ async def _enqueue_canonical_network_capability(
     cancel_key = f"agent_tool_cancel:{job_id}"
     # A worker-placed job polls this key, and its id exists only here, so a Hunt cancellation can
     # reach it only if the id is recorded against the Hunt now.
-    record_cancellable_job(redis_client, hunt_id, job_id)
+    await record_cancellable_job_durable(_pool(), redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id, "type": "canonical_network_capability",
         "capability_name": capability_name, "capability_input": dict(capability_input),
@@ -3068,7 +3067,7 @@ async def _enqueue_canonical_http_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
-    record_cancellable_job(redis_client, hunt_id, job_id)
+    await record_cancellable_job_durable(_pool(), redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id,
         "type": "canonical_http_capability",
@@ -3138,7 +3137,7 @@ async def _enqueue_canonical_browser_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
-    record_cancellable_job(redis_client, hunt_id, job_id)
+    await record_cancellable_job_durable(_pool(), redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id,
         "type": "canonical_browser_capability",
@@ -3210,7 +3209,7 @@ async def _enqueue_canonical_scanner_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
-    record_cancellable_job(redis_client, hunt_id, job_id)
+    await record_cancellable_job_durable(_pool(), redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id,
         "type": "canonical_scanner_capability",
@@ -3613,7 +3612,7 @@ async def _enqueue_hunt_replay_capability(
         raise HTTPException(status_code=422, detail="Safe replay selection is empty")
     redis_client = get_redis()
     job_id = str(uuid.uuid4())
-    record_cancellable_job(redis_client, str(run["id"]), job_id)
+    await record_cancellable_job_durable(_pool(), redis_client, str(run["id"]), job_id)
     reservation_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     timeout_seconds = 60
@@ -3818,5 +3817,3 @@ def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int) -> RequestC
         safe_methods_only=True,
         max_requests=min(selector.max_requests, hard_limit),
     )
-
-

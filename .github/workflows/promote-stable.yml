@@ -42,12 +42,16 @@ jobs:
           [[ "$SMOKE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$(tr -d '[:space:]' < install/STABLE_VERSION)" == "$VERSION" ]]
           gh release view "v${VERSION}" --json isPrerelease,isDraft --jq '(.isPrerelease == false) and (.isDraft == false)' | grep -qx true
+          release_sha="$(gh release view "v${VERSION}" --json targetCommitish --jq .targetCommitish)"
+          [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+          gh release download "v${VERSION}" --pattern release-image-lock.env --output release-image-lock.env
           curl --fail --silent --show-error --location \
             --proto '=https' --tlsv1.2 "$SMOKE_URL" --output public-smoke-receipt.json
           echo "${SMOKE_SHA256}  public-smoke-receipt.json" | sha256sum --check --strict
-          jq -e --arg version "$VERSION" '
+          jq -e --arg version "$VERSION" --arg sha "$release_sha" '
             .schema_version == "shakerscan-public-smoke/v1"
             and .version == $version
+            and .source_sha == $sha
             and .checks.clean_install == "pass"
             and .checks.ui_api_identity == "pass"
             and .checks.worker_identity == "pass"
@@ -55,6 +59,13 @@ jobs:
             and .checks.model_intake_browser_session == "pass"
             and .checks.firecracker_command == "pass"
           ' public-smoke-receipt.json >/dev/null
+          for binding in scanner:SCANNER_IMAGE api:API_IMAGE ui:UI_IMAGE signer:SIGNER_IMAGE; do
+            key="${binding%%:*}"
+            variable="${binding#*:}"
+            expected="$(sed -n "s/^${variable}=//p" release-image-lock.env)"
+            [[ "$expected" =~ @sha256:[0-9a-f]{64}$ ]]
+            test "$(jq -r ".images.${key}" public-smoke-receipt.json)" = "$expected"
+          done
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 

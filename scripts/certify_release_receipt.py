@@ -52,6 +52,7 @@ def certify_receipt(
     e2e: Mapping[str, Any],
     e2e_path: Path,
     source_sha: str,
+    external_evidence: Mapping[str, tuple[Mapping[str, Any], Path]] | None = None,
 ) -> dict[str, Any]:
     if not SOURCE_SHA.fullmatch(source_sha):
         raise CertificationError("source SHA must be a full lowercase commit identity")
@@ -77,8 +78,10 @@ def certify_receipt(
         raise CertificationError("upgrade receipt has no candidate identity")
     if upgrade_candidate.get("source_sha") != source_sha:
         raise CertificationError("upgrade receipt source does not match the candidate")
-    if upgrade_candidate.get("image_digest") != images["scanner"]:
-        raise CertificationError("upgrade receipt did not run the final scanner manifest digest")
+    if upgrade_candidate.get("images") != {
+        key: images[key] for key in ("scanner", "api", "ui")
+    }:
+        raise CertificationError("upgrade receipt did not run all final runtime manifest digests")
     upgrade_checks = upgrade.get("checks")
     if not isinstance(upgrade_checks, Mapping) or not upgrade_checks or any(
         value != "pass" for value in upgrade_checks.values()
@@ -117,6 +120,31 @@ def certify_receipt(
     if e2e_images is not None and dict(e2e_images) != dict(sorted(images.items())):
         raise CertificationError("E2E scorecard did not test the final release image digests")
 
+    external = dict(external_evidence or {})
+    required_external = {
+        "dast_quality", "fault_acceptance", "real_fleet_parity",
+        "model_intake_physical", "device_physical",
+    }
+    if set(external) != required_external:
+        raise CertificationError("candidate certification is missing required external evidence")
+    dast = external["dast_quality"][0]
+    if dast.get("passed") is not True or dast.get("quality_bar_passed") is not True:
+        raise CertificationError("DAST did not meet the complete release quality bar")
+    fault = external["fault_acceptance"][0]
+    if fault.get("candidate_sha") != source_sha or fault.get("promotion_authorized") is not False:
+        raise CertificationError("fault acceptance does not bind this candidate")
+    parity = external["real_fleet_parity"][0]
+    if (
+        parity.get("source_revision") != source_sha
+        or parity.get("consistent") is not True
+        or parity.get("all_artifacts_truthful") is not True
+    ):
+        raise CertificationError("real-fleet parity did not pass for this candidate")
+    for key in ("model_intake_physical", "device_physical"):
+        evidence = external[key][0]
+        if evidence.get("candidate_sha") != source_sha or evidence.get("status") != "pass":
+            raise CertificationError(f"{key} did not pass for this candidate")
+
     result = dict(candidate)
     result["schema_version"] = "shakerscan-release-candidate/v2"
     result["certification"] = {
@@ -131,12 +159,21 @@ def certify_receipt(
             "model_intake_and_mature_subsystems": "pass",
             "source_and_image_identity": "pass",
             "e2e_subject_binding": "pass",
+            "complete_dast_quality_bar": "pass",
+            "fault_acceptance": "pass",
+            "real_fleet_parity": "pass",
+            "model_intake_physical": "pass",
+            "device_physical": "pass",
         },
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),
             "stateful_upgrade_receipt": _file_sha256(upgrade_path),
             "preservation_receipt": _file_sha256(preservation_path),
             "exact_manifest_e2e_scorecard": _file_sha256(e2e_path),
+            **{
+                key: _file_sha256(path)
+                for key, (_value, path) in sorted(external.items())
+            },
         },
         "rollback_boundary": str(upgrade.get("rollback_boundary") or ""),
     }
@@ -154,6 +191,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preservation", required=True, type=Path)
     parser.add_argument("--e2e-scorecard", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--dast-quality", required=True, type=Path)
+    parser.add_argument("--fault-acceptance", required=True, type=Path)
+    parser.add_argument("--real-fleet-parity", required=True, type=Path)
+    parser.add_argument("--model-intake-physical", required=True, type=Path)
+    parser.add_argument("--device-physical", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -167,6 +209,15 @@ def main(argv: list[str] | None = None) -> int:
             e2e=_read(args.e2e_scorecard),
             e2e_path=args.e2e_scorecard,
             source_sha=args.source_sha,
+            external_evidence={
+                "dast_quality": (_read(args.dast_quality), args.dast_quality),
+                "fault_acceptance": (_read(args.fault_acceptance), args.fault_acceptance),
+                "real_fleet_parity": (_read(args.real_fleet_parity), args.real_fleet_parity),
+                "model_intake_physical": (
+                    _read(args.model_intake_physical), args.model_intake_physical,
+                ),
+                "device_physical": (_read(args.device_physical), args.device_physical),
+            },
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

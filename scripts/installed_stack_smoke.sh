@@ -129,7 +129,6 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
             PLAYWRIGHT_REAL_STACK=1 \
             SHAKERSCAN_API_URL="http://127.0.0.1:$API_PORT" \
             SHAKERSCAN_E2E_SCAN_TARGET="http://juice-shop:3000" \
-            SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000" \
             npm --prefix "$ROOT_DIR/ui" run test:browser
         mkdir -p "$(dirname "$INSTALLED_STACK_SMOKE_BROWSER_JSON")"
         cp "$ROOT_DIR/ui/test-results/browser-results.json" \

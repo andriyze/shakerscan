@@ -78,7 +78,8 @@ def test_no_receipt_redactor_carries_its_own_sensitive_key_set():
 
 def test_the_worker_uses_the_shared_rule():
     source = (ROOT / "api" / "worker.py").read_text(encoding="utf-8")
-    assert "_receipt_key_is_sensitive" in source
+    assert "redact_receipt_value as _redact_receipt_value" in source
+    assert "def _redact_receipt_value" not in source
     assert "_RECEIPT_SENSITIVE_KEYS" not in source, (
         "worker.py still carries its own exact-match key set"
     )

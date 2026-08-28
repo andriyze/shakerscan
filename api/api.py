@@ -601,6 +601,7 @@ try:
         amended_scan_plan_revision,
         build_discovery_continuation_manifests,
         merge_scan_action_continuation,
+        policy_constrained_hold_budget,
     )
     from scan.stage_store import (
         PostgresScanStageCheckpointStore,
@@ -724,6 +725,7 @@ except ModuleNotFoundError:
         amended_scan_plan_revision,
         build_discovery_continuation_manifests,
         merge_scan_action_continuation,
+        policy_constrained_hold_budget,
     )
     from api.scan.stage_store import (
         PostgresScanStageCheckpointStore,
@@ -10835,34 +10837,29 @@ def _compile_scan_admission_action_authority(
             None,
         )
 
-    # Derived from the canonical Scan contract, never a local family table. The
-    # previous copy fell behind when XSS and SQLi moved to batch actions.
+    # Derive continuation authority from the canonical family registry.
     included = set(scan_contract.policy.include_families)
     excluded = set(scan_contract.policy.exclude_families)
-    active_families = tuple(
-        family for family in SCAN_V2_FAMILY_NAMES
-        if scan_family_required_capability(family) is not None
-    )
     required_capabilities = tuple(
         scan_family_required_capability(family)
-        for family in active_families
+        for family in SCAN_V2_FAMILY_NAMES
         if family in included and family not in excluded
+        and scan_family_required_capability(family) is not None
     )
-    # Passive families carry continuation authority too: see scan_family_capabilities.
-    enabled_families = {
-        family for family in SCAN_V2_FAMILY_NAMES
-        if family not in excluded and (not included or family in included)
-    }
     allowed_capabilities = {
         capability
-        for family in enabled_families
+        for family in SCAN_V2_FAMILY_NAMES
+        if family not in excluded and (not included or family in included)
         for capability in scan_family_capabilities(family)
     }
     required_holds = (*required_capabilities, "scan.finalize")
     reserved_budget: dict[str, int] = {}
     for capability_name in required_holds:
-        specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-        for name, amount in specification.budget_cost.items():
+        hold_budget = policy_constrained_hold_budget(
+            agent_tools.CAPABILITY_REGISTRY, capability_name,
+            allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
+        )
+        for name, amount in hold_budget.items():
             reserved_budget[name] = reserved_budget.get(name, 0) + amount
 
     raw_parent = ScanActionPlanCompiler().compile(
@@ -10890,15 +10887,18 @@ def _compile_scan_admission_action_authority(
     )
     remaining = dict(parent_allocation.residual_scan_execute_budget)
     for capability_name in required_holds:
-        specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        hold_budget = policy_constrained_hold_budget(
+            agent_tools.CAPABILITY_REGISTRY, capability_name,
+            allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
+        )
         shortages = {
             name: amount - remaining.get(name, 0)
-            for name, amount in specification.budget_cost.items()
+            for name, amount in hold_budget.items()
             if amount > remaining.get(name, 0)
         }
         if shortages:
             raise ScanBudgetAllocationError(capability_name, shortages)
-        for name, amount in specification.budget_cost.items():
+        for name, amount in hold_budget.items():
             remaining[name] = remaining.get(name, 0) - amount
 
     parent_plan = parent_allocation.plan

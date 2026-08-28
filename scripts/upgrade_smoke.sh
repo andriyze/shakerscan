@@ -25,6 +25,7 @@ CANDIDATE_REDIS_CONTAINER="shakerscan-candidate-redis-$$"
 CANDIDATE_API_CONTAINER="shakerscan-candidate-api-$$"
 CANDIDATE_UI_CONTAINER="shakerscan-candidate-ui-$$"
 CANDIDATE_WORKER_CONTAINER="shakerscan-candidate-worker-$$"
+REDIS_VOLUME="shakerscan-upgrade-redis-$$"
 UPGRADE_QUEUED_ID="upgrade-smoke-queued-$$"
 UPGRADE_LEASED_ID="upgrade-smoke-leased-$$"
 UPGRADE_QUEUED_JOB="{\"scan_id\":\"$UPGRADE_QUEUED_ID\",\"job_id\":\"$UPGRADE_QUEUED_ID\"}"
@@ -46,9 +47,11 @@ cleanup() {
     docker rm -f "$ROLLBACK_WORKER_CONTAINER" "$ROLLBACK_UI_CONTAINER" \
         "$ROLLBACK_API_CONTAINER" "$ROLLBACK_REDIS_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$SMOKE_CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm -f "$REDIS_VOLUME" >/dev/null 2>&1 || true
     rm -rf -- "$SMOKE_TMP"
 }
 trap cleanup EXIT INT TERM
+docker volume create "$REDIS_VOLUME" >/dev/null
 
 if [ "$BASELINE_REF" != "v$STABLE_VERSION" ]; then
     echo "BASELINE_REF must match install/STABLE_VERSION (v$STABLE_VERSION)" >&2
@@ -259,29 +262,31 @@ run_scenario scanner_dirty verify_dirty
 # than by an operator.
 
 seed_redis_upgrade_work() {
+    local redis_container="${1:-$CANDIDATE_REDIS_CONTAINER}"
     # Queued and leased work an operator would have in flight across an upgrade. Each is tracked
     # by its OWN identity: an earlier version of this check seeded an unrelated lease and accepted
     # "queue drained OR some lease exists", so losing the queued job entirely still passed.
-    docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
+    docker exec "$redis_container" redis-cli -a scanner --no-auth-warning \
         RPUSH scan_jobs "$UPGRADE_QUEUED_JOB" >/dev/null
-    docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
+    docker exec "$redis_container" redis-cli -a scanner --no-auth-warning \
         SET "scan_lease:$UPGRADE_LEASED_ID" "upgrade-smoke-worker" EX 3600 >/dev/null
 }
 
 assert_redis_work_survived() {
+    local redis_container="${1:-$CANDIDATE_REDIS_CONTAINER}"
     local still_queued claimed leased
     # The SPECIFIC queued job, not the queue length: still on the queue, or claimed by this exact
     # id, or settled with a terminal marker. Anything else means it was lost.
-    still_queued="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner \
+    still_queued="$(docker exec "$redis_container" redis-cli -a scanner \
         --no-auth-warning LRANGE scan_jobs 0 -1 | grep -c "$UPGRADE_QUEUED_ID" || true)"
-    claimed="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
+    claimed="$(docker exec "$redis_container" redis-cli -a scanner --no-auth-warning \
         EXISTS "scan_lease:$UPGRADE_QUEUED_ID" | tr -d '[:space:]')"
     if [ "$still_queued" = "0" ] && [ "$claimed" != "1" ]; then
         echo "the queued job $UPGRADE_QUEUED_ID was neither preserved nor claimed across the upgrade" >&2
         exit 1
     fi
     # The pre-existing lease belongs to the worker that took it and must survive intact.
-    leased="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
+    leased="$(docker exec "$redis_container" redis-cli -a scanner --no-auth-warning \
         GET "scan_lease:$UPGRADE_LEASED_ID" | tr -d '[:space:]')"
     if [ "$leased" != "upgrade-smoke-worker" ]; then
         echo "the pre-existing worker lease did not survive the upgrade: '${leased:-missing}'" >&2
@@ -292,13 +297,15 @@ assert_redis_work_survived() {
 run_operational_candidate() {
     docker run --detach --name "$CANDIDATE_REDIS_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
-        "$REDIS_IMAGE" redis-server --requirepass scanner >/dev/null
+        -v "$REDIS_VOLUME:/data" \
+        "$REDIS_IMAGE" redis-server --requirepass scanner \
+        --appendonly yes --appendfsync always >/dev/null
     for _attempt in $(seq 1 30); do
         docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning PING \
             >/dev/null 2>&1 && break
         sleep 1
     done
-    seed_redis_upgrade_work
+    seed_redis_upgrade_work "$CANDIDATE_REDIS_CONTAINER"
 
     docker run --detach --name "$CANDIDATE_API_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
@@ -312,13 +319,6 @@ run_operational_candidate() {
         --network "container:$SMOKE_CONTAINER" \
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
         "$CANDIDATE_UI_IMAGE" >/dev/null
-    docker run --detach --name "$CANDIDATE_WORKER_CONTAINER" \
-        --network "container:$SMOKE_CONTAINER" \
-        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
-        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
-        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
-        "$SCANNER_IMAGE" python3 /app/worker.py >/dev/null
-
     local healthy=0
     for _attempt in $(seq 1 120); do
         if docker run --rm --network "container:$SMOKE_CONTAINER" \
@@ -339,13 +339,25 @@ run_operational_candidate() {
     docker run --rm --network "container:$SMOKE_CONTAINER" \
         --entrypoint sh "$SCANNER_IMAGE" -c \
         "curl -sf 'http://127.0.0.1:8080/targets?limit=100' | grep -F 'upgrade.example.test' >/dev/null"
+    # Check durable Redis state before a worker is allowed to claim it, then prove the worker boots.
+    assert_redis_work_survived "$CANDIDATE_REDIS_CONTAINER"
+    docker run --detach --name "$CANDIDATE_WORKER_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
+        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
+        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
+        "$SCANNER_IMAGE" python3 /app/worker.py >/dev/null
+    sleep 2
     if [ "$(docker inspect --format '{{.State.Running}}' "$CANDIDATE_WORKER_CONTAINER")" != "true" ]; then
         echo "candidate worker did not remain running on the upgraded database" >&2
         docker logs "$CANDIDATE_WORKER_CONTAINER" >&2 || true
         exit 1
     fi
-    assert_redis_work_survived
-    docker rm -f "$CANDIDATE_WORKER_CONTAINER" "$CANDIDATE_UI_CONTAINER" \
+    docker rm -f "$CANDIDATE_WORKER_CONTAINER" >/dev/null 2>&1 || true
+    # Re-establish the sentinels after the worker boot so rollback proves the same durable Redis
+    # volume, not a fresh empty service, survives the reverse transition as well.
+    seed_redis_upgrade_work "$CANDIDATE_REDIS_CONTAINER"
+    docker rm -f "$CANDIDATE_UI_CONTAINER" \
         "$CANDIDATE_API_CONTAINER" "$CANDIDATE_REDIS_CONTAINER" >/dev/null 2>&1 || true
 }
 
@@ -372,7 +384,9 @@ run_operational_rollback() {
     # explicitly; the API did not, which is why the rollback leg could not pass.
     docker run --detach --name "$ROLLBACK_REDIS_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
-        "$REDIS_IMAGE" redis-server --requirepass scanner >/dev/null
+        -v "$REDIS_VOLUME:/data" \
+        "$REDIS_IMAGE" redis-server --requirepass scanner \
+        --appendonly yes --appendfsync always >/dev/null
     docker run --detach --name "$ROLLBACK_API_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
         -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
@@ -389,15 +403,6 @@ run_operational_rollback() {
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
         -e NEXT_PUBLIC_APP_VERSION="$STABLE_VERSION" \
         "$BASELINE_UI_IMAGE" >/dev/null
-    docker run --detach --name "$ROLLBACK_WORKER_CONTAINER" \
-        --network "container:$SMOKE_CONTAINER" \
-        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
-        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
-        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
-        -e SCANNER_VERSION="$STABLE_VERSION" \
-        -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
-        "$BASELINE_IMAGE" python3 /app/worker.py >/dev/null
-
     local healthy=0
     for _attempt in $(seq 1 90); do
         if docker run --rm --network "container:$SMOKE_CONTAINER" \
@@ -417,6 +422,16 @@ run_operational_rollback() {
     docker run --rm --network "container:$SMOKE_CONTAINER" \
         --entrypoint sh "$SCANNER_IMAGE" -c \
         "curl -sf 'http://127.0.0.1:8080/targets?limit=100' | grep -F 'upgrade.example.test' >/dev/null"
+    assert_redis_work_survived "$ROLLBACK_REDIS_CONTAINER"
+    docker run --detach --name "$ROLLBACK_WORKER_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
+        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
+        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
+        -e SCANNER_VERSION="$STABLE_VERSION" \
+        -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
+        "$BASELINE_IMAGE" python3 /app/worker.py >/dev/null
+    sleep 2
     if [ "$(docker inspect --format '{{.State.Running}}' "$ROLLBACK_WORKER_CONTAINER")" != "true" ]; then
         echo "Previous-stable worker did not remain running after rollback" >&2
         docker logs "$ROLLBACK_WORKER_CONTAINER" >&2 || true
@@ -429,15 +444,29 @@ run_operational_rollback
 
 baseline_source_sha="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")"
 candidate_source_sha="${CANDIDATE_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
-baseline_image_id="${BASELINE_IMAGE_DIGEST:-$(docker image inspect --format '{{.Id}}' "$BASELINE_IMAGE")}"
-candidate_image_id="${CANDIDATE_IMAGE_DIGEST:-$(docker image inspect --format '{{.Id}}' "$SCANNER_IMAGE")}"
+image_digest() {
+    case "$1" in
+        *@sha256:*) printf '%s\n' "${1##*@}" ;;
+        *) docker image inspect --format '{{.Id}}' "$1" ;;
+    esac
+}
+baseline_scanner_image_id="${BASELINE_IMAGE_DIGEST:-$(image_digest "$BASELINE_IMAGE")}"
+baseline_api_image_id="${BASELINE_API_IMAGE_DIGEST:-$(image_digest "$BASELINE_API_IMAGE")}"
+baseline_ui_image_id="${BASELINE_UI_IMAGE_DIGEST:-$(image_digest "$BASELINE_UI_IMAGE")}"
+candidate_scanner_image_id="${CANDIDATE_IMAGE_DIGEST:-$(image_digest "$SCANNER_IMAGE")}"
+candidate_api_image_id="${CANDIDATE_API_IMAGE_DIGEST:-$(image_digest "$CANDIDATE_API_IMAGE")}"
+candidate_ui_image_id="${CANDIDATE_UI_IMAGE_DIGEST:-$(image_digest "$CANDIDATE_UI_IMAGE")}"
 receipt_path="${UPGRADE_RECEIPT_PATH:-$SMOKE_TMP/upgrade-receipt.json}"
 python3 "$REPO_ROOT/scripts/upgrade_acceptance_receipt.py" \
     --baseline-version "$STABLE_VERSION" \
     --baseline-source-sha "$baseline_source_sha" \
     --candidate-source-sha "$candidate_source_sha" \
-    --baseline-image "$baseline_image_id" \
-    --candidate-image "$candidate_image_id" \
+    --baseline-scanner-image "$baseline_scanner_image_id" \
+    --baseline-api-image "$baseline_api_image_id" \
+    --baseline-ui-image "$baseline_ui_image_id" \
+    --candidate-scanner-image "$candidate_scanner_image_id" \
+    --candidate-api-image "$candidate_api_image_id" \
+    --candidate-ui-image "$candidate_ui_image_id" \
     --output "$receipt_path"
 
 echo "Upgrade and operational rollback smoke passed from $BASELINE_REF using $SCANNER_IMAGE"

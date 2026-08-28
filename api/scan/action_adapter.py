@@ -278,7 +278,7 @@ _BATCH_SUCCESS_STATUSES = frozenset({"success", "succeeded", "completed"})
 
 
 def batch_outcome(
-    attempt_statuses: Sequence[str], unattempted: int,
+    attempts: Sequence[Any], unattempted: int,
 ) -> tuple[str, bool, bool]:
     """Return (status, partial, timed_out) for a batch from its attempts.
 
@@ -290,12 +290,19 @@ def batch_outcome(
     A completed attempt that reached "not proven" is still a success: not finding a
     vulnerability is a result. An attempt that never finished is not.
     """
-    failed = any(
-        str(status) not in _BATCH_SUCCESS_STATUSES for status in attempt_statuses
+    normalized = tuple(
+        (
+            str(item.get("status") or "").strip().lower(),
+            bool(item.get("timed_out")),
+        )
+        if isinstance(item, Mapping)
+        else (str(item or "").strip().lower(), False)
+        for item in attempts
     )
-    timed_out = any(
-        str(status) in {"timed_out", "partial"} for status in attempt_statuses
-    )
+    failed = any(status not in _BATCH_SUCCESS_STATUSES for status, _ in normalized)
+    # Partial is a completion-quality state, not a timeout synonym. Adapters report
+    # timeout independently because parser/network/browser partials are legitimate.
+    timed_out = any(status == "timed_out" or explicit for status, explicit in normalized)
     partial = bool(unattempted) or failed
     return ("partial" if partial else "success", partial, timed_out)
 
@@ -1115,7 +1122,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = 0
-        attempt_statuses: list[str] = []
+        attempt_statuses: list[Mapping[str, Any]] = []
         resumed = 0
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
@@ -1126,7 +1133,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
-                attempt_statuses.append(str(prior.get("status") or "success"))
+                attempt_statuses.append(prior)
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1212,6 +1219,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
                 "status": result.status,
+                "timed_out": bool(result.timed_out),
                 "budget_consumed": dict(result.actual_budget),
                 "observations": attempt_observations,
                 "errors": tuple(result.errors),
@@ -1219,7 +1227,10 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
-            attempt_statuses.append(str(result.status))
+            attempt_statuses.append({
+                "status": str(result.status),
+                "timed_out": bool(result.timed_out),
+            })
             attempted += 1
             observations.extend(attempt_observations)
             errors.extend(str(item) for item in result.errors)
@@ -1326,7 +1337,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
-        attempt_statuses: list[str] = []
+        attempt_statuses: list[Mapping[str, Any]] = []
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             if candidate_id not in candidate_signals:
@@ -1338,16 +1349,22 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
-                attempt_statuses.append(str(prior.get("status") or "success"))
+                attempt_statuses.append(prior)
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 continue
             if self.cancelled():
                 break
-            execution_url = execution_url_for_manifest_candidate(
+            resolved_request = execution_request_for_manifest_candidate(
                 endpoints, manifest, manifest_index,
             )
+            body_fields = tuple(
+                str(item) for item in resolved_request.get("body_field_names") or ()
+            )
+            if body_fields and not self.policy.allow_state_changing_http:
+                continue
+            execution_url = str(resolved_request["url"])
             remaining_attempts = max(1, len(rows) - offset)
             remaining = {
                 name: max(0, int(limit) - int(consumed.get(name, 0)))
@@ -1359,10 +1376,18 @@ class DatabaseNeutralScanActionDispatcher:
             }
             if sub_budget.get("browser_actions", 0) < 2:
                 break
+            if body_fields and sub_budget.get("state_changing_requests", 0) < 1:
+                break
             adapter = XSSBrowserProofAdapter(XSSBrowserProofAdapter.prepare(
                 target=self.target, execution_url=execution_url,
                 candidate_id=candidate_id,
                 parameter_name=str(candidate.get("parameter_name") or ""),
+                method=str(resolved_request.get("method") or "GET"),
+                content_type=(
+                    str(resolved_request.get("content_type"))
+                    if resolved_request.get("content_type") else None
+                ),
+                body_field_names=body_fields,
             ))
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             result = await CapabilityExecutor().execute(
@@ -1387,13 +1412,17 @@ class DatabaseNeutralScanActionDispatcher:
             }, *attempt_observations)
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
-                "status": result.status, "budget_consumed": dict(result.actual_budget),
+                "status": result.status, "timed_out": bool(result.timed_out),
+                "budget_consumed": dict(result.actual_budget),
                 "observations": bundled, "errors": tuple(result.errors),
                 "proof_state": proof_state,
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
-            attempt_statuses.append(str(result.status))
+            attempt_statuses.append({
+                "status": str(result.status),
+                "timed_out": bool(result.timed_out),
+            })
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
@@ -1487,7 +1516,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
-        attempt_statuses: list[str] = []
+        attempt_statuses: list[Mapping[str, Any]] = []
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
@@ -1502,7 +1531,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
-                attempt_statuses.append(str(prior.get("status") or "success"))
+                attempt_statuses.append(prior)
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1510,6 +1539,7 @@ class DatabaseNeutralScanActionDispatcher:
             if self.cancelled():
                 break
             request_class = str(candidate.get("request_class") or "safe_read")
+            proof_candidate = dict(candidate)
             if request_mode:
                 request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
                 if request is None:
@@ -1533,6 +1563,13 @@ class DatabaseNeutralScanActionDispatcher:
                     )
                 ):
                     continue
+                if candidate.get("body_field_names"):
+                    path = str(candidate.get("canonical_path") or "").lower()
+                    proof_candidate["request_class"] = (
+                        "safe_authentication"
+                        if any(token in path for token in ("/login", "/auth", "/session"))
+                        else "confirmed_mutation"
+                    )
                 request = proof_request_for_candidate(
                     endpoints, manifest, manifest_index,
                     request_id=f"candidate:{candidate_id}",
@@ -1558,7 +1595,7 @@ class DatabaseNeutralScanActionDispatcher:
                 specification=specification,
                 target=self.target,
                 request=request,
-                candidate=candidate,
+                candidate=proof_candidate,
                 transport=PinnedAiohttpReplayTransport(),
                 requested_budget=sub_budget,
             )
@@ -1589,13 +1626,17 @@ class DatabaseNeutralScanActionDispatcher:
             }, *attempt_observations)
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
-                "status": result.status, "budget_consumed": dict(result.actual_budget),
+                "status": result.status, "timed_out": bool(result.timed_out),
+                "budget_consumed": dict(result.actual_budget),
                 "observations": bundled, "errors": tuple(result.errors),
                 "proof_state": proof_state,
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
-            attempt_statuses.append(str(result.status))
+            attempt_statuses.append({
+                "status": str(result.status),
+                "timed_out": bool(result.timed_out),
+            })
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
@@ -1862,7 +1903,7 @@ class DatabaseNeutralScanActionDispatcher:
         errors: list[str] = []
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
-        attempt_statuses: list[str] = []
+        attempt_statuses: list[Mapping[str, Any]] = []
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
@@ -1875,7 +1916,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
-                attempt_statuses.append(str(prior.get("status") or "success"))
+                attempt_statuses.append(prior)
                 observations.extend(prior.get("observations") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
@@ -1962,13 +2003,17 @@ class DatabaseNeutralScanActionDispatcher:
             }, *attempt_observations)
             attempt = {
                 "attempt_id": attempt_id, "candidate_id": candidate_id,
-                "status": result.status, "budget_consumed": dict(result.actual_budget),
+                "status": result.status, "timed_out": bool(result.timed_out),
+                "budget_consumed": dict(result.actual_budget),
                 "observations": bundled, "errors": tuple(result.errors),
                 "proof_state": proof_state,
             }
             if result.status != "cancelled":
                 await checkpoint_attempt(action.action_id, attempt)
-            attempt_statuses.append(str(result.status))
+            attempt_statuses.append({
+                "status": str(result.status),
+                "timed_out": bool(result.timed_out),
+            })
             attempted += 1
             observations.extend(bundled)
             errors.extend(str(item) for item in result.errors)
@@ -2042,7 +2087,7 @@ class DatabaseNeutralScanActionDispatcher:
         wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         errors: list[str] = []
         attempted = resumed = 0
-        attempt_statuses: list[str] = []
+        attempt_statuses: list[Mapping[str, Any]] = []
 
         def probe_of(result: Any) -> PrincipalProbe:
             content_type = next((
@@ -2088,7 +2133,7 @@ class DatabaseNeutralScanActionDispatcher:
             if prior is not None:
                 resumed += 1
                 attempted += 1
-                attempt_statuses.append(str(prior.get("status") or "success"))
+                attempt_statuses.append(prior)
                 comparisons.append(RouteComparison(
                     route_id=route_id, url=str(prior.get("url") or ""),
                     anonymous=tuple(
@@ -2140,7 +2185,7 @@ class DatabaseNeutralScanActionDispatcher:
             # This family's attempts are in-process cross-principal comparisons: there is
             # no external process to be cut off, so the checkpoint's own status is the
             # attempt outcome.
-            attempt_statuses.append(str(checkpoint.get("status") or "success"))
+            attempt_statuses.append(checkpoint)
             attempted += 1
 
         # A finding needs proof the app gates function access somewhere; without an
@@ -2406,8 +2451,13 @@ class DatabaseNeutralScanActionDispatcher:
                 if prior_status in {"timed_out", "partial"}:
                     attempt_timed_out = True
                 observations.extend(prior.get("observations") or ())
+                errors.extend(str(item) for item in prior.get("errors") or ())
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
+                if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
+                    terminal_failure = True
+                if bool(prior.get("timed_out")) or str(prior.get("status")) == "timed_out":
+                    attempt_timed_out = True
                 continue
             if self.cancelled():
                 break
@@ -2453,7 +2503,10 @@ class DatabaseNeutralScanActionDispatcher:
                 remaining_budget.get(name, 0) < amount
                 for name, amount in floor.items()
             ):
-                break
+                # Candidate cost classes can be mixed. An expensive body entry
+                # must not suppress a later fundable query entry in the same
+                # immutable slice.
+                continue
             sub_budget = {
                 name: max(1, floor.get(name, 1), amount // remaining_attempts)
                 for name, amount in remaining_budget.items() if amount > 0
@@ -2556,6 +2609,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
                 "status": result.status,
+                "timed_out": bool(result.timed_out),
                 "budget_consumed": dict(result.actual_budget),
                 "observations": attempt_observations,
                 "errors": tuple(result.errors),

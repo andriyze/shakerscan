@@ -16,6 +16,7 @@ BIN_DIR="${SHAKERSCAN_BIN_DIR:-$HOME/.local/bin}"
 START_AFTER_INSTALL="${SHAKERSCAN_START:-1}"
 REMOTE_ACCESS="${SHAKERSCAN_REMOTE:-0}"
 INSTALL_STAGE=""
+INSTALL_BACKUP=""
 
 say() {
     printf '%s\n' "$*"
@@ -128,6 +129,9 @@ cleanup_install_stage() {
     if [ -n "$INSTALL_STAGE" ] && [ -d "$INSTALL_STAGE" ]; then
         rm -rf -- "$INSTALL_STAGE"
     fi
+    if [ -n "$INSTALL_BACKUP" ] && [ -d "$INSTALL_BACKUP" ] && [ ! -d "$INSTALL_DIR" ]; then
+        mv -- "$INSTALL_BACKUP" "$INSTALL_DIR"
+    fi
 }
 
 prune_retired_files() {
@@ -145,7 +149,7 @@ prune_retired_files() {
             /*|*..*) continue ;;
         esac
         if ! grep -Fxq -- "$retired_relative" "$staged"; then
-            rm -f -- "$INSTALL_DIR/$retired_relative"
+            rm -f -- "$INSTALL_STAGE/$retired_relative"
         fi
     done < "$previous"
 }
@@ -157,29 +161,31 @@ commit_staged_downloads() {
     if [ -f "$INSTALL_DIR/$OWNED_MANIFEST_NAME" ]; then
         cp "$INSTALL_DIR/$OWNED_MANIFEST_NAME" "$previous_manifest"
     fi
-    # Move each staged file into place by rename. A recursive copy writes over a live file in
-    # chunks, so an interruption can leave a half-written executable that still looks installed --
-    # a claim an earlier version of this comment made and `cp -R` never supported. A rename cannot
-    # do that: every file is either the old one or the new one, never part of both. The tree can
-    # still be a mix of versions if the run is interrupted, which the manifest records; no
-    # individual file is ever corrupt.
-    while IFS= read -r staged_relative; do
-        [ -n "$staged_relative" ] || continue
-        case "$staged_relative" in
-            /*|*..*) continue ;;
-        esac
-        staged_source="$INSTALL_STAGE/$staged_relative"
-        [ -f "$staged_source" ] || continue
-        mkdir -p "$(dirname "$INSTALL_DIR/$staged_relative")"
-        mv -f -- "$staged_source" "$INSTALL_DIR/$staged_relative"
-    done < "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
-    # Prune before the manifest moves: prune_retired_files compares the previous manifest against
-    # the staged one, and moving it first leaves nothing to compare against.
+    # Retired installer-owned files are removed from the candidate tree. Operator-owned state was
+    # copied into that tree before downloads began and is never named by this manifest.
     prune_retired_files "$previous_manifest"
-    mv -f -- "$INSTALL_STAGE/$OWNED_MANIFEST_NAME" "$INSTALL_DIR/$OWNED_MANIFEST_NAME"
-    rm -f -- "$INSTALL_DIR/.previous-owned-files"
-    cleanup_install_stage
+    rm -f -- "$previous_manifest"
+
+    # Activate one complete tree. The previous installation remains available as a rollback tree
+    # until the candidate rename succeeds, so a failed activation never leaves a mixed release.
+    INSTALL_BACKUP="${INSTALL_DIR}.shakerscan-rollback.$$"
+    [ ! -e "$INSTALL_BACKUP" ] || fail "installer rollback path already exists"
+    if [ -d "$INSTALL_DIR" ]; then
+        mv -- "$INSTALL_DIR" "$INSTALL_BACKUP"
+    else
+        INSTALL_BACKUP=""
+    fi
+    if ! mv -- "$INSTALL_STAGE" "$INSTALL_DIR"; then
+        if [ -n "$INSTALL_BACKUP" ] && [ -d "$INSTALL_BACKUP" ]; then
+            mv -- "$INSTALL_BACKUP" "$INSTALL_DIR"
+        fi
+        fail "failed to activate the staged installation"
+    fi
     INSTALL_STAGE=""
+    if [ -n "$INSTALL_BACKUP" ] && [ -d "$INSTALL_BACKUP" ]; then
+        rm -rf -- "$INSTALL_BACKUP"
+    fi
+    INSTALL_BACKUP=""
 }
 
 add_path_to_profile() {
@@ -385,25 +391,28 @@ say "Command path:      $BIN_DIR/shakerscan"
 say "Source:            $REPO_RAW_BASE"
 say ""
 
-mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" "$INSTALL_DIR/scripts" "$INSTALL_DIR/api/scan" "$INSTALL_DIR/api/runtime"
-mkdir -p "$INSTALL_DIR/scanner/scanner_tools"
-mkdir -p "$INSTALL_DIR/runner/guest" "$INSTALL_DIR/runner/host"
-mkdir -p "$INSTALL_DIR/skills/ai-security-session/agents" "$INSTALL_DIR/skills/ai-security-session/references"
-mkdir -p "$INSTALL_DIR/skills/content-discovery/agents" "$INSTALL_DIR/skills/content-discovery/references"
-mkdir -p "$INSTALL_DIR/skills/device-hunt/agents" "$INSTALL_DIR/skills/device-hunt/references"
-mkdir -p "$INSTALL_DIR/skills/device-triage/agents"
-mkdir -p "$INSTALL_DIR/skills/hunt"
-mkdir -p "$INSTALL_DIR/skills/js-analyze/agents" "$INSTALL_DIR/skills/js-analyze/references"
-mkdir -p "$INSTALL_DIR/skills/review-skills/agents"
-mkdir -p "$INSTALL_DIR/skills/research-agent/agents"
-mkdir -p "$INSTALL_DIR/skills/shakerscan/agents" "$INSTALL_DIR/skills/shakerscan/references"
-mkdir -p "$INSTALL_DIR/.claude/agents" "$INSTALL_DIR/.claude/commands" "$INSTALL_DIR/.claude/hooks"
-touch "$INSTALL_DIR/.env"
-# Stage inside the installation directory, not $TMPDIR: a rename is atomic only within one
-# filesystem, and $TMPDIR is frequently a different one. Placing the stage here is what lets each
-# file be moved into place by rename rather than copied byte by byte over a live file.
-INSTALL_STAGE="$(mktemp -d "$INSTALL_DIR/.shakerscan-install.XXXXXX")"
+install_parent="$(dirname "$INSTALL_DIR")"
+install_name="$(basename "$INSTALL_DIR")"
+mkdir -p "$install_parent"
+# The candidate and live tree are siblings on one filesystem, which makes activation a rename.
+INSTALL_STAGE="$(mktemp -d "$install_parent/.${install_name}.install.XXXXXX")"
 trap cleanup_install_stage EXIT HUP INT TERM
+if [ -d "$INSTALL_DIR" ]; then
+    cp -a "$INSTALL_DIR/." "$INSTALL_STAGE/"
+fi
+mkdir -p "$INSTALL_STAGE/db" "$INSTALL_STAGE/results" "$INSTALL_STAGE/scripts" "$INSTALL_STAGE/api/scan" "$INSTALL_STAGE/api/runtime"
+mkdir -p "$INSTALL_STAGE/scanner/scanner_tools"
+mkdir -p "$INSTALL_STAGE/runner/guest" "$INSTALL_STAGE/runner/host"
+mkdir -p "$INSTALL_STAGE/skills/ai-security-session/agents" "$INSTALL_STAGE/skills/ai-security-session/references"
+mkdir -p "$INSTALL_STAGE/skills/content-discovery/agents" "$INSTALL_STAGE/skills/content-discovery/references"
+mkdir -p "$INSTALL_STAGE/skills/device-hunt/agents" "$INSTALL_STAGE/skills/device-hunt/references"
+mkdir -p "$INSTALL_STAGE/skills/device-triage/agents" "$INSTALL_STAGE/skills/hunt"
+mkdir -p "$INSTALL_STAGE/skills/js-analyze/agents" "$INSTALL_STAGE/skills/js-analyze/references"
+mkdir -p "$INSTALL_STAGE/skills/review-skills/agents" "$INSTALL_STAGE/skills/research-agent/agents"
+mkdir -p "$INSTALL_STAGE/skills/shakerscan/agents" "$INSTALL_STAGE/skills/shakerscan/references"
+mkdir -p "$INSTALL_STAGE/.claude/agents" "$INSTALL_STAGE/.claude/commands" "$INSTALL_STAGE/.claude/hooks"
+touch "$INSTALL_STAGE/.env"
+: > "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
 
 say "Downloading ShakerScan runtime files..."
 download "$REPO_RAW_BASE/scanner.sh" "$INSTALL_DIR/scanner.sh"
@@ -555,8 +564,8 @@ download "$REPO_RAW_BASE/.claude/commands/subdomains.md" "$INSTALL_DIR/.claude/c
 download "$REPO_RAW_BASE/.claude/commands/workers.md" "$INSTALL_DIR/.claude/commands/workers.md"
 download "$REPO_RAW_BASE/.claude/hooks/session-start.sh" "$INSTALL_DIR/.claude/hooks/session-start.sh"
 download "$REPO_RAW_BASE/.claude/settings.json" "$INSTALL_DIR/.claude/settings.json"
-if [ -d "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" ]; then
-    rmdir "$INSTALL_DIR/db/configure-model-intake-signer-role.sh" || \
+if [ -d "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" ]; then
+    rmdir "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" || \
         fail "cannot replace non-empty signer role script directory from an earlier broken install"
 fi
 commit_staged_downloads

@@ -1143,7 +1143,7 @@ def _evidence_instance_timeline_event(row: Any) -> dict[str, Any]:
         "object_id": r.get("object_id"),
         "retention_policy": r.get("retention_policy"),
         "blocked_by": [],
-        "next_action": f"/evidence/{evidence_object_id}" if evidence_object_id else None,
+        "next_action": f"/evidence?object_id={evidence_object_id}" if evidence_object_id else None,
         "operator_message": f"Evidence instance recorded ({proof_state})",
         "created_at": r.get("created_at"),
     }

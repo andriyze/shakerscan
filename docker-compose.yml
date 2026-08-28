@@ -651,6 +651,7 @@ services:
       network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+        - UI_SOURCE_REVISION=${GIT_COMMIT:-unknown}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_UI_PORT:-3000}:3000"
     environment:

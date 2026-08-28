@@ -24,11 +24,8 @@ quality_bar:
   require_browser_proven_xss: true   # Juice Shop's DOM XSS should be browser-proven
   require_reliable_grade: true       # coverage complete enough to trust the grade
   max_known_expectation_gaps: 0      # every declared gap is a debt against this bar
-  # Which checks decide the outcome under --enforce-quality. Grade reliability is a
-  # coverage-completeness property the engine can reach by funding its plan properly, so
-  # it is binding now. Recall, browser-proven XSS and clearing the declared-gap debt need
-  # detector work and stay advisory until they are achievable; the full bar above is still
-  # reported in full so the shortfall never disappears from view.
+  # Developer scorecards highlight this incremental subset. Release qualification passes
+  # --enforce-quality, which binds the complete bar above rather than this progress subset.
   enforced:
     - quality:grade_reliable
 

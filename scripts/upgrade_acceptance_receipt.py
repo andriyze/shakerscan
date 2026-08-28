@@ -15,14 +15,21 @@ def main() -> int:
     parser.add_argument("--baseline-version", required=True)
     parser.add_argument("--baseline-source-sha", required=True)
     parser.add_argument("--candidate-source-sha", required=True)
-    parser.add_argument("--baseline-image", required=True)
-    parser.add_argument("--candidate-image", required=True)
+    for plane in ("scanner", "api", "ui"):
+        parser.add_argument(f"--baseline-{plane}-image", required=True)
+        parser.add_argument(f"--candidate-{plane}-image", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     for value in (args.baseline_source_sha, args.candidate_source_sha):
         if not re.fullmatch(r"[0-9a-f]{40}", value):
             parser.error("source identities must be full lowercase commit SHAs")
-    for value in (args.baseline_image, args.candidate_image):
+    baseline_images = {
+        plane: getattr(args, f"baseline_{plane}_image") for plane in ("scanner", "api", "ui")
+    }
+    candidate_images = {
+        plane: getattr(args, f"candidate_{plane}_image") for plane in ("scanner", "api", "ui")
+    }
+    for value in (*baseline_images.values(), *candidate_images.values()):
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
             parser.error("image identities must be exact sha256 digests")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?", args.baseline_version):
@@ -40,6 +47,7 @@ def main() -> int:
         "database_restart_preserved_state": "pass",
         "backup_restore_rollback_boundary": "pass",
         "previous_stable_api_ui_worker_boot_after_restore": "pass",
+        "redis_queue_and_lease_survive_upgrade_and_rollback": "pass",
     }
     receipt = {
         "schema_version": "stateful-upgrade-acceptance/v2",
@@ -47,11 +55,11 @@ def main() -> int:
         "baseline": {
             "version": args.baseline_version,
             "source_sha": args.baseline_source_sha,
-            "image_digest": args.baseline_image,
+            "images": baseline_images,
         },
         "candidate": {
             "source_sha": args.candidate_source_sha,
-            "image_digest": args.candidate_image,
+            "images": candidate_images,
         },
         "rollback_boundary": "pre-upgrade pg_dump restore plus previous-stable runtime boot",
         "checks": checks,

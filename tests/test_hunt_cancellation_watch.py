@@ -90,13 +90,13 @@ def test_refresh_is_rate_limited_between_heartbeats():
     assert pool.reads == 2
 
 
-def test_a_database_error_is_not_treated_as_a_cancellation():
-    # Fail-open is correct here and only here: a transient read failure is not evidence that an
-    # operator cancelled, and aborting authorized work on it would turn a blip into an outage.
+def test_a_database_error_stops_target_traffic_until_authority_can_be_reestablished():
+    # Continuing on stale authority is unsafe: a database outage can hide a cancellation or
+    # revocation, so the in-flight adapter must fail closed before its next request.
     pool = _Pool([], fail=True)
     watch = HuntCancellationWatch(lambda: pool, "hunt-1")
-    assert asyncio.run(watch.refresh(force=True)) is False
-    assert watch.cancelled() is False
+    assert asyncio.run(watch.refresh(force=True)) is True
+    assert watch.cancelled() is True
 
 
 def test_heartbeat_refreshes_the_state_and_runs_the_inner_beat():

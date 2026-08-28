@@ -126,7 +126,7 @@ def test_every_queue_site_records_its_job():
         # able to reach it.
         if "job_id = str(uuid.uuid4())" not in body:
             continue
-        if "record_cancellable_job(" not in body:
+        if "record_cancellable_job_durable(" not in body:
             missing.append(node.name)
     assert not missing, (
         "these queue work to a worker but never register it for Hunt cancellation: "

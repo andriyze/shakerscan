@@ -52,6 +52,12 @@ api_health="$(curl -fsS "http://127.0.0.1:$API_PORT/health")"
 ui_identity="$(curl -fsS "http://127.0.0.1:$UI_PORT/api/build-identity")"
 check_equal "API version" "$(jq -r '.scanner_version' <<<"$api_health")" "$VERSION"
 check_equal "UI version" "$(jq -r '.ui_version' <<<"$ui_identity")" "$VERSION"
+source_revision="$(jq -r '.source_revision' <<<"$api_health")"
+[[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "public smoke: API did not report an exact source revision" >&2
+    exit 1
+}
+check_equal "UI source revision" "$(jq -r '.source_revision' <<<"$ui_identity")" "$source_revision"
 check_equal "worker identity" "$(jq -r '.worker_build.fleet_uniform' <<<"$api_health")" "true"
 
 session="$(curl -fsS "http://127.0.0.1:$UI_PORT/api/model-intake/operator-credential")"
@@ -72,9 +78,16 @@ case "$(jq -r '.command' <<<"$plan")" in
     *) echo "public smoke: Firecracker command does not enter the curl runtime" >&2; exit 1 ;;
 esac
 
-jq -n --arg version "$VERSION" --arg tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+jq -n --arg version "$VERSION" --arg source_sha "$source_revision" \
+  --arg scanner "$(sed -n 's/^SCANNER_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
+  --arg api "$(sed -n 's/^API_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
+  --arg ui "$(sed -n 's/^UI_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
+  --arg signer "$(sed -n 's/^SIGNER_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
+  --arg tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
   schema_version: "shakerscan-public-smoke/v1",
   version: $version,
+  source_sha: $source_sha,
+  images: {scanner:$scanner, api:$api, ui:$ui, signer:$signer},
   tested_at: $tested_at,
   checks: {
     clean_install: "pass",

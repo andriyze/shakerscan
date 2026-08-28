@@ -1236,9 +1236,12 @@ def finalize_scan_report(
             # The family planned no escalation at all.
             proof["status"] = "not_planned"
             proof["reason"] = None
-        elif all(status in {"success", "partial"} for status in proof_statuses):
+        elif all(status == "success" for status in proof_statuses):
             proof["status"] = "complete"
             proof["reason"] = None
+        elif any(status == "partial" for status in proof_statuses):
+            proof["status"] = "partial"
+            proof["reason"] = (sorted(set(proof_reasons)) or ["proof_incomplete"])[0]
         elif all(
             status == "skipped" and reason == "not_applicable"
             for status, reason in zip(proof_statuses, proof_reasons or proof_statuses)
@@ -1273,9 +1276,7 @@ def finalize_scan_report(
             max(0, int(total) - int(scheduled_entries.get(capability, 0)))
             for capability, total in manifest_entries.items()
         )
-        action_incomplete = any(
-            status not in {"success", "partial"} for status in statuses
-        )
+        action_incomplete = any(status != "success" for status in statuses)
         zero_attempts = (
             row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
         )
@@ -1446,28 +1447,40 @@ def finalize_scan_report(
             int(raw_slice.get("count") or 0)
             if isinstance(raw_slice, Mapping) else 0
         )
-        attempts = {
-            str(item.get("attempt_id") or "")
+        attempt_rows = {
+            str(item.get("attempt_id") or ""): str(item.get("status") or "").lower()
             for item in observations.get(action.action_id, ())
             if isinstance(item, Mapping)
             and item.get("kind") == "candidate_attempt"
             and str(item.get("attempt_id") or "")
         }
+        completed = {
+            attempt_id for attempt_id, status in attempt_rows.items()
+            if status in {"success", "succeeded", "completed"}
+        }
+        failed_attempts = {
+            attempt_id for attempt_id, status in attempt_rows.items()
+            if status not in {"success", "succeeded", "completed"}
+        }
         row = candidate_coverage.setdefault(family, {
             "planned_candidates": 0,
             "attempted_candidates": 0,
+            "completed_candidates": 0,
+            "incomplete_candidates": 0,
             "unattempted_candidates": 0,
             "batch_actions": 0,
             "status": "complete",
         })
         row["planned_candidates"] += planned
-        row["attempted_candidates"] += len(attempts)
+        row["attempted_candidates"] += len(attempt_rows)
+        row["completed_candidates"] += len(completed)
+        row["incomplete_candidates"] += len(failed_attempts)
         row["batch_actions"] += 1
     for row in candidate_coverage.values():
         row["unattempted_candidates"] = max(
             0, row["planned_candidates"] - row["attempted_candidates"],
         )
-        if row["unattempted_candidates"]:
+        if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
     if zero_attempt_actions and coverage_status == "complete":
         coverage_status = "partial"

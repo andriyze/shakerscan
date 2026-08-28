@@ -332,6 +332,8 @@ class HuntRunService:
         running would let the next action spend budget that is already committed.
         """
         run_uuid = _uuid_or_400(hunt_id, "hunt id")
+        cancelled_ids: list[str] = []
+        durable_job_ids: list[str] = []
         async with self._pool().acquire() as connection:
             row = await connection.fetchrow(
                 """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled',
@@ -342,9 +344,11 @@ class HuntRunService:
             )
             if not row:
                 row = await hunt_run_or_404(connection, run_uuid)
-                return public_hunt_run(row)
-            cancelled = await connection.fetch(
-                """UPDATE scans
+                if row["status"] != "cancelled":
+                    return public_hunt_run(row)
+            else:
+                cancelled = await connection.fetch(
+                    """UPDATE scans
                    SET status = CASE
                            WHEN run_kind IN ('device_posture','device_probe') AND status='running'
                            THEN 'cancelling' ELSE 'cancelled' END,
@@ -361,19 +365,28 @@ class HuntRunService:
                    WHERE options->'hunt_dispatch'->>'hunt_id' = $1::text
                      AND status IN ('pending','queued','running')
                    RETURNING id""",
-                str(run_uuid),
-            )
-            cancelled_ids = [str(item["id"]) for item in cancelled]
-            if cancelled_ids:
-                # Shards of a cancelled parent must not be left to finish on their own.
-                await connection.execute(
-                    """UPDATE scans
+                    str(run_uuid),
+                )
+                cancelled_ids = [str(item["id"]) for item in cancelled]
+                if cancelled_ids:
+                    # Shards of a cancelled parent must not be left to finish on their own.
+                    await connection.execute(
+                        """UPDATE scans
                        SET status='cancelled', error_message='Cancelled by parent scan',
                            completed_at=NOW(), progress=100, current_phase='cancelled'
                        WHERE parent_scan_id = ANY($1::uuid[])
                          AND status IN ('pending','queued','running')""",
-                    [uuid.UUID(item) for item in cancelled_ids],
-                )
+                        [uuid.UUID(item) for item in cancelled_ids],
+                    )
+            durable_jobs = await connection.fetch(
+                """UPDATE hunt_cancellable_jobs
+                   SET cancel_requested_at=COALESCE(cancel_requested_at, NOW()),
+                       updated_at=NOW()
+                   WHERE hunt_id=$1 AND signal_state != 'terminal'
+                   RETURNING job_id""",
+                run_uuid,
+            )
+            durable_job_ids = sorted(str(item["job_id"]) for item in durable_jobs)
         # A worker-placed capability polls `agent_tool_cancel:{job_id}` for a job id minted at
         # queue time, so cancelling the Hunt and its scans still left that traffic running. Signal
         # every job this Hunt queued. Idempotent: an already-set flag is harmless and a finished
@@ -381,7 +394,9 @@ class HuntRunService:
         signalled: list[str] = []
         if self._redis_provider is not None:
             try:
-                signalled = signal_cancelled_jobs(self._redis_provider(), run_uuid)
+                signalled = signal_cancelled_jobs(
+                    self._redis_provider(), run_uuid, job_ids=durable_job_ids,
+                )
             except (AttributeError, NameError, TypeError):
                 # A programming error must never look like an unreachable Redis. The
                 # blanket handler that used to sit here swallowed a missing import, so
@@ -391,9 +406,22 @@ class HuntRunService:
                 raise
             except Exception:  # noqa: BLE001 - Redis is unreachable; the Hunt is cancelled either way
                 signalled = []
+        durable_signalled = sorted(set(signalled).intersection(durable_job_ids))
+        if durable_signalled:
+            async with self._pool().acquire() as connection:
+                await connection.execute(
+                    """UPDATE hunt_cancellable_jobs
+                       SET signal_state='signalled', signalled_at=NOW(), updated_at=NOW()
+                       WHERE hunt_id=$1 AND job_id = ANY($2::uuid[])""",
+                    run_uuid,
+                    [uuid.UUID(item) for item in durable_signalled],
+                )
+        pending_job_ids = sorted(set(durable_job_ids).difference(signalled))
         payload = public_hunt_run(row)
         payload["cancelled_scan_ids"] = cancelled_ids
         payload["cancelled_job_ids"] = signalled
+        payload["pending_cancel_job_ids"] = pending_job_ids
+        payload["cancellation_degraded"] = bool(pending_job_ids)
         return payload
 
     async def resume(self, hunt_id: str) -> dict[str, Any]:

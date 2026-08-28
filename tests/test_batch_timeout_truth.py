@@ -97,7 +97,13 @@ def test_the_shared_helper_is_the_single_rule():
     sys.path.insert(0, str(ROOT / "api"))
     from scan.action_adapter import batch_outcome
 
-    assert batch_outcome(["partial", "partial"], 0) == ("partial", True, True)
+    assert batch_outcome([
+        {"status": "partial", "timed_out": True},
+        {"status": "partial", "timed_out": True},
+    ], 0) == ("partial", True, True)
+    assert batch_outcome([
+        {"status": "partial", "timed_out": False},
+    ], 0) == ("partial", True, False)
     assert batch_outcome(["failed", "success"], 0) == ("partial", True, False)
     assert batch_outcome(["success", "success"], 0) == ("success", False, False)
     assert batch_outcome(["success"], 2) == ("partial", True, False)

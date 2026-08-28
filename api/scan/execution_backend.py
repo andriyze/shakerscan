@@ -1106,7 +1106,7 @@ class PostgresScanExecutionBackend:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT attempt_id, candidate_id, status, budget_consumed,
-                          observations_json, errors_json, proof_state
+                          observations_json, errors_json, timed_out, proof_state
                      FROM scan_action_attempt_checkpoints
                     WHERE scan_id=$1 AND action_id=$2 AND action_digest=$3
                     ORDER BY created_at, attempt_id""",
@@ -1125,6 +1125,7 @@ class PostgresScanExecutionBackend:
             "errors": tuple(str(item) for item in _json_array(
                 row["errors_json"], name="batch attempt errors",
             )),
+            "timed_out": bool(row.get("timed_out")),
             "proof_state": str(row.get("proof_state") or "") or None,
         } for row in rows)
 
@@ -1164,8 +1165,8 @@ class PostgresScanExecutionBackend:
                 """INSERT INTO scan_action_attempt_checkpoints (
                        scan_id, action_id, action_digest, attempt_id, candidate_id,
                        status, budget_consumed, observations_json, errors_json,
-                       proof_state
-                   ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10)
+                       timed_out, proof_state
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
                    ON CONFLICT (scan_id, action_id, attempt_id) DO UPDATE
                       SET updated_at=now()
                     WHERE scan_action_attempt_checkpoints.action_digest=EXCLUDED.action_digest
@@ -1177,6 +1178,7 @@ class PostgresScanExecutionBackend:
                 json.dumps(budget, sort_keys=True),
                 json.dumps(observations, sort_keys=True),
                 json.dumps(errors),
+                bool(attempt.get("timed_out")),
                 str(attempt.get("proof_state") or "") or None,
             )
         if row is None:

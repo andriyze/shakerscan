@@ -95,21 +95,14 @@ def test_the_helper_builds_a_well_formed_body_for_each_content_type():
         adapter.execution_request_for_manifest_candidate = original
 
 
-def test_mutation_metering_is_a_recorded_gap_not_a_silent_one():
-    """`max_state_changing_requests` does not yet decrement for body attempts.
-
-    Charging it is correct in principle and was tried: the budget is reserved per batch
-    action, a thorough plan admits several required SQLi batches, and one attempt costs
-    480 against a 500 ceiling -- so the second batch became unadmittable and every
-    thorough scan failed at admission, taking recall from 4/9 to 0/9. The gap is recorded
-    here so it cannot be mistaken for an oversight or quietly reintroduced the same way.
-    """
+def test_body_attempts_are_mutation_metered_with_affordable_profile_holds():
     from scan.external_process import BATCH_ATTEMPT_BODY_FLOORS
+    from scan.action_plan import _BATCH_PROFILES
+    from scan.contracts import BUDGET_PROFILES
 
     for capability, floor in BATCH_ATTEMPT_BODY_FLOORS.items():
-        assert "state_changing_requests" not in floor, (
-            f"{capability} declares mutation cost per batch again -- confirm a required "
-            "second batch still admits before keeping this"
-        )
-    source = (ROOT / "api" / "scan" / "external_process.py").read_text(encoding="utf-8")
-    assert "deliberately ABSENT" in source, "the gap must stay documented where it lives"
+        assert floor["state_changing_requests"] == floor["http_requests"]
+    thorough = _BATCH_PROFILES["thorough"]["sqli.verify_batch"][1]
+    ceiling = BUDGET_PROFILES["thorough"].max_state_changing_requests
+    assert thorough["state_changing_requests"] == 480
+    assert 2 * thorough["state_changing_requests"] <= ceiling

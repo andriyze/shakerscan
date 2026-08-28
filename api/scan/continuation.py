@@ -61,6 +61,16 @@ class ScanContinuationError(ValueError):
     """A continuation differs from its frozen parent or budget authority."""
 
 
+def policy_constrained_hold_budget(
+    registry: Any, capability_name: str, *, allow_state_changing_http: bool,
+) -> dict[str, int]:
+    """Constrain a registry-level continuation hold to frozen Scan policy."""
+    hold = dict(registry.require(capability_name).budget_cost)
+    if not allow_state_changing_http:
+        hold.pop("state_changing_requests", None)
+    return hold
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,

@@ -219,7 +219,7 @@ async def _finding_exception_lifecycle_sweep(
                 risk_tier="active",
                 approval_receipt_id=req.approval_receipt_id,
                 operator_message=f"Expired {len(expired_ids)} elapsed finding exception(s)",
-                next_action="/exceptions?queue_filter=expired",
+                next_action="/findings",
                 result_json={
                     "target_id": str(target_uuid) if target_uuid else None,
                     "candidate_count": len(candidate_ids),

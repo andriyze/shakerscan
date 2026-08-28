@@ -51,7 +51,11 @@ def _run(request, candidate, transport):
         request=request,
         candidate=candidate,
         transport=transport,
-        requested_budget={"http_requests": 20, "tool_wall_seconds": 20},
+        requested_budget={
+            "http_requests": 20,
+            "state_changing_requests": 20 if request.method == "POST" else 0,
+            "tool_wall_seconds": 20,
+        },
     )
     return asyncio.run(adapter.execute(
         heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,

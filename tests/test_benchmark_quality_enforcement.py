@@ -50,13 +50,12 @@ def test_the_artifact_separates_the_verdicts():
         assert f'"{field}"' in SOURCE, f"the scorecard does not record {field}"
 
 
-def test_only_the_named_subset_is_binding():
-    """The full bar stays reported; `enforced` names what decides the outcome."""
+def test_named_subset_is_progress_only_and_release_binds_the_full_bar():
+    """Developer progress stays visible, but release qualification binds the full bar."""
     assert "quality_enforced_passed" in SOURCE
     assert "quality_enforced_gates" in SOURCE
-    # The exit decision must read the enforced subset, never the whole bar.
-    decision = SOURCE[SOURCE.index("quality_ok = all("):]
-    assert "quality_enforced_passed" in decision[:300]
+    decision = SOURCE[SOURCE.index("full_bar_ok = all("):]
+    assert "release_ok = bool(overall_ok and (full_bar_ok" in decision[:600]
 
 
 def test_an_unknown_enforced_name_is_rejected():
@@ -64,7 +63,7 @@ def test_an_unknown_enforced_name_is_rejected():
     assert "names checks that do not exist" in SOURCE
 
 
-def test_the_juice_shop_bar_enforces_grade_reliability_only():
+def test_the_juice_shop_progress_subset_highlights_grade_reliability():
     import yaml
     bar = yaml.safe_load(
         (ROOT / "tests/fixtures/benchmarks/juice_shop.yaml").read_text()

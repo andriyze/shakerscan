@@ -172,6 +172,12 @@ class SQLiProofAdapter:
             raise SQLiProofError("SQLi proof capability is invalid")
         if int(requested_budget.get("http_requests") or 0) < 4:
             raise SQLiProofError("SQLi proof requires at least four HTTP requests")
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and int(
+            requested_budget.get("state_changing_requests") or 0
+        ) < int(requested_budget.get("http_requests") or 0):
+            raise SQLiProofError(
+                "body SQLi proof requires a conservative mutation reservation"
+            )
         if str(candidate.get("method") or "").upper() != request.method:
             raise SQLiProofError("SQLi proof request method differs from candidate")
         request_ref = str(candidate.get("request_ref_id") or "")
@@ -287,7 +293,12 @@ class SQLiProofAdapter:
             status = "cancelled" if str(exc) == "cancelled" else "blocked"
             return CapabilityAdapterResult(
                 status=status, errors=(str(exc),), execution_started=bool(attempted),
-                actual_budget={"http_requests": attempted, "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started))},
+                actual_budget={
+                    "http_requests": attempted,
+                    **({"state_changing_requests": attempted}
+                       if self.request.method not in {"GET", "HEAD", "OPTIONS"} else {}),
+                    "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
+                },
                 partial=bool(attempted), parser_version=SQLI_PROOF_PARSER_VERSION,
             )
 
@@ -323,7 +334,12 @@ class SQLiProofAdapter:
         errors = tuple(item.error_code for item in results if item.error_code)
         return CapabilityAdapterResult(
             status="partial" if errors else "success", observations=(observation,), errors=errors,
-            actual_budget={"http_requests": attempted, "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started))},
+            actual_budget={
+                "http_requests": attempted,
+                **({"state_changing_requests": attempted}
+                   if self.request.method not in {"GET", "HEAD", "OPTIONS"} else {}),
+                "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
+            },
             partial=bool(errors), timed_out=any(item.timed_out for item in results),
             execution_started=True, parser_version=SQLI_PROOF_PARSER_VERSION,
             redacted_execution={

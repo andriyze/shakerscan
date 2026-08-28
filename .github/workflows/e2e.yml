@@ -27,7 +27,6 @@ jobs:
       # route active scans through the runner host gateway.
       SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
       SHAKERSCAN_E2E_SCAN_TARGET: http://juice-shop:3000
-      SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
       MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
@@ -102,7 +101,8 @@ jobs:
       # debt) is still reported in full and still fails visibly without failing the run.
       - name: Measure DAST recall against the Juice Shop answer key
         run: |
-          python3 scripts/benchmark_targets.py juice_shop --auth --enforce-quality
+          python3 scripts/benchmark_targets.py juice_shop --auth --enforce-quality \
+            --target-url juice_shop=http://juice-shop:3000
           cp results/benchmark-runs/benchmark-juice_shop.json artifacts/dast-recall.json
 
       - name: Run exact-candidate UI unit and browser acceptance

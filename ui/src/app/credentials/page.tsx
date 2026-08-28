@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   getDevices,
@@ -177,6 +177,7 @@ function statusClass(profile: CredentialProfile): string {
 
 export default function CredentialsPage() {
   const toast = useToast()
+  const appliedDeepLink = useRef(false)
   const [targets, setTargets] = useState<Target[]>([])
   const [devices, setDevices] = useState<DeviceTarget[]>([])
   const [targetKind, setTargetKind] = useState<CredentialTargetKind>('web')
@@ -217,6 +218,23 @@ export default function CredentialsPage() {
   useEffect(() => {
     if (targetId && !choices.some((item) => item.id === targetId)) setTargetId('')
   }, [choices, targetId])
+
+  useEffect(() => {
+    if (loading || appliedDeepLink.current) return
+    appliedDeepLink.current = true
+    const params = new URLSearchParams(window.location.search)
+    const requestedId = params.get('target_id')?.trim()
+    const requestedUrl = params.get('target')?.trim()
+    const web = targets.find((item) => item.id === requestedId || (requestedUrl && item.url === requestedUrl))
+    const device = devices.find((item) => item.id === requestedId)
+    if (web) {
+      setTargetKind('web')
+      setTargetId(web.id)
+    } else if (device) {
+      setTargetKind('device')
+      setTargetId(device.id)
+    }
+  }, [devices, loading, targets])
 
   const loadProfiles = useCallback(async () => {
     if (!targetId) {

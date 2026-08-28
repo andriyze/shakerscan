@@ -18,6 +18,9 @@ on:
       parity_run_id:
         description: "Successful real-fleet Scan parity workflow run ID for this exact SHA"
         required: true
+      fault_acceptance_run_id:
+        description: "Successful V2 candidate fault/rollback acceptance run ID for this exact SHA"
+        required: true
       model_intake_physical_run_id:
         description: "Successful real Hugging Face/KVM acceptance run ID for this exact SHA"
         required: true
@@ -147,6 +150,7 @@ jobs:
           E2E_RUN_ID: ${{ inputs.e2e_run_id }}
           CODEQL_RUN_ID: ${{ inputs.codeql_run_id }}
           PARITY_RUN_ID: ${{ inputs.parity_run_id }}
+          FAULT_ACCEPTANCE_RUN_ID: ${{ inputs.fault_acceptance_run_id }}
           MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
           DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
         shell: bash
@@ -160,6 +164,7 @@ jobs:
           verify_run "$E2E_RUN_ID" "E2E (full release gate)"
           verify_run "$CODEQL_RUN_ID" "CodeQL"
           verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
+          verify_run "$FAULT_ACCEPTANCE_RUN_ID" "V2 candidate acceptance (non-publishing)"
           verify_run "$MODEL_INTAKE_PHYSICAL_RUN_ID" "Model Intake physical acceptance"
           verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"
 
@@ -308,6 +313,7 @@ jobs:
         run: |
           docker build \
             --build-arg NEXT_PUBLIC_APP_VERSION="$VERSION" \
+            --build-arg UI_SOURCE_REVISION="${{ needs.meta.outputs.candidate_sha }}" \
             -f ui/Dockerfile -t shakerscan-ui:release-candidate ui
 
       # Every candidate image is named explicitly. The smoke used to receive only
@@ -475,6 +481,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             NEXT_PUBLIC_APP_VERSION=${{ needs.meta.outputs.version }}
+            UI_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}
           labels: |
             org.opencontainers.image.title=ShakerScan UI
             org.opencontainers.image.description=Open-source ShakerScan web dashboard
@@ -794,6 +801,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: read
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -812,6 +820,29 @@ jobs:
         with:
           name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification
+
+      - name: Download candidate-bound external acceptance receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+          E2E_RUN_ID: ${{ inputs.e2e_run_id }}
+          PARITY_RUN_ID: ${{ inputs.parity_run_id }}
+          FAULT_ACCEPTANCE_RUN_ID: ${{ inputs.fault_acceptance_run_id }}
+          MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
+          DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/certification/external/{e2e,parity,fault,model-intake,device}
+          gh run download "$E2E_RUN_ID" -n "full-e2e-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/e2e
+          gh run download "$PARITY_RUN_ID" -n "v2-scan-parity-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/parity
+          gh run download "$FAULT_ACCEPTANCE_RUN_ID" -n "v2-candidate-acceptance-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/fault
+          gh run download "$MODEL_INTAKE_PHYSICAL_RUN_ID" -n "model-intake-physical-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/model-intake
+          gh run download "$DEVICE_PHYSICAL_RUN_ID" -n "device-physical-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/device
 
       - name: Pull and identify exact final manifests
         env:
@@ -866,6 +897,8 @@ jobs:
             CANDIDATE_API_IMAGE="${API_IMAGE}@${api_digest}" \
             CANDIDATE_UI_IMAGE="${UI_IMAGE}@${ui_digest}" \
             CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
+            CANDIDATE_API_IMAGE_DIGEST="$api_digest" \
+            CANDIDATE_UI_IMAGE_DIGEST="$ui_digest" \
             UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt.json" \
             scripts/upgrade_smoke.sh
 
@@ -913,6 +946,11 @@ jobs:
             --upgrade artifacts/certification/upgrade-receipt.json \
             --preservation artifacts/certification/preservation-receipt.json \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
+            --dast-quality artifacts/certification/external/e2e/dast-recall.json \
+            --fault-acceptance artifacts/certification/external/fault/v2-candidate-acceptance.json \
+            --real-fleet-parity artifacts/certification/external/parity/v2-scan-parity.json \
+            --model-intake-physical artifacts/certification/external/model-intake/model-intake-physical-acceptance.json \
+            --device-physical artifacts/certification/external/device/device-physical-acceptance.json \
             --source-sha "$CANDIDATE_SHA" \
             --output release-candidate-receipt.json
           test "$(jq -r '.schema_version' release-candidate-receipt.json)" = shakerscan-release-candidate/v2

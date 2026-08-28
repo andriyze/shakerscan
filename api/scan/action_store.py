@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS scan_action_attempt_checkpoints (
     errors_json JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
         jsonb_typeof(errors_json) = 'array'
     ),
+    timed_out BOOLEAN NOT NULL DEFAULT FALSE,
     proof_state TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -117,6 +118,8 @@ CREATE TABLE IF NOT EXISTS scan_action_attempt_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_scan_action_attempt_checkpoints_action
     ON scan_action_attempt_checkpoints(scan_id, action_id, created_at);
+ALTER TABLE scan_action_attempt_checkpoints
+    ADD COLUMN IF NOT EXISTS timed_out BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS result_json JSONB;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS receipt_json JSONB;
 ALTER TABLE scan_capability_actions ADD COLUMN IF NOT EXISTS backend_name TEXT;

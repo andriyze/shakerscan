@@ -1021,9 +1021,11 @@ def artifact_metadata(passed: bool) -> dict:
     }
 
 
-def submit_target(name, api, do_auth):
+def submit_target(name, api, do_auth, *, target_url_override=None):
     """Submit one benchmark scan and return a content-free queue receipt."""
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
+    if target_url_override:
+        fx["target_url"] = target_url_override
     opts = dict(fx.get("scan_options") or {})
     budget_profile = str(opts.pop("budget_profile", "thorough"))
     unsupported_options = sorted(set(opts).difference(PUBLIC_SCAN_OPTION_FIELDS))
@@ -1140,14 +1142,19 @@ def submit_target(name, api, do_auth):
     }
 
 
-def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False, retest_wait=600):
+def run_target(
+    name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False,
+    retest_wait=600, *, target_url_override=None,
+):
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
+    if target_url_override:
+        fx["target_url"] = target_url_override
     report = None
     scan_id = preset_scan_id
     two_user = False
     principal_validation = None
     if not scan_id:
-        receipt = submit_target(name, api, do_auth)
+        receipt = submit_target(name, api, do_auth, target_url_override=target_url_override)
         scan_id = receipt["scan_id"]
         two_user = receipt["two_user"]
         principal_validation = receipt.get("principal_validation")
@@ -1237,6 +1244,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("targets", nargs="+")
     ap.add_argument("--api", default="http://localhost:8080")
+    ap.add_argument(
+        "--target-url", action="append", default=[], metavar="NAME=URL",
+        help="override a fixture target with the exact network URL used by this stack",
+    )
     ap.add_argument("--timeout", type=int, default=2400)
     ap.add_argument("--auth", action="store_true", help="mint bearer tokens from fixture auth config")
     ap.add_argument("--scan-id", default=None, help="score an existing scan id instead of submitting")
@@ -1257,6 +1268,14 @@ def main():
     ap.add_argument("--hypothesis-created-by", default="benchmark_targets.py",
                     help="created_by value for benchmark hypothesis seeding")
     args = ap.parse_args()
+    target_url_overrides = {}
+    for binding in args.target_url:
+        name, separator, url = binding.partition("=")
+        parsed = urllib.parse.urlsplit(url)
+        if not separator or not name or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            print(f"ABORT: invalid --target-url binding: {binding!r}", file=sys.stderr)
+            return 2
+        target_url_overrides[name] = url
     try:
         hypothesis_target_ids = parse_target_id_overrides(args.hypothesis_target_id)
     except ValueError as e:
@@ -1298,7 +1317,10 @@ def main():
             print("ABORT: --submit-only requires exactly one benchmark target", file=sys.stderr)
             return 2
         try:
-            receipt = submit_target(args.targets[0], args.api, args.auth)
+            receipt = submit_target(
+                args.targets[0], args.api, args.auth,
+                target_url_override=target_url_overrides.get(args.targets[0]),
+            )
         except Exception as e:
             print(f"ABORT: {e}", file=sys.stderr)
             return 2
@@ -1310,8 +1332,11 @@ def main():
     cards = []
     for name in args.targets:
         try:
-            card = run_target(name, args.api, args.timeout, args.auth, args.scan_id,
-                              rescore_after_retest=args.rescore_after_retest, retest_wait=args.retest_wait)
+            card = run_target(
+                name, args.api, args.timeout, args.auth, args.scan_id,
+                rescore_after_retest=args.rescore_after_retest, retest_wait=args.retest_wait,
+                target_url_override=target_url_overrides.get(name),
+            )
         except Exception as e:
             card = {"target": name, "error": str(e), "passed": False}
         if args.seed_hypotheses:
@@ -1375,14 +1400,14 @@ def main():
     # gates only hold the line where the engine already is. Reporting them separately is
     # honest, but it also made the bar unenforceable: nothing could ever fail on it.
     # `--enforce-quality` makes it decide the exit status, so a release can require it.
-    quality_ok = all(
-        card.get("quality_enforced_passed", True)
-        for card in cards if card.get("quality_gates")
-    )
     full_bar_ok = all(
         card.get("quality_passed", True) for card in cards if card.get("quality_gates")
     )
-    release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
+    # A release gate cannot call the declared bar advisory.  The named subset remains useful in
+    # developer scorecards as an incremental progress signal, but --enforce-quality means the
+    # complete standard, including recall and proof quality, decides publication.
+    quality_ok = full_bar_ok
+    release_ok = bool(overall_ok and (full_bar_ok or not args.enforce_quality))
     run = {
         **artifact_metadata(release_ok),
         "fleet": fleet, "fleet_uniform": uniform,
@@ -1396,7 +1421,7 @@ def main():
         "quality_bar_enforced": bool(args.enforce_quality),
     }
     if not full_bar_ok:
-        binding = "; enforced subset FAILED" if not quality_ok else "; enforced subset met"
+        binding = "; full bar FAILED" if args.enforce_quality else ""
         print(
             "\nquality bar NOT MET" + binding
             + ("" if args.enforce_quality else " (advisory: pass --enforce-quality to fail on the enforced subset)")

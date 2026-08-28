@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 import hashlib
 import ipaddress
 import math
@@ -132,6 +133,9 @@ class PreparedXSSBrowserProof:
     payload_sha256: str
     candidate_id: str
     parameter_name: str
+    method: str
+    body: bytes
+    content_type: str | None
     input_digest: str
     estimated_budget: Mapping[str, int]
     redacted_execution: Mapping[str, Any]
@@ -158,6 +162,8 @@ class XSSBrowserProofAdapter:
     def prepare(
         cls, *, target: TargetBinding, execution_url: str,
         candidate_id: str, parameter_name: str,
+        method: str = "GET", content_type: str | None = None,
+        body_field_names: tuple[str, ...] = (),
     ) -> PreparedXSSBrowserProof:
         origin = _origin(execution_url)
         if origin not in target.allowed_origins or _origin_key(origin)[1] != target.canonical_host:
@@ -165,21 +171,62 @@ class XSSBrowserProofAdapter:
         if not target.allowed_addresses:
             raise BrowserCapabilityInputError("XSS proof target has no frozen address")
         parsed = urllib.parse.urlsplit(execution_url)
-        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=50)
-        matches = [index for index, (name, _value) in enumerate(pairs) if name == parameter_name]
-        if len(matches) != 1:
-            raise BrowserCapabilityInputError("XSS proof parameter authority is ambiguous")
+        normalized_method = str(method or "GET").strip().upper()
         marker = f"shakerscan_xss_{candidate_id[:12]}"
         payload = (
             '<img src=x onerror="document.documentElement.setAttribute('
             f"'data-shakerscan-proof','{marker}');console.log('{marker}')\">"
         )
-        index = matches[0]
-        pairs[index] = (pairs[index][0], payload)
-        url = urllib.parse.urlunsplit((
-            parsed.scheme, parsed.netloc, parsed.path,
-            urllib.parse.urlencode(pairs, doseq=True), parsed.fragment,
-        ))
+        body = b""
+        normalized_content_type: str | None = None
+        if body_field_names:
+            if normalized_method not in {"POST", "PUT", "PATCH"}:
+                raise BrowserCapabilityInputError(
+                    "XSS body proof requires a bounded write method"
+                )
+            fields = tuple(dict.fromkeys(str(item) for item in body_field_names))
+            if parameter_name not in fields:
+                raise BrowserCapabilityInputError(
+                    "XSS proof parameter is absent from body authority"
+                )
+            normalized_content_type = str(content_type or "").lower()
+            values = {
+                name: payload if name == parameter_name else "shakerscan"
+                for name in fields
+            }
+            if "json" in normalized_content_type:
+                body = json.dumps(
+                    values, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+                normalized_content_type = "application/json"
+            else:
+                body = urllib.parse.urlencode(values).encode("utf-8")
+                normalized_content_type = "application/x-www-form-urlencoded"
+            url = urllib.parse.urlunsplit((
+                parsed.scheme, parsed.netloc, parsed.path, "", "",
+            ))
+        else:
+            if normalized_method != "GET":
+                raise BrowserCapabilityInputError(
+                    "query XSS proof requires GET"
+                )
+            pairs = urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True, max_num_fields=50,
+            )
+            matches = [
+                index for index, (name, _value) in enumerate(pairs)
+                if name == parameter_name
+            ]
+            if len(matches) != 1:
+                raise BrowserCapabilityInputError(
+                    "XSS proof parameter authority is ambiguous"
+                )
+            index = matches[0]
+            pairs[index] = (pairs[index][0], payload)
+            url = urllib.parse.urlunsplit((
+                parsed.scheme, parsed.netloc, parsed.path,
+                urllib.parse.urlencode(pairs, doseq=True), parsed.fragment,
+            ))
         if _origin_key(url) != _origin_key(origin):
             raise BrowserCapabilityInputError("XSS proof URL escaped target origin")
         socket_factory = FrozenTargetSocketFactory(
@@ -189,7 +236,9 @@ class XSSBrowserProofAdapter:
         )
         normalized = {
             "target_id": target.target_id, "candidate_id": candidate_id,
-            "parameter_name": parameter_name, "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
+            "parameter_name": parameter_name, "method": normalized_method,
+            "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
+            "body_sha256": hashlib.sha256(body).hexdigest() if body else None,
         }
         return PreparedXSSBrowserProof(
             capability_name=cls.capability_name, adapter_name=cls.adapter_name,
@@ -200,10 +249,18 @@ class XSSBrowserProofAdapter:
             marker=marker, marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
             payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
             candidate_id=candidate_id, parameter_name=parameter_name,
+            method=normalized_method, body=body,
+            content_type=normalized_content_type,
             input_digest=PreparedExecution.digest_input(normalized),
-            estimated_budget={"browser_actions": 2, "http_requests": 50, "tool_wall_seconds": 30},
+            estimated_budget={
+                "browser_actions": 2, "http_requests": 50,
+                **({"state_changing_requests": 1} if body else {}),
+                "tool_wall_seconds": 30,
+            },
             redacted_execution={
                 "candidate_id": candidate_id, "parameter_name": parameter_name,
+                "method": normalized_method,
+                "body_sha256": hashlib.sha256(body).hexdigest() if body else None,
                 "payload_sha256": hashlib.sha256(payload.encode()).hexdigest(),
                 "marker_sha256": hashlib.sha256(marker.encode()).hexdigest(),
                 "address_policy": socket_factory.policy_receipt,
@@ -546,6 +603,7 @@ async def _execute_browser_action(
 ) -> CapabilityAdapterResult:
     started = time.monotonic()
     request_count = 0
+    proof_body_requests = 0
     browser_actions = 0
     blocked: list[dict[str, Any]] = []
     responses: list[dict[str, Any]] = []
@@ -631,7 +689,7 @@ async def _execute_browser_action(
         )
 
         async def route_request(route) -> None:
-            nonlocal request_count
+            nonlocal request_count, proof_body_requests
             request = route.request
             reason = None
             if cancelled():
@@ -641,8 +699,29 @@ async def _execute_browser_action(
                     same_origin = _origin_key(request.url) == _origin_key(prepared.origin)
                 except BrowserCapabilityInputError:
                     same_origin = False
+                body_navigation = (
+                    isinstance(prepared, PreparedXSSBrowserProof)
+                    and bool(prepared.body)
+                    and request.method.upper() == "GET"
+                    and request.url == prepared.url
+                    and proof_body_requests == 0
+                )
                 if not same_origin:
                     reason = "cross_origin"
+                elif body_navigation:
+                    if request_count >= prepared.max_requests:
+                        reason = "request_budget_exhausted"
+                    else:
+                        request_count += 1
+                        proof_body_requests += 1
+                        headers = dict(request.headers)
+                        headers["content-type"] = str(prepared.content_type)
+                        await route.continue_(
+                            method=prepared.method,
+                            post_data=prepared.body,
+                            headers=headers,
+                        )
+                        return
                 elif request.method.upper() not in SAFE_BROWSER_METHODS:
                     reason = "state_changing_method"
                 elif request_count >= prepared.max_requests:
@@ -1047,6 +1126,13 @@ def _browser_result(
         actual_budget={
             "browser_actions": browser_actions,
             "http_requests": request_count,
+            **({
+                "state_changing_requests": 1
+            } if (
+                isinstance(prepared, PreparedXSSBrowserProof)
+                and bool(prepared.body)
+                and request_count > 0
+            ) else {}),
             "tool_wall_seconds": elapsed,
         },
         partial=partial,

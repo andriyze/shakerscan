@@ -939,7 +939,7 @@ def test_authz_surface_batch_makes_no_claim_on_a_fully_public_app(monkeypatch):
     ]
 
 
-def test_safe_authentication_body_batch_needs_no_general_mutation_permission(monkeypatch):
+def test_safe_authentication_body_batch_still_charges_state_budget(monkeypatch):
     scan_id = str(uuid.uuid4())
     route_id = "d" * 64
     request = build_replay_plan(
@@ -994,7 +994,11 @@ def test_safe_authentication_body_batch_needs_no_general_mutation_permission(mon
     action = ScanAction(
         **{
             **action.digest_material(),
-            "requested_budget": {"http_requests": 4, "tool_wall_seconds": 20},
+            "requested_budget": {
+                "http_requests": 4,
+                "state_changing_requests": 4,
+                "tool_wall_seconds": 20,
+            },
         }
     )
     plan = ScanActionPlan(
@@ -1024,7 +1028,11 @@ def test_safe_authentication_body_batch_needs_no_general_mutation_permission(mon
     receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
 
     assert receipt.status == "success"
-    assert receipt.budget_consumed == {"http_requests": 4, "tool_wall_seconds": 2}
+    assert receipt.budget_consumed == {
+        "http_requests": 4,
+        "state_changing_requests": 4,
+        "tool_wall_seconds": 2,
+    }
     assert all(
         item.get("request_class") == "safe_authentication"
         for item in receipt.observations if item.get("kind") == "candidate_attempt"

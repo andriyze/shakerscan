@@ -12,8 +12,10 @@ COPY . .
 
 # Build-time app version (exposed to client)
 ARG NEXT_PUBLIC_APP_VERSION=dev
+ARG UI_SOURCE_REVISION=unknown
 ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
 RUN printf '%s\n' "$NEXT_PUBLIC_APP_VERSION" > /app/UI_BUILD_VERSION
+RUN printf '%s\n' "$UI_SOURCE_REVISION" > /app/UI_SOURCE_REVISION
 
 # Build
 RUN npm run build
@@ -30,6 +32,7 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/UI_BUILD_VERSION ./UI_BUILD_VERSION
+COPY --from=builder /app/UI_SOURCE_REVISION ./UI_SOURCE_REVISION
 
 EXPOSE 3000
 

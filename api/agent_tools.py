@@ -60,7 +60,8 @@ _FORBIDDEN_HEADERS: frozenset[str] = frozenset(
 )
 _SENSITIVE_HEADER_SUBSTR: tuple[str, ...] = (
     "token", "secret", "auth", "session", "cookie", "password", "api-key", "apikey",
-    "credential", "bearer",
+    "api_key", "access-key", "access_key", "private-key", "private_key",
+    "signing-key", "signing_key", "client-key", "client_key", "credential", "bearer",
 )
 
 # query_kb read-only surfaces (each maps to a bounded SELECT in api.py).

@@ -15,9 +15,17 @@ function bakedUiVersion(): string {
   }
 }
 
+function bakedSourceRevision(): string {
+  try {
+    return readFileSync(join(process.cwd(), 'UI_SOURCE_REVISION'), 'utf8').trim() || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 export async function GET() {
   return NextResponse.json(
-    { ui_version: bakedUiVersion() },
+    { ui_version: bakedUiVersion(), source_revision: bakedSourceRevision() },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }

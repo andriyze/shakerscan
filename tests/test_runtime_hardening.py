@@ -156,12 +156,12 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
 
     assert installer == hosted
     assert (
-        'mkdir -p "$INSTALL_DIR/db" "$INSTALL_DIR/results" '
-        '"$INSTALL_DIR/scripts" "$INSTALL_DIR/api/scan" '
-        '"$INSTALL_DIR/api/runtime"'
+        'mkdir -p "$INSTALL_STAGE/db" "$INSTALL_STAGE/results" '
+        '"$INSTALL_STAGE/scripts" "$INSTALL_STAGE/api/scan" '
+        '"$INSTALL_STAGE/api/runtime"'
     ) in installer
-    assert 'mkdir -p "$INSTALL_DIR/scanner/scanner_tools"' in installer
-    assert 'mkdir -p "$INSTALL_DIR/runner/guest" "$INSTALL_DIR/runner/host"' in installer
+    assert 'mkdir -p "$INSTALL_STAGE/scanner/scanner_tools"' in installer
+    assert 'mkdir -p "$INSTALL_STAGE/runner/guest" "$INSTALL_STAGE/runner/host"' in installer
     for relative_path in expected_downloads:
         assert f'download "$REPO_RAW_BASE/{relative_path}" "$INSTALL_DIR/{relative_path}"' in installer
     assert 'chmod +x "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"' in installer

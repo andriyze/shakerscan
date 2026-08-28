@@ -1449,7 +1449,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 96 | `db/init.sql` + migrations |
+| Durable tables | 97 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2645,6 +2645,7 @@ Scan feature or a second orchestration engine.
 | `findings` | `db/init.sql` |
 | `fleet_node_events` | `db/init.sql` |
 | `hunt_actions` | `db/init.sql` |
+| `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_runs` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
 | `investigation_candidate_observations` | `api/retest_contract.py` |

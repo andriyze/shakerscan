@@ -573,7 +573,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "xss.verify_batch",
             "Bounded Dalfox verification over one immutable candidate slice.",
             "internal", "active", _HTTP_TARGETS, "dalfox.batch", "1",
-            "active_testing", {"http_requests": 1_000, "tool_wall_seconds": 300},
+            "active_testing", {
+                "http_requests": 1_000,
+                "state_changing_requests": 1_000,
+                "tool_wall_seconds": 300,
+            },
             {
                 "network_reachability": True,
                 "binary": "dalfox",
@@ -599,7 +603,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "Prove ranked XSS candidates in a target-bound Playwright runtime.",
             "browser", "active", _HTTP_TARGETS, "playwright.xss_proof_batch", "1",
             "active_testing",
-            {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 300},
+            {
+                "browser_actions": 20,
+                "http_requests": 500,
+                "state_changing_requests": 20,
+                "tool_wall_seconds": 300,
+            },
             {
                 "network_reachability": True,
                 "runtime_target_binding": True,
@@ -637,7 +646,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "sqli.verify_batch",
             "Bounded SQLMap verification over one immutable candidate slice.",
             "internal", "active", _HTTP_TARGETS, "sqlmap.batch", "1",
-            "active_testing", {"http_requests": 1_800, "tool_wall_seconds": 300},
+            "active_testing", {
+                "http_requests": 1_800,
+                "state_changing_requests": 1_800,
+                "tool_wall_seconds": 300,
+            },
             {
                 "network_reachability": True,
                 "binary": "sqlmap",

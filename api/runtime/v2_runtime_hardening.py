@@ -63,6 +63,8 @@ def _redact_string(value: str) -> str:
             text = pattern.sub(r"\1 ***", text)
         elif index == 3:
             text = pattern.sub(r"\1***@", text)
+        elif index == 4:
+            text = pattern.sub("***", text)
         else:
             text = pattern.sub(r"\1***", text)
     return text

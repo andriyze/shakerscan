@@ -327,9 +327,9 @@ class RequestMutationVerificationAdapter:
             raise RequestMutationVerificationError(
                 "request candidate safety class is not executable"
             )
-        if int(requested_budget.get("http_requests") or 0) < 2 or (
-            request_class == "confirmed_mutation"
-            and int(requested_budget.get("state_changing_requests") or 0) < 2
+        if (
+            int(requested_budget.get("http_requests") or 0) < 2
+            or int(requested_budget.get("state_changing_requests") or 0) < 2
         ):
             raise RequestMutationVerificationError(
                 "request verifier requires two HTTP and mutation reservations"
@@ -353,9 +353,7 @@ class RequestMutationVerificationAdapter:
             "tool_wall_seconds": wall_seconds,
         }
         if "state_changing_requests" in self.requested_budget:
-            actual["state_changing_requests"] = (
-                attempted if self.request_class == "confirmed_mutation" else 0
-            )
+            actual["state_changing_requests"] = attempted
         return actual
 
     async def execute(

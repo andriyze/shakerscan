@@ -74,6 +74,9 @@ _INLINE_SECRET_PATTERNS = (
         r"[^&#\s]+"
     ),
     re.compile(r"(://)[^/@\s]+@"),
+    # Content-free errors sometimes include a synthetic secret label rather than a
+    # key/value pair. Preserve ordinary prose while masking hyphen/underscore values.
+    re.compile(r"(?i)\b(?:secret|token|password|api[_-]?key)(?:[-_][a-z0-9]+)+\b"),
 )
 
 
@@ -160,6 +163,8 @@ def _redact_string(value: str) -> str:
             redacted = pattern.sub(r"\1 ***", redacted)
         elif index == 3:
             redacted = pattern.sub(r"\1***@", redacted)
+        elif index == 4:
+            redacted = pattern.sub("***", redacted)
         else:
             redacted = pattern.sub(r"\1***", redacted)
     return redacted

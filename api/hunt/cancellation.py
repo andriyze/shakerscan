@@ -58,9 +58,8 @@ class HuntCancellationWatch:
     async def refresh(self, *, force: bool = False) -> bool:
         """Re-read the Hunt's status, at most once per refresh interval unless forced.
 
-        A read failure leaves the previous state untouched: a transient database error is not
-        evidence that a Hunt was cancelled, and inventing one would abort authorized work.
-        Cancellation, once observed, is never un-observed.
+        A read failure fails closed. Once the server can no longer revalidate the Hunt's durable
+        authority, target traffic must pause rather than continue on a stale cached grant.
         """
         if self._cancelled:
             return True
@@ -75,8 +74,9 @@ class HuntCancellationWatch:
                 status = await connection.fetchval(
                     "SELECT status FROM hunt_runs WHERE id=$1", self._hunt_run_id,
                 )
-        except Exception:  # noqa: BLE001 - see docstring: a read failure is not a cancellation
-            return self._cancelled
+        except Exception:  # noqa: BLE001 - authority cannot be revalidated; stop target traffic
+            self._cancelled = True
+            return True
         if str(status or "").strip().lower() in CANCELLING_STATUSES:
             self._cancelled = True
         return self._cancelled
@@ -129,7 +129,43 @@ def record_cancellable_job(redis_client: Any, hunt_id: Any, job_id: Any, *, ttl:
         return
 
 
-def signal_cancelled_jobs(redis_client: Any, hunt_id: Any, *, ttl: int = 3_600) -> list[str]:
+async def record_cancellable_job_durable(
+    pool: Any,
+    redis_client: Any,
+    hunt_id: Any,
+    job_id: Any,
+    *,
+    ttl: int = JOB_SET_TTL_SECONDS,
+) -> None:
+    """Persist a queued job before publishing it, then populate the fast Redis index.
+
+    Redis is deliberately only an accelerator here.  If it is unavailable the durable row lets a
+    later cancellation reconstruct the exact job ids; if Postgres is unavailable the caller must
+    not enqueue work that it can no longer cancel.
+    """
+    hunt = str(hunt_id or "").strip()
+    job = str(job_id or "").strip()
+    if not hunt or not job:
+        raise ValueError("hunt_id and job_id are required")
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """INSERT INTO hunt_cancellable_jobs(hunt_id, job_id)
+               VALUES($1::uuid, $2::uuid)
+               ON CONFLICT (hunt_id, job_id) DO UPDATE
+               SET updated_at=NOW()""",
+            hunt,
+            job,
+        )
+    record_cancellable_job(redis_client, hunt, job, ttl=ttl)
+
+
+def signal_cancelled_jobs(
+    redis_client: Any,
+    hunt_id: Any,
+    *,
+    job_ids: Any = (),
+    ttl: int = 3_600,
+) -> list[str]:
     """Set the cancel flag every worker-placed job of this Hunt polls. Returns the ids signalled.
 
     Idempotent by construction: setting an already-set flag is harmless, and a job that has since
@@ -139,12 +175,13 @@ def signal_cancelled_jobs(redis_client: Any, hunt_id: Any, *, ttl: int = 3_600) 
     if not redis_client or not hunt:
         return []
     key = f"{JOB_SET_PREFIX}{hunt}"
+    members: set[Any] = set(job_ids or ())
     try:
-        members = redis_client.smembers(key) or ()
+        members.update(redis_client.smembers(key) or ())
     except _CODING_ERRORS:
         raise
-    except Exception:  # noqa: BLE001 - an unreadable set must not block the cancellation itself
-        return []
+    except Exception:  # noqa: BLE001 - durable ids can still be signalled without the Redis set
+        pass
     signalled: list[str] = []
     for raw in members:
         job = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
@@ -167,5 +204,6 @@ __all__ = [
     "JOB_CANCEL_PREFIX",
     "JOB_SET_PREFIX",
     "record_cancellable_job",
+    "record_cancellable_job_durable",
     "signal_cancelled_jobs",
 ]

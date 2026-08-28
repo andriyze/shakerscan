@@ -38,7 +38,10 @@ def _evidence(tmp_path: Path):
     upgrade = {
         "schema_version": "stateful-upgrade-acceptance/v2",
         "status": "pass",
-        "candidate": {"source_sha": SOURCE, "image_digest": IMAGES["scanner"]},
+        "candidate": {
+            "source_sha": SOURCE,
+            "images": {key: IMAGES[key] for key in ("scanner", "api", "ui")},
+        },
         "rollback_boundary": "pre-upgrade pg_dump restore",
         "checks": checks,
     }
@@ -63,11 +66,28 @@ def _evidence(tmp_path: Path):
             for area in ("platform", "model_intake", "ai_gate", "dast", "hunt")
         ],
     }
+    external_values = {
+        "dast_quality": {"passed": True, "quality_bar_passed": True},
+        "fault_acceptance": {
+            "candidate_sha": SOURCE, "promotion_authorized": False,
+        },
+        "real_fleet_parity": {
+            "source_revision": SOURCE, "consistent": True,
+            "all_artifacts_truthful": True,
+        },
+        "model_intake_physical": {"candidate_sha": SOURCE, "status": "pass"},
+        "device_physical": {"candidate_sha": SOURCE, "status": "pass"},
+    }
+    external_evidence = {
+        key: (value, _write(tmp_path, f"{key}.json", value))
+        for key, value in external_values.items()
+    }
     paths = {
         "candidate_path": _write(tmp_path, "candidate.json", candidate),
         "upgrade_path": _write(tmp_path, "upgrade.json", upgrade),
         "preservation_path": _write(tmp_path, "preservation.json", preservation),
         "e2e_path": _write(tmp_path, "e2e.json", e2e),
+        "external_evidence": external_evidence,
     }
     return candidate, upgrade, preservation, e2e, paths
 
@@ -91,6 +111,7 @@ def test_certification_binds_exact_manifests_and_all_acceptance_evidence(tmp_pat
         "stateful_upgrade_receipt",
         "preservation_receipt",
         "exact_manifest_e2e_scorecard",
+        *paths["external_evidence"].keys(),
     }
 
 
@@ -98,7 +119,7 @@ def test_certification_binds_exact_manifests_and_all_acceptance_evidence(tmp_pat
 def test_certification_fails_closed_on_cross_candidate_or_failed_evidence(tmp_path, defect):
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
     if defect == "scanner_digest":
-        upgrade["candidate"]["image_digest"] = "sha256:" + "f" * 64
+        upgrade["candidate"]["images"]["scanner"] = "sha256:" + "f" * 64
     elif defect == "source":
         upgrade["candidate"]["source_sha"] = "b" * 40
     elif defect == "e2e":

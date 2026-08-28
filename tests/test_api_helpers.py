@@ -13173,7 +13173,9 @@ def test_evidence_instance_timeline_event_is_evidence_bound():
     assert ev["evidence_object_ids"] == ["33333333-3333-4333-8333-333333333333"]
     assert ev["tool_receipt_ids"] == ["55555555-5555-4555-8555-555555555555"]
     assert ev["campaign_id"] == "77777777-7777-4777-8777-777777777777"
-    assert ev["next_action"] == "/evidence/33333333-3333-4333-8333-333333333333"
+    assert ev["next_action"] == (
+        "/evidence?object_id=33333333-3333-4333-8333-333333333333"
+    )
 
 
 def test_refuter_review_timeline_event_is_refuter_requested_without_mutation():

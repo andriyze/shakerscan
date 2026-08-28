@@ -78,9 +78,9 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 0,
       "name": "max_state_changing_requests",
       "profile_ceilings": {
-        "balanced": 100,
-        "fast": 20,
-        "thorough": 500
+        "balanced": 800,
+        "fast": 200,
+        "thorough": 2000
       }
     },
     {
@@ -101,7 +101,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "max_endpoints": 2000,
       "max_hosts": 100,
       "max_http_requests": 5000,
-      "max_state_changing_requests": 100,
+      "max_state_changing_requests": 800,
       "max_tcp_ports": 5000,
       "max_tool_wall_seconds": 900,
       "max_workers": 4
@@ -112,7 +112,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "max_endpoints": 500,
       "max_hosts": 25,
       "max_http_requests": 1000,
-      "max_state_changing_requests": 20,
+      "max_state_changing_requests": 200,
       "max_tcp_ports": 1000,
       "max_tool_wall_seconds": 180,
       "max_workers": 2
@@ -123,7 +123,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "max_endpoints": 10000,
       "max_hosts": 500,
       "max_http_requests": 20000,
-      "max_state_changing_requests": 500,
+      "max_state_changing_requests": 2000,
       "max_tcp_ports": 20000,
       "max_tool_wall_seconds": 3600,
       "max_workers": 8

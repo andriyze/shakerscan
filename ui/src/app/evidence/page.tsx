@@ -25,6 +25,7 @@ interface EvidenceFilters {
   [key: string]: string | number | undefined
   finding_id?: string
   tool_receipt_id?: string
+  object_id?: string
 }
 
 const FAMILY_LABELS: Record<string, string> = {
@@ -85,6 +86,11 @@ function EvidenceContent() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
   const detailRequestId = useRef(0)
+
+  useEffect(() => {
+    const requested = (filters.object_id || '').trim()
+    if (requested) setModalObjectId(requested)
+  }, [filters.object_id])
 
   const findingFilter = (filters.finding_id || '').trim()
   const toolReceiptFilter = (filters.tool_receipt_id || '').trim()
@@ -387,7 +393,10 @@ function EvidenceContent() {
         </div>
       </details>
 
-      <EvidenceObjectModal objectId={modalObjectId} onClose={() => setModalObjectId(null)} />
+      <EvidenceObjectModal objectId={modalObjectId} onClose={() => {
+        setModalObjectId(null)
+        if (filters.object_id) setFilter('object_id', undefined)
+      }} />
     </div>
   )
 }

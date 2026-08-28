@@ -1436,7 +1436,7 @@ def test_internal_ai_gate_executor_receipt_is_recorded_and_redacted():
     assert args[13] == 0
     assert "secret-token" not in json.dumps(args, default=str)
     target_scope = json.loads(args[7])
-    assert target_scope["target"].endswith("***=***")
+    assert target_scope["target"].endswith("token=***")
 
 
 def test_internal_asm_recon_executor_receipt_is_recorded():
@@ -1480,6 +1480,23 @@ def test_redact_receipt_value_strips_url_userinfo():
     assert "hunter2" not in out and "admin:" not in out
     assert "secret-token" not in out
     assert urllib.parse.urlparse(out).hostname == "app.example.com"
+
+
+def test_worker_receipts_use_the_canonical_nested_secret_redactor():
+    value = worker._redact_receipt_value({
+        "observed_access_key": "AKIAEXAMPLE",
+        "matched_api_key": "private-value",
+        "headers": {
+            "X-API-Key": "private-value",
+            "Observed-Access-Key": "AKIAEXAMPLE",
+            "Accept": "application/json",
+        },
+    })
+    assert value["observed_access_key"] == "***"
+    assert value["matched_api_key"] == "***"
+    assert value["headers"]["X-API-Key"] == "***"
+    assert value["headers"]["Observed-Access-Key"] == "***"
+    assert value["headers"]["Accept"] == "application/json"
 
 
 def test_internal_model_intake_executor_receipt_records_failure():

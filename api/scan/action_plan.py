@@ -38,6 +38,7 @@ from .work_manifests import (
     ScanWorkManifestReference,
 )
 from .external_process import (
+    batch_attempt_floor,
     batch_attempt_capacity,
     minimum_reservation_scaled_profile,
 )
@@ -104,19 +105,12 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     },
     "thorough": {
         "xss.verify_batch": (8, {"http_requests": 960, "tool_wall_seconds": 240}),
-        # No state_changing_requests reservation here, and the reason is measured rather
-        # than chosen. This budget is charged PER BATCH ACTION and a thorough plan admits
-        # several required SQLi batches, so reserving the 480 mutations one body attempt
-        # costs made the second batch unadmittable against the 500 ceiling -- and a
-        # required action that cannot fit fails the whole scan. It did: every thorough
-        # scan died at admission with "verify.sqli.001 exceeds the plan budget", taking
-        # Juice Shop recall from 4/9 to 0/9.
-        #
-        # Dividing 500 across the batches leaves each below the 480 an attempt needs, so
-        # body SQLi is unfundable at this ceiling either way. Raising
-        # max_state_changing_requests is a mutation-authority decision, not a tuning knob,
-        # so body candidates stay unattempted until it is taken deliberately.
-        "sqli.verify_batch": (10, {"http_requests": 1_920, "tool_wall_seconds": 690}),
+        # The 2,000-unit active ceiling admits multiple required batches while
+        # retaining a conservative one-body-attempt hold in each slice.
+        "sqli.verify_batch": (10, {
+            "http_requests": 1_920, "state_changing_requests": 480,
+            "tool_wall_seconds": 690,
+        }),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
@@ -1104,15 +1098,41 @@ class ScanActionPlanCompiler:
                     for name, amount in maximum.items()
                 }
                 if (
+                    policy.allow_state_changing_http
+                    and blueprint.capability_name in {
+                        "xss.verify_batch", "sqli.verify_batch",
+                    }
+                ):
+                    # A discovered candidate manifest can mix query and body entries,
+                    # while its public reference intentionally reveals only a count.
+                    # Reserve enough for at least one body-class attempt in every
+                    # slice; the adapter then settles zero mutation units for a query
+                    # entry and the conservative hold for an executed POST entry.
+                    body_floor = batch_attempt_floor(
+                        blueprint.capability_name, body_candidate=True,
+                    )
+                    for name, amount in body_floor.items():
+                        budget[name] = max(int(budget.get(name, 0)), int(amount))
+                if (
+                    policy.allow_state_changing_http
+                    and blueprint.capability_name == "xss.browser_prove_batch"
+                ):
+                    budget["state_changing_requests"] = max(
+                        int(budget.get("state_changing_requests", 0)),
+                        slice_count,
+                    )
+                if (
                     blueprint.capability_name in {
+                        "xss.verify_batch", "sqli.verify_batch",
                         "xss.request_verify_batch", "sqli.request_verify_batch",
-                        "sqli.prove_batch", "nosqli.verify_batch",
+                        "sqli.prove_batch", "xss.browser_prove_batch",
+                        "nosqli.verify_batch",
                     }
                     and not policy.allow_state_changing_http
                 ):
                     budget.pop("state_changing_requests", None)
                 if (
-                    blueprint.capability_name in {"sqli.prove_batch", "nosqli.verify_batch"}
+                    blueprint.capability_name == "nosqli.verify_batch"
                     and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)

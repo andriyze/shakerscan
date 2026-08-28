@@ -3101,6 +3101,26 @@ async def run_schema_migrations(pool) -> None:
                 ON hunt_runs(status, updated_at DESC)
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS hunt_cancellable_jobs (
+                    hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+                    job_id UUID NOT NULL,
+                    signal_state TEXT NOT NULL DEFAULT 'pending',
+                    cancel_requested_at TIMESTAMPTZ,
+                    signalled_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (hunt_id, job_id),
+                    CONSTRAINT hunt_cancellable_jobs_state_check CHECK (
+                        signal_state IN ('pending','signalled','terminal')
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_cancellable_jobs_pending
+                ON hunt_cancellable_jobs(hunt_id, signal_state)
+                WHERE signal_state != 'terminal'
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_actions (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,

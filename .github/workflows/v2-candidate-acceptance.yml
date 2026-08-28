@@ -54,11 +54,14 @@ jobs:
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$REQUESTED_SHA"
-          git fetch --no-tags origin +refs/heads/v2:refs/remotes/origin/v2
-          git merge-base --is-ancestor "$REQUESTED_SHA" origin/v2 || {
-            echo "Candidate is not reachable from origin/v2" >&2
+          git fetch --no-tags origin \
+            +refs/heads/v2:refs/remotes/origin/v2 \
+            +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$REQUESTED_SHA" origin/v2 \
+             && ! git merge-base --is-ancestor "$REQUESTED_SHA" origin/main; then
+            echo "Candidate is not reachable from origin/v2 or origin/main" >&2
             exit 1
-          }
+          fi
           version="$(tr -d '[:space:]' < VERSION)"
           test -n "$version"
           echo "CANDIDATE_SHA=$REQUESTED_SHA" >> "$GITHUB_ENV"

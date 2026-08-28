@@ -40,6 +40,22 @@ class ScannerExecutionAdapter:
             for key, value in dict(requested_budget).items()
         }
         self._redacted_execution = dict(redacted_execution)
+        scanner_options = (
+            dict(self._process_payload.get("scanner_options") or {})
+            if isinstance(self._process_payload.get("scanner_options"), Mapping)
+            else {}
+        )
+        self._state_changing = (
+            bool(scanner_options.get("body_field_names"))
+            and str(scanner_options.get("method") or "GET").upper()
+            not in {"GET", "HEAD", "OPTIONS"}
+        )
+        if self._state_changing and int(
+            self._requested_budget.get("state_changing_requests") or 0
+        ) < int(self._requested_budget.get("http_requests") or 0):
+            raise ValueError(
+                "body scanner requires a conservative state-changing reservation"
+            )
         self.process_result: dict[str, Any] = {}
 
     async def execute(
@@ -171,6 +187,11 @@ class ScannerExecutionAdapter:
                     actual["http_requests"] = int(
                         self._requested_budget["http_requests"]
                     )
+            if "state_changing_requests" in self._requested_budget:
+                actual["state_changing_requests"] = (
+                    int(self._requested_budget["state_changing_requests"])
+                    if self._state_changing and execution_started else 0
+                )
 
         redacted_execution = dict(self._redacted_execution)
         if enforcement:
