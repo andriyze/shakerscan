@@ -86,3 +86,35 @@ def test_the_decision_table():
     assert _release_ok(True, False, False) is True, "advisory: unchanged for the dev loop"
     assert _release_ok(False, True, False) is False, "a broken regression gate always fails"
     assert _release_ok(False, True, True) is False
+
+
+def test_release_qualification_measures_recall():
+    """The E2E gate proved the stack ran; nothing measured what the scanner found.
+
+    `expected_recall` existed only in whatever local run someone remembered to do, so no
+    release artifact carried the single number that says how much of the answer key the
+    engine reaches. The E2E job already stands up Juice Shop and the fleet, so the
+    measurement belongs there.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "e2e.yml").read_text(encoding="utf-8")
+    assert "scripts/benchmark_targets.py juice_shop" in workflow
+    assert "--enforce-quality" in workflow, (
+        "release qualification must fail on the enforced subset, not merely report it"
+    )
+    assert "artifacts/dast-recall.json" in workflow
+    # The scorecard has to leave the runner, or the measurement dies with the job.
+    upload = workflow[workflow.index("Upload exact-SHA E2E scorecard"):]
+    assert "artifacts/dast-recall.json" in upload
+
+
+def test_the_benchmark_is_not_in_the_build_test_loop():
+    """It needs a live target and a uniform fleet, and takes ~20 minutes.
+
+    Keeping it out of the fast loop is deliberate: it also keeps the pressure to fit the
+    benchmark low, which is the failure mode a DAST answer key invites.
+    """
+    for name in ("v2-contracts.yml", "e2e-pr.yml", "commit-policy.yml"):
+        path = ROOT / ".github" / "workflows" / name
+        if not path.exists():
+            continue
+        assert "benchmark_targets" not in path.read_text(encoding="utf-8"), name

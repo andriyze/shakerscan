@@ -91,6 +91,20 @@ jobs:
           python3 tests/e2e/run_e2e.py --area all \
             --scorecard artifacts/e2e-scorecard.json
 
+      # The E2E gate proves the stack works end to end; it does not measure how much
+      # the scanner actually finds. `expected_recall` -- how many of Juice Shop's known
+      # vulnerability classes the engine reaches -- was produced only by whoever
+      # remembered to run the benchmark by hand, so release qualification never saw it.
+      # The stack and target are already up here, so the measurement costs one step.
+      #
+      # `--enforce-quality` makes the fixture's `quality_bar.enforced` subset decide the
+      # exit status. The advisory half (recall, browser-proven XSS, the declared-gap
+      # debt) is still reported in full and still fails visibly without failing the run.
+      - name: Measure DAST recall against the Juice Shop answer key
+        run: |
+          python3 scripts/benchmark_targets.py juice_shop --auth --enforce-quality
+          cp results/benchmark-runs/benchmark-juice_shop.json artifacts/dast-recall.json
+
       - name: Run exact-candidate UI unit and browser acceptance
         env:
           PLAYWRIGHT_REAL_STACK: "1"
@@ -110,6 +124,7 @@ jobs:
           path: |
             artifacts/e2e-scorecard.json
             artifacts/playwright.json
+            artifacts/dast-recall.json
           if-no-files-found: error
           retention-days: 30
 
