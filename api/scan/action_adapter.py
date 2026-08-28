@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+import json
 import urllib.parse
 
 try:
@@ -207,6 +208,70 @@ class ObservationBackend(Protocol):
     async def checkpoint_batch_attempt(
         self, action_id: str, attempt: Mapping[str, Any],
     ) -> None: ...
+
+
+# A body candidate cannot reach deterministic proof through a URL. `execution_url_for_
+# manifest_candidate` requires the candidate's field to appear in the endpoint's
+# `query_parameter_names`, and a body field appears in `body_field_names`, so every proof
+# escalation raised "candidate identity conflicts with its endpoint manifest" before it
+# executed. The engine could obtain a body signal and never turn it into the verified
+# finding the signal exists to produce.
+_BODY_PROOF_PLACEHOLDER = "shakerscan"
+
+
+def proof_request_for_candidate(
+    endpoint_manifest: Any,
+    candidate_manifest: Any,
+    index: int,
+    *,
+    request_id: str,
+    ordinal: int,
+    name: str,
+    headers: tuple[tuple[str, str], ...],
+    authenticated: bool,
+) -> ReplayRequest:
+    """Resolve one candidate into the exact request a proof attempt must replay.
+
+    A query candidate is fully described by its URL, exactly as before. A body candidate
+    carries its method, content type and a well-formed body whose declared fields hold an
+    inert placeholder, so the proof binds to the same field the signal came from.
+    """
+    resolved = execution_request_for_manifest_candidate(
+        endpoint_manifest, candidate_manifest, index,
+    )
+    fields = [str(item) for item in resolved.get("body_field_names") or () if str(item)]
+    method = str(resolved.get("method") or "GET").upper()
+    if not fields:
+        return ReplayRequest(
+            request_id=request_id, ordinal=ordinal, name=name, folder="",
+            method=method, url=str(resolved["url"]), headers=headers,
+            body=b"", body_mode="none",
+            auth_type="broker_session" if authenticated else "none",
+            has_sensitive_material=authenticated,
+        )
+    content_type = str(resolved.get("content_type") or "").lower()
+    if "json" in content_type:
+        payload = json.dumps(
+            {field: _BODY_PROOF_PLACEHOLDER for field in fields},
+            sort_keys=True, separators=(",", ":"),
+        )
+        media_type = "application/json"
+    else:
+        payload = "&".join(
+            f"{urllib.parse.quote(field, safe='')}={_BODY_PROOF_PLACEHOLDER}"
+            for field in fields
+        )
+        media_type = "application/x-www-form-urlencoded"
+    body_headers = tuple(
+        item for item in headers if str(item[0]).lower() != "content-type"
+    ) + (("Content-Type", media_type),)
+    return ReplayRequest(
+        request_id=request_id, ordinal=ordinal, name=name, folder="",
+        method=method, url=str(resolved["url"]), headers=body_headers,
+        body=payload.encode("utf-8"), body_mode="raw",
+        auth_type="broker_session" if authenticated else "none",
+        has_sensitive_material=authenticated,
+    )
 
 
 _BATCH_SUCCESS_STATUSES = frozenset({"success", "succeeded", "completed"})
@@ -1458,22 +1523,25 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
             else:
-                execution_url = execution_url_for_manifest_candidate(
+                # A body candidate mutates, so it needs the same authority the private
+                # request path above demands before it may be replayed.
+                if (
+                    candidate.get("body_field_names")
+                    and not (
+                        self.policy.allow_state_changing_http
+                        and self.policy.approval_receipt_id
+                    )
+                ):
+                    continue
+                request = proof_request_for_candidate(
                     endpoints, manifest, manifest_index,
-                )
-                request = ReplayRequest(
                     request_id=f"candidate:{candidate_id}",
                     ordinal=manifest_index,
                     name="canonical SQLi candidate",
-                    folder="",
-                    method=str(candidate.get("method") or "GET"),
-                    url=execution_url,
                     headers=tuple(primary.headers().items()),
-                    body=b"",
-                    body_mode="none",
-                    auth_type="broker_session" if primary.authenticated else "none",
-                    has_sensitive_material=primary.authenticated,
+                    authenticated=primary.authenticated,
                 )
+                execution_url = request.url
             remaining_attempts = max(1, len(rows) - offset)
             remaining = {
                 name: max(0, int(limit) - int(consumed.get(name, 0)))
@@ -1828,22 +1896,25 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
             else:
-                execution_url = execution_url_for_manifest_candidate(
+                # A body candidate mutates, so it needs the same authority the private
+                # request path above demands before it may be replayed.
+                if (
+                    candidate.get("body_field_names")
+                    and not (
+                        self.policy.allow_state_changing_http
+                        and self.policy.approval_receipt_id
+                    )
+                ):
+                    continue
+                request = proof_request_for_candidate(
                     endpoints, manifest, manifest_index,
-                )
-                request = ReplayRequest(
                     request_id=f"candidate:{candidate_id}",
                     ordinal=manifest_index,
                     name="canonical NoSQLi candidate",
-                    folder="",
-                    method=str(candidate.get("method") or "GET"),
-                    url=execution_url,
                     headers=tuple(primary.headers().items()),
-                    body=b"",
-                    body_mode="none",
-                    auth_type="broker_session" if primary.authenticated else "none",
-                    has_sensitive_material=primary.authenticated,
+                    authenticated=primary.authenticated,
                 )
+                execution_url = request.url
             remaining_attempts = max(1, len(rows) - offset)
             remaining = {
                 name: max(0, int(limit) - int(consumed.get(name, 0)))

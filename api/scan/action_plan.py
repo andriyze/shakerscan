@@ -104,7 +104,21 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
     },
     "thorough": {
         "xss.verify_batch": (8, {"http_requests": 960, "tool_wall_seconds": 240}),
-        "sqli.verify_batch": (10, {"http_requests": 1_920, "tool_wall_seconds": 690}),
+        # One body attempt costs 480 mutations against a 500 ceiling, so `thorough` funds
+        # exactly one and the rest of the slice stays query-only. Reserving nothing meant
+        # the floor could never be met and a body candidate could never run at all; taking
+        # more would leave no mutation authority for anything else in the plan. `fast` and
+        # `balanced` cannot fund one inside their 20- and 100-request ceilings, so they
+        # reserve none and report body candidates unattempted, which is the truthful
+        # outcome rather than a silent skip.
+        "sqli.verify_batch": (
+            10,
+            {
+                "http_requests": 1_920,
+                "state_changing_requests": 480,
+                "tool_wall_seconds": 690,
+            },
+        ),
         "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
         "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),

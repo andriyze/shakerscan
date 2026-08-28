@@ -69,9 +69,19 @@ BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
 # candidate is reported as unattempted rather than run in a way that cannot reach a verdict --
 # which is the same principle the batch adapter already applies to query candidates. Making these
 # land needs a profile-ceiling decision, not a smaller floor.
+# Every request a body attempt sends is a mutation, so its state-changing cost equals its
+# request cost. These floors omitted the dimension entirely, which meant a body attempt
+# consumed nothing from `max_state_changing_requests` -- the ceiling that exists to bound
+# exactly this traffic never decremented, so it bounded nothing. The permission itself was
+# always enforced: `work_manifests` only creates a body candidate when
+# `allow_state_changing_http` is set. What was missing was the accounting.
 BATCH_ATTEMPT_BODY_FLOORS: dict[str, dict[str, int]] = {
-    "xss.verify_batch": {"http_requests": 240, "tool_wall_seconds": 120},
-    "sqli.verify_batch": {"http_requests": 480, "tool_wall_seconds": 420},
+    "xss.verify_batch": {
+        "http_requests": 240, "state_changing_requests": 240, "tool_wall_seconds": 120,
+    },
+    "sqli.verify_batch": {
+        "http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420,
+    },
 }
 
 
