@@ -131,7 +131,11 @@ def _norm_live_finding(f):
         "description": f.get("description"),
         "tool": f.get("tool"),
         "severity": f.get("severity"),
-        "verified": bool(f.get("verified")) or verdict == "exploited",
+        # Live API rows carry `is_verified` (the derived proof projection); `verified` is not a
+        # field they have, so reading only it was dead code and the whole expression depended on
+        # the verdict alone. Read both so a proof-projected row counts even if the verdict is
+        # absent.
+        "verified": bool(f.get("is_verified") or f.get("verified")) or verdict == "exploited",
         "confidence_tier": f.get("confidence_tier"),
         "evidence": f.get("evidence"),
         "browser_proof": f.get("browser_proof"),

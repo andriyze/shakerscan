@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -35,6 +36,49 @@ except ImportError:
     )
 
 
+def _evidence_object(value: Any) -> dict[str, Any]:
+    """Return an evidence mapping whether it arrives as a dict or as JSON text.
+
+    Database rows carry evidence as JSON text, and this function only accepted a dict -- so every
+    evidence-derived signal here (proof_of_exploitation, payload_executed, extraction_evidence, the
+    V2 proof contract) was invisible for a persisted finding and visible only for one still in
+    memory. Unparseable text yields an empty mapping: unreadable evidence is no evidence, never a
+    reason to promote.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _has_satisfied_proof_contract(evidence: dict[str, Any]) -> bool:
+    """True for a V2 deterministic proof contract the finalizer re-executed and satisfied.
+
+    The signals above are the V1 vocabulary. The V2 finalizer speaks a different one -- it stamps
+    a named `proof_contract`, `proof_state: verified`, and `triage.verified` only after the
+    contract's own repetitions passed -- and the two share no key, so a complete deterministic
+    proof was read as no proof at all and the finding persisted as suspected. That demoted the
+    entire V2 proof chain out of verified-only filters and the headline grade.
+
+    All three markers are required together. Any one alone is a weaker claim, for the same reason
+    a bare `verified: true` is rejected here as a generic legacy flag: only the finalizer emits
+    the triple, and only after re-execution.
+    """
+    if not isinstance(evidence, dict):
+        return False
+    triage = evidence.get("triage") if isinstance(evidence.get("triage"), dict) else {}
+    return bool(
+        str(evidence.get("proof_contract") or "").strip()
+        and str(evidence.get("proof_state") or "").strip().lower() == "verified"
+        and triage.get("verified") is True
+    )
+
+
 def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | None:
     """Return DB verification fields implied by fresh scan-time proof.
 
@@ -51,7 +95,7 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     if not isinstance(finding, dict):
         return None
 
-    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    evidence = _evidence_object(finding.get("evidence"))
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
     poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
@@ -91,6 +135,7 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         or _has_browser_execution_proof(finding, evidence)
         or proof_type in _DETERMINISTIC_PROOF_TYPES
         or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
+        or _has_satisfied_proof_contract(evidence)
     )
     weak_proof = (
         verdict == "likely_vulnerable"
