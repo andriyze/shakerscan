@@ -227,6 +227,8 @@ jobs:
         shell: bash
         run: |
           SCANNER_IMAGE="shakerscan-scanner:$CANDIDATE_VERSION" \
+            CANDIDATE_API_IMAGE="shakerscan-api:$CANDIDATE_VERSION" \
+            CANDIDATE_UI_IMAGE="shakerscan-ui:$CANDIDATE_VERSION" \
             CANDIDATE_SHA="$CANDIDATE_SHA" \
             CANDIDATE_IMAGE_DIGEST="$(jq -r '.scanner' artifacts/candidate/images.json)" \
             UPGRADE_RECEIPT_PATH="$PWD/artifacts/candidate/upgrade-receipt.json" \

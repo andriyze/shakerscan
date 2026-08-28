@@ -858,8 +858,13 @@ jobs:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
         run: |
-          scanner_digest="$(jq -r '.images.scanner' artifacts/uncertified/release-candidate-receipt.json)"
+          receipt=artifacts/uncertified/release-candidate-receipt.json
+          scanner_digest="$(jq -r '.images.scanner' "$receipt")"
+          api_digest="$(jq -r '.images.api' "$receipt")"
+          ui_digest="$(jq -r '.images.ui' "$receipt")"
           SCANNER_IMAGE="${SCANNER_IMAGE}@${scanner_digest}" \
+            CANDIDATE_API_IMAGE="${API_IMAGE}@${api_digest}" \
+            CANDIDATE_UI_IMAGE="${UI_IMAGE}@${ui_digest}" \
             CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
             UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt.json" \
             scripts/upgrade_smoke.sh

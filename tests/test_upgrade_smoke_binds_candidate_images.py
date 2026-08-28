@@ -87,3 +87,56 @@ def test_the_upgraded_database_is_verified_before_the_candidate_boots():
     verify = source.index("run_scenario scanner_dirty verify_dirty")
     boot = source.index("run_operational_candidate\n")
     assert verify < boot
+
+
+
+# Every place that runs the smoke, and the image reference each must supply. The script
+# fails closed on a missing candidate image, so a caller that names only the scanner
+# breaks on a clean runner -- which is what happened to all four of these when the
+# fail-closed check was added and only one caller was updated with it.
+SMOKE_CALLERS = (
+    "Makefile",
+    ".github/workflows/v2-contracts.yml",
+    ".github/workflows/v2-candidate-acceptance.yml",
+    ".github/workflows/e2e.yml",
+    ".github/workflows/release-candidate.yml",
+)
+
+
+def _invocations(text):
+    """Each `scripts/upgrade_smoke.sh` call with the shell continuation lines above it."""
+    blocks = []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if "scripts/upgrade_smoke.sh" not in line:
+            continue
+        start = index
+        while start > 0 and lines[start - 1].rstrip().endswith("\\"):
+            start -= 1
+        blocks.append("\n".join(lines[start:index + 1]))
+    return blocks
+
+
+def test_every_caller_names_all_three_candidate_images():
+    missing = []
+    for relative in SMOKE_CALLERS:
+        path = ROOT / relative
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for block in _invocations(text):
+            for variable in ("SCANNER_IMAGE", "CANDIDATE_API_IMAGE", "CANDIDATE_UI_IMAGE"):
+                if f"{variable}=" not in block:
+                    missing.append(f"{relative}: invocation omits {variable}")
+    assert not missing, "\n".join(missing)
+
+
+def test_no_caller_was_overlooked():
+    """A new caller must appear in the list above, not run unbound."""
+    found = set()
+    for path in list(ROOT.glob("Makefile")) + list((ROOT / ".github/workflows").glob("*.yml")):
+        if "scripts/upgrade_smoke.sh" in path.read_text(encoding="utf-8"):
+            found.add(str(path.relative_to(ROOT)))
+    assert found <= set(SMOKE_CALLERS), (
+        f"unlisted callers of the upgrade smoke: {sorted(found - set(SMOKE_CALLERS))}"
+    )

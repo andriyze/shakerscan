@@ -431,7 +431,10 @@ jobs:
         run: |
           docker compose exec -T api python -c 'import api; assert api.app'
           docker compose exec -T worker sh -ceu 'httpx -version; nuclei -version; katana -version; dalfox version'
-          SCANNER_IMAGE=shakerscan-worker:local scripts/upgrade_smoke.sh
+          SCANNER_IMAGE=shakerscan-worker:local \
+            CANDIDATE_API_IMAGE=shakerscan-api:latest \
+            CANDIDATE_UI_IMAGE=shakerscan-ui:latest \
+            scripts/upgrade_smoke.sh
 
       - name: Enforce external adapter wire ceilings
         run: |
