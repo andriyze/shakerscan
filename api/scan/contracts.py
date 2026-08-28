@@ -32,7 +32,7 @@ from .execution import ScanExecutionPlan
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
     "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 20, 25),
     "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4, 100, 100),
-    "thorough": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 2_700, 8, 500, 500),
+    "thorough": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 3_600, 8, 500, 500),
 }
 
 # These are the only family names with concrete canonical action-graph semantics.

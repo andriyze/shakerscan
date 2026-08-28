@@ -2443,11 +2443,21 @@ class DatabaseNeutralScanActionDispatcher:
         batch_errors = list(errors[:20])
         if partial:
             attempt_errors = [str(item).strip().lower() for item in batch_errors]
-            stated = (
-                CapabilityResultReason.TIMED_OUT.value
-                if attempt_errors and all(item == "timeout" for item in attempt_errors)
-                else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+            # A batch that attempted every candidate it had did not run out of plan
+            # budget, whatever went wrong inside those attempts. Claiming otherwise put a
+            # false reason on a required action -- `verify.xss` reported
+            # "insufficient_plan_budget" while holding 650 unused requests, its attempts
+            # having been wall-killed (exit -9) -- and that alone made the grade
+            # unreliable while pointing every reader at the wrong cause.
+            wall_killed = attempt_errors and all(
+                item == "timeout" or item.startswith("exit_-") for item in attempt_errors
             )
+            if wall_killed:
+                stated = CapabilityResultReason.TIMED_OUT.value
+            elif unattempted:
+                stated = CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+            else:
+                stated = CapabilityResultReason.ADAPTER_FAILED.value
             batch_errors.insert(0, stated)
         return self._receipt(
             action,

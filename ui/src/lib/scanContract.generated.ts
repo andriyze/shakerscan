@@ -60,7 +60,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "profile_ceilings": {
         "balanced": 900,
         "fast": 180,
-        "thorough": 2700
+        "thorough": 3600
       }
     },
     {
@@ -125,7 +125,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "max_http_requests": 20000,
       "max_state_changing_requests": 500,
       "max_tcp_ports": 20000,
-      "max_tool_wall_seconds": 2700,
+      "max_tool_wall_seconds": 3600,
       "max_workers": 8
     }
   },
