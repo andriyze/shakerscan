@@ -22,6 +22,9 @@ CANDIDATE_REDIS_CONTAINER="shakerscan-candidate-redis-$$"
 CANDIDATE_API_CONTAINER="shakerscan-candidate-api-$$"
 CANDIDATE_UI_CONTAINER="shakerscan-candidate-ui-$$"
 CANDIDATE_WORKER_CONTAINER="shakerscan-candidate-worker-$$"
+UPGRADE_QUEUED_ID="upgrade-smoke-queued-$$"
+UPGRADE_LEASED_ID="upgrade-smoke-leased-$$"
+UPGRADE_QUEUED_JOB="{\"scan_id\":\"$UPGRADE_QUEUED_ID\",\"job_id\":\"$UPGRADE_QUEUED_ID\"}"
 SMOKE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-upgrade-smoke.XXXXXX")"
 
 cleanup() {
@@ -248,28 +251,32 @@ docker exec -i "$SMOKE_CONTAINER" pg_restore \
 # than by an operator.
 
 seed_redis_upgrade_work() {
-    # Queued and leased work an operator would have in flight across an upgrade. If the candidate
-    # loses or corrupts it, the upgrade silently drops authorized scans.
+    # Queued and leased work an operator would have in flight across an upgrade. Each is tracked
+    # by its OWN identity: an earlier version of this check seeded an unrelated lease and accepted
+    # "queue drained OR some lease exists", so losing the queued job entirely still passed.
     docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
-        RPUSH scan_jobs '{"scan_id":"upgrade-smoke-queued","job_id":"upgrade-smoke-queued"}' >/dev/null
+        RPUSH scan_jobs "$UPGRADE_QUEUED_JOB" >/dev/null
     docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
-        SET "scan_lease:upgrade-smoke-leased" "upgrade-smoke-worker" EX 3600 >/dev/null
+        SET "scan_lease:$UPGRADE_LEASED_ID" "upgrade-smoke-worker" EX 3600 >/dev/null
 }
 
 assert_redis_work_survived() {
-    local queued leased
-    queued="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
-        LLEN scan_jobs | tr -d '[:space:]')"
-    leased="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
-        GET "scan_lease:upgrade-smoke-leased" | tr -d '[:space:]')"
-    # The queue may legitimately be drained by the candidate worker claiming the job, but the work
-    # must not vanish without a lease: either it is still queued, or it is held.
-    if [ "$queued" = "0" ] && [ -z "$leased" ]; then
-        echo "queued work disappeared across the upgrade without being leased" >&2
+    local still_queued claimed leased
+    # The SPECIFIC queued job, not the queue length: still on the queue, or claimed by this exact
+    # id, or settled with a terminal marker. Anything else means it was lost.
+    still_queued="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner \
+        --no-auth-warning LRANGE scan_jobs 0 -1 | grep -c "$UPGRADE_QUEUED_ID" || true)"
+    claimed="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
+        EXISTS "scan_lease:$UPGRADE_QUEUED_ID" | tr -d '[:space:]')"
+    if [ "$still_queued" = "0" ] && [ "$claimed" != "1" ]; then
+        echo "the queued job $UPGRADE_QUEUED_ID was neither preserved nor claimed across the upgrade" >&2
         exit 1
     fi
-    if [ -n "$leased" ] && [ "$leased" != "upgrade-smoke-worker" ]; then
-        echo "an existing worker lease was overwritten by the candidate: $leased" >&2
+    # The pre-existing lease belongs to the worker that took it and must survive intact.
+    leased="$(docker exec "$CANDIDATE_REDIS_CONTAINER" redis-cli -a scanner --no-auth-warning \
+        GET "scan_lease:$UPGRADE_LEASED_ID" | tr -d '[:space:]')"
+    if [ "$leased" != "upgrade-smoke-worker" ]; then
+        echo "the pre-existing worker lease did not survive the upgrade: '${leased:-missing}'" >&2
         exit 1
     fi
 }

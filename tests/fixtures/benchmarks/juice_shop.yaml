@@ -15,6 +15,16 @@ auth:
   user1_login: { url: /rest/user/login, email_field: email, password_field: password }
 
 # Per-target pass/fail gates.
+# The standard this benchmark exists to measure against. Evaluated and reported on EVERY run, and
+# deliberately NOT part of `passed`: the gates below hold the line against regression, this says how
+# far the engine still is from the bar. Setting only the shipped numbers would make a green
+# scorecard read as "meets its bar" when it means "no worse than the day we lowered it".
+quality_bar:
+  min_expected_recall: 0.67          # 6 of the 9 expected classes
+  require_browser_proven_xss: true   # Juice Shop's DOM XSS should be browser-proven
+  require_reliable_grade: true       # coverage complete enough to trust the grade
+  max_known_expectation_gaps: 0      # every declared gap is a debt against this bar
+
 # The expectations below are NOT reduced to what the engine currently proves: they describe what a
 # competent DAST should find on this app, and shrinking them would destroy the measurement. The
 # classes not yet reachable are declared instead, so the shortfall stays visible and any NEW miss

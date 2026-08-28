@@ -56,3 +56,31 @@ def test_the_scheduled_total_is_summed_per_capability_not_per_family():
     source = definition_source("finalize_scan_report")
     assert 'row["_scheduled_entries"][action.capability_name]' in source
     assert "for capability, total in manifest_entries.items()" in source
+
+
+def test_unfinished_required_work_reaches_the_grade():
+    """Marking a family partial is not enough on its own.
+
+    `selected_family_gaps` is what carries a family's incompleteness into the top-level coverage
+    rollup and `grade_reliable`. The unscheduled and unattempted branches set the family's own
+    status but did not append to it, so an external audit reproduced a plan with ten manifest
+    candidates and two scheduled that still reported `coverage: complete` and
+    `grade_reliable: true`. A required family that did not finish its surface must invalidate the
+    grade computed over it.
+    """
+    source = definition_source("finalize_scan_report")
+    for reason in ("manifest_entries_unscheduled", "candidates_unattempted"):
+        branch = source.index(f'row["reason"] = "{reason}"')
+        nxt = source.find('elif row[', branch)
+        tail = source[branch:nxt if nxt > 0 else branch + 400]
+        assert 'selected_family_gaps.append(family)' in tail, reason
+        assert 'if row["required"]:' in tail, reason
+
+
+def test_an_optional_family_does_not_invalidate_the_grade():
+    # Only a REQUIRED family's shortfall makes the grade unreliable; a supporting family that ran
+    # partially is expected and must not degrade the whole report.
+    source = definition_source("finalize_scan_report")
+    branch = source.index('row["reason"] = "manifest_entries_unscheduled"')
+    tail = source[branch:branch + 900]
+    assert tail.index('if row["required"]:') < tail.index("selected_family_gaps.append(family)")

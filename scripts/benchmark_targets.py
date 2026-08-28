@@ -842,6 +842,47 @@ def collect_scorecard(report, fixture):
     }
 
 
+def apply_quality_bar(card, fixture):
+    """Evaluate the standard this benchmark is FOR, separately from what currently ships.
+
+    Setting the shipped numbers as the only gate makes a passing scorecard mean "no worse than the
+    day we lowered it" while reading like "the engine meets its bar". Both are recorded: the
+    regression gates decide `passed` and keep CI honest about drift, and the quality bar is
+    evaluated and reported every run so the distance to the intended standard is never hidden. It
+    deliberately does not affect `passed` -- the release decision is a human one, made with both
+    numbers in view.
+    """
+    bar = fixture.get("quality_bar") or {}
+    if not bar:
+        return None
+    results = []
+
+    def chk(name, ok, detail):
+        results.append({"gate": name, "pass": bool(ok), "detail": detail})
+
+    if "min_expected_recall" in bar:
+        recall = card.get("expected_recall")
+        measured = isinstance(recall, (int, float)) and not isinstance(recall, bool)
+        chk("quality:min_expected_recall",
+            measured and float(recall) >= float(bar["min_expected_recall"]),
+            f"{recall if measured else 'not measured'} >= {bar['min_expected_recall']}")
+    if bar.get("require_browser_proven_xss"):
+        ok = "xss" in (card.get("browser_proven_high_critical_families") or [])
+        chk("quality:require_browser_proven_xss", ok,
+            "browser XSS present" if ok else "no browser-proven XSS")
+    if bar.get("require_reliable_grade"):
+        chk("quality:grade_reliable", card.get("grade_reliable") is not False,
+            f"grade_reliable={card.get('grade_reliable')}")
+    if "max_known_expectation_gaps" in bar:
+        declared = len((fixture.get("gates") or {}).get("known_expectation_gaps") or [])
+        chk("quality:max_known_expectation_gaps",
+            declared <= int(bar["max_known_expectation_gaps"]),
+            f"{declared} declared gaps <= {bar['max_known_expectation_gaps']}")
+    card["quality_gates"] = results
+    card["quality_passed"] = all(item["pass"] for item in results)
+    return results
+
+
 def apply_gates(card, fixture):
     gates = fixture.get("gates", {})
     results = []
@@ -1156,12 +1197,18 @@ def run_target(name, api, timeout, do_auth, preset_scan_id=None, rescore_after_r
             print(f"[{name}] post-retest re-score: verified H/C "
                   f"{finish_card['verified_high_critical']} -> {post_card['verified_high_critical']}", flush=True)
 
+    quality = apply_quality_bar(scoring_card, fx)
     gates = apply_gates(scoring_card, fx)
     out = dict(scoring_card)
     out["scan_id"] = scan_id
     out["target"] = name
     out["gates"] = gates
     out["passed"] = all(g["pass"] for g in gates)
+    if quality is not None:
+        # Reported beside `passed`, never folded into it: a regression pass must never read as
+        # meeting the standard the benchmark exists to measure.
+        out["quality_gates"] = quality
+        out["quality_passed"] = all(g["pass"] for g in quality)
     out["scorecards"] = cards_by_phase
     return out
 
@@ -1291,6 +1338,14 @@ def main():
             print(f"    HYPOTHESES {status}: created_or_endorsed={created} skipped={skipped} {detail}")
         for g in card.get("gates", []):
             print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
+        quality = card.get("quality_gates") or []
+        if quality:
+            # Printed after the regression gates and clearly labelled, so a green run can never be
+            # read as meeting the standard when it is only holding the line.
+            verdict = "MET" if card.get("quality_passed") else "NOT MET"
+            print(f"    -- quality bar ({verdict}): the standard this benchmark measures against --")
+            for g in quality:
+                print(f"    [{'PASS' if g['pass'] else 'FAIL'}] {g['gate']}: {g['detail']}")
     run = {
         **artifact_metadata(bool(overall_ok)),
         "fleet": fleet, "fleet_uniform": uniform,

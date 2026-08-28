@@ -253,10 +253,12 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
         "verified": 1, "suspected": 1, "unproven_critical_high": 1,
     }
     assert report["result"] == {
-        "score": 80,
-        "grade": "B*",
+        "score": 70,
+        # 70 is the C band: one high-severity finding now caps the grade there rather than
+        # denting a 100 down to a still-passing 90.
+        "grade": "C*",
         "grade_reliable": False,
-        "score_policy": "verified_and_suspected_severity_weight/v1",
+        "score_policy": "verified_and_suspected_severity_ceiling/v2",
     }
     assert report["coverage"]["grade_reliability"]["reasons"] == [
         "unproven_critical_high"

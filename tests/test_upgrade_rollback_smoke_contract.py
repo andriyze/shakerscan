@@ -95,10 +95,15 @@ def test_queued_and_leased_redis_work_must_survive_the_upgrade():
     assert "seed_redis_upgrade_work()" in source
     assert "assert_redis_work_survived()" in source
     body = source[source.index("assert_redis_work_survived()"):]
-    # Work may be claimed by the candidate worker, but it must not simply vanish.
-    assert "queued work disappeared across the upgrade without being leased" in body[:1500]
-    # An existing lease belongs to the worker that took it.
-    assert "an existing worker lease was overwritten by the candidate" in body[:1500]
+    # Each piece of work is tracked by its OWN identity. An earlier version seeded an unrelated
+    # lease and accepted "queue drained OR some lease exists", so losing the queued job entirely
+    # still passed -- an external audit reproduced exactly that false pass.
+    assert "$UPGRADE_QUEUED_ID" in body[:1800]
+    assert "LRANGE scan_jobs" in body[:1800], "the specific job, not the queue length"
+    assert "was neither preserved nor claimed across the upgrade" in body[:1800]
+    # The pre-existing lease is checked by its own key and expected value.
+    assert "the pre-existing worker lease did not survive the upgrade" in body[:1800]
+    assert "$UPGRADE_LEASED_ID" in body[:1800]
 
 
 def test_the_candidate_runs_before_the_rollback_leg():

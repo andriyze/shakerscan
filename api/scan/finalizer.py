@@ -25,6 +25,15 @@ _SEVERITY_WEIGHT = {
     "low": 2,
     "info": 0,
 }
+# The best score a scan can hold once a finding of this severity exists. Grade bands are
+# A>=90, B>=80, C>=70, D>=60, F<60 -- so one critical is an F however few findings there are, one
+# high cannot exceed C, and one medium cannot exceed B. Low and informational have no ceiling: a
+# single low-severity issue is not a reason to fail an application, though it still costs weight.
+_SEVERITY_SCORE_CEILING = {
+    "critical": 40,
+    "high": 70,
+    "medium": 85,
+}
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
@@ -763,10 +772,21 @@ def _runtime_destinations(
 
 
 def _score(findings: Sequence[Mapping[str, Any]]) -> tuple[int, str]:
-    score = max(0, 100 - sum(
-        _SEVERITY_WEIGHT.get(str(item.get("severity") or "info"), 0)
-        for item in findings
-    ))
+    """Score a scan so the worst thing found sets the ceiling and the count moves it within.
+
+    Subtracting a weight per finding from 100 made severity a dent rather than a verdict: one
+    proven critical injection scored 80 and graded B, one high scored 90 and graded A. On a
+    deliberately vulnerable application that produced pages of A grades beside proven injections.
+    A security grade has to answer "how bad is the worst thing here", so severity caps the score
+    and the subtractive weight then differentiates within that cap.
+    """
+    severities = [str(item.get("severity") or "info").strip().lower() for item in findings]
+    score = max(0, 100 - sum(_SEVERITY_WEIGHT.get(name, 0) for name in severities))
+    ceiling = min(
+        (_SEVERITY_SCORE_CEILING[name] for name in severities if name in _SEVERITY_SCORE_CEILING),
+        default=100,
+    )
+    score = min(score, ceiling)
     grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
     return score, grade
 
@@ -999,9 +1019,17 @@ def finalize_scan_report(
         elif row["unscheduled_candidates"] > 0:
             row["coverage_status"] = "partial"
             row["reason"] = "manifest_entries_unscheduled"
+            # A REQUIRED family that left work unscheduled has not covered its surface, so the
+            # grade computed over it is not reliable. Marking the family partial while leaving the
+            # top-level rollup clean reported `coverage: complete` and `grade_reliable: true` over
+            # a plan that ran a fraction of its manifest.
+            if row["required"]:
+                selected_family_gaps.append(family)
         elif row["unattempted_candidates"] > 0:
             row["coverage_status"] = "partial"
             row["reason"] = "candidates_unattempted"
+            if row["required"]:
+                selected_family_gaps.append(family)
         else:
             row["coverage_status"] = "complete"
             row["reason"] = None
@@ -1178,7 +1206,7 @@ def finalize_scan_report(
             "score": score,
             "grade": rendered_grade,
             "grade_reliable": grade_reliable,
-            "score_policy": "verified_and_suspected_severity_weight/v1",
+            "score_policy": "verified_and_suspected_severity_ceiling/v2",
         },
         "coverage": {
             "status": coverage_status,

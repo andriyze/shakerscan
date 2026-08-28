@@ -3138,6 +3138,7 @@ async def _enqueue_canonical_browser_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
+    record_cancellable_job(redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id,
         "type": "canonical_browser_capability",
@@ -3209,6 +3210,7 @@ async def _enqueue_canonical_scanner_capability(
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
+    record_cancellable_job(redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id,
         "type": "canonical_scanner_capability",
@@ -3611,6 +3613,7 @@ async def _enqueue_hunt_replay_capability(
         raise HTTPException(status_code=422, detail="Safe replay selection is empty")
     redis_client = get_redis()
     job_id = str(uuid.uuid4())
+    record_cancellable_job(redis_client, str(run["id"]), job_id)
     reservation_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     timeout_seconds = 60

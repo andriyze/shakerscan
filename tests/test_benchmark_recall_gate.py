@@ -215,3 +215,68 @@ def test_bfla_is_only_selected_when_two_principals_exist():
     source = inspect.getsource(module.submit_target)
     assert "if len(minted_tokens) >= 2:" in source
     assert 'include_families.append("authz_surface")' in source
+
+
+# --- The quality bar must survive the regression bar -------------------------------------------
+# Setting the shipped numbers as the ONLY gate makes a passing scorecard mean "no worse than the
+# day we lowered it" while reading as "the engine meets its bar". An external audit called this out
+# as a P0, correctly. Both are now evaluated every run.
+
+def _quality_fixture(**bar):
+    base = {"min_expected_recall": 0.67, "require_browser_proven_xss": True,
+            "require_reliable_grade": True, "max_known_expectation_gaps": 0}
+    base.update(bar)
+    return {"gates": {"known_expectation_gaps": [{"id": "a", "reason": "x"}]},
+            "quality_bar": base, "expected": []}
+
+
+def test_the_quality_bar_fails_when_the_regression_bar_passes():
+    card = _card(0.44)
+    card["grade_reliable"] = False
+    card["browser_proven_high_critical_families"] = []
+    benchmark.apply_quality_bar(card, _quality_fixture())
+    assert card["quality_passed"] is False
+    failed = {g["gate"] for g in card["quality_gates"] if not g["pass"]}
+    assert failed == {
+        "quality:min_expected_recall",
+        "quality:require_browser_proven_xss",
+        "quality:grade_reliable",
+        "quality:max_known_expectation_gaps",
+    }
+
+
+def test_the_quality_bar_never_changes_passed():
+    # The release decision is a human one taken with both numbers in view; the quality bar must not
+    # silently block CI, and must not be folded into `passed` either.
+    card = _card(0.44)
+    card["grade_reliable"] = False
+    benchmark.apply_quality_bar(card, _quality_fixture())
+    gates = _result(card, {"gates": {"min_expected_recall": 0.4}, "expected": []})
+    assert gates["min_expected_recall"]["pass"] is True
+    assert card["quality_passed"] is False
+
+
+def test_every_declared_gap_counts_as_debt_against_the_bar():
+    card = _card(0.9)
+    card["grade_reliable"] = True
+    card["browser_proven_high_critical_families"] = ["xss"]
+    benchmark.apply_quality_bar(card, _quality_fixture())
+    gap_gate = next(g for g in card["quality_gates"]
+                    if g["gate"] == "quality:max_known_expectation_gaps")
+    assert gap_gate["pass"] is False, "a declared gap is a debt, not a free pass"
+
+
+def test_a_fixture_with_an_answer_key_declares_a_quality_bar():
+    import yaml
+
+    for path in sorted(FIXTURES.glob("*.yaml")):
+        fixture = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not fixture.get("expected"):
+            continue
+        gaps = (fixture.get("gates") or {}).get("known_expectation_gaps") or []
+        if not gaps:
+            continue
+        # A fixture that has lowered its gate must say what the real bar is.
+        assert fixture.get("quality_bar"), (
+            f"{path.name} declares gaps but no quality_bar, so the shortfall is invisible"
+        )

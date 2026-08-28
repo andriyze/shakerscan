@@ -103,15 +103,57 @@ def test_missing_identifiers_are_refused_rather_than_guessed():
     assert signal_cancelled_jobs(redis, "") == []
 
 
-def test_both_queue_sites_record_their_job():
-    from tests.api_sources import definition_source
+def test_every_queue_site_records_its_job():
+    """Enumerated from the source, not listed by hand.
 
-    for handler in (
+    The first version of this test named the two sites the fix had touched, so it passed while
+    browser, scanner and replay work stayed uncancellable -- an external audit found exactly that.
+    Discovering the sites means a new one cannot be added without either registering its job or
+    failing here.
+    """
+    import ast
+
+    router = Path("api/hunt/interaction_router.py").read_text(encoding="utf-8")
+    tree = ast.parse(router)
+    missing = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        if not node.name.startswith("_enqueue_"):
+            continue
+        body = ast.get_source_segment(router, node) or ""
+        # A site that mints a job id is placing work on a worker, so a Hunt cancellation has to be
+        # able to reach it.
+        if "job_id = str(uuid.uuid4())" not in body:
+            continue
+        if "record_cancellable_job(" not in body:
+            missing.append(node.name)
+    assert not missing, (
+        "these queue work to a worker but never register it for Hunt cancellation: "
+        + ", ".join(sorted(missing))
+    )
+
+
+def test_the_enumeration_finds_every_known_site():
+    # Guard the guard: if the discovery predicate stops matching, the test above would pass
+    # vacuously.
+    import ast
+
+    router = Path("api/hunt/interaction_router.py").read_text(encoding="utf-8")
+    tree = ast.parse(router)
+    found = {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and node.name.startswith("_enqueue_")
+        and "job_id = str(uuid.uuid4())" in (ast.get_source_segment(router, node) or "")
+    }
+    assert found >= {
         "_enqueue_canonical_network_capability",
         "_enqueue_canonical_http_capability",
-    ):
-        source = definition_source(handler)
-        assert "record_cancellable_job(redis_client, hunt_id, job_id)" in source, handler
+        "_enqueue_canonical_browser_capability",
+        "_enqueue_canonical_scanner_capability",
+        "_enqueue_hunt_replay_capability",
+    }, found
 
 
 def test_cancel_signals_and_reports_what_it_reached():
