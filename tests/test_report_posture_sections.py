@@ -27,8 +27,12 @@ def _observations(**overrides):
                     "x-frame-options": "DENY",
                     "content-security-policy": "default-src 'self'; object-src 'none'",
                 },
+                # The capability builds this inside the response summary. An earlier
+                # version of this fixture put it at the observation root, which is a
+                # shape production never emits -- so the test passed while real reports
+                # carried an empty cookie list.
+                "set_cookie_metadata": [{"secure": True, "httponly": True, "samesite": "lax"}],
             },
-            "set_cookie_metadata": [{"secure": True, "httponly": True, "samesite": "lax"}],
         }],
         "baseline.dns": [{
             "kind": "dns_posture",
@@ -47,10 +51,16 @@ def _observations(**overrides):
             "certificate_not_after": "2026-11-03T19:41:03+00:00",
             "certificate_expired": False,
             "certificate_trust": "trusted",
+            "certificate_public_key_bits": 2048,
+            "certificate_public_key_type": "RSAPublicKey",
+            "certificate_signature_hash": "sha256",
+            "certificate_signature_algorithm": "1.2.840.113549.1.1.11",
         }],
         "discover.web_probe": [{
             "kind": "http_fingerprint", "webserver": "nginx",
-            "technologies": [{"name": "React", "version": "18"}],
+            # The probe emits plain strings, not objects. An earlier fixture used
+            # objects, which took a different branch than production ever does.
+            "technologies": ["React", "HTTP/3"],
         }],
     }
     base.update(overrides)
@@ -60,7 +70,11 @@ def _observations(**overrides):
 def test_security_headers_are_reported_with_what_is_missing():
     sections = _posture_sections(_observations())
     http = sections["http"]
-    assert http["security_headers"]["x-frame-options"] == "DENY"
+    # Keyed as the report contract names them, not as the wire header spells them.
+    assert http["security_headers"]["x_frame_options"] == "DENY"
+    assert "referrer_policy" not in http["security_headers"]
+    # The raw capture stays available alongside the projection.
+    assert http["observed_headers"]["x-frame-options"] == "DENY"
     # The report should say what is absent, not only what is present.
     assert "referrer-policy" in http["missing_security_headers"]
     assert "x-frame-options" not in http["missing_security_headers"]
@@ -73,7 +87,13 @@ def test_the_certificate_section_is_projected():
     assert tls["cipher_bits"] == 128
     # Flat `certificate_*` fields are gathered under the documented `certificate` path.
     assert tls["certificate"]["issuer"] == "CN=Test CA"
-    assert tls["certificate"]["subject"] == "CN=target.test"
+    # Subject renders as the common name; the full DN stays under subject_dn.
+    assert tls["certificate"]["subject"] == "target.test"
+    assert tls["certificate"]["subject_dn"] == "CN=target.test"
+    # The documented reader-facing names are present alongside the X.509 ones.
+    assert tls["certificate"]["key_size"] == 2048
+    assert tls["certificate"]["key_algo"] == "RSAPublicKey"
+    assert tls["certificate"]["sig_algo"] == "sha256"
     assert tls["certificate"]["expired"] is False
     assert "certificate_issuer" not in tls, "the flat form should not leak alongside the nested one"
 
@@ -141,3 +161,45 @@ def test_projection_is_pure():
     source = inspect.getsource(_posture_sections)
     for forbidden in ("requests", "urlopen", "socket", "open(", "datetime.now", "time."):
         assert forbidden not in source, forbidden
+
+
+def test_cookie_posture_is_read_from_the_response_summary():
+    """The observation root never carries it; reading there yields a silent empty list."""
+    obs = _observations()
+    root_shaped = dict(obs["baseline.http"][0])
+    response = dict(root_shaped["response"])
+    root_shaped["set_cookie_metadata"] = response.pop("set_cookie_metadata")
+    root_shaped["response"] = response
+    obs["baseline.http"] = [root_shaped]
+
+    assert _posture_sections(obs)["http"]["set_cookie_metadata"] == []
+
+
+def test_an_absent_csp_is_reported_missing_not_graded_zero():
+    """A scoring card reading "/100" for a policy that does not exist states nothing."""
+    obs = _observations()
+    http = dict(obs["baseline.http"][0])
+    response = dict(http["response"])
+    headers = dict(response["security_headers"])
+    headers.pop("content-security-policy")
+    response["security_headers"] = headers
+    http["response"] = response
+    obs["baseline.http"] = [http]
+
+    section = _posture_sections(obs)["http"]
+    assert "csp_evaluation" not in section
+    assert "content-security-policy" in section["missing_security_headers"]
+
+
+def test_a_present_csp_is_still_graded():
+    section = _posture_sections(_observations())["http"]
+    assert section["csp_evaluation"]["grade"]
+
+
+def test_observed_technologies_carry_a_label_not_an_invented_percentage():
+    items = _posture_sections(_observations())["discovery"]["tech"]["items"]
+    assert items, "the fixture should produce technologies"
+    assert {item["name"] for item in items} == {"React", "HTTP/3", "nginx"}
+    for item in items:
+        assert "confidence" not in item, "the probe assigns no numeric confidence"
+        assert item["confidence_label"] == "observed"

@@ -800,6 +800,114 @@ def _score(findings: Sequence[Mapping[str, Any]]) -> tuple[int, str]:
     return score, grade
 
 
+# The report contract the UI and AGENTS.md both name, mapped from the header the
+# capability actually captured.
+_UI_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("hsts", "strict-transport-security"),
+    ("x_frame_options", "x-frame-options"),
+    ("x_content_type_options", "x-content-type-options"),
+    ("referrer_policy", "referrer-policy"),
+    ("permissions_policy", "permissions-policy"),
+    ("coop", "cross-origin-opener-policy"),
+    ("corp", "cross-origin-resource-policy"),
+    ("coep", "cross-origin-embedder-policy"),
+    ("csp", "content-security-policy"),
+)
+
+
+def _common_name(distinguished_name: Any) -> str | None:
+    """Return the CN from an RFC 4514 DN, or None when there is none to read."""
+    for part in str(distinguished_name or "").split(","):
+        name, sep, value = part.partition("=")
+        if sep and name.strip().upper() == "CN" and value.strip():
+            return value.strip()
+    return None
+
+
+def _certificate_section(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Gather the flat `certificate_*` observation fields into the documented shape.
+
+    The observation names its fields for the X.509 structure it read; the report names
+    them for the reader (`key_size`, `key_algo`, `sig_algo`). Both are kept: the
+    documented names so the report renders, and the source names so nothing is lost.
+    """
+    flat = {
+        key[len("certificate_"):]: value
+        for key, value in row.items()
+        if key.startswith("certificate_") and value is not None
+    }
+    if not flat:
+        return {}
+    dns_names = [str(name) for name in flat.get("dns_names") or ()]
+    certificate = dict(flat)
+    certificate["subject_dn"] = flat.get("subject")
+    certificate["subject"] = _common_name(flat.get("subject")) or flat.get("subject")
+    if flat.get("public_key_bits") is not None:
+        certificate["key_size"] = flat["public_key_bits"]
+    if flat.get("public_key_type") is not None:
+        certificate["key_algo"] = flat["public_key_type"]
+    if flat.get("signature_algorithm") is not None:
+        certificate["sig_algo"] = flat.get("signature_hash") or flat["signature_algorithm"]
+    if flat.get("serial_hex") is not None:
+        certificate["serial"] = flat["serial_hex"]
+    if flat.get("sha256"):
+        certificate["fingerprints"] = {"sha256": flat["sha256"]}
+    if dns_names:
+        certificate["wildcard"] = any(name.startswith("*.") for name in dns_names)
+    return certificate
+
+
+def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a DNS posture observation into the documented per-record-type shape.
+
+    A query that timed out is reported as a timeout, never as "not configured": the
+    two look identical in an empty record list and only one of them is a finding.
+    """
+    records = row.get("records") if isinstance(row.get("records"), Mapping) else {}
+    addresses = row.get("bound_addresses") if isinstance(row.get("bound_addresses"), Mapping) else {}
+    failed = {
+        str(item).split(":", 1)[0]
+        for item in row.get("errors") or ()
+        if ":" in str(item)
+    }
+
+    def answered(name: str) -> list[Any]:
+        return [item for item in records.get(name) or () if item not in (None, "")]
+
+    section: dict[str, Any] = {
+        "records": dict(records),
+        "bound_addresses": dict(addresses),
+        "query_count": row.get("query_count"),
+        "errors": list(row.get("errors") or ()),
+    }
+    if addresses.get("A"):
+        section["a"] = list(addresses["A"])
+    if addresses.get("AAAA"):
+        section["aaaa"] = list(addresses["AAAA"])
+    if answered("host_mx"):
+        section["mx"] = answered("host_mx")
+    if answered("host_caa"):
+        section["caa"] = answered("host_caa")
+    spf = next(
+        (str(item) for item in answered("host_txt") if str(item).lower().startswith("v=spf1")),
+        None,
+    )
+    if spf:
+        section["spf"] = spf
+    if answered("dmarc"):
+        section["dmarc"] = {"record": str(answered("dmarc")[0])}
+    if "host_dnskey" in failed:
+        section["dnssec"] = {"status": "timeout"}
+    elif "host_dnskey" in records:
+        section["dnssec"] = {"status": "secure" if answered("host_dnskey") else "unsigned"}
+    for key, query in (("mta_sts", "mta_sts"), ("tls_rpt", "tls_rpt")):
+        if query in failed:
+            continue
+        if query in records:
+            section[key] = {"enabled": bool(answered(query))}
+    return section
+
+
 def _posture_sections(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> dict[str, Any]:
@@ -816,6 +924,7 @@ def _posture_sections(
     tls_section: dict[str, Any] = {}
     dns_section: dict[str, Any] = {}
     technologies: list[dict[str, Any]] = []
+    server_versions: dict[str, Any] = {}
     seen_tech: set[str] = set()
 
     for action_id, rows in observations.items():
@@ -831,30 +940,34 @@ def _posture_sections(
                 )
                 http_section = {
                     "status": response.get("status"),
-                    "http_version": response.get("http_version"),
-                    "content_type": response.get("content_type"),
-                    "security_headers": dict(headers),
+                    "security_headers": {
+                        key: headers[header]
+                        for key, header in _UI_SECURITY_HEADERS
+                        if header in headers
+                    },
+                    "observed_headers": dict(headers),
                     "missing_security_headers": sorted(
                         name for name in _EXPECTED_SECURITY_HEADERS if name not in headers
                     ),
-                    "set_cookie_metadata": list(row.get("set_cookie_metadata") or ()),
-                    "csp_evaluation": _evaluate_csp(headers.get("content-security-policy")),
+                    # Only a policy that exists gets graded: an absent CSP rendered as a
+                    # scoring card reading "/100", which states nothing. Its absence is
+                    # carried by the missing-header list instead.
+                    **(
+                        {"csp_evaluation": _evaluate_csp(headers["content-security-policy"])}
+                        if headers.get("content-security-policy") else {}
+                    ),
+                    # The capability puts cookie posture in the response summary, so that
+                    # is where it is read from; the observation root never carried it.
+                    "set_cookie_metadata": list(response.get("set_cookie_metadata") or ()),
                 }
             elif kind == "tls_protocol":
-                # The observation carries certificate facts as flat `certificate_*` fields; the
-                # documented report path is `result.tls.certificate`, so they are gathered rather
-                # than passed through. Written against the real observation, not an assumed shape.
-                certificate = {
-                    key[len("certificate_"):]: value
-                    for key, value in row.items()
-                    if key.startswith("certificate_") and value is not None
-                }
                 candidate = {
                     key: row.get(key) for key in (
                         "protocol", "cipher", "cipher_bits", "weak_cipher",
                         "alpn_protocol", "origin", "port", "status",
                     ) if row.get(key) is not None
                 }
+                certificate = _certificate_section(row)
                 if certificate:
                     candidate["certificate"] = certificate
                 # A scan inspects several origins; keep the first successful handshake and let a
@@ -867,23 +980,28 @@ def _posture_sections(
                 ):
                     tls_section = candidate
             elif kind == "dns_posture":
-                dns_section = {
-                    "records": dict(row.get("records") or {}),
-                    "query_count": row.get("query_count"),
-                    "bound_addresses": dict(row.get("bound_addresses") or {}),
-                    "errors": list(row.get("errors") or ()),
-                }
+                dns_section = _dns_section(row)
             elif kind == "http_fingerprint":
                 for item in row.get("technologies") or ():
                     name = str((item or {}).get("name") if isinstance(item, Mapping) else item)
                     if name and name not in seen_tech:
                         seen_tech.add(name)
                         technologies.append(
-                            dict(item) if isinstance(item, Mapping) else {"name": name}
+                            dict(item) if isinstance(item, Mapping)
+                            # The probe observed this in the response; it assigns no
+                            # numeric confidence, and inventing one would be a claim the
+                            # scanner never made.
+                            else {"name": name, "confidence_label": "observed"}
                         )
-                if row.get("webserver") and str(row["webserver"]) not in seen_tech:
-                    seen_tech.add(str(row["webserver"]))
-                    technologies.append({"name": str(row["webserver"]), "source": "webserver"})
+                if row.get("webserver"):
+                    banner = str(row["webserver"])
+                    server_versions[str(row.get("url") or "server")] = banner
+                    if banner not in seen_tech:
+                        seen_tech.add(banner)
+                        technologies.append({
+                            "name": banner, "source": "webserver",
+                            "confidence_label": "observed",
+                        })
 
     sections: dict[str, Any] = {}
     if http_section:
@@ -892,8 +1010,13 @@ def _posture_sections(
         sections["tls"] = tls_section
     if dns_section:
         sections["dns"] = dns_section
-    if technologies:
-        sections["discovery"] = {"tech": {"items": technologies}}
+    if technologies or server_versions:
+        discovery: dict[str, Any] = {}
+        if technologies:
+            discovery["tech"] = {"items": technologies}
+        if server_versions:
+            discovery["server_versions"] = server_versions
+        sections["discovery"] = discovery
     return sections
 
 
@@ -1349,8 +1472,11 @@ def finalize_scan_report(
             "grade": rendered_grade,
             "grade_reliable": grade_reliable,
             "score_policy": "verified_and_suspected_severity_ceiling/v2",
-            **_posture_sections(observations),
         },
+        # Posture belongs on the envelope, not inside the nested "result": the stored
+        # `result_json` IS what a client reads as `scan.result`, so a section nested one
+        # level deeper is documented as `result.tls` and served as `result.result.tls`.
+        **_posture_sections(observations),
         "coverage": {
             "status": coverage_status,
             "reasons": coverage_reasons,

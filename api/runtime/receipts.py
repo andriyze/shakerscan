@@ -26,6 +26,11 @@ _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _UNSET = object()
+# Standard response headers whose names collide with a secret word but whose values
+# are policy declarations. `Access-Control-Allow-Credentials: true` says the endpoint
+# honours cross-origin credentials -- that is precisely the posture a report exists to
+# show, and masking it destroyed the evidence.
+_NON_SECRET_HEADER_NAMES = frozenset({"access_control_allow_credentials"})
 _EXACT_SENSITIVE_KEYS = frozenset({
     "access_key", "access_key_id", "access_token", "api_key", "apikey",
     "aws_access_key_id", "client_secret", "key", "private_key", "refresh_token",
@@ -98,6 +103,8 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     if not parts:
         return False
     joined = "_".join(parts)
+    if joined in _NON_SECRET_HEADER_NAMES:
+        return False
     describes = _describes_a_value(parts)
     if item is not _UNSET and isinstance(item, (bool, int, float)) and describes:
         return False

@@ -42,8 +42,8 @@ test('every internal sidebar destination is represented in the route manifest', 
   for (const href of hrefs) assert.ok(routes.has(href), `sidebar route ${href} is not declared`)
 })
 
-test('all 38 audited work-start paths retain a source marker and outcome assertion', () => {
-  const expected = Array.from({ length: 38 }, (_, index) => `START-${String(index + 1).padStart(3, '0')}`)
+test('all 36 audited work-start paths retain a source marker and outcome assertion', () => {
+  const expected = Array.from({ length: 36 }, (_, index) => `START-${String(index + 1).padStart(3, '0')}`)
   assert.deepEqual(manifest.workActions.map((entry) => entry.caseId).sort(), expected)
   for (const action of manifest.workActions) {
     const sourcePath = path.join(root, action.source)

@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+try:
+    from proof_contracts import is_canonical_proof_contract
+except ModuleNotFoundError:  # package import in host-side tests
+    from .proof_contracts import is_canonical_proof_contract
+
 
 def _coerce_float(value: Any) -> float | None:
     try:
@@ -72,8 +77,11 @@ def _has_satisfied_proof_contract(evidence: dict[str, Any]) -> bool:
     if not isinstance(evidence, dict):
         return False
     triage = evidence.get("triage") if isinstance(evidence.get("triage"), dict) else {}
+    # The contract must be one this scanner can re-execute. Accepting any non-empty
+    # name let operator-supplied evidence name an invented contract and promote itself
+    # to "exploited" without a single deterministic re-execution behind it.
     return bool(
-        str(evidence.get("proof_contract") or "").strip()
+        is_canonical_proof_contract(evidence.get("proof_contract"))
         and str(evidence.get("proof_state") or "").strip().lower() == "verified"
         and triage.get("verified") is True
     )

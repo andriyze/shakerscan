@@ -2362,7 +2362,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* TLS */}
-      {tls && (tls.certificate || tls.cipher_suites || tls.sslyze || tls.testssl || tls.nmap) && (
+      {tls && (tls.certificate || tls.protocol || tls.cipher_suites || tls.sslyze || tls.testssl || tls.nmap) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">TLS/SSL Configuration</h2>
           {tls.certificate && (
@@ -2701,7 +2701,25 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 OCSP Stapling: {tls.ocsp.stapled ? 'Enabled' : 'Not Detected'}
               </span>
             )}
-            {tls.testssl?.supports_tls13 !== null && (
+            {tls.protocol && (
+              <span className={`px-3 py-1 rounded text-sm ${tls.protocol === 'TLSv1.3' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
+                {tls.protocol}{tls.cipher ? ` · ${tls.cipher}` : ''}
+              </span>
+            )}
+            {tls.weak_cipher !== undefined && (
+              <span className={`px-3 py-1 rounded text-sm ${tls.weak_cipher ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
+                Cipher strength: {tls.weak_cipher ? 'Weak' : 'Strong'}{tls.cipher_bits ? ` (${tls.cipher_bits}-bit)` : ''}
+              </span>
+            )}
+            {tls.alpn_protocol && (
+              <span className="px-3 py-1 rounded text-sm bg-gray-700 text-gray-300">
+                ALPN: {tls.alpn_protocol}
+              </span>
+            )}
+            {/* `tls.testssl?.x !== null` is TRUE when testssl is absent -- undefined is not
+                null -- and the body then dereferenced it unguarded, so one missing
+                sub-object took down the entire report page. */}
+            {tls.testssl?.supports_tls13 != null && (
               <span className={`px-3 py-1 rounded text-sm ${tls.testssl.supports_tls13 ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                 TLS 1.3: {tls.testssl.supports_tls13 ? 'Supported' : 'Not Supported'}
               </span>
@@ -2714,7 +2732,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
 
           {/* Show message if no TLS data */}
-          {!tls.certificate?.days_remaining && !tls.sslyze?.tls_versions && !tls.testssl?.supports_tls13 && (
+          {!tls.certificate?.days_remaining && !tls.protocol && !tls.sslyze?.tls_versions && !tls.testssl?.supports_tls13 && (
             <p className="text-gray-500 text-sm">No TLS/SSL data available - target may not support HTTPS or scan was limited.</p>
           )}
         </div>
@@ -2826,6 +2844,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {[
               { name: 'HSTS', key: 'hsts', critical: true },
+              { name: 'Content-Security-Policy', key: 'csp', critical: true },
               { name: 'X-Frame-Options', key: 'x_frame_options', critical: true },
               { name: 'X-Content-Type-Options', key: 'x_content_type_options', critical: true },
               { name: 'Referrer-Policy', key: 'referrer_policy', critical: false },
