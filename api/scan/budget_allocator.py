@@ -67,17 +67,45 @@ _PRIMARY_ACTIVE_VERIFIER_IDS = {
     "verify.request_xss",
     "verify.authz",
 }
-_ACTIVE_VERIFIER_CAPABILITIES = {
-    "sqli.verify_batch",
-    "xss.verify_batch",
-    "sqli.verify",
-    "xss.verify",
-    "sqli.request_verify",
-    "xss.request_verify",
-    "sqli.request_verify_batch",
-    "xss.request_verify_batch",
-    "authz.verify",
-}
+# Capabilities that verify a candidate deterministically, as opposed to broadening
+# coverage. Derived from the registry rather than listed by hand: the hand-written set
+# named only the sqli/xss/authz verifiers that existed when it was written, so the
+# exposure, nosqli and authz_surface families -- added later, and all three REQUIRED --
+# fell to the default tier below broad template breadth. On Juice Shop that made
+# `passive.templates.001` outrank `verify.exposure.001` on nothing but alphabetical
+# order, skipping 102 of 210 exposure candidates and leaving the grade unreliable.
+#
+# `device.service.verify` and `candidate.verify` are excluded deliberately: neither
+# participates in a canonical Scan action plan.
+_VERIFIER_NAME_SUFFIXES = (".verify", ".verify_batch", ".request_verify", ".request_verify_batch")
+_NON_SCAN_VERIFIER_CAPABILITIES = frozenset({"candidate.verify", "device.service.verify"})
+
+
+def _derive_active_verifier_capabilities() -> frozenset[str]:
+    try:
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:  # package import in host-side tests
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    return frozenset(
+        name for name in (
+            str(getattr(spec, "name", spec)) for spec in CAPABILITY_REGISTRY.list()
+        )
+        if name.endswith(_VERIFIER_NAME_SUFFIXES)
+        and name not in _NON_SCAN_VERIFIER_CAPABILITIES
+    )
+
+
+_ACTIVE_VERIFIER_CAPABILITIES = _derive_active_verifier_capabilities()
+
+# Template sweeps broaden coverage; they never prove anything. Passive batches belong
+# here with the rest -- omitting them left them in the catch-all tier, competing with
+# proof work as an equal.
+_TEMPLATE_BREADTH_CAPABILITIES = frozenset({
+    "templates.scan",
+    "templates.active_batch",
+    "templates.passive_batch",
+    "templates.passive_scan",
+})
 
 
 def _allocation_priority(action: ScanAction) -> int:
@@ -99,7 +127,7 @@ def _allocation_priority(action: ScanAction) -> int:
         return 3
     if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
         return 4
-    if action.capability_name in {"templates.scan", "templates.active_batch"}:
+    if action.capability_name in _TEMPLATE_BREADTH_CAPABILITIES:
         return 5
     return 6
 
