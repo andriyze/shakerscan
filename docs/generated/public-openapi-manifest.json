@@ -13,7 +13,7 @@
     "AISettingsProbeRequest": "aa56c0aa6c2c3c4928cd0922421c52b42e768dafdb4e1f3cc0e19460c8f161af",
     "AISettingsUpdate": "a2e4ec2b9181116972dc310c9336bbd0ab15f462ac51b9d0365cb3f7ca49106f",
     "AITargetConnectivityTestRequest": "8b42ef7e773d6dcc94e0c5114625d896db0ca68738d783214644c78760c4b435",
-    "AITargetCreate": "7bdd9051cb2b92d3aa411dde4a625894606cc1995fc843ea499140e192465d81",
+    "AITargetCreate": "2dfaa83918b78af34e0a05e37c2915f78307bb5a1d39bf5c114943585aafd8ad",
     "AITargetCredential": "36d18e16447d2066044c7fc4df4e1d01c64e9a4d4da633ab850262e99e0b3a0b",
     "AITargetPrincipalCreate": "502b478d903ccf7d6e5b35b6b886efc03ff74ebd5de64eebe832011bb85cc098",
     "AITargetPrincipalUpdate": "78f3e4214ded88bd0ed475e878989cd71b9ac350ac63446050b4db0eb221af9f",
@@ -50,8 +50,8 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
-    "CredentialProfileCreate": "fa60e94ab8846e95c681c065720a4fd8f1bf74be37d07e5fea4251f441010e99",
-    "CredentialProfilePatch": "cd1434168495cb6793c31dccf93e1869184272fcc88913d0feabfd7057e599f1",
+    "CredentialProfileCreate": "5ce497f517c995a974fdd8cd8525f0d020a5268254c957a7c62b587ecadaa82b",
+    "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
     "CredentialProfileRotate": "9a29e2246008a2ac8143b0d245a4869ca6f4b5daaea156fe8265254401d806b5",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
     "DeviceAgentShellConfirmRequest": "fdef7745a9931aea4c672a551ab838d981de2c6b0944bd82847ae7baaa52d437",
@@ -145,8 +145,8 @@
     "ScanFamilyPreviewRequest": "a55203c1dc8757ada57f4ccf950ced3f14a94c465bd9b274a195b0e485a13c18",
     "ScanPublicCompatibilityOptions": "7529119d6bc845fd0f87c41d50f09e24cd74763242d14c7beb09a4b5e92fea30",
     "ScanPublicPlacement": "c4e5d7fecd6812e56a62f94fb639b7b792cfb9f904e75f7ae500b1d0597dc125",
-    "ScheduleCreate": "510834036b356235d1e7f365e85fd54645022116d18b6fac0ec11a63fb852b54",
-    "ScheduleUpdate": "a4a3c03fc55977b42ef34a5da1a2f7e57f5786665dd2f420d6fed88adbd33b92",
+    "ScheduleCreate": "7230e00073484dc22b21ab387323ec1c8a2f3596134b7712e04e892052d7d731",
+    "ScheduleUpdate": "9f5f80c7c72b527f331d60e33ff63dcc73f96dc510d5c97333ce01bb1df704ad",
     "ScopePreviewRequest": "c9d558119d4bec6e7ce3004de47ff76117a0e18331c77ef0034568525354fade",
     "SessionActionRequest": "4f6d384ac03d0b3f64e4d68b866f76125457e865dceb0637ed91e73ab52aee98",
     "SessionFindingCreate": "c6f7e1d0cbe91306da47b3706b686c6e1a2055d0c4b4f54c6bdf12300342ddd0",
@@ -154,7 +154,7 @@
     "SourceIngestFile": "24261cf6ca1c44f52d7de7c6214924abaf037935db22f36d7a2bcf833f7ce51d",
     "SourceIngestHint": "94e5d153a90162f75eaf9fc8318ac6c2311212f5731ba588e6ece3c516b5e462",
     "SourceIngestRequest": "242f6d3897985daa37e86f8ddf10f8c479e7a55d62061ac26a0c4cc7f6d8afa3",
-    "TargetCreate": "d5eae7ad950e8e9ffd2870400513ea537926e279a684a0d8cbd2421e0860a7d7",
+    "TargetCreate": "43ad13ff1c83843776253550a05f30f098fb9e61058f01d8c530deda4bc2dec8",
     "TargetCredentialProfileCreate": "e7b2d47f2ed91cec28b95a8f6e81665b9a89668e798c840197b43f9ecf4a3252",
     "TargetCredentialProfileRotate": "bd844225f60cfc92ef36eed08cc444a322dcf4d98a43f27db1a1d5f5a0a2c3c4",
     "TargetCredentialProfileUpdate": "f1d6822f06d5a2b15698c6c7702765e12fcaf5ddb37a75ef522f797285dfa9ae",
@@ -168,14 +168,14 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "e68dcb516b9d67c273c0eb54edb5d5fbee2024f2e01630c1b8e31564a4f613cb",
-    "TargetUpdate": "fd88dcd873327de681cb00eb1506cd944ddf728156abd20c56b4e55848214083",
+    "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "55b86ecaf10e557049f5273d62393ade1c3debb5adb88d3d8ea0877f05c92e76",
+  "contract_sha256": "48c00baada7e74bebdb6422a978807d6fce3e7d0fa540997ff3bb87ba21d51d1",
   "openapi": "3.1.0",
-  "operation_count": 389,
+  "operation_count": 390,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1052,6 +1052,21 @@
         "credentials"
       ]
     },
+    "GET /credential-profiles/capabilities": {
+      "deprecated": false,
+      "operation_id": "credential_capability_catalog_credential_profiles_capabilities_get",
+      "parameters_sha256": "cf959deda5469c23f55bdd3ae3aec9183f7be8c9b5534078aed4e209a0eccadb",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "credentials"
+      ]
+    },
     "GET /credential-profiles/{profile_id}": {
       "deprecated": false,
       "operation_id": "get_credential_profile_credential_profiles__profile_id__get",
@@ -1340,7 +1355,7 @@
     "GET /exposure/assets": {
       "deprecated": false,
       "operation_id": "exposure_assets_exposure_assets_get",
-      "parameters_sha256": "53a02e966bec1d29571fd6312b5c6c5509b3db99cbe9f716f13f274e11d36ff0",
+      "parameters_sha256": "3bc9d969ad5fe92ca37ba0722c4f96239f75f5a65e26a50e6c2c47de8fa54783",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -5260,6 +5275,7 @@
     "credentials": [
       "DELETE /credential-profiles/{profile_id}",
       "GET /credential-profiles",
+      "GET /credential-profiles/capabilities",
       "GET /credential-profiles/{profile_id}",
       "PATCH /credential-profiles/{profile_id}",
       "POST /credential-profiles",

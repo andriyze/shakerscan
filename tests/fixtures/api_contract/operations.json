@@ -465,6 +465,11 @@
     "operation_id": "create_credential_profile_credential_profiles_post"
   },
   {
+    "path": "/credential-profiles/capabilities",
+    "method": "get",
+    "operation_id": "credential_capability_catalog_credential_profiles_capabilities_get"
+  },
+  {
     "path": "/credential-profiles/{profile_id}",
     "method": "delete",
     "operation_id": "delete_credential_profile_credential_profiles__profile_id__delete"
@@ -1018,6 +1023,11 @@
     "path": "/hunts/{hunt_id}/query",
     "method": "post",
     "operation_id": "query_hunt_hunts__hunt_id__query_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/record",
+    "method": "get",
+    "operation_id": "export_hunt_record_hunts__hunt_id__record_get"
   },
   {
     "path": "/hunts/{hunt_id}/resume",

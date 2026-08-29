@@ -651,6 +651,13 @@
     "name": "create_credential_profile"
   },
   {
+    "path": "/credential-profiles/capabilities",
+    "methods": [
+      "GET"
+    ],
+    "name": "credential_capability_catalog"
+  },
+  {
     "path": "/credential-profiles/{profile_id}",
     "methods": [
       "DELETE"
@@ -1449,6 +1456,13 @@
       "POST"
     ],
     "name": "query_hunt"
+  },
+  {
+    "path": "/hunts/{hunt_id}/record",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_hunt_record"
   },
   {
     "path": "/hunts/{hunt_id}/resume",
