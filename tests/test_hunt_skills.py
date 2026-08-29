@@ -188,6 +188,43 @@ def test_a_budget_dimension_outside_the_skill_subset_is_rejected():
         )
 
 
+def test_unknown_manifest_keys_are_rejected_instead_of_silently_ignored():
+    with pytest.raises(HuntSkillError, match="unsupported skill fields"):
+        build_skill_spec(_spec(budgets={"max_http_requests": 10}), path="x.md", body="")
+    with pytest.raises(HuntSkillError, match="unsupported routing fields"):
+        build_skill_spec(
+            _spec(routing={"trigger": ["typo"]}), path="x.md", body="",
+        )
+
+
+def test_a_malformed_skill_is_quarantined_and_catalog_health_is_visible(tmp_path):
+    good = tmp_path / "good.md"
+    bad = tmp_path / "bad.md"
+    good.write_text(
+        "---\n" + "\n".join(f"{key}: {value}" for key, value in {
+            "id": "skill.web.good", "name": "good", "title": "Good",
+            "description": "Good skill", "version": "1.0.0", "kind": "specialist",
+            "phase": "recon", "risk": "low", "support": "supported",
+        }.items())
+        + "\ntarget_kinds: [web]\ncapabilities: [http.request]\n---\nMethod\n",
+        encoding="utf-8",
+    )
+    bad.write_text("---\nbudget: [unterminated\n---\n", encoding="utf-8")
+
+    loaded = load_skill_library(tmp_path)
+
+    assert [item.skill_id for item in loaded.list()] == ["skill.web.good"]
+    assert loaded.health()["status"] == "degraded"
+    assert loaded.health()["issue_count"] == 1
+
+
+def test_a_missing_skill_mount_is_not_reported_as_an_empty_catalog(tmp_path):
+    loaded = load_skill_library(tmp_path / "missing")
+    assert loaded.health()["status"] == "unavailable"
+    with pytest.raises(HuntSkillError, match="catalog is unavailable"):
+        loaded.resolve_for_hunt(["skill.web.anything"], target_kind="web")
+
+
 def test_a_deferred_technique_must_say_what_it_needs():
     with pytest.raises(HuntSkillError, match="what it requires"):
         build_skill_spec(
@@ -348,6 +385,14 @@ def test_the_edge_skill_no_longer_defers_the_client_ip_probe(library):
     deferred = {item["technique"] for item in spec.deferred_techniques}
     assert "client-ip-header-trust-probe" not in deferred
     assert "client-ip-header-trust" in spec.techniques
+
+
+def test_authorization_skill_keeps_session_establishment_available(library):
+    spec = library.require(
+        "skill.web.authorization-idor-bola-bfla-and-property-level-testing"
+    )
+    assert "two_controlled_identities" in spec.preconditions
+    assert "auth.session.establish" in spec.capabilities
 
 
 # --- cross-target hunt history -----------------------------------------------------------

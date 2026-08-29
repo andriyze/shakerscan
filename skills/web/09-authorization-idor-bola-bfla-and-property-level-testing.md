@@ -13,6 +13,7 @@ target_kinds:
 - web
 - api
 capabilities:
+- auth.session.establish
 - http.request
 - authz.verify
 - browser.navigate

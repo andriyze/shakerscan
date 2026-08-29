@@ -43,6 +43,15 @@ SKILL_BUDGET_DIMENSIONS = frozenset({
     "max_state_changing_requests",
     "max_oob_interactions",
 })
+SKILL_TOP_LEVEL_FIELDS = frozenset({
+    "id", "name", "title", "description", "version", "kind", "phase", "risk",
+    "support", "target_kinds", "capabilities", "optional_capabilities",
+    "missing_capabilities", "server_enforced", "server_satisfied_prerequisites",
+    "budget", "routing", "preconditions", "techniques", "promotion_gate",
+    "requires_skills", "deferred_techniques", "source",
+})
+SKILL_ROUTING_FIELDS = frozenset({"triggers", "indicators", "exclusions"})
+SKILL_DEFERRED_FIELDS = frozenset({"technique", "requires"})
 
 
 class HuntSkillError(ValueError):
@@ -174,6 +183,11 @@ def _deferred(value: Any, *, skill: str) -> tuple[Mapping[str, str], ...]:
     for item in value:
         if not isinstance(item, Mapping):
             raise HuntSkillError(f"{skill}: each deferred technique must be an object")
+        unknown = sorted(set(item) - SKILL_DEFERRED_FIELDS)
+        if unknown:
+            raise HuntSkillError(
+                f"{skill}: unsupported deferred technique fields: {', '.join(unknown)}"
+            )
         technique = str(item.get("technique") or "").strip()
         requires = str(item.get("requires") or "").strip()
         if not technique or not requires:
@@ -186,6 +200,11 @@ def _deferred(value: Any, *, skill: str) -> tuple[Mapping[str, str], ...]:
 
 def build_skill_spec(meta: Mapping[str, Any], *, path: str, body: str) -> HuntSkillSpec:
     """Validate one declaration against the live capability registry."""
+    unknown = sorted(set(meta) - SKILL_TOP_LEVEL_FIELDS)
+    if unknown:
+        raise HuntSkillError(
+            f"{path}: unsupported skill fields: {', '.join(unknown)}"
+        )
     skill_id = _text(meta.get("id"), field="id", skill=path)
     support = _text(meta.get("support"), field="support", skill=skill_id)
     if support not in SUPPORT_LEVELS:
@@ -226,6 +245,11 @@ def build_skill_spec(meta: Mapping[str, Any], *, path: str, body: str) -> HuntSk
     routing = meta.get("routing") or {}
     if not isinstance(routing, Mapping):
         raise HuntSkillError(f"{skill_id}: routing must be an object")
+    unknown_routing = sorted(set(routing) - SKILL_ROUTING_FIELDS)
+    if unknown_routing:
+        raise HuntSkillError(
+            f"{skill_id}: unsupported routing fields: {', '.join(unknown_routing)}"
+        )
 
     return HuntSkillSpec(
         skill_id=skill_id,
@@ -262,7 +286,14 @@ def build_skill_spec(meta: Mapping[str, Any], *, path: str, body: str) -> HuntSk
 class HuntSkillLibrary:
     """Validated, immutable-by-convention source of skill truth."""
 
-    def __init__(self, specs: Iterable[HuntSkillSpec]) -> None:
+    def __init__(
+        self,
+        specs: Iterable[HuntSkillSpec],
+        *,
+        catalog_status: str = "ready",
+        catalog_root: str | None = None,
+        catalog_issues: Iterable[Mapping[str, str]] = (),
+    ) -> None:
         by_id: dict[str, HuntSkillSpec] = {}
         for spec in specs:
             if spec.skill_id in by_id:
@@ -282,6 +313,18 @@ class HuntSkillLibrary:
                         f"{spec.skill_id}: requires {required}, which is not bindable"
                     )
         self._by_id = MappingProxyType(by_id)
+        self.catalog_status = str(catalog_status)
+        self.catalog_root = catalog_root
+        self.catalog_issues = tuple(MappingProxyType(dict(item)) for item in catalog_issues)
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "status": self.catalog_status,
+            "root": self.catalog_root,
+            "loaded_count": len(self),
+            "issue_count": len(self.catalog_issues),
+            "issues": [dict(item) for item in self.catalog_issues],
+        }
 
     def __len__(self) -> int:
         return len(self._by_id)
@@ -313,6 +356,8 @@ class HuntSkillLibrary:
         requested = [str(item or "").strip() for item in skill_ids if str(item or "").strip()]
         if not requested:
             return ()
+        if self.catalog_status == "unavailable":
+            raise HuntSkillError("Hunt skill catalog is unavailable on this runtime")
         # The cap applies to what the operator chose. Prerequisites are expanded below and
         # do not consume the operator's budget of choices.
         if len(requested) > MAX_SKILLS_PER_HUNT:
@@ -394,8 +439,14 @@ def _frontmatter(text: str) -> tuple[Mapping[str, Any], str]:
 
     if not text.startswith("---"):
         raise HuntSkillError("skill file has no frontmatter")
-    _, raw, body = text.split("---", 2)
-    meta = yaml.safe_load(raw)
+    try:
+        _, raw, body = text.split("---", 2)
+    except ValueError as exc:
+        raise HuntSkillError("skill frontmatter is not terminated") from exc
+    try:
+        meta = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise HuntSkillError("skill frontmatter is malformed YAML") from exc
     if not isinstance(meta, Mapping):
         raise HuntSkillError("skill frontmatter must be a mapping")
     return meta, body.lstrip("\n")
@@ -419,23 +470,65 @@ def skill_library_root() -> pathlib.Path | None:
 
 
 def load_skill_library(root: pathlib.Path | None = None) -> HuntSkillLibrary:
-    """Build the library from disk. A missing directory yields an empty library.
-
-    An empty library is a supported state: the skill plane is additive, and a runtime that
-    was installed without it must still start and hunt.
-    """
+    """Build the library while quarantining malformed files and reporting mount health."""
     location = root or skill_library_root()
-    if location is None:
-        return HuntSkillLibrary(())
-    specs = []
-    for path in sorted(location.glob("*.md")):
+    if location is None or not location.is_dir():
+        return HuntSkillLibrary(
+            (), catalog_status="unavailable",
+            catalog_root=str(location) if location is not None else None,
+            catalog_issues=({
+                "path": str(location) if location is not None else "",
+                "error": "skill directory is not mounted",
+            },),
+        )
+    issues: list[dict[str, str]] = []
+    by_id: dict[str, HuntSkillSpec] = {}
+    try:
+        paths = sorted(location.glob("*.md"))
+    except OSError as exc:
+        return HuntSkillLibrary(
+            (), catalog_status="unavailable", catalog_root=str(location),
+            catalog_issues=({"path": str(location), "error": type(exc).__name__},),
+        )
+    for path in paths:
         # Prose that documents the library rather than declaring a skill. Everything else
         # must carry frontmatter: a malformed skill fails loudly instead of disappearing.
         if path.name in LIBRARY_DOCUMENT_FILES:
             continue
-        meta, body = _frontmatter(path.read_text(encoding="utf-8"))
-        specs.append(build_skill_spec(meta, path=str(path), body=body))
-    return HuntSkillLibrary(specs)
+        try:
+            meta, body = _frontmatter(path.read_text(encoding="utf-8"))
+            spec = build_skill_spec(meta, path=str(path), body=body)
+            if spec.skill_id in by_id:
+                raise HuntSkillError(f"duplicate skill: {spec.skill_id}")
+            by_id[spec.skill_id] = spec
+        except (HuntSkillError, OSError, UnicodeError) as exc:
+            issues.append({"path": str(path), "error": str(exc) or type(exc).__name__})
+
+    # Quarantine bindable declarations whose prerequisite disappeared with a malformed
+    # file. Repeat because removing one prerequisite can invalidate another dependent.
+    while True:
+        invalid: list[tuple[str, str]] = []
+        for skill_id, spec in by_id.items():
+            if not spec.bindable:
+                continue
+            for required in spec.requires_skills:
+                prerequisite = by_id.get(required)
+                if prerequisite is None or not prerequisite.bindable:
+                    invalid.append((skill_id, f"requires unavailable skill {required}"))
+                    break
+        if not invalid:
+            break
+        for skill_id, error in invalid:
+            spec = by_id.pop(skill_id)
+            issues.append({"path": spec.path, "error": error})
+
+    status = "degraded" if issues else "ready"
+    if not by_id and not issues:
+        status = "empty"
+    return HuntSkillLibrary(
+        by_id.values(), catalog_status=status, catalog_root=str(location),
+        catalog_issues=issues,
+    )
 
 
 def read_skill_body(spec: HuntSkillSpec) -> str:

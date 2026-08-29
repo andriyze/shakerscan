@@ -210,6 +210,7 @@ async def list_hunt_skills(
         "skills": [spec.public() for spec in specs],
         "count": len(specs),
         "bindable_count": sum(1 for spec in specs if spec.bindable),
+        "catalog": library.health(),
     }
 
 
@@ -222,7 +223,7 @@ async def get_hunt_skill(skill_id: str, include_methodology: bool = Query(True))
         raise HTTPException(status_code=404, detail=f"unknown skill {skill_id}") from exc
     try:
         return spec.public(include_body=include_methodology)
-    except (OSError, HuntSkillError) as exc:
+    except (OSError, UnicodeError, HuntSkillError) as exc:
         raise HTTPException(
             status_code=503, detail="skill methodology is unavailable"
         ) from exc
