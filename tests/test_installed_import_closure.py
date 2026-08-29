@@ -66,16 +66,16 @@ def test_every_download_line_names_a_file_that_exists():
     assert not missing_on_disk, f"install/index.sh downloads files that no longer exist: {missing_on_disk}"
 
 
-def test_the_checker_detects_a_removed_module():
+def test_the_checker_detects_a_removed_module(tmp_path, monkeypatch):
     # Prove the gate bites rather than trivially passing: drop a known-required line and confirm the
-    # closure reports it.
+    # closure reports it. Use a private manifest copy because release validation mounts the approved
+    # source read-only; a test must never edit the candidate checkout it is meant to verify.
     original = (ROOT / "install" / "index.sh").read_text(encoding="utf-8")
     needle = 'download "$REPO_RAW_BASE/api/runtime/json_fields.py" "$INSTALL_DIR/api/runtime/json_fields.py"\n'
     assert needle in original
-    try:
-        (ROOT / "install" / "index.sh").write_text(original.replace(needle, "", 1), encoding="utf-8")
-        missing = checker.missing_modules()
-        assert "api/runtime/json_fields.py" in missing
-    finally:
-        (ROOT / "install" / "index.sh").write_text(original, encoding="utf-8")
-    assert not checker.missing_modules()
+    installer = tmp_path / "index.sh"
+    installer.write_text(original.replace(needle, "", 1), encoding="utf-8")
+    monkeypatch.setattr(checker, "INSTALLER", installer)
+
+    missing = checker.missing_modules()
+    assert "api/runtime/json_fields.py" in missing

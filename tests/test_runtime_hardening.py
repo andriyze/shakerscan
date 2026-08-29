@@ -646,7 +646,10 @@ def test_scanner_sh_local_build_marker_controls_default_runtime_mode():
     assert 'rm -f "$LOCAL_BUILD_MARKER"' not in script
     assert ".shakerscan-local-build" in gitignore
     ignored = subprocess.run(
-        ["git", "check-ignore", "--quiet", "--no-index", ".shakerscan-local-build"],
+        [
+            "git", "-c", f"safe.directory={ROOT}", "check-ignore",
+            "--quiet", "--no-index", ".shakerscan-local-build",
+        ],
         cwd=ROOT,
         check=False,
     )
