@@ -12,6 +12,29 @@ import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 
 const SEARCH_DEBOUNCE_MS = 300
 
+type TargetIdentityKind = 'registrable_domain' | 'ip_address' | 'internal_service' | 'host'
+
+export function classifyTargetGroupIdentity(value: string): { kind: TargetIdentityKind; label: string; canDiscoverSubdomains: boolean; internal: boolean } {
+  const host = value.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  const ipv4 = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)
+  const ipv6 = host.includes(':') && /^[0-9a-f:]+$/i.test(host)
+  const decimalAddress = /^\d+$/.test(host)
+  if (ipv4 || ipv6 || decimalAddress) {
+    return { kind: 'ip_address', label: decimalAddress ? 'Numeric IP form' : 'IP address', canDiscoverSubdomains: false, internal: false }
+  }
+  const internal = host === 'localhost'
+    || host.endsWith('.local')
+    || host.endsWith('.internal')
+    || host.endsWith('.localhost')
+    || host.includes('host.docker.internal')
+    || !host.includes('.')
+  if (internal) return { kind: 'internal_service', label: 'Internal service', canDiscoverSubdomains: false, internal: true }
+  const labels = host.split('.').filter(Boolean)
+  const registrable = labels.length >= 2 && /^[a-z]{2,63}$/i.test(labels.at(-1) || '')
+  if (registrable) return { kind: 'registrable_domain', label: 'Domain', canDiscoverSubdomains: true, internal: false }
+  return { kind: 'host', label: 'Host', canDiscoverSubdomains: false, internal: false }
+}
+
 function isPlausibleTargetUrl(value: string): boolean {
   const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value) ? value : `https://${value}`
   let url: URL
@@ -529,7 +552,7 @@ function TargetsContent() {
       {/* Summary with Clear Filters */}
       <div className="flex items-center justify-between">
         <span className="text-sm text-gray-400">
-          {totalRootDomains} domain{totalRootDomains !== 1 ? 's' : ''} - {totalTargets} target{totalTargets !== 1 ? 's' : ''}
+          {totalRootDomains} asset group{totalRootDomains !== 1 ? 's' : ''} · {totalTargets} target{totalTargets !== 1 ? 's' : ''}
         </span>
         {hasActiveFilters && (
           <button
@@ -559,10 +582,14 @@ function TargetsContent() {
       ) : (
         <div className="space-y-3">
           {domains.map((domain) => {
+            const identity = classifyTargetGroupIdentity(domain.root_domain)
             const domainInfo = (
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="block max-w-full truncate font-medium text-white">{boundedDisplayText(domain.root_domain, 96)}</span>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+                    identity.internal ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-800 text-gray-400'
+                  }`}>{identity.label}</span>
                   {domain.subdomain_count > 0 && (
                     <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
                       +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
@@ -571,6 +598,9 @@ function TargetsContent() {
                 </div>
                 {domain.root_target && (
                   <p className="text-xs text-gray-500 truncate">{boundedTargetDisplay(domain.root_target)}</p>
+                )}
+                {identity.internal && (
+                  <p className="mt-1 text-xs text-amber-300/80">Internal/private identity · runtime destination policy is checked before execution.</p>
                 )}
               </div>
             )
@@ -729,7 +759,7 @@ function TargetsContent() {
                       aria-haspopup="menu"
                       disabled={scanningDomains.has(domain.root_domain)}
                       className="flex items-center gap-1 px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white rounded text-xs font-medium transition-colors"
-                      title={`Scan all ${domain.total_count} target${domain.total_count !== 1 ? 's' : ''} in this domain`}
+                      title={`Scan all ${domain.total_count} target${domain.total_count !== 1 ? 's' : ''} in this asset group`}
                     >
                       {scanningDomains.has(domain.root_domain) ? (
                         <>
@@ -775,7 +805,8 @@ function TargetsContent() {
                     )}
                   </div>
                 )}
-                {/* Discover Button - always show for root domains */}
+                {/* Subdomain discovery only applies to registrable domain identities. */}
+                {identity.canDiscoverSubdomains && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
@@ -799,8 +830,9 @@ function TargetsContent() {
                     </>
                   )}
                 </button>
+                )}
                 {!domain.root_target && (
-                  <span className="text-xs text-gray-600 italic">No root target</span>
+                  <span className="text-xs text-gray-600 italic">Grouped targets · no exact root record</span>
                 )}
               </div>
 
