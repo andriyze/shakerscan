@@ -20,8 +20,11 @@ export interface UseUrlFiltersOptions<T extends FilterState> {
 // push against the prerendered entry and silently reverts it — breaking every
 // filter interaction after opening a deep link.
 function shallowNavigate(url: string, mode: 'push' | 'replace') {
-  if (mode === 'push') window.history.pushState(null, '', url)
-  else window.history.replaceState(null, '', url)
+  // Preserve the App Router's private history payload. Replacing it with null
+  // can leave popstate showing a new URL while React keeps the previous page.
+  const state = { ...(window.history.state || {}), __shakerscanFilterEntry: true }
+  if (mode === 'push') window.history.pushState(state, '', url)
+  else window.history.replaceState(state, '', url)
 }
 
 export function useUrlFilters<T extends FilterState = FilterState>(options: UseUrlFiltersOptions<T> = {}) {
