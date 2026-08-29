@@ -3,7 +3,26 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Braces, Compass, FileArchive, KeyRound, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldCheck, TriangleAlert, X } from 'lucide-react'
+import {
+  Activity,
+  BookOpen,
+  Bot,
+  Boxes,
+  Braces,
+  Compass,
+  FileArchive,
+  History,
+  KeyRound,
+  Menu,
+  Network,
+  PackageCheck,
+  Radar,
+  Router,
+  ServerCog,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+} from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
 import {
@@ -91,6 +110,7 @@ const navGroups: {
     badge: 'Agentic',
     items: [
       { href: '/hunt', label: 'Agent Hunt', icon: <Compass className="w-5 h-5" /> },
+      { href: '/hunts', label: 'Hunt History', icon: <History className="w-5 h-5" /> },
     ],
   },
   {

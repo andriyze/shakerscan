@@ -20,6 +20,17 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .cancellation import signal_cancelled_jobs
 
 
+HUNT_TARGET_KINDS = frozenset({"web", "api", "device", "network"})
+HUNT_BUDGET_PROFILE_NAMES = frozenset({"fast", "balanced", "thorough"})
+# Sortable columns, mapped explicitly so a client cannot name an arbitrary expression.
+HUNT_SORT_COLUMNS = {
+    "created_at": "h.created_at",
+    "updated_at": "h.updated_at",
+    "completed_at": "h.completed_at",
+    "status": "h.status",
+    "objective": "h.objective",
+    "target_url": "COALESCE(t.url, d.primary_locator)",
+}
 HUNT_RUN_STATUSES = frozenset({
     "created",
     "active",
@@ -199,10 +210,18 @@ def public_hunt_run(
         "policy": policy,
         "budget": _decode_json(item.get("budget_json"), {}),
         "budget_used": _decode_json(item.get("budget_used_json"), {}),
-        "stop_reason": item.get("stop_reason"),
         "final_debrief": _decode_json(item.get("final_debrief"), {}),
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
+        # Present in the table but never projected, so a client could not show how long a
+        # hunt took or sort by when it finished.
+        "completed_at": item.get("completed_at"),
+        "stop_reason": item.get("stop_reason"),
+        # Resolved by the list query's join. Absent on a single-run read, where the caller
+        # already knows the target it asked about.
+        "target_url": item.get("target_url"),
+        "target_name": item.get("target_name"),
+        "root_domain": item.get("root_domain"),
         "next_action": (
             f"POST /hunts/{item.get('id')}/query"
             if item.get("status") in {"active", "awaiting_planner"}
@@ -268,28 +287,79 @@ class HuntRunService:
     async def list(
         self,
         *,
-        target_id: str | None,
-        status: str | None,
-        limit: int,
+        target_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        target_kind: str | None = None,
+        budget_profile: str | None = None,
+        root_domain: str | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
     ) -> dict[str, Any]:
+        """List hunts across targets, with the target's identity resolved.
+
+        The projection carried only a target UUID, so any cross-target view rendered
+        unreadable identifiers or had to fetch every target and join in the browser. The
+        join happens here, and `total` is the count before paging so a client can say
+        "51-100 of 240" rather than "50 shown".
+        """
         clauses: list[str] = []
         params: list[Any] = []
         if target_id:
             params.append(_uuid_or_400(target_id, "target id"))
             clauses.append(
-                f"(target_id=${len(params)} OR device_target_id=${len(params)})"
+                f"(h.target_id=${len(params)} OR h.device_target_id=${len(params)})"
             )
         if status:
             if status not in HUNT_RUN_STATUSES:
                 raise HTTPException(status_code=400, detail="invalid Hunt status")
             params.append(status)
-            clauses.append(f"status=${len(params)}")
+            clauses.append(f"h.status=${len(params)}")
+        if target_kind:
+            if target_kind not in HUNT_TARGET_KINDS:
+                raise HTTPException(status_code=400, detail="invalid Hunt target kind")
+            params.append(target_kind)
+            clauses.append(f"h.target_kind=${len(params)}")
+        if budget_profile:
+            if budget_profile not in HUNT_BUDGET_PROFILE_NAMES:
+                raise HTTPException(status_code=400, detail="invalid Hunt budget profile")
+            params.append(budget_profile)
+            clauses.append(f"h.budget_profile=${len(params)}")
+        if root_domain:
+            params.append(str(root_domain).strip().lower())
+            clauses.append(f"t.root_domain=${len(params)}")
+        if search:
+            # Objective and target identity together: an operator looking for a past hunt
+            # remembers one or the other, rarely both.
+            params.append(f"%{str(search).strip()}%")
+            clauses.append(
+                f"(h.objective ILIKE ${len(params)} OR t.url ILIKE ${len(params)}"
+                f" OR t.name ILIKE ${len(params)} OR d.name ILIKE ${len(params)}"
+                f" OR d.primary_locator ILIKE ${len(params)})"
+            )
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
+        order_column = HUNT_SORT_COLUMNS.get(str(sort_by))
+        if order_column is None:
+            raise HTTPException(status_code=400, detail="invalid Hunt sort field")
+        direction = "ASC" if str(sort_order).lower() == "asc" else "DESC"
+        joins = (
+            " FROM hunt_runs h"
+            " LEFT JOIN targets t ON t.id = h.target_id"
+            " LEFT JOIN device_targets d ON d.id = h.device_target_id"
+        )
         async with self._pool().acquire() as connection:
+            total = await connection.fetchval(
+                f"SELECT COUNT(*){joins}{where}", *params,
+            )
+            params.extend([int(limit), max(0, int(offset))])
             rows = await connection.fetch(
-                f"SELECT * FROM hunt_runs{where} "
-                f"ORDER BY created_at DESC LIMIT ${len(params)}",
+                f"SELECT h.*, COALESCE(t.url, d.primary_locator) AS target_url,"
+                f" COALESCE(t.name, d.name) AS target_name, t.root_domain"
+                f"{joins}{where}"
+                f" ORDER BY {order_column} {direction} NULLS LAST, h.id"
+                f" LIMIT ${len(params) - 1} OFFSET ${len(params)}",
                 *params,
             )
         return {
@@ -300,6 +370,9 @@ class HuntRunService:
                 for row in rows
             ],
             "count": len(rows),
+            "total": int(total or 0),
+            "limit": int(limit),
+            "offset": max(0, int(offset)),
         }
 
     async def finish(

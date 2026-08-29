@@ -3106,6 +3106,12 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_hunt_runs_status
                 ON hunt_runs(status, updated_at DESC)
             """)
+            # The existing indexes are all partial or status-scoped, so a cross-target
+            # history page ordered by recency had no index to use.
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_runs_created
+                ON hunt_runs(created_at DESC)
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_cancellable_jobs (
                     hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,

@@ -341,3 +341,57 @@ def test_the_edge_skill_no_longer_defers_the_client_ip_probe(library):
     deferred = {item["technique"] for item in spec.deferred_techniques}
     assert "client-ip-header-trust-probe" not in deferred
     assert "client-ip-header-trust" in spec.techniques
+
+
+# --- cross-target hunt history -----------------------------------------------------------
+
+def test_the_hunt_list_exposes_filters_sorting_and_paging():
+    """It took only target_id, status and limit, so there was no way to review hunts across
+    targets: no offset, no search, no sort, and a count that was just the page size."""
+    from api.hunt.run_service import HUNT_SORT_COLUMNS
+    import inspect
+
+    from api.hunt.run_service import HuntRunService
+
+    signature = inspect.signature(HuntRunService.list)
+    for name in (
+        "target_id", "status", "limit", "offset", "search",
+        "target_kind", "budget_profile", "root_domain", "sort_by", "sort_order",
+    ):
+        assert name in signature.parameters, name
+    assert set(HUNT_SORT_COLUMNS) >= {
+        "created_at", "updated_at", "completed_at", "status", "target_url",
+    }
+
+
+def test_sortable_columns_are_an_explicit_map_not_client_text():
+    """The sort field reaches an ORDER BY, so it is resolved through a fixed map rather
+    than interpolated."""
+    from api.hunt.run_service import HUNT_SORT_COLUMNS
+
+    assert all(
+        value.startswith(("h.", "COALESCE(")) for value in HUNT_SORT_COLUMNS.values()
+    )
+    assert "; " not in "".join(HUNT_SORT_COLUMNS.values())
+
+
+def test_the_public_projection_carries_target_identity_and_completion():
+    """A cross-target list rendered bare UUIDs and could not show duration, because
+    completed_at was in the table but never projected."""
+    from api.hunt.run_service import public_hunt_run
+
+    row = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "target_kind": "web", "target_id": "22222222-2222-4222-8222-222222222222",
+        "objective": "x", "status": "completed", "budget_profile": "fast",
+        "policy_json": {}, "budget_json": {}, "budget_used_json": {},
+        "target_url": "https://app.example.test", "target_name": "App",
+        "root_domain": "example.test", "completed_at": "2026-01-01T00:00:00Z",
+        "stop_reason": "completed",
+    }
+    projection = public_hunt_run(row, include_context=False, include_capabilities=False)
+    assert projection["target_url"] == "https://app.example.test"
+    assert projection["target_name"] == "App"
+    assert projection["root_domain"] == "example.test"
+    assert projection["completed_at"] == "2026-01-01T00:00:00Z"
+    assert projection["stop_reason"] == "completed"

@@ -172,25 +172,41 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
 
 def test_hunt_run_service_lists_without_context_or_capability_expansion():
     class Connection:
+        async def fetchval(self, query, *args):
+            # Counted before paging so a client can report "51-100 of 240" rather than
+            # only how many rows this page happened to return.
+            assert query.startswith("SELECT COUNT(*)")
+            assert "LIMIT" not in query
+            return 240
+
         async def fetch(self, query, *args):
-            assert "target_id=$1 OR device_target_id=$1" in query
-            assert "status=$2" in query
-            assert "LIMIT $3" in query
-            assert args[1:] == ("active", 25)
+            assert "h.target_id=$1 OR h.device_target_id=$1" in query
+            assert "h.status=$2" in query
+            assert "LEFT JOIN targets t" in query
+            assert "LIMIT $3 OFFSET $4" in query
+            assert args[1:] == ("active", 25, 50)
             return [_row()]
 
     service = HuntRunService(lambda: _Pool(Connection()))
     result = asyncio.run(service.list(
-        target_id=str(uuid.uuid4()), status="active", limit=25
+        target_id=str(uuid.uuid4()), status="active", limit=25, offset=50,
     ))
 
     assert result["count"] == 1
+    assert result["total"] == 240
+    assert result["offset"] == 50
     assert "context_pack" not in result["hunts"][0]
     assert "capabilities" not in result["hunts"][0]
 
-    with pytest.raises(run_router.HTTPException) as exc:
-        asyncio.run(service.list(target_id=None, status="invented", limit=25))
-    assert exc.value.status_code == 400
+    for kwargs in (
+        {"status": "invented"},
+        {"target_kind": "invented"},
+        {"budget_profile": "invented"},
+        {"sort_by": "objective; DROP TABLE"},
+    ):
+        with pytest.raises(run_router.HTTPException) as exc:
+            asyncio.run(service.list(limit=25, **kwargs))
+        assert exc.value.status_code == 400, kwargs
 
 
 def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():

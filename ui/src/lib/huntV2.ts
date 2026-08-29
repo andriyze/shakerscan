@@ -57,6 +57,17 @@ export interface HuntV2 {
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
   created_at?: string
   updated_at?: string
+  completed_at?: string | null
+  // Resolved by the list query's join; absent on a single-run read, where the caller
+  // already knows which target it asked about.
+  target_url?: string | null
+  target_name?: string | null
+  root_domain?: string | null
+  skills?: Array<{
+    skill_id: string
+    title: string
+    requested: boolean
+  }>
 }
 
 export interface HuntStartV2Request {
@@ -119,19 +130,56 @@ export async function getHuntV2(huntId: string): Promise<HuntV2> {
   return response.json()
 }
 
-export async function listHuntsV2(params: {
+export type HuntSortField =
+  | 'created_at' | 'updated_at' | 'completed_at' | 'status' | 'objective' | 'target_url'
+
+export interface HuntListParams {
   targetId?: string
   status?: HuntV2['status']
+  targetKind?: HuntTargetKind
+  budgetProfile?: HuntBudgetProfile
+  rootDomain?: string
+  search?: string
+  sortBy?: HuntSortField
+  sortOrder?: 'asc' | 'desc'
   limit?: number
-} = {}): Promise<{ hunts: HuntV2[]; count: number }> {
+  offset?: number
+}
+
+export interface HuntListResult {
+  hunts: HuntV2[]
+  count: number
+  // Rows matching the filter before paging, so a view can say "51-100 of 240".
+  total: number
+  limit: number
+  offset: number
+}
+
+export async function listHuntsV2(params: HuntListParams = {}): Promise<HuntListResult> {
   const search = new URLSearchParams()
   if (params.targetId) search.set('target_id', params.targetId)
   if (params.status) search.set('status', params.status)
+  if (params.targetKind) search.set('target_kind', params.targetKind)
+  if (params.budgetProfile) search.set('budget_profile', params.budgetProfile)
+  if (params.rootDomain) search.set('root_domain', params.rootDomain)
+  if (params.search) search.set('search', params.search)
+  if (params.sortBy) search.set('sort_by', params.sortBy)
+  if (params.sortOrder) search.set('sort_order', params.sortOrder)
   if (params.limit) search.set('limit', String(params.limit))
+  if (params.offset) search.set('offset', String(params.offset))
   const suffix = search.size ? `?${search.toString()}` : ''
   const response = await fetch(`${API_URL}/hunts${suffix}`, { cache: 'no-store' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to list Hunts (${response.status})`))
-  return response.json()
+  const payload = await response.json()
+  // Older servers returned neither total nor offset; fall back to what was returned so a
+  // page renders rather than showing "undefined of undefined".
+  return {
+    hunts: payload.hunts || [],
+    count: payload.count ?? (payload.hunts || []).length,
+    total: payload.total ?? payload.count ?? (payload.hunts || []).length,
+    limit: payload.limit ?? params.limit ?? 50,
+    offset: payload.offset ?? params.offset ?? 0,
+  }
 }
 
 export async function cancelHuntV2(huntId: string): Promise<HuntV2> {

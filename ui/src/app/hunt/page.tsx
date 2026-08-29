@@ -77,10 +77,14 @@ function HuntHistory({
   targetId,
   runs,
   loading,
+  total,
+  error,
 }: {
   targetId: string
   runs: HuntV2[]
   loading: boolean
+  total: number
+  error: string | null
 }) {
   return (
     <Card className="p-5">
@@ -89,10 +93,14 @@ function HuntHistory({
           <h2 className="font-medium text-white">Recent Hunts for this target</h2>
           <p className="mt-1 text-xs text-gray-500">Open a durable run to inspect its policy, budget use, capabilities, scans, and outcome.</p>
         </div>
-        <span className="text-xs text-gray-500">{runs.length} shown</span>
+        <Link href={`/hunts?search=${encodeURIComponent(targetId)}`} className="text-xs text-blue-400 hover:text-blue-300">
+          {total > runs.length ? `View all ${total}` : 'View all hunts'}
+        </Link>
       </div>
       {loading ? (
         <p className="mt-4 text-sm text-gray-500">Loading Hunt history…</p>
+      ) : error ? (
+        <p role="alert" className="mt-4 text-sm text-amber-300">{error}</p>
       ) : runs.length === 0 ? (
         <p className="mt-4 text-sm text-gray-500">No canonical Hunts have been recorded for this target.</p>
       ) : (
@@ -158,6 +166,8 @@ function HuntContent() {
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
   const [huntHistory, setHuntHistory] = useState<HuntV2[]>([])
   const [huntHistoryLoading, setHuntHistoryLoading] = useState(false)
+  const [huntHistoryTotal, setHuntHistoryTotal] = useState(0)
+  const [huntHistoryError, setHuntHistoryError] = useState<string | null>(null)
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -258,8 +268,21 @@ function HuntContent() {
     }
     setHuntHistoryLoading(true)
     listHuntsV2({ targetId: selectedChoice.id, limit: 12 })
-      .then(({ hunts }) => { if (!cancelled) setHuntHistory(hunts) })
-      .catch(() => { if (!cancelled) setHuntHistory([]) })
+      .then(({ hunts, total }) => {
+        if (cancelled) return
+        setHuntHistory(hunts)
+        setHuntHistoryTotal(total)
+        setHuntHistoryError(null)
+      })
+      // A swallowed failure rendered as "no hunts recorded", which is a different and
+      // reassuring claim than "we could not load them".
+      .catch((cause) => {
+        if (cancelled) return
+        setHuntHistory([])
+        setHuntHistoryError(
+          cause instanceof Error ? cause.message : 'Failed to load Hunt history',
+        )
+      })
       .finally(() => { if (!cancelled) setHuntHistoryLoading(false) })
     return () => { cancelled = true }
   }, [selectedChoice?.id])
@@ -744,6 +767,8 @@ function HuntContent() {
               targetId={selectedChoice.id}
               runs={huntHistory}
               loading={huntHistoryLoading}
+              total={huntHistoryTotal}
+              error={huntHistoryError}
             />
           )}
         </>

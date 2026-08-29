@@ -244,10 +244,20 @@ async def get_hunt(hunt_id: str):
 async def list_hunts(
     target_id: str | None = Query(None),
     status: str | None = Query(None),
+    target_kind: str | None = Query(None),
+    budget_profile: str | None = Query(None),
+    root_domain: str | None = Query(None),
+    search: str | None = Query(None, max_length=200),
+    sort_by: str = Query("created_at"),
+    sort_order: str = Query("desc"),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
+    """List hunts across every target, filtered, sorted and paged."""
     return await _service().list(
-        target_id=target_id, status=status, limit=limit
+        target_id=target_id, status=status, target_kind=target_kind,
+        budget_profile=budget_profile, root_domain=root_domain, search=search,
+        sort_by=sort_by, sort_order=sort_order, limit=limit, offset=offset,
     )
 
 

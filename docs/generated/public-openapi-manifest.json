@@ -173,7 +173,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "77cc445bf2a12c1ac9df0746ec4bebe2a6702cfd9d3905a487f9cb3bb4d1fc85",
+  "contract_sha256": "1853ca0d02a605a6dc9c32d0d9c6ecaf4c4065577d661dba0ab1fe0801ca9c21",
   "openapi": "3.1.0",
   "operation_count": 384,
   "operations": {
@@ -1532,7 +1532,7 @@
     "GET /hunts": {
       "deprecated": false,
       "operation_id": "list_hunts_hunts_get",
-      "parameters_sha256": "d178ac40a84fe6760dde9b7963ef49bfc746dac06fe885659fa76ad2a8f58f0c",
+      "parameters_sha256": "ef7e94406747e5d929d2f8b054f3dbc708d940327c5b0e2e0a181f304171d876",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
