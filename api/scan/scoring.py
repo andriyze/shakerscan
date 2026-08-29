@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # package import layout
     from scanner.score_bands import GRADE_BANDS, grade_for
 
 
-SCORE_POLICY = "risk_and_assurance/v5"
+SCORE_POLICY = "risk_and_assurance/v6"
 
 ASSURANCE_BANDS: tuple[tuple[int, str], ...] = (
     (85, "strong"), (70, "adequate"), (50, "limited"), (1, "weak"), (0, "none"),

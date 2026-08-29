@@ -238,6 +238,38 @@ def test_finalizer_projects_pinned_http_header_posture_findings():
     )
 
 
+def test_finalizer_does_not_grade_headers_from_an_auth_challenge():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {"status": 401, "security_headers": {}},
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["findings"] == []
+    assert report["http"]["posture_observed"] is False
+    assert report["http"]["missing_security_headers"] == []
+    assert report["result"]["posture_penalty"] == 0
+
+
 def test_finalizer_promotes_only_deterministic_proof_contracts():
     xss = _action("verify.xss", 0, capability_name="xss.verify")
     sqli = _action(
@@ -284,7 +316,7 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     # still-passing 90; the suspected critical alongside it is real evidence but does not
     # cap as if it were confirmed.
     assert (result["risk_score"], result["risk_grade"]) == (70, "C")
-    assert result["score_policy"] == "risk_and_assurance/v5"
+    assert result["score_policy"] == "risk_and_assurance/v6"
     assert result["grade"] == "C*" and result["grade_reliable"] is False
     assert result["score"] == result["risk_score"], "compatibility alias is the risk axis"
     assert "proven_high:1" in result["score_reasons"]

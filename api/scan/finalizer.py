@@ -950,6 +950,7 @@ def _posture_sections(
                 continue
             kind = str(row.get("kind") or "")
             if kind == "http_observation" and str(action_id) == "baseline.http":
+                request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
                 response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
                 headers = (
                     response.get("security_headers")
@@ -960,10 +961,19 @@ def _posture_sections(
                 # findings from a failure -- the UI renders each one red -- so posture is
                 # published only behind an observed status. Absent is not failing; that
                 # rule already governed the TLS and CSP sections and this one skipped it.
-                if response.get("status") in (None, ""):
+                status = response.get("status")
+                if status in (None, ""):
                     continue
+                posture_observed = isinstance(status, int) and 200 <= status < 400
+                origin = request.get("origin") or response.get("final_url")
+                is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
+                expected_headers = tuple(
+                    name for name in _EXPECTED_SECURITY_HEADERS
+                    if name != "strict-transport-security" or is_https
+                )
                 http_section = {
-                    "status": response.get("status"),
+                    "status": status,
+                    "posture_observed": posture_observed,
                     "security_headers": {
                         key: headers[header]
                         for key, header in _UI_SECURITY_HEADERS
@@ -971,8 +981,8 @@ def _posture_sections(
                     },
                     "observed_headers": dict(headers),
                     "missing_security_headers": sorted(
-                        name for name in _EXPECTED_SECURITY_HEADERS if name not in headers
-                    ),
+                        name for name in expected_headers if name not in headers
+                    ) if posture_observed else [],
                     # Only a policy that exists gets graded: an absent CSP rendered as a
                     # scoring card reading "/100", which states nothing. Its absence is
                     # carried by the missing-header list instead.

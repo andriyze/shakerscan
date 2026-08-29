@@ -87,11 +87,11 @@ def test_deterministic_application_posture_weaknesses_reduce_risk_score():
             },
         },
     )
-    assert result["score"] == 86
-    assert result["posture_penalty"] == 14
+    assert result["score"] == 80
+    assert result["posture_penalty"] == 20
     assert "posture_missing_content-security-policy:12" in result["reasons"]
     assert "posture_missing_referrer-policy:2" in result["reasons"]
-    assert not any("strict-transport-security" in reason for reason in result["reasons"])
+    assert "posture_missing_strict-transport-security:6" in result["reasons"]
 
 
 def test_a_low_finding_still_permits_a_high_grade():

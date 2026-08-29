@@ -22,6 +22,7 @@ SEVERITY_WEIGHT: Mapping[str, int] = {
     "critical": 20, "high": 10, "medium": 5, "low": 2, "info": 0,
 }
 HTTP_POSTURE_WEIGHT: Mapping[str, int] = {
+    "strict-transport-security": 6,
     "content-security-policy": 12,
     "x-frame-options": 4,
     "x-content-type-options": 4,
