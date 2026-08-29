@@ -14731,6 +14731,42 @@ def _mark_parallel_parent_degraded(
     return True
 
 
+def _recompute_parallel_parent_assurance(
+    merged: dict[str, Any], *, completed_count: int, total_count: int,
+) -> int:
+    """Score the merged execution record, never a copied shard's result block."""
+    coverage = merged.get("coverage") if isinstance(merged.get("coverage"), dict) else {}
+    coverage = dict(coverage)
+    if total_count > 0 and completed_count < total_count:
+        coverage["status"] = "failed" if completed_count == 0 else "partial"
+    computed = scan_scoring.assurance(
+        coverage,
+        smart_coverage=(
+            merged.get("smart_coverage")
+            if isinstance(merged.get("smart_coverage"), dict) else {}
+        ),
+    )
+    score = int(computed["score"])
+    gaps = list(computed.get("gaps") or ())
+    if total_count > 0 and completed_count < total_count:
+        # The merged action ledger normally carries the same loss. This ceiling is the
+        # fail-closed backstop when a failed child produced no action rows to merge.
+        score = min(score, int(round(100 * completed_count / total_count)))
+        if "parallel_shards_incomplete" not in gaps:
+            gaps.append("parallel_shards_incomplete")
+    result = merged.setdefault("result", {})
+    if not isinstance(result, dict):
+        result = {}
+        merged["result"] = result
+    result.update({
+        "assurance_score": score,
+        "assurance_band": scan_scoring.assurance_band(score),
+        "assurance_components": computed.get("components") or {},
+        "assurance_gaps": sorted(gaps),
+    })
+    return score
+
+
 async def _record_endpoint_telemetry_attempts(
     conn,
     *,
@@ -17218,6 +17254,9 @@ async def process_scan_merge_job(job_data: dict):
             agg_score = merged['result'].get('score', agg_score)
     technically_incomplete = bool(failed_n or cancelled_n or partial_n)
     merged['technical_outcome'] = 'INCOMPLETE' if technically_incomplete else 'COMPLETE'
+    _recompute_parallel_parent_assurance(
+        merged, completed_count=completed_n, total_count=len(children),
+    )
 
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.

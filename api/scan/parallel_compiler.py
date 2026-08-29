@@ -1813,6 +1813,10 @@ def summarize_parallel_action_coverage(
             )
         ),
         "finalization_action_id": "finalize.report",
+        "placement_executed": bool(actions) and not any(
+            str(item.get("reason_code") or "") == "placement_unavailable"
+            for item in actions
+        ),
         "capability_coverage": {
             "total": len(actions),
             "required": len(required),

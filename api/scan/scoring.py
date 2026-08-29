@@ -201,12 +201,15 @@ def risk(
 # undermine confidence in a clean result: work that was planned and never ran matters more
 # than the breadth of identities exercised.
 ASSURANCE_COMPONENTS: tuple[tuple[str, int], ...] = (
-    ("required_actions_complete", 25),
-    ("selected_families_complete", 25),
-    ("candidates_attempted", 20),
-    ("active_verification_attempted", 15),
+    ("required_actions_complete", 15),
+    ("selected_families_complete", 15),
+    ("candidates_attempted", 10),
+    ("active_verification_attempted", 10),
     ("authenticated_coverage", 10),
     ("placement_available", 5),
+    # Plan-relative completion alone lets a one-action, one-family, one-candidate plan earn
+    # the same 100 as a broad examination. This component is deliberately absolute.
+    ("examination_breadth", 35),
 )
 
 
@@ -269,6 +272,10 @@ def assurance(
     )
     planned_actions = int(coverage.get("planned_action_count") or 0)
     terminal_actions = int(coverage.get("terminal_action_count") or 0)
+    if coverage.get("finalization_action_id") and planned_actions > terminal_actions:
+        # Legacy reports counted finalize.report in the plan but never in terminal action
+        # rows. It is report construction, not examination, so remove it from denominator.
+        planned_actions -= 1
     capability_coverage = coverage.get("capability_coverage")
     capability_coverage = (
         capability_coverage if isinstance(capability_coverage, Mapping) else {}
@@ -317,7 +324,19 @@ def assurance(
             else 0.0
         ),
         "authenticated_coverage": 1.0 if authenticated else 0.0,
-        "placement_available": 0.0 if "placement_unavailable" in reasons else 1.0,
+        # Availability has to be recorded by the finalizer. Absence of an error is not
+        # evidence that an executable placement existed.
+        "placement_available": (
+            1.0
+            if coverage.get("placement_executed") is True
+            and "placement_unavailable" not in reasons
+            else 0.0
+        ),
+        "examination_breadth": (
+            _ratio(planned_actions, 8)
+            + _ratio(len(selected), 2)
+            + _ratio(planned, 20)
+        ) / 3.0,
     }
     score = int(round(sum(
         weight * values[name] for name, weight in ASSURANCE_COMPONENTS

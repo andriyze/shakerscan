@@ -178,6 +178,7 @@ def test_full_coverage_with_authenticated_traffic_scores_strong():
             "sqli": {"planned_candidates": 20, "attempted_candidates": 20},
         },
         "grade_reliability": {"reliable": True, "reasons": []},
+        "placement_executed": True,
     }
     result = assurance(coverage, smart_coverage={"principal_contexts_exercised": 2})
     assert result["score"] == 100
@@ -280,6 +281,44 @@ def test_assurance_counts_required_capabilities_not_the_separate_finalizer():
     result = assurance(coverage)
     assert result["components"]["required_actions_complete"]["value"] == 1.0
     assert "required_actions_complete" not in result["gaps"]
+
+
+def test_a_trivial_complete_plan_cannot_look_like_a_broad_examination():
+    coverage = {
+        "planned_action_count": 1,
+        "terminal_action_count": 1,
+        "placement_executed": True,
+        "family_coverage": [{
+            "family": "xss", "selected": True, "status": "complete",
+            "proof_escalation": {"attempted_candidates": 1},
+        }],
+        "candidate_coverage": {
+            "xss": {"planned_candidates": 1, "attempted_candidates": 1},
+        },
+    }
+    result = assurance(
+        coverage, smart_coverage={"principal_contexts_exercised": 2},
+    )
+    assert result["score"] < 85
+    assert result["band"] != "strong"
+    assert result["components"]["examination_breadth"]["value"] < 1
+
+
+def test_placement_points_must_be_earned_by_execution():
+    coverage = {
+        "planned_action_count": 8, "terminal_action_count": 8,
+        "family_coverage": [
+            {"family": "xss", "selected": True, "status": "complete"},
+            {"family": "sqli", "selected": True, "status": "complete"},
+        ],
+        "candidate_coverage": {
+            "xss": {"planned_candidates": 10, "attempted_candidates": 10},
+            "sqli": {"planned_candidates": 10, "attempted_candidates": 10},
+        },
+    }
+    assert assurance(coverage)["components"]["placement_available"]["value"] == 0
+    coverage["placement_executed"] = True
+    assert assurance(coverage)["components"]["placement_available"]["value"] == 1
 
 
 # --- the two axes stay separate ----------------------------------------------------------

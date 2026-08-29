@@ -5998,6 +5998,49 @@ def test_parallel_parent_degraded_when_any_shard_fails():
     assert merged["result"]["coverage_issues"]
 
 
+def test_parallel_parent_assurance_is_recomputed_and_capped_by_all_shards():
+    merged = {
+        "result": {"assurance_score": 100, "assurance_band": "strong"},
+        "coverage": {
+            "planned_action_count": 8,
+            "terminal_action_count": 8,
+            "placement_executed": True,
+            "family_coverage": [
+                {
+                    "family": "xss", "selected": True, "status": "complete",
+                    "proof_escalation": {"attempted_candidates": 10},
+                },
+                {
+                    "family": "sqli", "selected": True, "status": "complete",
+                    "proof_escalation": {"attempted_candidates": 10},
+                },
+            ],
+            "candidate_coverage": {
+                "xss": {"planned_candidates": 10, "attempted_candidates": 10},
+                "sqli": {"planned_candidates": 10, "attempted_candidates": 10},
+            },
+        },
+        "smart_coverage": {"principal_contexts_exercised": 2},
+    }
+
+    score = worker._recompute_parallel_parent_assurance(
+        merged, completed_count=1, total_count=6,
+    )
+
+    assert score <= 17
+    assert merged["result"]["assurance_score"] == score
+    assert merged["result"]["assurance_band"] != "strong"
+    assert "parallel_shards_incomplete" in merged["result"]["assurance_gaps"]
+
+
+def test_parallel_parent_assurance_clears_a_copied_score_without_coverage():
+    merged = {"result": {"assurance_score": 92, "assurance_band": "strong"}}
+    assert worker._recompute_parallel_parent_assurance(
+        merged, completed_count=0, total_count=3,
+    ) == 0
+    assert merged["result"]["assurance_band"] == "none"
+
+
 def test_parent_duplicate_merge_preserves_stronger_proof_and_instances():
     union = {}
     weak = {

@@ -1466,9 +1466,10 @@ def finalize_scan_report(
     coverage_block = {
         "status": coverage_status,
         "reasons": coverage_reasons,
-        "planned_action_count": len(plan.actions),
+        "planned_action_count": len(expected_actions),
         "terminal_action_count": len(action_rows),
         "finalization_action_id": finalization_action.action_id,
+        "placement_executed": bool(action_rows) and not placement_gaps,
         "capability_coverage": capability_coverage,
         "grade_reliability": {
             "reliable": grade_reliable,
