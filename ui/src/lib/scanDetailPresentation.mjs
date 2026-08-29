@@ -1,8 +1,11 @@
+const MATERIAL_SEVERITIES = new Set(['critical', 'high', 'medium'])
+
 function record(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
 function finiteNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === '') return fallback
   const number = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(number) ? number : fallback
 }
@@ -84,4 +87,70 @@ export function scanLogEntry(rawLine) {
   }
 
   return { raw, source, message, kind, label, meta }
+}
+
+export function scanResultPresentation(scan, assurance) {
+  const scanRecord = record(scan)
+  const report = record(scanRecord.result)
+  const result = record(report.result)
+  const findings = Array.isArray(report.findings) ? report.findings : []
+  const material = findings.filter((finding) => MATERIAL_SEVERITIES.has(String(finding?.severity || '').toLowerCase()))
+  const confirmed = material.filter((finding) => (
+    finding?.verified === true && String(finding?.proof_state || '') === 'verified'
+  ))
+  const candidates = material.filter((finding) => !confirmed.includes(finding))
+  const assuranceBand = String(assurance?.band || result.assurance_band || 'none')
+  const assuranceLabel = String(assurance?.label || 'Coverage unavailable')
+  const weakExamination = ['none', 'weak', 'limited'].includes(assuranceBand)
+
+  let headline = 'No material vulnerability confirmed in this run'
+  let explanation = findings.length
+    ? `${findings.length} lower-severity or informational observation${findings.length === 1 ? ' was' : 's were'} recorded.`
+    : 'This run did not produce a confirmed medium, high, or critical finding.'
+  let tone = 'caution'
+  if (confirmed.length) {
+    headline = `${confirmed.length} confirmed material ${confirmed.length === 1 ? 'issue requires' : 'issues require'} action`
+    explanation = 'Deterministic evidence confirmed at least one medium, high, or critical finding in this run.'
+    tone = 'danger'
+  } else if (candidates.length) {
+    headline = `${candidates.length} potential material ${candidates.length === 1 ? 'issue needs' : 'issues need'} verification`
+    explanation = 'These candidates are not confirmed vulnerabilities until their proof requirements succeed.'
+    tone = 'warning'
+  }
+
+  const options = record(scanRecord.options)
+  const plan = record(options.scan_execution_plan)
+  const policy = record(plan.policy)
+  const resolvedFamilies = Array.isArray(plan.resolved_families) ? plan.resolved_families : []
+  const budgetProfile = String(plan.budget_profile || options.budget_profile || 'unknown')
+  const activeTesting = policy.active_testing === true
+  const smartCoverage = record(report.smart_coverage)
+  const authStates = Array.isArray(smartCoverage.auth_states_tested) ? smartCoverage.auth_states_tested : []
+  const authenticated = authStates.some((state) => String(state).toLowerCase() !== 'anonymous')
+  const budgetUsed = record(record(report.scan_metadata).budget_used)
+  const missingHeaders = Array.isArray(record(report.http).missing_security_headers)
+    ? record(report.http).missing_security_headers
+    : []
+
+  return {
+    headline,
+    explanation,
+    tone,
+    confidence: weakExamination
+      ? `${assuranceLabel} — this is not a clean bill of health.`
+      : `${assuranceLabel} supports this run-level conclusion.`,
+    observedRiskScore: finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
+    observedRiskGrade: String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
+    budgetProfile,
+    activeTesting,
+    authenticated,
+    resolvedFamilies,
+    requestCount: finiteNumber(budgetUsed.http_requests, null),
+    missingHeaders,
+    posturePenalty: finiteNumber(result.posture_penalty, null),
+    scorePolicy: String(result.score_policy || ''),
+    postureIncluded: String(result.score_policy || '') === 'risk_and_assurance/v4',
+    confirmedCount: confirmed.length,
+    candidateCount: candidates.length,
+  }
 }

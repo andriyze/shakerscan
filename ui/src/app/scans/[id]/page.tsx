@@ -14,7 +14,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { scanLogEntry, scanPhasePresentation } from '@/lib/scanDetailPresentation.mjs'
+import { scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -121,7 +121,6 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
   const severityEntries = SEVERITY_LEVELS
     .map((severity) => [severity, severityCounts[severity]] as const)
     .filter(([, count]) => count > 0)
-  const totalCounted = severityEntries.reduce((sum, [, count]) => sum + count, 0)
   const scorePresentation = deviceScorePresentation(scan)
   const assurance = scanAssurance(scan)
   const hasGrade = Boolean(scorePresentation.grade)
@@ -138,112 +137,163 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
     (scanFingerprint && buildFingerprint && scanFingerprint !== buildFingerprint) ||
     (!scanFingerprint && scanVersion && buildVersion && scanVersion !== buildVersion)
   )
+  const resultPresentation = scanResultPresentation(scan, assurance)
+  const conclusionTone = resultPresentation.tone === 'danger'
+    ? 'border-red-500/30 bg-red-500/10'
+    : resultPresentation.tone === 'warning'
+      ? 'border-amber-500/30 bg-amber-500/10'
+      : 'border-blue-500/25 bg-blue-500/10'
+  const scopeSummary = [
+    resultPresentation.budgetProfile !== 'unknown' ? `${resultPresentation.budgetProfile} budget` : null,
+    resultPresentation.activeTesting ? 'active testing' : 'passive checks',
+    resultPresentation.authenticated ? 'authenticated' : 'anonymous',
+  ].filter(Boolean).join(' · ')
 
   return (
-    <Card className="p-6 mb-6">
-      <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
-        {(hasGrade || hasScore || scorePresentation.status === 'unavailable') && (
-          <div>
-            {scorePresentation.status === 'provisional' && (
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-300">
-                Provisional posture
-              </p>
-            )}
-            {scorePresentation.status === 'unavailable' ? (
-              <p className="text-sm font-medium text-amber-200">Posture score unavailable</p>
-            ) : (
-              <div className="flex items-baseline gap-3">
-                {hasGrade && (
-                  <span className={`text-5xl font-bold ${gradeTextColor(scorePresentation.grade)}`}>
-                    {scorePresentation.grade}
-                  </span>
-                )}
-                {hasScore && (
-                  <span className="text-lg text-gray-400">{scorePresentation.score}/100</span>
-                )}
-              </div>
-            )}
-            {scorePresentation.note && (
-              <p className="mt-1 max-w-md text-xs text-amber-200/80">{scorePresentation.note}</p>
-            )}
-          </div>
-        )}
-        {assurance && (
-          <div>
-            {/* The second axis. Without it a clean grade over a scan that examined almost
-                nothing is indistinguishable from a clean grade over a thorough one. */}
-            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
-              Assurance
+    <Card className="mb-6 overflow-hidden p-0">
+      <section className={`border-b p-6 ${conclusionTone}`} aria-labelledby="scan-conclusion-heading">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-3xl">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Run conclusion</p>
+            <h2 id="scan-conclusion-heading" className="mt-2 text-2xl font-semibold text-white">
+              {resultPresentation.headline}
+            </h2>
+            <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
+            <p className={`mt-3 text-sm font-medium ${assuranceClass(assurance?.band)}`}>
+              {resultPresentation.confidence}
             </p>
-            <div className="flex items-baseline gap-3">
-              <span className={`text-3xl font-bold ${assuranceClass(assurance.band)}`}>
-                {assurance.score}
-              </span>
-              <span className="text-sm text-gray-400">/100 · {assurance.label}</span>
-            </div>
-            {assurance.gaps.length > 0 && (
-              <p className="mt-1 max-w-md text-xs text-gray-500">
-                Not covered: {assurance.gaps.join(', ')}
-              </p>
-            )}
           </div>
-        )}
-        {severityEntries.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {severityEntries.map(([severity, count]) => (
+          <div className="text-right text-xs text-gray-500">
+            {scanTypeLabel && <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>}
+            {duration && <p className="mt-0.5">Completed in {duration}</p>}
+            <p className="mt-0.5 capitalize">{scopeSummary}</p>
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-px bg-gray-800 md:grid-cols-3">
+        <div className="bg-gray-950/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Observed risk from this run</p>
+          {scorePresentation.status === 'unavailable' ? (
+            <p className="mt-3 text-sm font-medium text-amber-200">Risk score unavailable</p>
+          ) : (
+            <div className="mt-2 flex items-baseline gap-3">
+              {hasGrade && (
+                <span className={`text-4xl font-bold ${gradeTextColor(scorePresentation.grade)}`}>
+                  {scorePresentation.grade}
+                </span>
+              )}
+              {hasScore && <span className="text-lg text-gray-300">{scorePresentation.score}/100</span>}
+            </div>
+          )}
+          <p className="mt-2 text-xs leading-5 text-gray-500">
+            Finding evidence and deterministic posture observed by this run. This is not an overall safety or release score.
+          </p>
+          {scorePresentation.note && (
+            <p className="mt-2 text-xs text-amber-200/80">{scorePresentation.note}</p>
+          )}
+        </div>
+
+        <div className="bg-gray-950/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Examination strength</p>
+          {assurance ? (
+            <>
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className={`text-4xl font-bold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
+                <span className="text-sm text-gray-300">/100 · {assurance.label}</span>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                How much planned work, candidate testing, identity coverage, and verification actually ran.
+              </p>
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-gray-500">Coverage score unavailable</p>
+          )}
+        </div>
+
+        <div className="bg-gray-950/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Evidence observed</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {severityEntries.length > 0 ? severityEntries.map(([severity, count]) => (
               <Link
                 key={severity}
                 href={`/findings?scan_id=${scan.id}&severity=${severity}`}
-                title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} for this scan`}
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded uppercase cursor-pointer transition hover:opacity-90 hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
+                title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} from this scan`}
+                className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
               >
                 {count} {severity}
               </Link>
-            ))}
+            )) : (
+              <span className="text-sm text-gray-400">No findings reported</span>
+            )}
           </div>
-        ) : totalCounted === 0 && (scan.findings_count || 0) === 0 ? (
-          <span className="text-sm text-gray-500">No findings</span>
-        ) : null}
-        <div className="ml-auto text-right">
-          {scanTypeLabel && (
-            <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>
-          )}
-          {duration && (
-            <p className="text-xs text-gray-500 mt-0.5">Completed in {duration}</p>
-          )}
+          <p className="mt-3 text-xs leading-5 text-gray-500">
+            {resultPresentation.confirmedCount > 0
+              ? `${resultPresentation.confirmedCount} material finding${resultPresentation.confirmedCount === 1 ? '' : 's'} carry deterministic proof.`
+              : resultPresentation.candidateCount > 0
+                ? `${resultPresentation.candidateCount} material candidate${resultPresentation.candidateCount === 1 ? '' : 's'} still need verification.`
+                : 'No confirmed medium, high, or critical finding was produced by this run.'}
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3 border-t border-gray-800 p-5">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <CoverageMetric label="Budget" value={resultPresentation.budgetProfile} />
+          <CoverageMetric label="Testing" value={resultPresentation.activeTesting ? 'Active allowed' : 'Passive only'} />
+          <CoverageMetric label="Identity coverage" value={resultPresentation.authenticated ? 'Authenticated' : 'Anonymous only'} />
+          <CoverageMetric label="HTTP requests used" value={resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()} />
+        </div>
+        {resultPresentation.resolvedFamilies.length > 0 && (
+          <p className="text-xs text-gray-500">
+            Check families run: {resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}
+          </p>
+        )}
+        {resultPresentation.missingHeaders.length > 0 && (
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">Baseline posture needs attention</p>
+            <p className="mt-1 text-xs leading-5 text-amber-100/75">
+              Missing headers: {resultPresentation.missingHeaders.join(', ')}.
+              {resultPresentation.postureIncluded
+                ? ` These deterministic weaknesses reduced the observed-risk score${resultPresentation.posturePenalty !== null ? ` by ${resultPresentation.posturePenalty} points` : ''}.`
+                : ' This historical score predates posture-aware scoring, so these weaknesses are visible but were not deducted from its number.'}
+            </p>
+          </div>
+        )}
+        {assurance && assurance.gaps.length > 0 && (
+          <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+            <p className="text-xs font-medium text-gray-300">What was not established</p>
+            <ul className="mt-2 grid gap-1 text-xs text-gray-500 sm:grid-cols-2">
+              {assurance.gaps.map((gap: string) => <li key={gap}>• {gap}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 bg-gray-950/70 px-5 py-3 text-xs text-gray-500">
+        <span>Scan ID {scan.id}</span>
+        <div className="text-right">
           {scanVersion && (
-            <p
-              className={`text-xs mt-0.5 font-mono ${versionMismatch ? 'text-red-400 font-semibold' : 'text-gray-500'}`}
-              title={
-                versionMismatch
-                  ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan on the current build for up-to-date detection.`
-                  : `Scanner build ${scanVersion}`
-              }
+            <span
+              className={`font-mono ${versionMismatch ? 'font-semibold text-red-400' : ''}`}
+              title={versionMismatch
+                ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan for current detector behavior.`
+                : `Scanner build ${scanVersion}`}
             >
               {versionMismatch ? '⚠ ' : ''}scanner {scanVersion}
-              {versionMismatch
-                ? (scanVersion === buildVersion && scanFingerprint && buildFingerprint
-                    // Same git label but different source fingerprint: show the
-                    // fingerprints, else the UI prints a confusing "X ≠ X".
-                    ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
-                    : ` ≠ ${buildVersion}`)
-                : ''}
-            </p>
+              {versionMismatch && scanVersion === buildVersion && scanFingerprint && buildFingerprint
+                ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
+                : versionMismatch ? ` ≠ ${buildVersion}` : ''}
+            </span>
           )}
           {(() => {
-            // §2: warn when this scan was submitted against a build-stale fleet —
-            // its results may have come from older detector code.
             const staleAtSubmit = Number((scan?.options as any)?.stale_worker_count_at_submit || 0)
             const fleetAtSubmit = Number((scan?.options as any)?.worker_fleet_size_at_submit || 0)
-            if (staleAtSubmit > 0) {
-              return (
-                <p className="text-xs mt-0.5 font-mono text-amber-400"
-                   title="Some workers were running older code than the current checkout when this scan was submitted; results may be from stale detectors. Restart workers and re-scan.">
-                  ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
-                </p>
-              )
-            }
-            return null
+            return staleAtSubmit > 0 ? (
+              <span className="ml-3 font-mono text-amber-400" title="Some workers were build-stale when this scan was submitted.">
+                ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
+              </span>
+            ) : null
           })()}
         </div>
       </div>

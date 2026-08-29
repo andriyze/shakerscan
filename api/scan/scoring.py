@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # package import layout
     from scanner.score_bands import GRADE_BANDS, grade_for
 
 
-SCORE_POLICY = "risk_and_assurance/v3"
+SCORE_POLICY = "risk_and_assurance/v4"
 
 SEVERITY_WEIGHT: Mapping[str, int] = {
     "critical": 20, "high": 10, "medium": 5, "low": 2, "info": 0,
