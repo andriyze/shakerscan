@@ -1200,9 +1200,10 @@ def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
 
     assert "build_tool()" in dockerfile
     assert "go build -mod=mod -trimpath" in dockerfile
-    assert "golang.org/x/crypto@v0.53.0" in dockerfile
-    assert "golang.org/x/net@v0.56.0" in dockerfile
-    assert "golang.org/x/text@v0.39.0" in dockerfile
+    assert "golang.org/x/crypto@v0.55.0" in dockerfile
+    assert "golang.org/x/mod@v0.40.0" in dockerfile
+    assert "golang.org/x/net@v0.58.0" in dockerfile
+    assert "golang.org/x/text@v0.41.0" in dockerfile
     assert "github.com/jackc/pgx/v5@v5.9.0" in dockerfile
     assert "apt-get purge -y --auto-remove" in dockerfile
     assert "playwright==1.62.0" in requirements
