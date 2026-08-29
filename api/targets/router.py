@@ -2888,7 +2888,7 @@ class TargetUpdate(BaseModel):
     # Merged into the existing metadata (JSONB ||), so partial ownership
     # updates don't clobber unrelated keys. Set a key to "" to clear it.
     metadata_json: Optional[dict] = None
-    cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal"]] = None
+    cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal", "unclassified"]] = None
 
     @field_validator("metadata_json")
     @classmethod
