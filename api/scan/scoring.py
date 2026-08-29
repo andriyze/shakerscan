@@ -39,6 +39,16 @@ SCORE_POLICY = "risk_and_assurance/v3"
 SEVERITY_WEIGHT: Mapping[str, int] = {
     "critical": 20, "high": 10, "medium": 5, "low": 2, "info": 0,
 }
+# Deterministic baseline posture is evidence too. These deductions intentionally cover
+# application-layer headers that are meaningful on both public and local targets. Public
+# delivery controls such as HSTS, certificate health, DNSSEC, and mail policy require target
+# context and remain outside this narrow table until that context is part of the finalizer.
+HTTP_POSTURE_WEIGHT: Mapping[str, int] = {
+    "content-security-policy": 12,
+    "x-frame-options": 4,
+    "x-content-type-options": 4,
+    "referrer-policy": 2,
+}
 # The best risk score that may stand once a *proven* finding of this severity exists. One
 # proven critical is an F however few findings there are; one proven high cannot exceed C.
 # Low and informational have no ceiling: a single low-severity issue is not a reason to fail
@@ -127,8 +137,12 @@ def _severity(finding: Mapping[str, Any]) -> str:
     return name if name in SEVERITY_WEIGHT else "info"
 
 
-def risk(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Score how bad the findings are, discounted by how well each one is proven."""
+def risk(
+    findings: Sequence[Mapping[str, Any]],
+    *,
+    posture: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Score observed finding risk plus deterministic application posture weaknesses."""
     penalty = 0.0
     ceiling = 100
     proven: dict[str, int] = {}
@@ -146,6 +160,21 @@ def risk(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         else:
             suspected[severity] = suspected.get(severity, 0) + 1
             ceiling = min(ceiling, SUSPECTED_CEILING.get(severity, 100))
+    http = (posture or {}).get("http")
+    http = http if isinstance(http, Mapping) else {}
+    missing_headers = {
+        str(header).strip().lower()
+        for header in (http.get("missing_security_headers") or ())
+        if str(header).strip()
+    }
+    posture_penalties = {
+        header: points
+        for header, points in HTTP_POSTURE_WEIGHT.items()
+        if header in missing_headers
+    }
+    posture_penalty = sum(posture_penalties.values())
+    penalty += posture_penalty
+
     score = min(max(0, 100 - int(round(penalty))), ceiling)
     reasons: list[str] = []
     for severity in ("critical", "high", "medium"):
@@ -153,12 +182,18 @@ def risk(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             reasons.append(f"proven_{severity}:{proven[severity]}")
         if suspected.get(severity):
             reasons.append(f"suspected_{severity}:{suspected[severity]}")
+    reasons.extend(
+        f"posture_missing_{header}:{points}"
+        for header, points in posture_penalties.items()
+    )
     return {
         "score": score,
         "grade": grade_for(score),
         "reasons": reasons,
         "proven_counts": proven,
         "suspected_counts": suspected,
+        "posture_penalty": posture_penalty,
+        "posture_penalties": posture_penalties,
     }
 
 
@@ -208,7 +243,8 @@ def assurance(
     ]
     selected = [item for item in families if item.get("selected")]
     complete = [
-        item for item in selected if str(item.get("status") or "") == "complete"
+        item for item in selected
+        if str(item.get("status") or item.get("coverage_status") or "") == "complete"
     ]
 
     planned = attempted = 0
@@ -233,6 +269,19 @@ def assurance(
     )
     planned_actions = int(coverage.get("planned_action_count") or 0)
     terminal_actions = int(coverage.get("terminal_action_count") or 0)
+    capability_coverage = coverage.get("capability_coverage")
+    capability_coverage = (
+        capability_coverage if isinstance(capability_coverage, Mapping) else {}
+    )
+    capability_actions = [
+        item for item in (capability_coverage.get("actions") or ())
+        if isinstance(item, Mapping)
+    ]
+    required_actions = [item for item in capability_actions if item.get("required")]
+    required_completed = [
+        item for item in required_actions
+        if str(item.get("status") or "").lower() in {"success", "succeeded", "completed"}
+    ]
 
     # Nothing ran, so nothing was examined. Reporting this as anything but zero is the
     # failure this axis exists to prevent: a scan that never executed would otherwise
@@ -252,6 +301,8 @@ def assurance(
     values = {
         "required_actions_complete": (
             0.0 if "required_action_incomplete" in reasons
+            else _ratio(len(required_completed), len(required_actions))
+            if required_actions
             else _ratio(terminal_actions, planned_actions)
         ),
         "selected_families_complete": _ratio(len(complete), len(selected)),
@@ -318,10 +369,11 @@ def score_scan(
     coverage: Mapping[str, Any],
     *,
     smart_coverage: Mapping[str, Any] | None = None,
+    posture: Mapping[str, Any] | None = None,
     grade_reliable: bool = True,
 ) -> dict[str, Any]:
     """Both axes plus the compatibility projection older readers still expect."""
-    risk_result = risk(findings)
+    risk_result = risk(findings, posture=posture)
     assurance_result = assurance(coverage, smart_coverage=smart_coverage)
     grade = risk_result["grade"]
     return {
@@ -333,6 +385,8 @@ def score_scan(
         "assurance_components": assurance_result["components"],
         "assurance_gaps": assurance_result["gaps"],
         "score_reasons": risk_result["reasons"],
+        "posture_penalty": risk_result["posture_penalty"],
+        "posture_penalties": risk_result["posture_penalties"],
         # Kept so existing readers, stored rows, and the device presentation keep working.
         # They are the risk axis; assurance has no equivalent in the old shape.
         "score": risk_result["score"],
@@ -345,6 +399,7 @@ __all__ = [
     "ASSURANCE_BANDS",
     "ASSURANCE_COMPONENTS",
     "GRADE_BANDS",
+    "HTTP_POSTURE_WEIGHT",
     "PROVEN_CEILING",
     "SCORE_POLICY",
     "SEVERITY_WEIGHT",

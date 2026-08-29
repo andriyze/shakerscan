@@ -1492,9 +1492,11 @@ def finalize_scan_report(
     # Scored after coverage exists, because the assurance axis reads it. The severity-only
     # scorer ran ~350 lines earlier and every one of these signals was computed and then
     # used for nothing but appending a star to the letter.
+    posture_sections = _posture_sections(observations)
     result_block = scoring.score_scan(
         findings, coverage_block,
         smart_coverage=smart_coverage_block,
+        posture=posture_sections,
         grade_reliable=grade_reliable,
     )
     report = {
@@ -1506,7 +1508,7 @@ def finalize_scan_report(
         # Posture belongs on the envelope, not inside the nested "result": the stored
         # `result_json` IS what a client reads as `scan.result`, so a section nested one
         # level deeper is documented as `result.tls` and served as `result.result.tls`.
-        **_posture_sections(observations),
+        **posture_sections,
         "coverage": coverage_block,
         "verification_summary": {
             "verified": verified,

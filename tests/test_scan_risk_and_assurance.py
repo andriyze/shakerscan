@@ -61,6 +61,26 @@ def test_informational_findings_do_not_move_the_grade():
     assert risk([proven("info"), proven("info")])["score"] == 100
 
 
+def test_deterministic_application_posture_weaknesses_reduce_risk_score():
+    result = risk(
+        [proven("info")],
+        posture={
+            "http": {
+                "missing_security_headers": [
+                    "content-security-policy",
+                    "referrer-policy",
+                    "strict-transport-security",
+                ],
+            },
+        },
+    )
+    assert result["score"] == 86
+    assert result["posture_penalty"] == 14
+    assert "posture_missing_content-security-policy:12" in result["reasons"]
+    assert "posture_missing_referrer-policy:2" in result["reasons"]
+    assert not any("strict-transport-security" in reason for reason in result["reasons"])
+
+
 def test_a_low_finding_still_permits_a_high_grade():
     result = risk([proven("low")])
     assert result["grade"] == "A"
@@ -226,6 +246,40 @@ def test_anonymous_only_coverage_is_not_full_assurance():
 
 def test_the_component_weights_total_one_hundred():
     assert sum(weight for _, weight in ASSURANCE_COMPONENTS) == 100
+
+
+def test_assurance_reads_canonical_family_coverage_status():
+    coverage = {
+        "planned_action_count": 1,
+        "terminal_action_count": 1,
+        "family_coverage": [
+            {"family": "nuclei_passive", "selected": True, "coverage_status": "complete"},
+        ],
+        "candidate_coverage": {},
+    }
+    result = assurance(coverage)
+    assert result["components"]["selected_families_complete"]["value"] == 1.0
+    assert "selected_families_complete" not in result["gaps"]
+
+
+def test_assurance_counts_required_capabilities_not_the_separate_finalizer():
+    coverage = {
+        "planned_action_count": 10,
+        "terminal_action_count": 9,
+        "finalization_action_id": "finalize.report",
+        "family_coverage": [],
+        "candidate_coverage": {},
+        "capability_coverage": {
+            "actions": [
+                {"action_id": "discover", "required": True, "status": "success"},
+                {"action_id": "baseline", "required": True, "status": "success"},
+                {"action_id": "optional", "required": False, "status": "skipped"},
+            ],
+        },
+    }
+    result = assurance(coverage)
+    assert result["components"]["required_actions_complete"]["value"] == 1.0
+    assert "required_actions_complete" not in result["gaps"]
 
 
 # --- the two axes stay separate ----------------------------------------------------------
