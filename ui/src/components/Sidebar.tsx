@@ -309,7 +309,7 @@ function NavContent({
             GitHub
           </a>
           <div className="flex items-center gap-2">
-          <span title="Show all sections (Interactive Testing, Leads, Records, Governance, Developer)" className="inline-flex">
+          <span title="Show advanced sections (Records, Governance, Developer)" className="inline-flex">
             <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
           </span>
           <Link

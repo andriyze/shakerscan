@@ -274,7 +274,7 @@ export default function Dashboard() {
                 >
                   <span className={`h-2 w-2 rounded-full bg-amber-400 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queuePending}</span>
-                  <span className="hidden text-gray-500 sm:inline">scans pending</span>
+                  <span className="text-gray-500">scans pending</span>
                 </Link>
                 <Link
                   href="/scans?status=running"
@@ -283,7 +283,7 @@ export default function Dashboard() {
                 >
                   <span className={`h-2 w-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queueRunning}</span>
-                  <span className="hidden text-gray-500 sm:inline">scan{queueRunning === 1 ? '' : 's'} running</span>
+                  <span className="text-gray-500">scan{queueRunning === 1 ? '' : 's'} running</span>
                 </Link>
                 {(workPending !== queuePending || workRunning !== queueRunning) && (
                   <span
@@ -300,9 +300,10 @@ export default function Dashboard() {
               onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
               aria-label="Emergency clear pending jobs"
               title="Emergency clear pending jobs"
-              className={`ml-0.5 flex h-7 w-7 items-center justify-center rounded text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400 ${FOCUS_RING}`}
+              className={`ml-1 flex h-7 items-center justify-center gap-1 rounded border border-red-950/70 px-2 text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300 ${FOCUS_RING}`}
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="text-[10px]">Emergency clear</span>
             </button>
           </div>
 
@@ -320,7 +321,7 @@ export default function Dashboard() {
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
               {workersKnown ? totalAvailable : '--'}
             </span>
-            <span className="hidden text-xs text-gray-500 sm:inline">{fleetEnabled ? 'schedulable' : 'current'}</span>
+            <span className="text-xs text-gray-500">{fleetEnabled ? 'schedulable workers' : 'current workers'}</span>
             {fleetEnabled && (
               <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
                 {localAvailable} local
