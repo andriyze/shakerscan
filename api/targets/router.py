@@ -63,7 +63,7 @@ try:
         bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
     from action_scope import scope_origin_matches_target
-    from asset_cohorts import TARGET_COHORTS, normalize_target_cohort, target_cohort
+    from asset_cohorts import target_cohort
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -90,7 +90,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
     )
-    from ..asset_cohorts import TARGET_COHORTS, normalize_target_cohort, target_cohort
+    from ..asset_cohorts import target_cohort
     from ..runtime.credential_store import CredentialStoreError
     from ..runtime.models import TargetBinding
     from ..scan.action_plan import ScanActionPlanError
@@ -646,7 +646,8 @@ async def create_target(request: TargetCreate):
                 INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
-                RETURNING id, url, root_domain, is_root, (xmax = 0) AS created
+                RETURNING id, url, name, discovery_source, metadata_json,
+                          root_domain, is_root, (xmax = 0) AS created
             """, normalized_target, request.name, root_domain, is_root,
                  json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
                  json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
@@ -661,7 +662,12 @@ async def create_target(request: TargetCreate):
                 # from the just-submitted origin.
                 'root_domain': row['root_domain'],
                 'is_root': row['is_root'],
-                'cohort': requested_cohort or 'unclassified',
+                'cohort': target_cohort(
+                    url=row['url'],
+                    name=row.get('name'),
+                    discovery_source=row.get('discovery_source'),
+                    metadata=_decode_json_value(row.get('metadata_json')) or {},
+                ),
                 'status': 'created' if row['created'] else 'already_exists'
             }
             # Surface warning if path/query was stripped

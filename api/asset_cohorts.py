@@ -51,7 +51,13 @@ def target_cohort(
         host = (urlsplit(str(url)).hostname or "").lower()
     except ValueError:
         host = ""
+    raw_locator = str(url or "").strip().lower()
+    if not host and "://" not in raw_locator:
+        authority = raw_locator.split("/", 1)[0].rsplit("@", 1)[-1]
+        host = authority.rsplit(":", 1)[0].strip("[]")
     if host in {"localhost", "host.docker.internal"} or host.endswith((".local", ".localhost", ".internal", ".test")) or host.isdigit():
+        return "internal"
+    if host and "." not in host and ":" not in host:
         return "internal"
     try:
         if host and ipaddress.ip_address(host).is_private:

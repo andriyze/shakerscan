@@ -20217,10 +20217,13 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
 
     class Conn:
         async def fetchrow(self, query, *args):
-            assert "RETURNING id, url, root_domain, is_root" in query
+            assert "RETURNING id, url, name, discovery_source, metadata_json" in query
             return {
                 "id": existing_id,
                 "url": "http://localhost:3001",
+                "name": "stored internal target",
+                "discovery_source": "manual",
+                "metadata_json": {"cohort": "internal"},
                 "root_domain": "localhost",
                 "is_root": False,
                 "created": False,
@@ -20239,6 +20242,7 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     assert response["url"] == "http://localhost:3001"
     assert response["root_domain"] == "localhost"
     assert response["is_root"] is False
+    assert response["cohort"] == "internal"
     assert response["status"] == "already_exists"
     # The reuse must also be announced. Returning only the stored metadata let a caller believe it
     # had registered https://localhost:9090; a scope receipt and a Hunt were then bound to one

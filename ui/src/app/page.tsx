@@ -550,7 +550,7 @@ function buildCohortActions(exposure: ExposureAssetsResponse | null): DashboardA
   const metrics = exposure?.metrics
   if (!metrics) return []
   const items: DashboardActionItem[] = []
-  if ((metrics.failed_scans || 0) > 0) items.push({ id: 'cohort-failures', priority: 'high', category: 'Reliability', title: 'Review failed assessments', detail: `${metrics.failed_scans} scoped asset${metrics.failed_scans === 1 ? '' : 's'} have a failed latest assessment.`, href: '/scans?status=failed', action_label: 'Review failures', count: metrics.failed_scans })
+  if ((metrics.failed_scans || 0) > 0) items.push({ id: 'cohort-failures', priority: 'high', category: 'Reliability', title: 'Review failed assessments', detail: `${metrics.failed_scans} scoped asset${metrics.failed_scans === 1 ? ' has' : 's have'} a failed latest assessment.`, href: '/scans?status=failed', action_label: 'Review failures', count: metrics.failed_scans })
   if ((metrics.active_needs_verification || 0) > 0) items.push({ id: 'cohort-unverified', priority: 'high', category: 'Evidence', title: 'Reduce unverified risk noise', detail: `${metrics.active_needs_verification} active scoped finding${metrics.active_needs_verification === 1 ? '' : 's'} still need deterministic verification.`, href: '/exposure?posture=needs_verification', action_label: 'Review evidence', count: metrics.active_needs_verification })
   if ((metrics.stale_assets || 0) > 0) items.push({ id: 'cohort-stale', priority: 'medium', category: 'Freshness', title: 'Refresh stale assets', detail: `${metrics.stale_assets} scoped asset${metrics.stale_assets === 1 ? '' : 's'} have stale evidence.`, href: '/exposure?posture=stale', action_label: 'Review stale assets', count: metrics.stale_assets })
   return items
