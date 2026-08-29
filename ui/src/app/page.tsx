@@ -258,7 +258,10 @@ export default function Dashboard() {
   const scopedUrls = useMemo(() => new Set((scopedExposure?.assets || []).flatMap((asset) => [asset.url, asset.root_domain].filter((value): value is string => Boolean(value)).map(normalizeScopeLocator))), [scopedExposure])
   const coverage = useMemo(() => buildCoverageRollup(scopedTargets), [scopedTargets])
   const meaningfulActivity = useMemo(
-    () => timeline.filter((event) => isMeaningfulActivity(event) && rowMatchesCohort(event.target_id, event.target_url, cohortView, scopedTargetIds, scopedUrls)).slice(0, 5),
+    () => timeline.filter((event) => isMeaningfulActivity(event) && (
+      rowMatchesCohort(event.target_id, event.target_url, cohortView, scopedTargetIds, scopedUrls)
+      || isGlobalActivity(event.target_id, event.target_url)
+    )).slice(0, 5),
     [timeline, cohortView, scopedTargetIds, scopedUrls],
   )
   const recentScans = useMemo(
@@ -498,6 +501,13 @@ function rowMatchesCohort(
   if (view === 'all') return true
   if (targetId) return targetIds.has(targetId)
   return Boolean(targetUrl && locators.has(normalizeScopeLocator(targetUrl)))
+}
+
+function isGlobalActivity(
+  targetId: string | null | undefined,
+  targetUrl: string | null | undefined,
+): boolean {
+  return !targetId && !targetUrl
 }
 
 function countCohorts(assets: ExposureAsset[]): Record<string, number> {

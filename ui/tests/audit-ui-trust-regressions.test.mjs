@@ -84,10 +84,12 @@ test('scan submission titles follow the live execution status', () => {
   assert.doesNotMatch(timeline, /'Scan\.submit': 'Scan queued'/)
 })
 
-test('scoped dashboard refuses unbound and unscoped historical rows', () => {
+test('scoped dashboard keeps global activity visible without attributing it to a cohort', () => {
   const dashboard = read('src/app/page.tsx')
   const targets = read('src/app/targets/page.tsx')
   assert.match(dashboard, /rowMatchesCohort\(scan\.target_id, scan\.target_url/)
+  assert.match(dashboard, /isGlobalActivity\(event\.target_id, event\.target_url\)/)
+  assert.match(dashboard, /return !targetId && !targetUrl/)
   assert.match(dashboard, /What changed is hidden in scoped mode/)
   assert.match(dashboard, /Observed posture \{scan\.grade\}/)
   assert.match(dashboard, /assurance\.label.*assurance\.score/)
