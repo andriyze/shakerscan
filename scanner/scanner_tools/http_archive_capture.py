@@ -247,10 +247,18 @@ def record_scan_call(captured: Mapping[str, Any]) -> None:
         "request_body": captured.get("request_body"),
         "response_headers": dict(captured.get("response_headers") or {}),
         "response_body": captured.get("response_body"),
+        "response_body_sha256": captured.get("response_body_sha256"),
+        "response_body_bytes": captured.get("response_body_bytes"),
         "status_code": captured.get("status_code"),
+        "http_version": captured.get("http_version"),
         "elapsed_ms": captured.get("elapsed_ms"),
         "error": captured.get("error"),
+        "started_at": captured.get("started_at"),
+        "principal_slot": captured.get("principal_slot"),
+        "remote_ip": captured.get("remote_ip"),
+        "direct_origin": bool(captured.get("direct_origin")),
         "response_body_truncated": bool(captured.get("response_body_truncated")),
+        "response_digest_scope": captured.get("response_digest_scope"),
         "fidelity": captured.get("fidelity") or "wire_request",
     })
 

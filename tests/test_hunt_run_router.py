@@ -234,6 +234,8 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                 }]
             if "FROM http_transactions t" in query:
                 return []
+            if "FROM hunt_actions action" in query:
+                return []
             raise AssertionError(query)
 
     service = HuntRunService(lambda: _Pool(Connection()))

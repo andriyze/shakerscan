@@ -227,7 +227,7 @@ export default function HttpArchiveExport({
           <form className="grid gap-2 sm:grid-cols-[minmax(12rem,1fr)_8rem_8rem_auto]" onSubmit={(event) => { event.preventDefault(); void load(0) }}>
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-600" />
-              <Input aria-label="Search archived calls" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="URL, capability, or adapter" />
+              <Input aria-label="Search archived calls" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Capability, adapter, or method" />
             </div>
             <Select aria-label="Filter archived calls by method" value={method} onChange={(event) => setMethod(event.target.value)}>
               <option value="">All methods</option>

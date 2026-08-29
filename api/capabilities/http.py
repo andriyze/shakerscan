@@ -213,6 +213,7 @@ def _emit_transaction(
         "response_body": body,
         "response_body_sha256": response_body_sha256,
         "response_body_bytes": response_body_bytes,
+        "response_digest_scope": "prefix" if body_truncated else "complete",
         # The executor stops reading at its own ceiling, so the archive is told the body is
         # a prefix rather than measuring it and concluding it is whole.
         "response_body_truncated": bool(body_truncated),
@@ -221,7 +222,7 @@ def _emit_transaction(
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
         "started_at": started_at,
         "principal_slot": str(principal_slot or "anonymous"),
-        "fidelity": "wire_request",
+        "fidelity": "wire_request_prefix" if body_truncated else "wire_request",
     })
 
 

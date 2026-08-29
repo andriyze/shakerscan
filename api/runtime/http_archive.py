@@ -93,8 +93,8 @@ class HttpTransaction:
     request_body: bytes | None = None
     response_headers: Mapping[str, str] | None = None
     response_body: bytes | None = None
-    # When the executor retained only a prefix, these still describe the complete decoded
-    # body. If absent, the archive computes them from response_body as before.
+    # When the executor retained only a prefix, metadata.response_digest_scope states whether
+    # these describe the complete decoded body or only the observed prefix.
     response_body_sha256: str | None = None
     response_body_bytes: int | None = None
     # True when the executor stopped reading before the body ended. Without it the archive
@@ -536,6 +536,10 @@ def hunt_call_recorder(
             error=captured.get("error"),
             response_body_truncated=bool(captured.get("response_body_truncated")),
             started_at=captured.get("started_at") or clock(),
+            metadata={
+                "fidelity": captured.get("fidelity") or "wire_request",
+                "response_digest_scope": captured.get("response_digest_scope"),
+            },
         ))
 
     return collected, record
@@ -754,12 +758,19 @@ def scan_transactions_from_capture(
             request_body=_as_bytes(call.get("request_body")),
             response_headers=call.get("response_headers") or None,
             response_body=_as_bytes(call.get("response_body")),
+            response_body_sha256=call.get("response_body_sha256"),
+            response_body_bytes=call.get("response_body_bytes"),
+            http_version=call.get("http_version"),
+            principal_slot=call.get("principal_slot"),
+            remote_ip=call.get("remote_ip"),
+            direct_origin=bool(call.get("direct_origin")),
             elapsed_ms=call.get("elapsed_ms"),
             error=call.get("error"),
             response_body_truncated=bool(call.get("response_body_truncated")),
-            started_at=clock(),
+            started_at=call.get("started_at") or clock(),
             metadata={
                 "fidelity": call.get("fidelity"),
+                "response_digest_scope": call.get("response_digest_scope"),
                 "redacted_argv": call.get("redacted_argv"),
                 # Stated on every row so a bounded archive is never mistaken for the
                 # complete traffic of the run.

@@ -26,10 +26,13 @@ from api.runtime.http_archive import (
     transaction_rows,
 )
 from api.runtime.http_archive_reader import (
+    _search_pattern,
+    archive_fidelity,
     count_transactions,
     export_document,
     project,
     read_transactions,
+    read_archive_stats,
 )
 from api.capabilities.http import _read_bounded_response
 from scanner.scanner_tools import http_archive_capture
@@ -205,6 +208,16 @@ def test_fidelity_is_backed_by_counters_not_by_row_count():
         rows, export_format="transactions", redaction="redacted", owner={}, total=1,
     )
     assert legacy["fidelity"] == "unknown"
+
+    uncovered = export_document(
+        rows, export_format="transactions", redaction="redacted", owner={}, total=1,
+        stats={
+            "attempted": 1, "stored": 1, "failed": 0, "dropped": 0,
+            "unarchived_http_capabilities": ["web.crawl"],
+        },
+    )
+    assert uncovered["fidelity"] == "partial"
+    assert "web.crawl" in uncovered["fidelity_detail"]
 
 
 def test_a_truncated_response_is_marked_even_when_the_prefix_fits():
@@ -434,6 +447,27 @@ def test_adapter_limited_capture_cannot_be_labelled_complete():
     assert "adapter-limited" in document["fidelity_detail"]
 
 
+@pytest.mark.asyncio
+async def test_scan_stats_find_successful_http_capabilities_with_no_archive_rows():
+    class Conn:
+        async def fetchrow(self, query, *params):
+            return {"attempted": 3, "stored": 3, "failed": 0, "dropped": 0}
+
+        async def fetchval(self, query, *params):
+            return 0
+
+        async def fetch(self, query, *params):
+            assert "requested_budget->>'http_requests'" in query
+            return [{"capability_name": "web.crawl"}]
+
+    stats = await read_archive_stats(Conn(), scan_id="scan-1", hunt_run_id=None)
+    assert stats["unarchived_http_capabilities"] == ["web.crawl"]
+    assert stats["unarchived_http_capability_count"] == 1
+    fidelity, detail = archive_fidelity(stats, total=3)
+    assert fidelity == "partial"
+    assert "web.crawl" in detail
+
+
 class _ArchiveQueryConnection:
     def __init__(self):
         self.calls = []
@@ -463,11 +497,15 @@ async def test_archive_browser_filters_count_and_rows_with_the_same_search():
     count_query, count_params = conn.calls[0][1:]
     row_query, row_params = conn.calls[1][1:]
     for query in (count_query, row_query):
-        assert "url ILIKE" in query
+        assert "url ILIKE" not in query
         assert "capability_name" in query
         assert "adapter" in query
     assert count_params == ("scan-1", "POST", 401, "%/login%")
     assert row_params == ("scan-1", "POST", 401, "%/login%", 25, 50)
+
+
+def test_archive_search_escapes_like_operators_and_never_queries_raw_urls():
+    assert _search_pattern(r"50%_done\x") == "%50\\%\\_done\\\\x%"
 
 
 def test_filtered_export_reports_matches_and_whole_archive_count_separately():
@@ -485,6 +523,28 @@ def test_the_deterministic_scan_plane_records_its_calls():
     from tests.api_sources import api_tree_source
 
     assert "transaction_recorder=_scan_capture.record_scan_call" in api_tree_source()
+
+
+def test_scan_capture_preserves_wire_identity_and_truncation_metadata():
+    from api.runtime.http_archive import scan_transactions_from_capture
+
+    http_archive_capture.start_capture()
+    http_archive_capture.record_scan_call({
+        "method": "GET", "url": "https://t/x", "http_version": "HTTP/2",
+        "response_body": b"prefix", "response_body_sha256": "a" * 64,
+        "response_body_bytes": 7, "response_body_truncated": True,
+        "response_digest_scope": "prefix", "principal_slot": "primary",
+        "remote_ip": "203.0.113.7", "direct_origin": True,
+    })
+    item = scan_transactions_from_capture(
+        http_archive_capture.drain_capture(), scan_id="scan-1",
+    )[0]
+    assert item.response_body_sha256 == "a" * 64
+    assert item.response_body_bytes == 7
+    assert item.principal_slot == "primary"
+    assert item.remote_ip == "203.0.113.7"
+    assert item.direct_origin is True
+    assert item.metadata["response_digest_scope"] == "prefix"
 
 
 def test_archive_blobs_use_a_retention_class_the_sweep_accepts():

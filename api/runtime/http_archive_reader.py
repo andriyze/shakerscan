@@ -12,6 +12,11 @@ import json
 from typing import Any, Mapping, Sequence
 
 try:
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+except ModuleNotFoundError:  # package import layout
+    from .capability_registry import CAPABILITY_REGISTRY
+
+try:
     from redaction import redact_sensitive
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import redact_sensitive
@@ -37,6 +42,14 @@ LEFT JOIN evidence_objects rb ON rb.id = t.request_body_object_id
 LEFT JOIN evidence_objects sh ON sh.id = t.response_headers_object_id
 LEFT JOIN evidence_objects sb ON sb.id = t.response_body_object_id
 """
+
+
+def _search_pattern(value: str) -> str:
+    """Literal ILIKE pattern; `%`, `_`, and backslash are ordinary search text."""
+    escaped = (
+        str(value).strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return f"%{escaped}%"
 
 
 def _json_safe(value: Any) -> Any:
@@ -94,11 +107,11 @@ async def read_transactions(
         params.append(int(status_code))
         clauses.append(f"t.status_code=${len(params)}")
     if search:
-        params.append(f"%{str(search).strip()}%")
+        params.append(_search_pattern(search))
         clauses.append(
-            f"(t.url ILIKE ${len(params)}"
-            f" OR COALESCE(t.capability_name,'') ILIKE ${len(params)}"
-            f" OR COALESCE(t.adapter,'') ILIKE ${len(params)})"
+            f"(COALESCE(t.capability_name,'') ILIKE ${len(params)} ESCAPE '\\'"
+            f" OR COALESCE(t.adapter,'') ILIKE ${len(params)} ESCAPE '\\'"
+            f" OR t.method ILIKE ${len(params)} ESCAPE '\\')"
         )
     if not clauses:
         raise ValueError("an export must name a scan or a hunt")
@@ -139,11 +152,11 @@ async def count_transactions(
         params.append(int(status_code))
         clauses.append(f"status_code=${len(params)}")
     if search:
-        params.append(f"%{str(search).strip()}%")
+        params.append(_search_pattern(search))
         clauses.append(
-            f"(url ILIKE ${len(params)}"
-            f" OR COALESCE(capability_name,'') ILIKE ${len(params)}"
-            f" OR COALESCE(adapter,'') ILIKE ${len(params)})"
+            f"(COALESCE(capability_name,'') ILIKE ${len(params)} ESCAPE '\\'"
+            f" OR COALESCE(adapter,'') ILIKE ${len(params)} ESCAPE '\\'"
+            f" OR method ILIKE ${len(params)} ESCAPE '\\')"
         )
     return int(await conn.fetchval(
         "SELECT COUNT(*) FROM http_transactions WHERE " + " AND ".join(clauses),
@@ -153,7 +166,7 @@ async def count_transactions(
 
 async def read_archive_stats(
     conn, *, scan_id: str | None, hunt_run_id: str | None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """What the archive attempted for this run, against what it holds."""
     owner_kind = "scan" if scan_id else "hunt"
     owner_id = scan_id or hunt_run_id
@@ -185,6 +198,47 @@ async def read_archive_stats(
             hunt_run_id,
         )
     stats["capture_limited"] = int(capture_limited or 0)
+    if scan_id:
+        missing_rows = await conn.fetch(
+            """SELECT DISTINCT action.capability_name
+               FROM scan_capability_actions action
+               WHERE action.scan_id=$1
+                 AND action.status IN ('success','partial')
+                 AND COALESCE(NULLIF(action.requested_budget->>'http_requests','')::int,0) > 0
+                 AND NOT EXISTS (
+                     SELECT 1 FROM http_transactions tx
+                     WHERE tx.scan_id=action.scan_id
+                       AND tx.capability_name=action.capability_name
+                 )
+               ORDER BY action.capability_name""",
+            scan_id,
+        )
+        missing = [str(item["capability_name"]) for item in missing_rows]
+    else:
+        action_rows = await conn.fetch(
+            """SELECT DISTINCT action.capability_name
+               FROM hunt_actions action
+               WHERE action.hunt_run_id=$1
+                 AND action.status IN ('completed','partial')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM http_transactions tx
+                     WHERE tx.hunt_run_id=action.hunt_run_id
+                       AND tx.capability_name=action.capability_name
+                 )
+               ORDER BY action.capability_name""",
+            hunt_run_id,
+        )
+        missing = []
+        for item in action_rows:
+            name = str(item["capability_name"])
+            try:
+                spec = CAPABILITY_REGISTRY.require(name)
+            except KeyError:
+                continue
+            if int(spec.budget_cost.get("http_requests") or 0) > 0:
+                missing.append(name)
+    stats["unarchived_http_capabilities"] = missing
+    stats["unarchived_http_capability_count"] = len(missing)
     return stats
 
 
@@ -207,15 +261,24 @@ def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]
     failed = int(stats.get("failed") or 0)
     dropped = int(stats.get("dropped") or 0)
     capture_limited = int(stats.get("capture_limited") or 0)
+    unarchived = [
+        str(item) for item in stats.get("unarchived_http_capabilities") or []
+        if str(item)
+    ]
     if attempted == 0 and total == 0:
         return "unavailable", "no calls were recorded for this run"
-    if failed or dropped or stored < attempted or capture_limited:
+    if failed or dropped or stored < attempted or capture_limited or unarchived:
         return "partial", (
             f"{stored} of {attempted} recorded calls were stored"
             + (f"; {dropped} were dropped at the capture ceiling" if dropped else "")
             + (
                 f"; {capture_limited} calls have adapter-limited wire detail"
                 if capture_limited else ""
+            )
+            + (
+                "; HTTP-producing capabilities with no archived calls: "
+                + ", ".join(unarchived[:10])
+                if unarchived else ""
             )
         )
     return "complete", f"all {stored} recorded calls were stored"
@@ -261,6 +324,7 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
         "elapsed_ms": item.get("elapsed_ms"),
         "error": item.get("error"),
         "truncated": bool(item.get("truncated")),
+        "capture": item.get("metadata_json") or {},
     }
 
 
