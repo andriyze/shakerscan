@@ -2139,6 +2139,72 @@ def test_scan_worker_does_not_revive_failed_queue_handoff_during_claim(monkeypat
     assert redis.hashes[-1][2]["status"] == "failed"
 
 
+def test_reclaimed_running_scan_terminalizes_without_replaying_requests(monkeypatch):
+    scan_id = "22222222-2222-4222-8222-222222222222"
+
+    class ReclaimedConn:
+        def __init__(self):
+            self.executions = []
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            assert "execution_lease_lost" in query
+            assert args[0] == uuid.UUID(scan_id)
+            return "UPDATE 1"
+
+    class ReclaimedRedis:
+        def __init__(self):
+            self.updates = []
+            self.expirations = []
+
+        def hgetall(self, key):
+            assert key == "job:reclaimed-job"
+            return {
+                b"queue_delivery_attempts": b"2",
+                b"queue_reclaimed": b"true",
+            }
+
+        def hset(self, key, *, mapping):
+            self.updates.append((key, mapping))
+
+        def expire(self, key, ttl):
+            self.expirations.append((key, ttl))
+
+    conn = ReclaimedConn()
+    redis = ReclaimedRedis()
+    run_calls = []
+
+    async def running_status(_scan_id):
+        return "running"
+
+    async def forbidden_run_scan(*args, **kwargs):
+        run_calls.append((args, kwargs))
+        raise AssertionError("a reclaimed uncertain execution must not replay")
+
+    async def forbidden_attribution(_job):
+        raise AssertionError("a reclaimed delivery must not replace original worker attribution")
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_confirmed_scan_handoff_status", running_status)
+    monkeypatch.setattr(worker, "run_scan", forbidden_run_scan)
+    monkeypatch.setattr(worker, "_attribute_job_execution", forbidden_attribution)
+
+    asyncio.run(worker.process_scan_job({
+        "job_id": "reclaimed-job",
+        "scan_id": scan_id,
+        "target": "https://example.test",
+        "options": {},
+        "_deferred_execution_attribution": True,
+    }))
+
+    assert run_calls == []
+    assert redis.updates[-1][1]["status"] == "failed"
+    assert redis.updates[-1][1]["current_phase"] == "execution_lease_lost"
+    assert redis.updates[-1][1]["delivery_attempts"] == "2"
+    assert redis.expirations == [("job:reclaimed-job", 86400)]
+
+
 def test_exploit_worker_does_not_claim_endpoints_for_failed_queue_handoff(monkeypatch):
     class FailedHandoffConn(_FakeAsmConn):
         def __init__(self):

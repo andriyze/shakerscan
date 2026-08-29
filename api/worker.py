@@ -13611,6 +13611,46 @@ async def process_scan_job(job_data: dict):
 
     current_status = await _confirmed_scan_handoff_status(scan_id)
     broker_ingest = bool(job_data.get("_broker_result_id"))
+    if current_status == 'running' and not broker_ingest:
+        delivery = _decode_redis_hash(r.hgetall(f"job:{job_id}"))
+        try:
+            delivery_attempts = int(delivery.get("queue_delivery_attempts") or 0)
+        except (TypeError, ValueError):
+            delivery_attempts = 0
+        reclaimed = (
+            str(delivery.get("queue_reclaimed") or "").strip().lower() == "true"
+            or delivery_attempts >= 2
+        )
+        if reclaimed:
+            message = (
+                "The worker queue lease was reclaimed after the original execution stopped "
+                "acknowledging it. Automatic replay was withheld because the earlier worker "
+                "may already have issued requests; re-run the scan to start a new bounded execution."
+            )
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans
+                    SET status='failed', current_phase='execution_lease_lost',
+                        error_message=$2, completed_at=NOW()
+                    WHERE id=$1 AND status='running'
+                    """,
+                    uuid.UUID(scan_id),
+                    message,
+                )
+            r.hset(f"job:{job_id}", mapping={
+                'status': 'failed',
+                'current_phase': 'execution_lease_lost',
+                'error': message,
+                'delivery_attempts': str(delivery_attempts),
+            })
+            r.expire(f"job:{job_id}", 86400)
+            print(
+                f"[{job_id[:8]}] reclaimed delivery terminalized without replay "
+                f"(attempt {delivery_attempts})",
+                flush=True,
+            )
+            return
     if current_status not in ({'pending', 'queued', 'running'} if broker_ingest else {'pending', 'queued'}):
         print(f"[{job_id[:8]}] Scan is {current_status}; queued worker job skipped", flush=True)
         r.hset(
@@ -13623,6 +13663,9 @@ async def process_scan_job(job_data: dict):
         )
         r.expire(f"job:{job_id}", 86400)
         return
+
+    if job_data.pop("_deferred_execution_attribution", False):
+        await _attribute_job_execution(job_data)
 
     # Update Redis status
     r.hset(f"job:{job_id}", mapping={
@@ -23072,9 +23115,16 @@ async def process_job(job_data: dict):
     # Fail-closed: refuse to run a scan on a build-stale worker (see helper).
     if await _refuse_stale_job_if_needed(job_data):
         return
+    job_type = job_data.get('type', 'scan')
     try:
-        if not job_data.get("_broker_result_id"):
+        if not job_data.get("_broker_result_id") and job_type != 'scan':
             await _attribute_job_execution(job_data)
+        elif not job_data.get("_broker_result_id"):
+            # Standalone Scan attribution must happen only after its durable
+            # pending/queued claim succeeds. A reclaimed duplicate must not
+            # overwrite the worker that owned the original execution.
+            job_data = dict(job_data)
+            job_data["_deferred_execution_attribution"] = True
     except RuntimeError as exc:
         # A node can be revoked between lease and dispatch. Preserve the user's
         # work while the control-plane reconciler removes that peer.
@@ -23086,8 +23136,6 @@ async def process_job(job_data: dict):
         print(f"[fleet] refused job on this node and requeued it: {exc}", flush=True)
         await asyncio.sleep(2)
         return
-    job_type = job_data.get('type', 'scan')
-
     try:
         if job_type == 'discovery':
             await process_discovery_job(job_data)

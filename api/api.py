@@ -2524,10 +2524,20 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
             # Look for job with this scan_id
             job_keys = r.keys("job:*")
             heartbeat_found = False
+            delivery_reclaimed = False
+            delivery_attempts = 0
 
             for key in job_keys:
                 job_data = _decode_redis_hash(r.hgetall(key))
                 if job_data.get('scan_id') == scan_id or _redis_text(key).endswith(scan_id):
+                    try:
+                        delivery_attempts = int(job_data.get('queue_delivery_attempts') or 0)
+                    except (TypeError, ValueError):
+                        delivery_attempts = 0
+                    delivery_reclaimed = (
+                        str(job_data.get('queue_reclaimed') or '').strip().lower() == 'true'
+                        or delivery_attempts >= 2
+                    )
                     heartbeat_str = job_data.get('heartbeat')
                     if heartbeat_str:
                         try:
@@ -2537,11 +2547,18 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
 
                             if heartbeat_age > heartbeat_timeout_minutes:
                                 is_stale = True
-                                reason = (
-                                    f"No heartbeat for {heartbeat_age:.1f} minutes "
-                                    f"(timeout {heartbeat_timeout_minutes} min, "
-                                    f"phase={current_phase or 'unknown'}, progress={progress})"
-                                )
+                                if delivery_reclaimed:
+                                    reason = (
+                                        "Worker execution stopped after its queue lease was reclaimed "
+                                        f"(delivery attempt {delivery_attempts}); automatic replay was withheld "
+                                        "to avoid duplicate requests"
+                                    )
+                                else:
+                                    reason = (
+                                        f"Worker stopped heartbeating for {heartbeat_age:.1f} minutes "
+                                        f"(timeout {heartbeat_timeout_minutes} min, "
+                                        f"last phase={current_phase or 'unknown'}, progress={progress})"
+                                    )
                         except (ValueError, TypeError):
                             pass
                     break
@@ -2552,8 +2569,8 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 if scan_age > heartbeat_timeout_minutes:
                     is_stale = True
                     reason = (
-                        f"No heartbeat found, scan started {scan_age:.1f} minutes ago "
-                        f"(timeout {heartbeat_timeout_minutes} min)"
+                        "The scan was claimed but no worker heartbeat was recorded; "
+                        f"claim age {scan_age:.1f} minutes (timeout {heartbeat_timeout_minutes} min)"
                     )
 
             # Check 2: Max duration exceeded (safety net)
