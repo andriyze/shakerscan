@@ -21,6 +21,20 @@ test('progress logs become readable milestones without discarding raw evidence',
   assert.equal(scanLogEntry('WARNING: request budget reached').kind, 'warning')
 })
 
+test('successful diagnostics with empty error fields remain neutral', () => {
+  const probe = scanLogEntry('Diagnostic Discover Web Probe · outcome=success · reason=none · error=none · execution=unknown · limiter=within_ceiling')
+  const crawl = scanLogEntry('Diagnostic Discover Web Crawl · outcome=success · reason=none · error=none · http=0/121/150 observed/hard/reserved')
+  assert.equal(probe.kind, 'detail')
+  assert.equal(probe.label, 'activity')
+  assert.equal(crawl.kind, 'detail')
+})
+
+test('structured diagnostic failures and real exceptions remain errors', () => {
+  assert.equal(scanLogEntry('Diagnostic Discover Web Crawl · outcome=failed · error=connection_refused').kind, 'error')
+  assert.equal(scanLogEntry('[error] worker aborted').kind, 'error')
+  assert.equal(scanLogEntry('Traceback: connection failed').kind, 'error')
+})
+
 test('a shallow clean scan leads with an honest conclusion instead of a perfect score', () => {
   const result = scanResultPresentation({
     score: 100,

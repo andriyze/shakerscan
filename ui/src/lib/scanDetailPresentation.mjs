@@ -72,10 +72,10 @@ export function scanLogEntry(rawLine) {
     label = 'milestone'
     message = progress[3].trim() || progress[1].replaceAll('_', ' ')
     meta = `${progress[2]}% · ${progress[1].replaceAll('_', ' ')}`
-  } else if (/\b(error|failed|failure|traceback|exception|fatal)\b/i.test(raw)) {
+  } else if (structuredLogFailure(raw, source)) {
     kind = 'error'
     label = 'error'
-  } else if (/\b(warn(?:ing)?|timed?\s*out|partial|degraded|budget reached|skipping)\b/i.test(raw)) {
+  } else if (structuredLogWarning(raw, source)) {
     kind = 'warning'
     label = 'attention'
   } else if (/\b(finding|vulnerab|verified|candidate|exploit)\b/i.test(raw)) {
@@ -87,6 +87,32 @@ export function scanLogEntry(rawLine) {
   }
 
   return { raw, source, message, kind, label, meta }
+}
+
+function structuredValue(raw, key) {
+  const match = raw.match(new RegExp(`(?:^|[\\s·])${key}=([^\\s·]+)`, 'i'))
+  return match ? match[1].replace(/^['"]|['"]$/g, '').toLowerCase() : ''
+}
+
+function structuredLogFailure(raw, source) {
+  const normalizedSource = String(source || '').toLowerCase()
+  if (['error', 'fatal', 'exception', 'traceback'].includes(normalizedSource)) return true
+  const outcome = structuredValue(raw, '(?:outcome|status|result)')
+  if (['error', 'failed', 'failure', 'fatal', 'exception'].includes(outcome)) return true
+  const error = structuredValue(raw, 'error')
+  if (error && !['none', 'null', 'false', 'no', '0', 'nil', 'success', 'ok', '-'].includes(error)) return true
+  const withoutBenignFields = raw
+    .replace(/(?:^|[\s·])(?:error|reason)=(?:none|null|false|no|0|nil|success|ok|-)(?=$|[\s·])/gi, ' ')
+    .replace(/(?:^|[\s·])(?:outcome|status|result)=(?:success|ok|complete|completed)(?=$|[\s·])/gi, ' ')
+  return /(?:^|[\s:])(error|failed|failure|traceback|exception|fatal)(?:$|[\s:])/i.test(withoutBenignFields)
+}
+
+function structuredLogWarning(raw, source) {
+  const normalizedSource = String(source || '').toLowerCase()
+  if (['warn', 'warning'].includes(normalizedSource)) return true
+  const outcome = structuredValue(raw, '(?:outcome|status|result)')
+  if (['warning', 'partial', 'degraded', 'timeout', 'timed_out', 'skipped'].includes(outcome)) return true
+  return /\b(warn(?:ing)?|timed?\s*out|partial|degraded|budget reached|skipping)\b/i.test(raw)
 }
 
 export function scanResultPresentation(scan, assurance) {
