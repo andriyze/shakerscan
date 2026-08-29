@@ -36,6 +36,7 @@ ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
 TARGET_HOST_IDENTITY_MIGRATION = "target_host_identity_v1"
 LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"
+EVIDENCE_SCAN_IDENTITY_MIGRATION = "evidence_scan_identity_v2"
 
 
 class SchemaMigrationError(RuntimeError):
@@ -952,6 +953,70 @@ async def _reconcile_active_finding_counts(conn) -> None:
             WHERE f.device_target_id=d.id AND f.status='active'
         )
     """)
+
+
+async def _migrate_evidence_scan_identity(conn) -> None:
+    """Install scan-scoped evidence identity exactly once without rewriting history.
+
+    Older releases kept one mutable evidence row per finding/object type. The first
+    scan-scoped rollout repaired that legacy row correctly, but left the repair as
+    an unconditional startup UPDATE. Once later scans wrote their own observations,
+    the UPDATE tried to move every historical row onto the finding's latest scan and
+    collided with the new unique index. An already-present index is authoritative
+    evidence that the one-time repair completed before this ledger entry existed.
+    """
+    applied = await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1",
+        EVIDENCE_SCAN_IDENTITY_MIGRATION,
+    )
+    if applied:
+        return
+
+    index_present = await conn.fetchval(
+        "SELECT to_regclass('idx_evidence_objects_finding_type_scan_unique') IS NOT NULL"
+    )
+    if index_present:
+        await conn.execute(
+            "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+            EVIDENCE_SCAN_IDENTITY_MIGRATION,
+        )
+        return
+
+    # On a true legacy database there is at most one row per finding/object type.
+    # The NOT EXISTS guard also makes a partially upgraded database safe: a row
+    # already attached to the current scan wins and older scan observations remain
+    # untouched rather than being deleted or relabelled.
+    await conn.execute("""
+        UPDATE evidence_objects evidence
+        SET scan_id=findings.scan_id
+        FROM findings
+        WHERE evidence.finding_id=findings.id
+          AND evidence.scan_id IS NOT NULL
+          AND findings.scan_id IS NOT NULL
+          AND evidence.scan_id IS DISTINCT FROM findings.scan_id
+          AND evidence.object_type ~ '(^finding_evidence$|_evidence$)'
+          AND evidence.retention_delete_pending_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM evidence_objects current_observation
+              WHERE current_observation.finding_id=evidence.finding_id
+                AND current_observation.object_type=evidence.object_type
+                AND current_observation.scan_id=findings.scan_id
+          )
+    """)
+    await conn.execute("""
+        ALTER TABLE evidence_objects
+        DROP CONSTRAINT IF EXISTS evidence_objects_finding_type_unique
+    """)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_scan_unique
+        ON evidence_objects(finding_id, object_type, scan_id)
+        WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
+    """)
+    await conn.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        EVIDENCE_SCAN_IDENTITY_MIGRATION,
+    )
 
 
 async def run_schema_migrations(pool) -> None:
@@ -3767,32 +3832,7 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS retention_delete_preview_id UUID,
                 ADD COLUMN IF NOT EXISTS retention_delete_pending_at TIMESTAMPTZ
             """)
-            # The original identity collapsed every observation of a finding into
-            # one mutable row. Its content was replaced by the newest scan while
-            # its scan_id stayed attached to the first scan, corrupting provenance.
-            # Existing rows contain the most recently upserted content, so repair
-            # that legacy link to the finding's current observation once, then make
-            # every future scan observation independently addressable.
-            await conn.execute("""
-                UPDATE evidence_objects evidence
-                SET scan_id=findings.scan_id
-                FROM findings
-                WHERE evidence.finding_id=findings.id
-                  AND evidence.scan_id IS NOT NULL
-                  AND findings.scan_id IS NOT NULL
-                  AND evidence.scan_id IS DISTINCT FROM findings.scan_id
-                  AND evidence.object_type ~ '(^finding_evidence$|_evidence$)'
-                  AND evidence.retention_delete_pending_at IS NULL
-            """)
-            await conn.execute("""
-                ALTER TABLE evidence_objects
-                DROP CONSTRAINT IF EXISTS evidence_objects_finding_type_unique
-            """)
-            await conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_scan_unique
-                ON evidence_objects(finding_id, object_type, scan_id)
-                WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
-            """)
+            await _migrate_evidence_scan_identity(conn)
             await conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_unscoped_unique
                 ON evidence_objects(finding_id, object_type)
