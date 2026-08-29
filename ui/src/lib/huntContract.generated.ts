@@ -142,6 +142,7 @@ export const HUNT_START_CONTRACT = {
   "limits": {
     "capabilities": 128,
     "credential_refs": 16,
+    "direct_origin_addresses": 8,
     "goal_chars": 20000,
     "request_collections": 32,
     "skill_ids": 4
@@ -172,6 +173,7 @@ export const HUNT_START_CONTRACT = {
   },
   "policy_fields": [
     "active_testing",
+    "allow_direct_origin",
     "allow_identity_headers",
     "allow_oob_interactions",
     "allow_state_changing_http",

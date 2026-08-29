@@ -53,19 +53,16 @@ preconditions:
 - origin_ownership_confirmed
 techniques:
 - origin-exposure-discovery
+- direct-origin-request-with-preserved-host
 - unproxied-port-inventory
 - certificate-and-sni-correlation
 - path-normalization-differential
 - preflight-and-verb-surface
 - cache-identity-confusion
-promotion_gate: origin_reached_without_edge_or_edge_origin_disagreement_with_negative_control
+promotion_gate: direct_origin_response_matches_application_without_edge_headers_or_edge_origin_disagreement
 requires_skills:
 - skill.web.http-baselining-replay-and-differential-analysis
 deferred_techniques:
-- technique: direct-origin-request-with-preserved-host
-  requires: an operator-authorized origin-binding tier; runtime target binding refuses an unbound
-    address today, and lifting it belongs behind an explicit confirmed permission rather than a
-    relaxed default
 - technique: historical-and-aaaa-dns-enumeration
   requires: a planner-visible dns.resolve capability; dns.inspect exists but is server-only
 - technique: method-and-content-type-switching
@@ -120,23 +117,26 @@ every other control at once.
 
 ## What this runtime can and cannot do
 
-This matters more here than in most skills, because the classic Cloudflare bypass proof —
-`curl --resolve app.example.com:443:203.0.113.10` with the original `Host` — is exactly what
-ShakerScan's runtime target binding refuses. Every request is pinned to a bound origin and a
-resolved address, and `Host`, `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are rejected request
-headers.
+The classic bypass proof — `curl --resolve app.example.com:443:203.0.113.10` carrying the original
+`Host` — is available, but only against an address the **operator** confirmed when starting the
+hunt. Pass one of those addresses as `via_address` on `http.request` and the connection is pinned
+to it while SNI and `Host` stay the target's. The planner chooses among confirmed addresses; it
+never supplies one.
 
-That limit is deliberate and should not be worked around. It changes what you prove:
+That requires `policy.allow_direct_origin`, `active_testing`, and a target-bound approval receipt.
+Without them, every request goes to the target's resolved address, and this skill is limited to
+proving exposure rather than demonstrating the bypass.
 
-- **You can prove exposure.** An origin candidate that answers on an unproxied port, presents the
-  target's certificate, or serves the application under a DNS-only name is evidence the edge is
-  not the only path in.
-- **You cannot, here, complete the direct-origin request** that demonstrates the bypass end to end.
-  Record the exposure as the finding, name the confirming step, and leave it to an operator with an
-  explicit second-origin binding.
+Both outcomes are worth reporting, and they are not the same evidence:
 
-Treat that as a reporting boundary, not a reason to skip the work. "This origin is reachable
-without the edge" is already actionable.
+- **Exposure.** An origin candidate answering on an unproxied port, presenting the target's
+  certificate, or serving the application under a DNS-only name shows the edge is not the only path
+  in. Actionable on its own.
+- **Demonstrated bypass.** The same application content returned over a `via_address` request, with
+  the edge's response headers absent. This is the finding.
+
+Every response records whether it arrived through the resolved address or a confirmed origin. Never
+compare the two without saying which is which.
 
 ## Agent workflow
 
@@ -178,7 +178,21 @@ container-published application ports — and to management, monitoring, and bac
 An HTTP service answering the application on a port the edge does not proxy is a complete bypass
 even if you cannot finish the request from here.
 
-### 4. Path normalization differential
+### 4. Complete the bypass, where the operator authorized it
+
+For each exposed candidate the operator confirmed as a `direct_origin_address`, send the same
+request twice: once normally, and once with `via_address` set to that address. Compare status, body,
+and the edge's own response headers.
+
+The application answering identically over `via_address`, without the edge headers, is the
+demonstrated bypass. A connection refused or a TLS failure is the control working. A generic origin
+denial before application routing is also correct behaviour — the origin recognised traffic that did
+not come through the edge.
+
+Keep this to a handful of requests. It exists to confirm the exposure discovered in steps 2 and 3,
+not to conduct the rest of the assessment against the origin.
+
+### 5. Path normalization differential
 
 The edge and the application must agree about what path a request names. Where they disagree, an
 edge rule guarding `/admin` protects a string the application never sees.
@@ -200,7 +214,7 @@ convert, which makes `/admin%2fsettings` and `/admin%252fsettings` the highest-y
 A single anomalous response is not a finding. Re-send both the anomalous and the canonical form
 interleaved, and require the difference to reproduce.
 
-### 5. Preflight and verb surface
+### 6. Preflight and verb surface
 
 `http.request` can send `OPTIONS`. Some edge access configurations pass preflight straight to the
 origin so CORS works. Check that an unauthenticated `OPTIONS` performs no state-changing or
@@ -213,7 +227,7 @@ defect.
 The remaining method work — `POST`, `PUT`, `DELETE`, and the `X-HTTP-Method-Override` and `_method`
 conventions — is deferred; this runtime's `http.request` carries no body.
 
-### 6. Cache and identity confusion
+### 7. Cache and identity confusion
 
 The highest-severity edge finding is one user's authenticated response served to another. Use
 `authz.verify` with two principals where the target has them, and `http.request` otherwise:
@@ -228,7 +242,7 @@ The highest-severity edge finding is one user's authenticated response served to
 An authenticated route that looks like a static file is the common cause. Never treat a single
 `HIT` as proof — confirm the response body actually crosses identities.
 
-### 7. Client-IP header trust — deferred, and why
+### 8. Client-IP header trust — deferred, and why
 
 The edge supplies a connecting-IP header so the origin can identify the visitor. It is trustworthy
 only when the connection is known to have come from the edge. Where it is trusted unconditionally,
@@ -252,6 +266,8 @@ whether or not this runtime could send the header.
 - **Origin exposure:** the alternate name or port, the service identified, the certificate or
   response evidence tying it to the same application, and the contrast with the edge-fronted
   baseline.
+- **Demonstrated bypass:** the paired requests, the confirmed address used, the application content
+  returned over it, and the edge headers present on one and absent on the other.
 - **Normalization disagreement:** both representations, both responses, the shared application
   route, and an interleaved repeat.
 - **Cache confusion:** both principals' requests and responses, the marker that crossed, and the

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
 
 import agent_tools
@@ -163,6 +163,7 @@ async def execute_bound_http_request(
     allow_write: bool = False,
     trusted_headers: Mapping[str, Any] | None = None,
     allow_identity_headers: bool = False,
+    direct_origin_addresses: Sequence[str] = (),
     cookies: Mapping[str, Any] | None = None,
     principal_slot: str = "anonymous",
     selected_headers: list[str] | None = None,
@@ -204,7 +205,20 @@ async def execute_bound_http_request(
             "ok": False,
             "error": "scope: HTTP origin is outside the frozen target binding",
         }
-    if not target.allowed_addresses:
+    # An operator-confirmed address replaces the resolved one for this request only, while
+    # SNI and Host stay the target's. That is what demonstrates an origin is reachable
+    # without whatever sits in front of it, rather than only suspecting it from a scan.
+    # The planner may name an address but never invent one: it has to be in the list the
+    # operator confirmed at hunt start.
+    via_address = str(args.get("via_address") or "").strip()
+    confirmed = tuple(str(item).strip() for item in direct_origin_addresses if str(item).strip())
+    if via_address and via_address not in confirmed:
+        return {
+            "ok": False,
+            "error": "scope: via_address is not an operator-confirmed direct origin",
+        }
+    frozen_addresses = (via_address,) if via_address else target.allowed_addresses
+    if not frozen_addresses:
         return {
             "ok": False,
             "error": "scope: HTTP target has no frozen address",
@@ -216,7 +230,7 @@ async def execute_bound_http_request(
                 urllib.parse.urlsplit(request_origin).port
                 or (443 if request_origin.startswith("https://") else 80)
             ),
-            frozen_addresses=target.allowed_addresses,
+            frozen_addresses=frozen_addresses,
         )
         pinned_address = socket_factory.primary_address
     except ValueError as exc:
@@ -247,6 +261,10 @@ async def execute_bound_http_request(
             else "form" if form_body is not None else None
         ),
         "pinned_address": pinned_address,
+        # Recorded so a reader can always tell whether a response came through the target's
+        # resolved address or an operator-confirmed origin. The two are not comparable
+        # evidence and must never be conflated in a finding.
+        "direct_origin": bool(via_address),
         "address_policy": socket_factory.policy_receipt,
         "follow_redirects": follow_redirects,
     }

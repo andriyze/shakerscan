@@ -959,6 +959,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                 },
+                # Send this request to one operator-confirmed address instead of the
+                # target's resolved address, keeping SNI and Host. This is how an edge
+                # bypass is demonstrated rather than merely suspected. The planner may only
+                # name an address the operator confirmed at hunt start.
+                "via_address": {"type": "string", "maxLength": 45},
             }, required=("method", "path")),
             "http-observation/v1", ("http_observation", "tool_receipt"),
             hunt_executor="worker_http",

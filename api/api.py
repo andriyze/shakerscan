@@ -13445,41 +13445,14 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         except _hunt_skills.HuntSkillError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         allowed_capabilities, budget = bound.allowed_capabilities, bound.budget
-        policy = {
-            "schema_version": "hunt-policy/v2",
-            "target_kind": contract.target_kind,
-            "active_testing": bool(
-                contract.policy.active_testing and approval_validated
-            ),
-            "credential_access": credential_access,
-            "mutation_allowed": bool(
-                contract.policy.allow_state_changing_http and approval_validated
-            ),
-            "allow_state_changing_http": bool(
-                contract.policy.allow_state_changing_http and approval_validated
-            ),
-            "network_discovery": bool(
-                contract.policy.network_discovery and approval_validated
-            ),
-            "allow_oob_interactions": bool(
-                contract.policy.allow_oob_interactions and approval_validated
-            ),
-            "allow_identity_headers": bool(
-                contract.policy.allow_identity_headers and approval_validated
-            ),
-            "authorization_confirmed": contract.policy.authorization_confirmed,
-            "approval_receipt_id": validated_approval_id,
-            "scope_receipt_id": validated_scope_id,
-            "device_fragility_profile": (
-                "authenticated_active"
-                if contract.target_kind == "device" and credential_access
-                else "safe_remote" if contract.target_kind == "device" else None
-            ),
-            "budget_profile": contract.budget_profile,
-            "budget_schema_version": HUNT_BUDGET_SCHEMA,
-            "budget": asdict(budget),
-            "allowed_capabilities": list(allowed_capabilities),
-        }
+        policy = contract.persisted_policy(
+            approval_validated=approval_validated,
+            credential_access=credential_access,
+            approval_receipt_id=validated_approval_id,
+            scope_receipt_id=validated_scope_id,
+            budget=budget,
+            allowed_capabilities=allowed_capabilities,
+        )
         normalized_contract = contract.public_dict()
         normalized_contract["policy"]["approval_receipt_id"] = validated_approval_id
         normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id

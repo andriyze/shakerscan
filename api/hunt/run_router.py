@@ -30,6 +30,7 @@ class HuntStartV2PolicyRequest(BaseModel):
     network_discovery: bool = False
     allow_oob_interactions: bool = False
     allow_identity_headers: bool = False
+    allow_direct_origin: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
@@ -52,6 +53,7 @@ class HuntStartV2Request(BaseModel):
     capabilities: list[str] = Field(default_factory=list, max_length=128)
     request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
     skill_ids: list[str] = Field(default_factory=list, max_length=4)
+    direct_origin_addresses: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
 

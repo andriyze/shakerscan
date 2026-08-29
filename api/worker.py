@@ -22507,6 +22507,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     allow_identity_headers=bool(
                         hunt_policy.get("allow_identity_headers")
                     ),
+                    direct_origin_addresses=tuple(
+                        hunt_policy.get("direct_origin_addresses") or ()
+                    ),
                     principal_slot=principal_slot,
                     timeout_seconds=min(
                         60,

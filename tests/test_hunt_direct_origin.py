@@ -1,0 +1,175 @@
+"""Operator-confirmed direct-origin requests.
+
+Demonstrating that an origin is reachable without the CDN or WAF in front of it requires
+connecting to a specific address while still presenting the target's hostname. That is
+useful and dangerous for the same reason, so the address comes from the operator and the
+planner may only choose among the ones already confirmed.
+"""
+
+import asyncio
+
+import pytest
+
+from api.capabilities.http import execute_bound_http_request
+from api.hunt.start_contract import (
+    MAX_DIRECT_ORIGIN_ADDRESSES,
+    HuntStartContractError,
+    normalize_hunt_start_payload,
+)
+from api.runtime.models import TargetBinding
+
+
+APPROVAL = "11111111-1111-4111-8111-111111111111"
+AUTHORIZED = {
+    "allow_direct_origin": True,
+    "active_testing": True,
+    "authorization_confirmed": True,
+    "approval_receipt_id": APPROVAL,
+}
+
+
+def _start(**overrides):
+    payload = {"target_id": "t1", "target_kind": "web", "goal": "g", "policy": {}}
+    payload.update(overrides)
+    return normalize_hunt_start_payload(payload)
+
+
+def _binding():
+    return TargetBinding(
+        target_id="t1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",),
+        allowed_addresses=("198.51.100.5",),
+    )
+
+
+def _run(**kwargs):
+    return asyncio.run(execute_bound_http_request(
+        "https://app.example.test",
+        {"method": "GET", "path": "/", **kwargs.pop("args", {})},
+        target=_binding(),
+        timeout_seconds=kwargs.pop("timeout_seconds", 1),
+        **kwargs,
+    ))
+
+
+# --- contract ----------------------------------------------------------------------------
+
+def test_addresses_without_the_authority_are_refused():
+    with pytest.raises(HuntStartContractError, match="requires policy.allow_direct_origin"):
+        _start(direct_origin_addresses=["203.0.113.10"])
+
+
+def test_the_authority_without_addresses_is_refused():
+    """Granting it with nothing to use it on reads as configured while doing nothing."""
+    with pytest.raises(HuntStartContractError, match="at least one direct origin address"):
+        _start(policy=AUTHORIZED)
+
+
+def test_direct_origin_requires_active_testing_and_an_approval_receipt():
+    with pytest.raises(HuntStartContractError, match="require active_testing"):
+        _start(
+            direct_origin_addresses=["203.0.113.10"],
+            policy={"allow_direct_origin": True},
+        )
+    with pytest.raises(HuntStartContractError, match="approval receipt"):
+        _start(
+            direct_origin_addresses=["203.0.113.10"],
+            policy={
+                "allow_direct_origin": True, "active_testing": True,
+                "authorization_confirmed": True,
+            },
+        )
+
+
+def test_only_literal_addresses_are_accepted():
+    """A hostname would be resolved at connect time, which is the indirection this field
+    exists to remove: the operator is naming the machine, not another name for it."""
+    with pytest.raises(HuntStartContractError, match="literal IP addresses"):
+        _start(
+            direct_origin_addresses=["origin.example.com"], policy=AUTHORIZED,
+        )
+
+
+def test_both_address_families_are_accepted_and_deduplicated():
+    contract = _start(
+        direct_origin_addresses=["203.0.113.10", "2001:db8::10", "203.0.113.10"],
+        policy=AUTHORIZED,
+    )
+    assert list(contract.direct_origin_addresses) == ["203.0.113.10", "2001:db8::10"]
+
+
+def test_the_confirmed_list_is_bounded():
+    """A long list stops being an operator naming hosts and becomes a scan range."""
+    with pytest.raises(HuntStartContractError, match="at most"):
+        _start(
+            direct_origin_addresses=[
+                f"203.0.113.{index}"
+                for index in range(MAX_DIRECT_ORIGIN_ADDRESSES + 1)
+            ],
+            policy=AUTHORIZED,
+        )
+
+
+# --- persisted policy --------------------------------------------------------------------
+
+def test_unearned_authority_is_stored_as_absent():
+    """Workers read the row, not the request. Authority that was asked for but not approved
+    must not survive into the row, or every reader has to re-check the receipt."""
+    contract = _start(
+        direct_origin_addresses=["203.0.113.10"], policy=AUTHORIZED,
+    )
+    row = contract.persisted_policy(
+        approval_validated=False, credential_access=False,
+        approval_receipt_id=None, scope_receipt_id=None,
+        budget=contract.resolved_budget_object, allowed_capabilities=(),
+    )
+    assert row["allow_direct_origin"] is False
+    assert row["direct_origin_addresses"] == []
+    assert row["active_testing"] is False
+
+
+def test_approved_authority_reaches_the_row():
+    contract = _start(
+        direct_origin_addresses=["203.0.113.10"], policy=AUTHORIZED,
+    )
+    row = contract.persisted_policy(
+        approval_validated=True, credential_access=False,
+        approval_receipt_id=APPROVAL, scope_receipt_id=None,
+        budget=contract.resolved_budget_object, allowed_capabilities=("http.request",),
+    )
+    assert row["allow_direct_origin"] is True
+    assert row["direct_origin_addresses"] == ["203.0.113.10"]
+
+
+# --- executor ----------------------------------------------------------------------------
+
+def test_an_unconfirmed_address_is_refused_before_any_connection():
+    result = _run(
+        args={"via_address": "203.0.113.99"},
+        direct_origin_addresses=("203.0.113.10",),
+    )
+    assert result["ok"] is False
+    assert "not an operator-confirmed direct origin" in result["error"]
+
+
+def test_a_planner_cannot_reach_an_address_when_none_were_confirmed():
+    result = _run(args={"via_address": "203.0.113.10"})
+    assert result["ok"] is False
+    assert "not an operator-confirmed direct origin" in result["error"]
+
+
+def test_a_confirmed_address_passes_the_scope_check():
+    """It fails at connect, not at scope: the address is admitted and the attempt is real."""
+    result = _run(
+        args={"via_address": "203.0.113.10"},
+        direct_origin_addresses=("203.0.113.10",),
+    )
+    assert not str(result.get("error", "")).startswith("scope:")
+
+
+def test_the_target_address_is_still_used_when_no_address_is_named():
+    result = _run(direct_origin_addresses=("203.0.113.10",))
+    assert not str(result.get("error", "")).startswith("scope:")
+    assert result.get("request", {}).get("direct_origin") is not True
