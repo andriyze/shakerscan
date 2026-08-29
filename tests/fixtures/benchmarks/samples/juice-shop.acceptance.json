@@ -3,6 +3,7 @@
   "false_positive_risk": 0.8,
   "gates": {
     "active_execution_ok": true,
+    "auth_workflow_ready": false,
     "completion_telemetry_consistent": true,
     "grade_reliable_recorded": true,
     "max_unverified_high_ratio": false,

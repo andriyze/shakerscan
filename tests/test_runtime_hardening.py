@@ -164,8 +164,10 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
     assert 'mkdir -p "$INSTALL_STAGE/runner/guest" "$INSTALL_STAGE/runner/host"' in installer
     for relative_path in expected_downloads:
         assert f'download "$REPO_RAW_BASE/{relative_path}" "$INSTALL_DIR/{relative_path}"' in installer
-    assert 'chmod +x "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"' in installer
-    assert 'chmod +x "$INSTALL_DIR/scripts/provision-model-intake-firecracker.sh"' in installer
+    # Executability is established in the staged tree before the atomic directory
+    # activation; post-activation chmod would expose a partially configured install.
+    assert 'chmod +x "$INSTALL_STAGE/scripts/build-model-intake-guest-rootfs.sh"' in installer
+    assert 'chmod +x "$INSTALL_STAGE/scripts/provision-model-intake-firecracker.sh"' in installer
 
 
 def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():

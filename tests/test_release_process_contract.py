@@ -24,6 +24,7 @@ def test_worker_only_status_does_not_report_missing_local_api_as_failure():
 
 def test_release_process_documents_build_promote_stable_order():
     text = (ROOT / "docs" / "release-process.md").read_text(encoding="utf-8")
-    assert text.index("## 1. Freeze and build") < text.index("## 2. Additional Fleet topology acceptance")
-    assert text.index("## 2. Additional Fleet topology acceptance") < text.index("## 3. Publish")
+    optional = "## 2. Optional physical support-boundary acceptance"
+    assert text.index("## 1. Freeze and build") < text.index(optional)
+    assert text.index(optional) < text.index("## 3. Publish")
     assert text.index("## 3. Publish") < text.index("## 4. Public smoke")
