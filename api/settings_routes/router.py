@@ -223,6 +223,7 @@ async def update_automation_settings(request: AutomationSettingsUpdate):
 @router.put("/settings/ai")
 async def update_ai_settings(request: AISettingsUpdate):
     """Update runtime AI settings, optionally persisting to local .env."""
+    _validate_effective_ai_threshold_update(request, _load_effective_ai_settings())
     try:
         r = get_redis()
     except Exception as e:
@@ -1554,6 +1555,42 @@ class AISettingsUpdate(BaseModel):
                 "ai_escalation_min_severity cannot be broader than verification_min_severity"
             )
         return self
+
+
+def _validate_effective_ai_threshold_update(
+    request: AISettingsUpdate,
+    current: Mapping[str, Any],
+) -> None:
+    """Validate a partial update against the policy it will actually produce."""
+    verification = (
+        request.verification_min_severity
+        or request.auto_retest_min_severity
+        or current.get("verification_min_severity")
+        or current.get("auto_retest_min_severity")
+        or "medium"
+    )
+    escalation = (
+        request.ai_escalation_min_severity
+        or request.ai_verify_min_severity
+        or current.get("ai_escalation_min_severity")
+        or current.get("ai_verify_min_severity")
+        or "high"
+    )
+    severity_order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    verification = str(verification or "medium").strip().lower()
+    escalation = str(escalation or "high").strip().lower()
+    if verification not in severity_order:
+        verification = "medium"
+    if escalation not in severity_order:
+        escalation = "high"
+    if severity_order[escalation] < severity_order[verification]:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "ai_escalation_min_severity cannot be broader than the effective "
+                "verification_min_severity"
+            ),
+        )
 
 
 class ScanExecutionSettingsUpdate(BaseModel):

@@ -7,7 +7,12 @@ from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
-from settings_routes.router import AISettingsUpdate  # noqa: E402
+from fastapi import HTTPException
+
+from settings_routes.router import (  # noqa: E402
+    AISettingsUpdate,
+    _validate_effective_ai_threshold_update,
+)
 
 
 def test_ai_escalation_must_be_within_verification_eligible_severities():
@@ -38,3 +43,16 @@ def test_ordered_canonical_threshold_hierarchy_is_valid():
 
     assert settings.verification_min_severity == "medium"
     assert settings.ai_escalation_min_severity == "high"
+
+
+def test_partial_threshold_patch_is_validated_against_persisted_state():
+    request = AISettingsUpdate(ai_escalation_min_severity="medium")
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_effective_ai_threshold_update(
+            request,
+            {"verification_min_severity": "high"},
+        )
+
+    assert exc.value.status_code == 422
+    assert "effective verification_min_severity" in exc.value.detail
