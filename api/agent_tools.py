@@ -48,15 +48,39 @@ READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 WRITE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 ALL_METHODS: frozenset[str] = READ_METHODS | WRITE_METHODS
 
-# Request headers the model may never set. Auth/identity headers come ONLY from a
-# server-resolved principal (as_principal); a Host/CL/hop-by-hop header would break
-# same-origin or smuggle. Anything matching a sensitive substring is also dropped.
-_FORBIDDEN_HEADERS: frozenset[str] = frozenset(
+# Headers the planner may never set, whatever the operator authorizes, because real auth
+# comes only from a server-resolved principal (as_principal). Letting a planner supply one
+# would put a credential outside the credential store and outside the evidence chain.
+_CREDENTIAL_HEADERS: frozenset[str] = frozenset(
+    {"authorization", "cookie", "proxy-authorization"}
+)
+# Message framing and routing owned by the executor. A planner-set value here does not test
+# anything; it produces a malformed or misrouted request. Deliberate framing manipulation is
+# request smuggling, which belongs to its own raw single-connection capability with its own
+# approval, not to a header field on a normal request.
+_TRANSPORT_HEADERS: frozenset[str] = frozenset(
     {
-        "authorization", "cookie", "host", "content-length", "connection",
-        "transfer-encoding", "proxy-authorization", "x-forwarded-for",
-        "x-forwarded-host", "x-real-ip", "forwarded",
+        "host", "content-length", "connection", "transfer-encoding",
+        "keep-alive", "te", "trailer", "upgrade",
     }
+)
+# Headers that assert who the client is. Forging one is a legitimate and important test --
+# an origin that trusts them while reachable outside its edge is exploitable -- but it is
+# also identity forgery, so it requires explicit operator authority rather than being
+# available by default.
+#
+# The Cloudflare and Akamai names belong here for the same reason as X-Forwarded-For. They
+# were previously absent, so the two headers an origin behind a major edge is most likely to
+# trust were the two a planner could always set.
+IDENTITY_HEADERS: frozenset[str] = frozenset(
+    {
+        "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+        "cf-connecting-ip", "true-client-ip", "x-client-ip", "x-originating-ip",
+        "x-cluster-client-ip", "x-remote-addr", "x-remote-ip",
+    }
+)
+_FORBIDDEN_HEADERS: frozenset[str] = (
+    _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS | IDENTITY_HEADERS
 )
 _SENSITIVE_HEADER_SUBSTR: tuple[str, ...] = (
     "token", "secret", "auth", "session", "cookie", "password", "api-key", "apikey",
@@ -1597,15 +1621,26 @@ def validate_same_origin_path(path: Any) -> str:
     return text
 
 
-def filter_request_headers(headers: Any) -> dict[str, str]:
-    """Drop any header the model must not set (auth/identity/hop-by-hop/sensitive). Real
-    auth comes only from a server-resolved principal. Returns the surviving benign headers."""
+def filter_request_headers(
+    headers: Any, *, allow_identity_headers: bool = False,
+) -> dict[str, str]:
+    """Drop any header the planner must not set. Returns the surviving headers.
+
+    ``allow_identity_headers`` is the operator's explicit decision that forging a client
+    address against this target is in scope. It never unlocks credential or transport
+    headers: those are refused because of how ShakerScan handles secrets and frames
+    requests, which is not the operator's to waive.
+    """
     out: dict[str, str] = {}
     if not isinstance(headers, dict):
         return out
+    refused = (
+        _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS
+        if allow_identity_headers else _FORBIDDEN_HEADERS
+    )
     for name, value in headers.items():
         lname = str(name).strip().lower()
-        if not lname or lname in _FORBIDDEN_HEADERS:
+        if not lname or lname in refused:
             continue
         if any(sub in lname for sub in _SENSITIVE_HEADER_SUBSTR):
             continue

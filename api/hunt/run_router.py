@@ -29,6 +29,7 @@ class HuntStartV2PolicyRequest(BaseModel):
     allow_state_changing_http: bool = False
     network_discovery: bool = False
     allow_oob_interactions: bool = False
+    allow_identity_headers: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)

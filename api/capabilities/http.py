@@ -162,6 +162,7 @@ async def execute_bound_http_request(
     target: TargetBinding,
     allow_write: bool = False,
     trusted_headers: Mapping[str, Any] | None = None,
+    allow_identity_headers: bool = False,
     cookies: Mapping[str, Any] | None = None,
     principal_slot: str = "anonymous",
     selected_headers: list[str] | None = None,
@@ -221,7 +222,9 @@ async def execute_bound_http_request(
     except ValueError as exc:
         return {"ok": False, "error": f"scope: {exc}"}
 
-    headers = agent_tools.filter_request_headers(args.get("headers"))
+    headers = agent_tools.filter_request_headers(
+        args.get("headers"), allow_identity_headers=allow_identity_headers,
+    )
     headers.update(_trusted_headers(trusted_headers))
     query = args.get("query") if isinstance(args.get("query"), dict) else None
     json_body = (

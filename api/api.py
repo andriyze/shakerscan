@@ -13388,12 +13388,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         else:
             raise HTTPException(status_code=422, detail="unsupported target kind")
 
-        privileged = bool(
-            contract.policy.active_testing
-            or contract.policy.network_discovery
-            or contract.policy.allow_state_changing_http
-            or contract.policy.allow_oob_interactions
-            or credential_rows
+        privileged = contract.policy.is_privileged(
+            credentials_requested=bool(credential_rows)
         )
         if contract.policy.approval_receipt_id:
             approval_context = await _validate_approval_receipt_for_action(
@@ -13467,6 +13463,9 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             ),
             "allow_oob_interactions": bool(
                 contract.policy.allow_oob_interactions and approval_validated
+            ),
+            "allow_identity_headers": bool(
+                contract.policy.allow_identity_headers and approval_validated
             ),
             "authorization_confirmed": contract.policy.authorization_confirmed,
             "approval_receipt_id": validated_approval_id,

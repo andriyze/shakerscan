@@ -172,6 +172,7 @@ export const HUNT_START_CONTRACT = {
   },
   "policy_fields": [
     "active_testing",
+    "allow_identity_headers",
     "allow_oob_interactions",
     "allow_state_changing_http",
     "approval_receipt_id",

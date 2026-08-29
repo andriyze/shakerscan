@@ -62,6 +62,7 @@ _ALLOWED_POLICY_KEYS = frozenset({
     "allow_state_changing_http",
     "network_discovery",
     "allow_oob_interactions",
+    "allow_identity_headers",
     "authorization_confirmed",
     "approval_receipt_id",
     "scope_receipt_id",
@@ -288,6 +289,10 @@ class HuntStartPolicy:
     allow_state_changing_http: bool = False
     network_discovery: bool = False
     allow_oob_interactions: bool = False
+    # The operator's explicit decision that forging a client-address header against this
+    # target is in scope. Needed to test whether an origin trusts a client-suppliable
+    # address, which is exploitable wherever that origin is reachable outside its edge.
+    allow_identity_headers: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = None
     scope_receipt_id: str | None = None
@@ -295,6 +300,21 @@ class HuntStartPolicy:
     @property
     def authorized(self) -> bool:
         return bool(self.authorization_confirmed and self.approval_receipt_id)
+
+    def is_privileged(self, *, credentials_requested: bool) -> bool:
+        """Whether this policy needs confirmed authorization and an approval receipt.
+
+        One definition, because the same rule was previously restated at the start handler
+        and had to be edited in both places whenever a new authority was added.
+        """
+        return bool(
+            credentials_requested
+            or self.active_testing
+            or self.allow_state_changing_http
+            or self.network_discovery
+            or self.allow_oob_interactions
+            or self.allow_identity_headers
+        )
 
     def validate(self, *, credentials_requested: bool) -> None:
         if self.scope_receipt_id and not self.approval_receipt_id:
@@ -307,13 +327,11 @@ class HuntStartPolicy:
             raise HuntStartContractError("network discovery requires active_testing")
         if self.allow_oob_interactions and not self.active_testing:
             raise HuntStartContractError("OOB interactions require active_testing")
-        privileged = bool(
-            self.active_testing
-            or self.allow_state_changing_http
-            or self.network_discovery
-            or self.allow_oob_interactions
-            or credentials_requested
-        )
+        if self.allow_identity_headers and not self.active_testing:
+            raise HuntStartContractError(
+                "identity-header forgery requires active_testing"
+            )
+        privileged = self.is_privileged(credentials_requested=credentials_requested)
         if privileged and not self.authorization_confirmed:
             raise HuntStartContractError(
                 "active, network, mutation, OOB, and credential use require authorization_confirmed=true"
@@ -345,6 +363,7 @@ class HuntStartPolicy:
             "allow_state_changing_http": self.allow_state_changing_http,
             "network_discovery": self.network_discovery,
             "allow_oob_interactions": self.allow_oob_interactions,
+            "allow_identity_headers": self.allow_identity_headers,
             "authorization_confirmed": self.authorization_confirmed,
             "approval_receipt_id": self.approval_receipt_id,
             "scope_receipt_id": self.scope_receipt_id,
@@ -476,6 +495,9 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         ),
         allow_oob_interactions=_boolean(
             policy_raw.get("allow_oob_interactions"), "allow_oob_interactions"
+        ),
+        allow_identity_headers=_boolean(
+            policy_raw.get("allow_identity_headers"), "allow_identity_headers"
         ),
         authorization_confirmed=_boolean(
             policy_raw.get("authorization_confirmed"), "authorization_confirmed"

@@ -22501,6 +22501,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target=target,
                     allow_write=False,
                     trusted_headers=trusted_headers,
+                    # Read from the persisted hunt policy, which the start handler wrote
+                    # only after validating the target-bound approval receipt. ScanPolicy
+                    # does not carry this flag, so the row is the authority.
+                    allow_identity_headers=bool(
+                        hunt_policy.get("allow_identity_headers")
+                    ),
                     principal_slot=principal_slot,
                     timeout_seconds=min(
                         60,
