@@ -2045,7 +2045,7 @@ function ScanDetailContent() {
   // Show error for failed scans - but show partial results if available
   if (scan.status === 'failed') {
     const hasPartialResults = scan.result && (
-      scan.result.dns || scan.result.tls || scan.result.http ||
+      scan.result.infrastructure || scan.result.dns || scan.result.tls || scan.result.http ||
       (scan.result.findings && scan.result.findings.length > 0)
     )
     const isPartial = scan.result?.scan_metadata?.partial === true
