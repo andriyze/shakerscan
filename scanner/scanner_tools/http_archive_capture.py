@@ -25,6 +25,9 @@ CAPTURE_SCHEMA = "scanner-http-capture/v1"
 # memory before the worker drains it; the count of dropped calls is reported so the archive
 # never silently claims to be the whole run.
 DEFAULT_MAX_CAPTURED = 50_000
+# Count limits alone do not bound memory: 50,000 responses at the per-call stdout ceiling
+# would retain roughly 100 GB. This aggregate budget is the authoritative process-local cap.
+DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 # curl writes the response body to stdout unless told otherwise. Anything past this is not
 # worth holding in memory for every call in a scan.
 MAX_STDOUT_CAPTURE_BYTES = 2 * 1024 * 1024
@@ -35,17 +38,47 @@ _DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-ascii"}
 _DISCARD_TARGETS = {"/dev/null", "nul"}
 
 
+def _capture_size(value: Any, *, seen: set[int] | None = None) -> int:
+    """Conservative retained-payload estimate without serializing secret-bearing content."""
+    visited = seen if seen is not None else set()
+    identity = id(value)
+    if identity in visited:
+        return 0
+    visited.add(identity)
+    if value is None:
+        return 8
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(value) + 64
+    if isinstance(value, str):
+        return len(value.encode("utf-8", errors="replace")) + 64
+    if isinstance(value, Mapping):
+        return 128 + sum(
+            _capture_size(key, seen=visited) + _capture_size(item, seen=visited)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return 96 + sum(_capture_size(item, seen=visited) for item in value)
+    return 64
+
+
 class _Capture:
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, byte_limit: int) -> None:
         self.limit = limit
+        self.byte_limit = byte_limit
+        self.bytes_used = 0
         self.calls: list[dict[str, Any]] = []
         self.dropped = 0
+        self.dropped_bytes = 0
 
     def add(self, call: Mapping[str, Any]) -> None:
-        if len(self.calls) >= self.limit:
+        size = _capture_size(call)
+        if len(self.calls) >= self.limit or size > self.byte_limit - self.bytes_used:
             self.dropped += 1
+            self.dropped_bytes += size
             return
-        self.calls.append(dict(call))
+        retained = dict(call)
+        self.calls.append(retained)
+        self.bytes_used += size
 
 
 _active: contextvars.ContextVar[_Capture | None] = contextvars.ContextVar(
@@ -61,9 +94,17 @@ def max_captured() -> int:
         return DEFAULT_MAX_CAPTURED
 
 
+def max_capture_bytes() -> int:
+    raw = os.environ.get("HTTP_ARCHIVE_MAX_CAPTURE_BYTES")
+    try:
+        return max(0, int(str(raw).strip())) if raw else DEFAULT_MAX_CAPTURE_BYTES
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CAPTURE_BYTES
+
+
 def start_capture() -> None:
     """Begin collecting for the current scan."""
-    _active.set(_Capture(max_captured()))
+    _active.set(_Capture(max_captured(), max_capture_bytes()))
 
 
 def capture_active() -> bool:
@@ -75,12 +116,18 @@ def drain_capture() -> dict[str, Any]:
     capture = _active.get()
     _active.set(None)
     if capture is None:
-        return {"schema_version": CAPTURE_SCHEMA, "calls": [], "dropped": 0}
+        return {
+            "schema_version": CAPTURE_SCHEMA, "calls": [], "dropped": 0,
+            "bytes_used": 0, "byte_limit": max_capture_bytes(), "dropped_bytes": 0,
+        }
     return {
         "schema_version": CAPTURE_SCHEMA,
         "calls": capture.calls,
         # Stated so a reader can tell a bounded archive from a complete one.
         "dropped": capture.dropped,
+        "bytes_used": capture.bytes_used,
+        "byte_limit": capture.byte_limit,
+        "dropped_bytes": capture.dropped_bytes,
     }
 
 
@@ -268,10 +315,12 @@ def scan_target_host(url: str) -> str | None:
 __all__ = [
     "CAPTURE_SCHEMA",
     "DEFAULT_MAX_CAPTURED",
+    "DEFAULT_MAX_CAPTURE_BYTES",
     "MAX_STDOUT_CAPTURE_BYTES",
     "capture_active",
     "drain_capture",
     "max_captured",
+    "max_capture_bytes",
     "parse_curl_command",
     "record",
     "record_client_call",

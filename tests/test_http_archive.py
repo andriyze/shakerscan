@@ -6,8 +6,10 @@ makes a finding defensible and a scan unreviewable. These tests pin the properti
 make the archive trustworthy rather than merely present.
 """
 
+import asyncio
 import hashlib
 import json
+import time
 
 import pytest
 
@@ -29,6 +31,8 @@ from api.runtime.http_archive_reader import (
     project,
     read_transactions,
 )
+from api.capabilities.http import _read_bounded_response
+from scanner.scanner_tools import http_archive_capture
 
 
 def test_a_truncated_body_still_reports_the_whole_body_truthfully():
@@ -211,6 +215,38 @@ def test_a_retained_prefix_uses_the_executor_full_body_digest_and_length():
     assert rows[0]["truncated"] is True
 
 
+def test_response_reader_has_an_absolute_deadline_not_only_idle_timeout():
+    class SlowResponse:
+        async def aiter_bytes(self):
+            yield b"a"
+            await asyncio.sleep(0.05)
+            yield b"b"
+
+    body, digest, observed, truncated, deadline_exceeded = asyncio.run(
+        _read_bounded_response(
+            SlowResponse(), deadline=time.perf_counter() + 0.005, body_limit=100,
+        )
+    )
+    assert body == b"a"
+    assert digest == hashlib.sha256(b"a").hexdigest()
+    assert observed == 1
+    assert truncated is True
+    assert deadline_exceeded is True
+
+
+def test_process_capture_is_bounded_by_bytes_not_only_entry_count(monkeypatch):
+    monkeypatch.setenv("HTTP_ARCHIVE_MAX_CAPTURED_CALLS", "50000")
+    monkeypatch.setenv("HTTP_ARCHIVE_MAX_CAPTURE_BYTES", "256")
+    http_archive_capture.start_capture()
+    http_archive_capture.record({"url": "https://t/", "response_body": b"x" * 500})
+    captured = http_archive_capture.drain_capture()
+
+    assert captured["calls"] == []
+    assert captured["dropped"] == 1
+    assert captured["dropped_bytes"] > captured["byte_limit"]
+    assert captured["bytes_used"] == 0
+
+
 def test_a_partial_export_says_so():
     rows = [{"id": "1", "method": "GET", "url": "https://t/", "sequence": 0, "plane": "scan"}]
     document = export_document(
@@ -336,7 +372,7 @@ def test_the_archive_records_the_request_that_was_built():
     assert 'getattr(response, "request", None)' in source
     assert 'getattr(built, "query", b"")' in source, "the query string must come from the built URL"
     assert "body_truncated=body_truncated" in source, "truncation is passed, not recomputed"
-    assert "response_hasher.update(chunk)" in source
+    assert "_read_bounded_response(" in source
     assert "response_body_bytes=response_bytes" in source
 
 

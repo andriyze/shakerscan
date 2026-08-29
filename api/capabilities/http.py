@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -71,6 +72,43 @@ _SECURITY_POSTURE_HEADERS: tuple[str, ...] = (
     "server",
     "x-powered-by",
 )
+
+
+async def _read_bounded_response(
+    response: Any,
+    *,
+    deadline: float,
+    body_limit: int = MAX_BODY_BYTES,
+) -> tuple[bytes, str, int, bool, bool]:
+    """Read at most one byte past ``body_limit`` under one absolute deadline.
+
+    httpx read timeouts are idle timeouts: a hostile peer can emit one byte before every
+    timeout forever. The outer asyncio deadline bounds total occupation, while observing one
+    byte past the body ceiling proves truncation without draining an unbounded response.
+    Returned length and digest describe observed bytes; ``truncated`` says they are a prefix.
+    """
+    retained = bytearray()
+    observed = bytearray()
+    truncated = False
+    deadline_exceeded = False
+    remaining_seconds = max(0.001, deadline - time.perf_counter())
+    try:
+        async with asyncio.timeout(remaining_seconds):
+            async for chunk in response.aiter_bytes():
+                remaining_observation = max(0, body_limit + 1 - len(observed))
+                if remaining_observation:
+                    observed.extend(chunk[:remaining_observation])
+                remaining_body = max(0, body_limit - len(retained))
+                if remaining_body:
+                    retained.extend(chunk[:remaining_body])
+                if len(observed) > body_limit:
+                    truncated = True
+                    break
+    except TimeoutError:
+        truncated = True
+        deadline_exceeded = True
+    digest = hashlib.sha256(bytes(observed)).hexdigest()
+    return bytes(retained), digest, len(observed), truncated, deadline_exceeded
 
 
 def _origin(value: Any) -> str | None:
@@ -366,6 +404,7 @@ async def execute_bound_http_request(
     response = None
     body = b""
     final_url = url
+    request_deadline = time.perf_counter() + max(0.001, float(timeout))
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -420,20 +459,18 @@ async def execute_bound_http_request(
                         "all frozen target addresses failed before connect"
                     )
                 request_view["pinned_address"] = pinned_address
-                retained = bytearray()
-                response_bytes = 0
-                response_hasher = hashlib.sha256()
                 try:
-                    async for chunk in response.aiter_bytes():
-                        response_hasher.update(chunk)
-                        response_bytes += len(chunk)
-                        remaining = MAX_BODY_BYTES - len(retained)
-                        if remaining > 0:
-                            retained.extend(chunk[:remaining])
+                    (
+                        body,
+                        response_body_sha256,
+                        response_bytes,
+                        body_truncated,
+                        read_deadline_exceeded,
+                    ) = await _read_bounded_response(
+                        response, deadline=request_deadline,
+                    )
                 finally:
                     await response.aclose()
-                body = bytes(retained)
-                body_truncated = response_bytes > MAX_BODY_BYTES
                 final_url = current_url
                 if transaction_recorder is not None:
                     try:
@@ -443,7 +480,7 @@ async def execute_bound_http_request(
                             response=response,
                             body=body,
                             body_truncated=body_truncated,
-                            response_body_sha256=response_hasher.hexdigest(),
+                            response_body_sha256=response_body_sha256,
                             response_body_bytes=response_bytes,
                             pinned_address=pinned_address,
                             direct_origin=bool(via_address),
@@ -458,6 +495,10 @@ async def execute_bound_http_request(
                             f"[http-archive] transaction not recorded: {type(exc).__name__}",
                             file=sys.stderr, flush=True,
                         )
+                if read_deadline_exceeded:
+                    # Preserve the status, headers, and bounded prefix, but never continue a
+                    # redirect chain after the absolute request deadline was exhausted.
+                    break
                 if (
                     not follow_redirects
                     or response.status_code not in REDIRECT_STATUSES
