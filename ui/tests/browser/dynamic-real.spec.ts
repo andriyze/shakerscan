@@ -63,7 +63,7 @@ test('filtered scan history stays synchronized through Back and Forward', async 
   await page.goto(listUrl)
   await expect(page.getByLabel('Filter by scan status')).toHaveValue('completed')
   await expect(page.getByLabel('Search scans by target URL')).toHaveValue(scan.target_url)
-  await page.locator(`a[href^="/scans/${scan.id}"]`).first().click()
+  await page.locator(`a[href^="/scans/${scan.id}"]:visible`).first().click()
   await expect(page).toHaveURL(new RegExp(`/scans/${scan.id}`))
 
   await page.goBack()
