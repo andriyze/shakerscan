@@ -26,11 +26,14 @@ export interface HuntActionV2 {
     budget_consumed: Record<string, number>
     budget_accounting: {
       schema_version: 'hunt-budget-settlement/v1'
-      basis: 'exact_settlement' | 'legacy_reported_charge'
+      basis: 'exact_settlement' | 'settlement_failed' | 'no_reservation' | 'legacy_reported_charge'
+      settlement_status: string
+      reservation_id?: string | null
       charge_basis: 'capability_reported_settlement' | 'conservative_full_reservation' | 'legacy_unknown' | string
       reserved: Record<string, number>
       actual: Record<string, number>
       released: Record<string, number>
+      overspent: Record<string, number>
       used_after_reconciliation: Record<string, number>
     }
     reference_ids: {
@@ -62,8 +65,9 @@ export interface HuntV2 {
   }>
   actions?: HuntActionV2[]
   outcome_summary?: {
-    schema_version: 'hunt-outcome-summary/v1'
+    schema_version: 'hunt-outcome-summary/v2'
     capability_calls: number
+    total_capability_calls: number
     action_statuses: Record<string, number>
     observation_count: number
     finding_ids: string[]

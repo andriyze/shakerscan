@@ -10,6 +10,7 @@ import pytest
 from api.hunt import run_router
 from api.hunt.run_service import (
     HuntRunService,
+    hunt_action_outcome_summary,
     public_hunt_action,
     public_hunt_action_trace,
     public_hunt_run,
@@ -91,8 +92,10 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
             "secret": "must-not-leak",
             "observations": [{"message": "must-not-leak"}],
             "budget_consumed": {"agent_actions": 1, "invalid": "hidden"},
-            "budget_accounting": {
-                "charge_basis": "capability_reported_settlement",
+                "budget_accounting": {
+                    "charge_basis": "capability_reported_settlement",
+                    "settlement_status": "succeeded",
+                    "reservation_id": "reservation-1",
                 "reserved": {"agent_actions": 1, "http_requests": 24},
                 "actual": {"agent_actions": 1, "http_requests": 1},
                 "released": {"http_requests": 23},
@@ -119,10 +122,13 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
     assert action["result"]["budget_accounting"] == {
         "schema_version": "hunt-budget-settlement/v1",
         "basis": "exact_settlement",
+        "settlement_status": "succeeded",
+        "reservation_id": "reservation-1",
         "charge_basis": "capability_reported_settlement",
         "reserved": {"agent_actions": 1, "http_requests": 24},
         "actual": {"agent_actions": 1, "http_requests": 1},
         "released": {"http_requests": 23},
+        "overspent": {},
         "used_after_reconciliation": {"agent_actions": 4, "http_requests": 7},
     }
     assert action["result"]["reference_ids"]["scan_ids"] == [str(scan_id)]
@@ -166,6 +172,44 @@ def test_public_hunt_action_prefers_canonical_worker_observation_count():
     assert action["result"]["budget_accounting"]["basis"] == "legacy_reported_charge"
     assert action["result"]["budget_accounting"]["charge_basis"] == "legacy_unknown"
     assert action["result"]["budget_accounting"]["actual"] == {}
+
+
+def test_accounting_without_a_reservation_is_not_labeled_exact():
+    action = public_hunt_action({
+        "id": uuid.uuid4(),
+        "capability_name": "web.crawl",
+        "status": "completed",
+        "input_summary": {},
+        "result_summary": {
+            "budget_consumed": {"http_requests": 3},
+            "budget_accounting": {
+                "settlement_status": "worker_managed",
+                "actual": {"http_requests": 3},
+            },
+        },
+    })
+
+    assert action["result"]["budget_accounting"]["basis"] == "no_reservation"
+
+
+def test_factual_hunt_outcome_excludes_unsuccessful_action_claims():
+    finding_id = str(uuid.uuid4())
+    summary = hunt_action_outcome_summary([
+        {
+            "status": "completed",
+            "result": {"observation_count": 2, "reference_ids": {"finding_ids": [finding_id]}},
+        },
+        {
+            "status": "blocked",
+            "result": {"observation_count": 99, "reference_ids": {"finding_ids": [str(uuid.uuid4())]}},
+        },
+    ])
+
+    assert summary["capability_calls"] == 1
+    assert summary["total_capability_calls"] == 2
+    assert summary["observation_count"] == 2
+    assert summary["finding_ids"] == [finding_id]
+    assert summary["action_statuses"] == {"completed": 1, "blocked": 1}
 
 
 def test_explicit_hunt_trace_preserves_decision_without_secrets_or_hidden_thoughts():
@@ -217,8 +261,9 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
     assert result["outcome_summary"] == {
-        "schema_version": "hunt-outcome-summary/v1",
+        "schema_version": "hunt-outcome-summary/v2",
         "capability_calls": 1,
+        "total_capability_calls": 1,
         "action_statuses": {"completed": 1},
         "observation_count": 0,
         "finding_ids": [],

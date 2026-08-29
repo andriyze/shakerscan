@@ -163,11 +163,21 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
 
     budget_consumed = numeric_budget(result_summary.get("budget_consumed"))
     raw_accounting = result_summary.get("budget_accounting")
-    has_exact_accounting = isinstance(raw_accounting, Mapping)
-    accounting = dict(raw_accounting) if has_exact_accounting else {}
+    has_accounting = isinstance(raw_accounting, Mapping)
+    accounting = dict(raw_accounting) if has_accounting else {}
+    reservation_id = str(accounting.get("reservation_id") or "") or None
+    settlement_status = str(accounting.get("settlement_status") or "legacy")
+    has_measured_actual = isinstance(accounting.get("actual"), Mapping)
+    has_exact_accounting = bool(
+        reservation_id and settlement_status == "succeeded" and has_measured_actual
+    )
     budget_actual = numeric_budget(accounting.get("actual"))
-    if has_exact_accounting and not budget_actual:
-        budget_actual = budget_consumed
+    accounting_basis = (
+        "exact_settlement" if has_exact_accounting
+        else "settlement_failed" if settlement_status == "failed"
+        else "no_reservation" if has_accounting and not reservation_id
+        else "legacy_reported_charge"
+    )
     observations = result_summary.get("observations")
     if isinstance(observations, list):
         observation_count = len(observations)
@@ -206,7 +216,9 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
             "budget_consumed": budget_actual if has_exact_accounting else budget_consumed,
             "budget_accounting": {
                 "schema_version": "hunt-budget-settlement/v1",
-                "basis": "exact_settlement" if has_exact_accounting else "legacy_reported_charge",
+                "basis": accounting_basis,
+                "settlement_status": settlement_status,
+                "reservation_id": reservation_id,
                 "charge_basis": (
                     str(accounting.get("charge_basis") or "capability_reported_settlement")
                     if has_exact_accounting else "legacy_unknown"
@@ -214,6 +226,7 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
                 "reserved": numeric_budget(accounting.get("reserved")),
                 "actual": budget_actual,
                 "released": numeric_budget(accounting.get("released")),
+                "overspent": numeric_budget(accounting.get("overspent")),
                 "used_after_reconciliation": numeric_budget(
                     accounting.get("used_after_reconciliation")
                 ),
@@ -230,9 +243,13 @@ def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
         "finding_ids": set(), "candidate_ids": set(), "evidence_ids": set(),
     }
     observations = 0
+    successful_calls = 0
     for action in actions:
         status = str(action.get("status") or "unknown")
         statuses[status] = statuses.get(status, 0) + 1
+        if status != "completed":
+            continue
+        successful_calls += 1
         result = action.get("result") if isinstance(action.get("result"), Mapping) else {}
         observations += max(0, int(result.get("observation_count") or 0))
         typed = result.get("reference_ids") if isinstance(result.get("reference_ids"), Mapping) else {}
@@ -241,8 +258,9 @@ def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
                 if _uuid_reference(reference):
                     references[key].add(str(reference))
     return {
-        "schema_version": "hunt-outcome-summary/v1",
-        "capability_calls": len(actions),
+        "schema_version": "hunt-outcome-summary/v2",
+        "capability_calls": successful_calls,
+        "total_capability_calls": len(actions),
         "action_statuses": statuses,
         "observation_count": observations,
         "finding_ids": sorted(references["finding_ids"]),

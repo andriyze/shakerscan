@@ -840,14 +840,14 @@ function HuntContent() {
                   <p className="text-xs uppercase tracking-wide text-gray-500">Final debrief</p>
                   <p className="mt-2 text-sm font-medium text-gray-200">Factual run record</p>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400 sm:grid-cols-3">
-                    <span>{hunt.outcome_summary.capability_calls} capability calls</span>
+                    <span>{hunt.outcome_summary.capability_calls} of {hunt.outcome_summary.total_capability_calls} calls succeeded</span>
                     <span>{hunt.outcome_summary.observation_count} observations</span>
                     <span>{hunt.outcome_summary.finding_ids.length} findings</span>
                     <span>{hunt.outcome_summary.candidate_ids.length} candidates</span>
                     <span>{hunt.outcome_summary.evidence_ids.length} evidence objects</span>
-                    <span>{hunt.outcome_summary.action_statuses.failed || 0} failed actions</span>
+                    <span>{Object.entries(hunt.outcome_summary.action_statuses).map(([status, count]) => `${count} ${status.replaceAll('_', ' ')}`).join(' · ')}</span>
                   </div>
-                  {hunt.final_debrief?.summary && <p className="mt-3 text-sm text-gray-300"><span className="text-gray-500">Analyst summary:</span> {hunt.final_debrief.summary}</p>}
+                  {hunt.final_debrief?.summary && <p className="mt-3 text-sm text-gray-300"><span className="text-gray-500">Planner debrief:</span> {hunt.final_debrief.summary}</p>}
                   {hunt.final_debrief?.next_actions && hunt.final_debrief.next_actions.length > 0 && (
                     <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-400">
                       {hunt.final_debrief.next_actions.map((action) => <li key={action}>{action}</li>)}
@@ -956,6 +956,12 @@ function HuntContent() {
                           <p className="mt-2 text-xs text-amber-300/80">
                             Legacy reported charge: {formatBudget(legacyBudget)} · reservation versus actual was not retained
                           </p>
+                        )}
+                        {accounting.basis === 'settlement_failed' && (
+                          <p className="mt-2 text-xs text-red-300">Budget settlement failed; no released amount is asserted. Review the action receipt.</p>
+                        )}
+                        {accounting.basis === 'no_reservation' && (
+                          <p className="mt-2 text-xs text-amber-300/80">No durable reservation existed; displayed usage is reported execution data, not an exact settlement.</p>
                         )}
                         {(references.scan_ids.length > 0 || references.finding_ids.length > 0) && (
                           <div className="mt-3 flex flex-wrap gap-3">

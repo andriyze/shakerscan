@@ -114,6 +114,8 @@ def _hunt_budget_accounting(
     used_after_reconciliation: Mapping[str, Any],
     *,
     charge_basis: str = "capability_reported_settlement",
+    settlement_status: str,
+    reservation_id: str | None,
 ) -> dict[str, Any]:
     """Publish exact settlement semantics without conflating holds and charges."""
 
@@ -123,20 +125,30 @@ def _hunt_budget_accounting(
     normalized_actual = {
         str(key): max(0, int(value)) for key, value in actual.items()
     }
-    return {
+    accounting = {
         "schema_version": "hunt-budget-settlement/v1",
         "charge_basis": charge_basis,
+        "settlement_status": settlement_status,
+        "reservation_id": reservation_id,
         "reserved": normalized_reserved,
         "actual": normalized_actual,
-        "released": {
-            key: max(0, amount - int(normalized_actual.get(key) or 0))
+        "overspent": {
+            key: int(normalized_actual.get(key) or 0) - amount
             for key, amount in normalized_reserved.items()
+            if int(normalized_actual.get(key) or 0) > amount
         },
         "used_after_reconciliation": {
             str(key): max(0, int(value))
             for key, value in used_after_reconciliation.items()
         },
     }
+    if settlement_status == "succeeded":
+        accounting["released"] = {
+            key: amount - int(normalized_actual.get(key) or 0)
+            for key, amount in normalized_reserved.items()
+            if amount >= int(normalized_actual.get(key) or 0)
+        }
+    return accounting
 
 
 def configure_hunt_interaction_router(
@@ -2579,6 +2591,7 @@ async def _execute_hunt_capability_lifecycle(
                         "failed", "blocked"
                     }
             reconciled_used = dict(used)
+            settlement_status = "not_attempted"
             is_partial = bool(
                 isinstance(receipt_payload, dict)
                 and (receipt_payload.get("partial") or receipt_payload.get("status") == "partial")
@@ -2861,6 +2874,8 @@ async def _execute_hunt_capability_lifecycle(
                                     if name == "candidate.verify"
                                     else "capability_reported_settlement"
                                 ),
+                                settlement_status="succeeded",
+                                reservation_id=terminal_record.reservation_id,
                             )
                         )
                     updated_action = await conn.execute(
@@ -2939,6 +2954,7 @@ async def _execute_hunt_capability_lifecycle(
                             # usage in the same transaction as the canonical receipt,
                             # or still owns the live reservation after an API timeout.
                             reconciled_used = current_used
+                            settlement_status = "worker_managed"
                         else:
                             current_ledger = {
                                 key: int(current_used.get(key) or 0)
@@ -2954,7 +2970,9 @@ async def _execute_hunt_capability_lifecycle(
                                 locked["id"], json.dumps(current_used),
                             )
                             reconciled_used = current_used
+                            settlement_status = "succeeded"
                 except Exception:
+                    settlement_status = "failed"
                     logger.exception(
                         "Failed to reconcile Hunt capability budget",
                         extra={"hunt_id": hunt_id, "action_id": str(action_id)},
@@ -3002,6 +3020,11 @@ async def _execute_hunt_capability_lifecycle(
                             "conservative_full_reservation"
                             if name == "candidate.verify"
                             else "capability_reported_settlement"
+                        ),
+                        settlement_status=settlement_status,
+                        reservation_id=(
+                            durable_reservation.record.reservation_id
+                            if durable_reservation is not None else None
                         ),
                     )
                 await conn.execute(
