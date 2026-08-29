@@ -62,6 +62,10 @@ _TRANSPORT_HEADERS: frozenset[str] = frozenset(
     {
         "host", "content-length", "connection", "transfer-encoding",
         "keep-alive", "te", "trailer", "upgrade",
+        # These alter the effective route or method while the canonical receipt continues
+        # to describe the bound path/method. They require a dedicated capability and proof
+        # contract rather than a normal request header, even with identity-forgery approval.
+        "x-original-url", "x-rewrite-url", "x-http-method-override",
     }
 )
 # Headers that assert who the client is. Forging one is a legitimate and important test --
@@ -77,6 +81,7 @@ IDENTITY_HEADERS: frozenset[str] = frozenset(
         "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
         "cf-connecting-ip", "true-client-ip", "x-client-ip", "x-originating-ip",
         "x-cluster-client-ip", "x-remote-addr", "x-remote-ip",
+        "client-ip", "x-forwarded", "fastly-client-ip", "x-azure-clientip",
     }
 )
 _FORBIDDEN_HEADERS: frozenset[str] = (

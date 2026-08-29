@@ -196,6 +196,9 @@ def test_the_identity_header_vocabulary_has_one_owner():
     assert "cf-connecting-ip" in agent_tools.IDENTITY_HEADERS
     assert "true-client-ip" in agent_tools.IDENTITY_HEADERS
     assert "x-forwarded-for" in agent_tools.IDENTITY_HEADERS
+    assert "client-ip" in agent_tools.IDENTITY_HEADERS
+    assert "fastly-client-ip" in agent_tools.IDENTITY_HEADERS
+    assert "x-azure-clientip" in agent_tools.IDENTITY_HEADERS
     # Credential and transport headers are refused for reasons the operator cannot waive,
     # so they are deliberately not part of this set.
     assert "authorization" not in agent_tools.IDENTITY_HEADERS

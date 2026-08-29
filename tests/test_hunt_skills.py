@@ -224,6 +224,10 @@ def test_identity_headers_are_refused_by_default():
         "Forwarded": "for=127.0.0.1",
         "CF-Connecting-IP": "127.0.0.1",
         "True-Client-IP": "127.0.0.1",
+        "Client-IP": "127.0.0.1",
+        "X-Forwarded": "for=127.0.0.1",
+        "Fastly-Client-IP": "127.0.0.1",
+        "X-Azure-ClientIP": "127.0.0.1",
         "X-WAF-Probe": "keep-me",
     }
     kept = agent_tools.filter_request_headers(probe)
@@ -253,6 +257,9 @@ def test_operator_authority_never_unlocks_credential_or_transport_headers():
         "Transfer-Encoding": "chunked",
         "Connection": "keep-alive",
         "Upgrade": "websocket",
+        "X-Original-URL": "/admin/users",
+        "X-Rewrite-URL": "/admin/users",
+        "X-HTTP-Method-Override": "DELETE",
     }
     assert agent_tools.filter_request_headers(probe, allow_identity_headers=True) == {}
 

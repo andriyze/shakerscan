@@ -531,7 +531,11 @@ def resolve_scan_interactive_credential(
         _username=(
             str(selected["username"]) if selected["username"] is not None else None
         ),
-        _secret=str(selected["secret"]),
+        # Preserve an absent half of an admitted username/secret identity as empty.  str(None)
+        # would send the literal text "None" to a real login form.
+        _secret=(
+            str(selected["secret"]) if selected["secret"] is not None else ""
+        ),
         _client_id=(
             str(selected["client_id"]) if selected["client_id"] is not None else None
         ),
