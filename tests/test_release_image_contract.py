@@ -107,6 +107,8 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     ):
         assert dependency in scanner
     assert "pip uninstall -y --break-system-packages msgpack setuptools" in scanner
+    assert "rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth" in scanner
+    assert "test -z \"$(python -c 'pass' 2>&1)\"" in scanner
 
     assert "node:24-alpine@sha256:" in ui
     assert ui.count("apk upgrade --no-cache") == 2

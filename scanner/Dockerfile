@@ -191,7 +191,9 @@ COPY scanner/requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
     -r /app/requirements.lock && \
     pip uninstall -y --break-system-packages msgpack setuptools && \
-    pip check
+    rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth && \
+    pip check && \
+    test -z "$(python -c 'pass' 2>&1)"
 
 # Model-intake evidence adapters live in separate, hash-locked virtual
 # environments. Their dependency graphs cannot alter the API/worker runtime.
