@@ -17,11 +17,11 @@ version, notes, and provenance metadata.
 
 ## 1. Freeze and build a candidate
 
-Merge the intended commit through protected `main`, then run full E2E, CodeQL, real-fleet Scan
-parity, Model Intake physical acceptance, and Connected Device physical acceptance on that exact
-commit. Run **Release candidate** with `version`, the exact 40-character SHA, and all five successful
-run IDs. The workflow verifies each workflow name, conclusion, and head SHA, runs the remaining
-frozen-source gates and native builds,
+Merge the intended commit through protected `main`, obtain successful exact-SHA CodeQL, then run
+**Release candidate** with `version`, the exact 40-character SHA, and the CodeQL run ID. Optional
+real-fleet Scan parity, Model Intake physical acceptance, and Connected Device physical acceptance
+run IDs may be supplied when those support boundaries are being qualified. The workflow verifies
+every supplied workflow identity, conclusion, and head SHA, runs the frozen-source gates and native builds,
 bakes version plus source revision into `/opt/shakerscan/release-manifest.json`, pushes only
 `candidate-<sha>-<run-id>` multi-architecture manifests, and uploads
 `release-candidate-receipt.json`. Each platform build publishes BuildKit provenance and an SBOM;
@@ -32,13 +32,12 @@ digests are scanned for unwaived high/critical vulnerabilities before certificat
 Never deploy by a mutable version or `latest` during acceptance. Use the candidate tag or, for the
 strongest binding, the digests in the receipt.
 
-## 2. Additional Fleet topology acceptance (optional)
+## 2. Optional physical support-boundary acceptance
 
-Model Intake KVM and one authorized physical Connected Device are mandatory exact-SHA gates above.
-Operators may additionally use a clean hosted-installer control plane and multiple broker VPS nodes on the exact
-candidate digest to exercise cross-node placement, worker loss/reclaim, lease isolation, dedupe,
-centralized artifacts, and public datastore isolation. This is operational evidence, not a release
-promotion requirement, and it may be performed before or after publication.
+Operators may qualify Model Intake KVM, an authorized physical Connected Device, or a clean
+hosted-installer control plane with multiple broker VPS nodes on the exact candidate digest. These
+receipts exercise host-specific support boundaries; they are optional operational evidence, not a
+release-promotion requirement. An omitted receipt is recorded as not run, never passed.
 
 Any application-code change creates a new candidate SHA and requires a new candidate build. Do not
 patch a live candidate and keep the old build receipt.
@@ -55,12 +54,13 @@ Release records build provenance. `latest` and the installer remain unchanged.
 
 Test the published version as a new user would. At minimum run
 `scripts/public_install_smoke.sh <version>`, which uses the public curl installer in an empty
-temporary home and verifies one UI/API/worker identity, the no-paste local Model Intake session,
-the same session through the production browser bundle, and the exact one-command Firecracker
-guidance. The smoke passes `SHAKERSCAN_INSTALL_VERSION` to the public installer so it tests the
+temporary home and verifies the installed version plus UI, API, and worker identity. Model Intake is
+explicitly excluded from this release's public smoke receipt. The smoke passes
+`SHAKERSCAN_INSTALL_VERSION` to the public installer so it tests the
 published immutable version before the stable channel moves; ordinary installs leave that variable
 unset and continue to resolve `install/STABLE_VERSION`. Continue with the stateful upgrade, rollback,
-doctor/status, agent/MCP launch, a bounded scan, Model Intake readiness, and remote Fleet status.
+doctor/status, agent/MCP launch, and a bounded scan. Optional Model Intake or remote Fleet checks
+belong in their separate support-boundary receipts.
 Preserve the generated content-free receipt and hash.
 
 Only then merge a small PR changing `install/STABLE_VERSION`. Run **Promote stable channel** with the

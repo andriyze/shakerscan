@@ -25,7 +25,8 @@ ShakerScan covers:
 - Continuous attack-surface management (ASM), subdomain discovery, and certificate-transparency monitoring
 - AI Gate tests for chat, RAG, agent, and MCP endpoints *(preview)*
 - Model Intake reviews for provenance, dependencies, licenses, unsafe serialization, isolated runtime behavior, and deployment readiness
-- Interactive Testing, finding retests, evidence, exceptions, the mission ledger, and Hunt
+- Finding retests, evidence, the mission ledger, and Hunt; compatibility session and exception APIs
+  remain available to agents without separate V1-oriented UI pages
 
 > Only scan systems you own or are explicitly authorized to test. Active testing can change
 > application state, trigger alerts, and create significant traffic.
@@ -115,11 +116,11 @@ findings, proof state, coverage, and the final report.
 | Let the current AI agent investigate a web, API, network, or device target | **Hunt** |
 | Test a chatbot, RAG pipeline, agent, or MCP server | **AI Gate** |
 | Vet a model artifact before deployment | **Model Intake** |
-| Reproduce a workflow or test two user roles manually | **Interactive Testing** |
-| Review, retest, suppress, or triage issues | **Findings** and **Exceptions** |
+| Reproduce a workflow or test two user roles manually | Ask the current agent to use the compatibility session API |
+| Review, retest, suppress, or triage issues | **Findings**; exception lifecycle remains available through the API |
 | Inspect retained proof or export evidence | **Evidence** |
 | Let the current AI agent explore and exploit autonomously | **Hunt** |
-| Preview a natural-language operation safely | **AI Operations Router** |
+| Preview a natural-language operation safely | Ask the current agent to use the AI operations API |
 
 Connected-device scan capacity is opt-in to preserve existing DAST resources. Run
 `./scanner.sh devices start` before the first device scan and `./scanner.sh devices status` to check
@@ -288,7 +289,7 @@ The UI launcher is **AI Investigator → Hunt**. Through an agent, the routing i
 | “Run a thorough active Scan” | The same Scan with larger ceilings and explicit authorization |
 | “Run a Hunt” | External-agent-driven `/hunts` investigation |
 | “Verify this finding” | Bounded deterministic verifier |
-| “Test this manually” | Interactive Testing |
+| “Test this manually” | Agent-driven compatibility session API |
 
 The older `/research/*` episode controller remains available for specialized guided verification
 and compatibility. It is not the Hunt launcher.
@@ -303,15 +304,14 @@ and compatibility. It is not the Hunt launcher.
 | Connected Devices | Stable device identities, posture scans, service policy, credentials, generic request collections, and device-target Hunt capabilities |
 | Targets / Exposure | Asset inventory, subdomains, exposure graph, and application graph |
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
-| Findings / Exceptions Queue | Triage, notes, retests, replay, cleanup, accepted risk, and exception lifecycle |
+| Findings | Triage, notes, retests, replay, cleanup, and accepted risk |
 | AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
 | Hunt / Leads | AI-driven exploration through target-aware capabilities, bounded exploitation, proof promotion, and the hypothesis backlog |
-| Interactive Testing | Browser sessions, credentials, principals, auth expectations, replay, and explicit findings |
 | Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and the read-only mission ledger |
-| Settings | AI providers, scan policy, automation, deployment policies, Arsenal, and Router |
+| Settings | AI providers, scan policy, automation, deployment policies, and Arsenal |
 
 Turn on **Show all** at the bottom of the sidebar to reveal advanced areas such as Evidence,
-Timeline, Exceptions Queue, Command Arsenal, and AI Ops Router.
+Timeline, Policy Profiles, and Command Arsenal.
 
 The exhaustive route and capability catalog is in the
 [Functionality Reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md).

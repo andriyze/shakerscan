@@ -6,6 +6,7 @@ CANDIDATE = ROOT / ".github" / "workflows" / "release-candidate.yml"
 PROMOTION = ROOT / ".github" / "workflows" / "release.yml"
 STABLE = ROOT / ".github" / "workflows" / "promote-stable.yml"
 CODEQL = ROOT / ".github" / "workflows" / "codeql.yml"
+PUBLIC_SMOKE = ROOT / "scripts" / "public_install_smoke.sh"
 
 
 def test_candidate_build_cannot_publish_release_or_stable_aliases():
@@ -75,18 +76,28 @@ def test_stable_channel_is_separate_last_step():
     assert "install/STABLE_VERSION" in text
     assert "public-smoke-receipt.json" in text
     assert "sha256sum --check --strict" in text
-    assert "shakerscan-public-smoke/v1" in text
+    assert "shakerscan-public-smoke/v2" in text
+    assert '.scope_exclusions == ["model_intake"]' in text
     for check in (
         "clean_install",
         "ui_api_identity",
         "worker_identity",
-        "model_intake_local_session",
-        "model_intake_browser_session",
-        "firecracker_command",
     ):
         assert f".checks.{check}" in text
+    assert "model_intake_local_session" not in text
+    assert "model_intake_browser_session" not in text
+    assert "firecracker_command" not in text
     assert 'imagetools create -t "${image}:latest"' in text
     assert "docker build " not in text
+
+
+def test_public_smoke_records_the_model_intake_scope_exclusion():
+    text = PUBLIC_SMOKE.read_text(encoding="utf-8")
+
+    assert 'schema_version: "shakerscan-public-smoke/v2"' in text
+    assert 'scope_exclusions: ["model_intake"]' in text
+    assert "/model-intake/" not in text
+    assert "model_intake_browser_smoke.py" not in text
 
 
 def test_clean_candidate_build_retries_only_pinned_base_downloads():

@@ -1,10 +1,9 @@
 """The canonical set of deterministic proof contracts.
 
 A finding reaches "exploited" only by naming a contract the scanner re-executed and
-satisfied. Nothing validated that name: `_has_satisfied_proof_contract` accepted any
-non-empty string, so evidence carrying an invented contract -- reachable through the
-manual-finding API, which takes operator-supplied evidence verbatim -- promoted itself
-past the deterministic-only proof boundary.
+satisfied. Historically nothing validated that name: `_has_satisfied_proof_contract`
+accepted any non-empty string, so an untrusted or legacy evidence record carrying an
+invented contract could cross the deterministic-only proof boundary.
 
 The names live here rather than beside each emitter so that the check and the emitters
 cannot disagree: `tests/test_proof_contract_registry.py` asserts this set is exactly

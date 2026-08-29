@@ -49,15 +49,13 @@ jobs:
             --proto '=https' --tlsv1.2 "$SMOKE_URL" --output public-smoke-receipt.json
           echo "${SMOKE_SHA256}  public-smoke-receipt.json" | sha256sum --check --strict
           jq -e --arg version "$VERSION" --arg sha "$release_sha" '
-            .schema_version == "shakerscan-public-smoke/v1"
+            .schema_version == "shakerscan-public-smoke/v2"
             and .version == $version
             and .source_sha == $sha
+            and .scope_exclusions == ["model_intake"]
             and .checks.clean_install == "pass"
             and .checks.ui_api_identity == "pass"
             and .checks.worker_identity == "pass"
-            and .checks.model_intake_local_session == "pass"
-            and .checks.model_intake_browser_session == "pass"
-            and .checks.firecracker_command == "pass"
           ' public-smoke-receipt.json >/dev/null
           for binding in scanner:SCANNER_IMAGE api:API_IMAGE ui:UI_IMAGE signer:SIGNER_IMAGE; do
             key="${binding%%:*}"

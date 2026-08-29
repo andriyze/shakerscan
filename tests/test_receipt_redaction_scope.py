@@ -56,6 +56,14 @@ def test_the_observation_storage_key_is_kept():
     assert redact_receipt_value({"object_key": key}) == {"object_key": key}
 
 
+def test_only_the_valid_cors_credentials_policy_value_is_preserved():
+    key = "Access-Control-Allow-Credentials"
+    assert redact_receipt_value({key: "true"}) == {key: "true"}
+    assert redact_receipt_value({key: "TRUE"}) == {key: "TRUE"}
+    assert redact_receipt_value({key: "Bearer reflected-secret"}) == {key: MASK}
+    assert redact_receipt_value({key: "arbitrary-target-value"}) == {key: MASK}
+
+
 SECRET_KEYS = (
     "authorization", "api_key", "apikey", "x-api-key", "private_key", "ssh_private_key",
     "signing_key", "access_key", "access_key_id", "aws_access_key_id", "access_token",

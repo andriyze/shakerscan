@@ -3,7 +3,6 @@ set -euo pipefail
 
 VERSION="${1:?usage: scripts/public_install_smoke.sh VERSION [receipt.json]}"
 RECEIPT="${2:-public-smoke-receipt.json}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-public-smoke.XXXXXX")"
 SMOKE_ROOT="$(cd "$SMOKE_ROOT" && pwd -P)"
 SMOKE_HOME="$SMOKE_ROOT/home"
@@ -60,42 +59,22 @@ source_revision="$(jq -r '.source_revision' <<<"$api_health")"
 check_equal "UI source revision" "$(jq -r '.source_revision' <<<"$ui_identity")" "$source_revision"
 check_equal "worker identity" "$(jq -r '.worker_build.fleet_uniform' <<<"$api_health")" "true"
 
-session="$(curl -fsS "http://127.0.0.1:$UI_PORT/api/model-intake/operator-credential")"
-check_equal "local session reason" "$(jq -r '.reason' <<<"$session")" "local_session"
-token="$(jq -r '.token' <<<"$session")"
-curl -fsS -H "Authorization: Bearer $token" -H "Origin: http://127.0.0.1:$UI_PORT" \
-    "http://127.0.0.1:$API_PORT/model-intake/submissions?limit=1" >/dev/null
-
-docker run --rm --network host --entrypoint python \
-    -v "$ROOT_DIR/scripts/model_intake_browser_smoke.py:/tmp/model_intake_browser_smoke.py:ro" \
-    "shakerscan/shakerscan-scanner:$VERSION" \
-    /tmp/model_intake_browser_smoke.py "http://127.0.0.1:$UI_PORT"
-
-plan="$(curl -fsS "http://127.0.0.1:$API_PORT/model-intake/runners/install-plan")"
-check_equal "install kind" "$(jq -r '.install_kind' <<<"$plan")" "curl_install"
-case "$(jq -r '.command' <<<"$plan")" in
-    "cd $RUNTIME && sudo ./scanner.sh model-intake-runner install"*) ;;
-    *) echo "public smoke: Firecracker command does not enter the curl runtime" >&2; exit 1 ;;
-esac
-
 jq -n --arg version "$VERSION" --arg source_sha "$source_revision" \
   --arg scanner "$(sed -n 's/^SCANNER_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg api "$(sed -n 's/^API_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg ui "$(sed -n 's/^UI_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg signer "$(sed -n 's/^SIGNER_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
-  schema_version: "shakerscan-public-smoke/v1",
+  schema_version: "shakerscan-public-smoke/v2",
   version: $version,
   source_sha: $source_sha,
   images: {scanner:$scanner, api:$api, ui:$ui, signer:$signer},
   tested_at: $tested_at,
+  scope_exclusions: ["model_intake"],
   checks: {
     clean_install: "pass",
     ui_api_identity: "pass",
-    worker_identity: "pass",
-    model_intake_local_session: "pass",
-    model_intake_browser_session: "pass",
-    firecracker_command: "pass"
+    worker_identity: "pass"
   }
 }' > "$RECEIPT"
 echo "Public install smoke passed; receipt: $RECEIPT"

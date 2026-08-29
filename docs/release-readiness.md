@@ -133,12 +133,13 @@ receipts.
 
 - [ ] `scripts/run_complete_python_suite.py` passes inside the locked candidate worker image.
 - [ ] `make release-gates`, UI tests/build, dependency audits, and capability-inventory check pass.
-- [ ] Scanner, API overlay, UI, signer, and fixed Firecracker guest build and self-test.
+- [ ] Scanner, API overlay, UI, and signer build from the frozen source candidate.
 - [ ] External adapter wire acceptance proves observed request/connection ceilings for all adapters.
 - [ ] Clean installer, duplicate dirty upgrade, required-migration failure, backup, and rollback pass.
 - [ ] CodeQL, security/static checks, exact-manifest vulnerability scans, commit policy, V2
-  contracts, full E2E, real-fleet parity, Model Intake KVM, and physical-device acceptance are
-  successful for the same 40-character source SHA.
+  contracts, and final-manifest E2E are successful for the same 40-character source SHA.
+- [ ] Optional real-fleet parity, Model Intake KVM, and physical-device receipts are either bound to
+  that SHA or explicitly recorded as not run; omission is never represented as a pass.
 
 ### Manual UI acceptance
 
@@ -146,8 +147,8 @@ receipts.
   pagination control, and internal link without console/runtime errors.
 - [ ] Dashboard, Docs, Targets, New Scan, Scans, Scan Detail, Findings, Finding Detail, Credentials,
   Request Collections, Devices, Device Detail/Policies, Schedules, Interactive, Exposure, Coverage,
-  Hunt, Evidence, Timeline, Campaigns, AI Gate, Model Intake, Policy Profiles, Exceptions, Arsenal,
-  AI Ops Router, Settings, Fleet guidance, and Application Graph are inspected.
+  Hunt, Evidence, Timeline, Campaigns, AI Gate, Model Intake, Policy Profiles, Arsenal, Settings,
+  Fleet guidance, and Application Graph are inspected.
 - [ ] Multiple existing Juice Shop, Honey, Hunt, AI Gate, and LG TV records have coherent target,
   status, shard, progress, finding, evidence, provenance, and navigation data.
 - [ ] Running parent scans do not become failed because an unfinished shard is absent or stale; true
@@ -179,24 +180,22 @@ receipts.
 - [ ] Every new submission records its scan/Hunt ID and browser link. Long-running scans are not
   polled as part of the submission turn; results are evaluated in a later acceptance pass.
 
-### Model Intake and Fleet
+### Optional Model Intake, Device, and Fleet qualification
 
-- [ ] Local fixture E2E reports Firecracker unsupported precisely on macOS and incomplete, not passed.
-- [ ] Public-model E2E and report/artifact parity pass on an authorized networked runner.
-- [ ] AMD64 Linux/KVM qualification passes on a compatible host or remains an explicit stop-ship item
-  for the claimed support tier.
-- [ ] One authorized physical device completes a safe-remote posture scan with confirmed online
-  reachability on an exact-SHA device worker.
-- [ ] Exact-SHA broker parity covers local/broker/parallel semantics, worker loss/reclaim, lease
-  authority, centralized artifacts, finding dedupe, and build identity.
+- [ ] When Model Intake physical support is claimed, public-model and AMD64 Linux/KVM qualification
+  pass on an authorized compatible runner.
+- [ ] When physical-device support is being qualified, one authorized device completes a safe-remote
+  posture scan with confirmed online reachability on an exact-SHA worker.
+- [ ] When Fleet support is being qualified, exact-SHA broker parity covers local/broker/parallel
+  semantics, worker loss/reclaim, lease authority, centralized artifacts, dedupe, and build identity.
 
 ## Publication sequence (not authorized by preparation)
 
 1. Freeze one exact candidate SHA after all implementation and manual fixes.
-2. Obtain successful exact-SHA full E2E, CodeQL, V2 real-fleet parity, Model Intake KVM, and
-   physical-device acceptance runs.
+2. Obtain successful exact-SHA source contracts and CodeQL. Attach optional physical-boundary
+   receipts only for support tiers being qualified.
 3. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
-4. Complete candidate-image, upgrade, Model Intake, UI/API/CLI/MCP, and public-install acceptance.
+4. Complete candidate-image, upgrade, UI/API/CLI/MCP, and public-install acceptance.
 5. Run **Promote release** to map version tags to accepted digests without rebuilding.
 6. Record the published SHA/digests in `RELEASES.md` and verify the GitHub Release.
 7. Only in a separate stable-channel change, update `install/STABLE_VERSION` and run **Promote stable

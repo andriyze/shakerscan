@@ -26,11 +26,13 @@ _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _UNSET = object()
-# Standard response headers whose names collide with a secret word but whose values
-# are policy declarations. `Access-Control-Allow-Credentials: true` says the endpoint
-# honours cross-origin credentials -- that is precisely the posture a report exists to
-# show, and masking it destroyed the evidence.
-_NON_SECRET_HEADER_NAMES = frozenset({"access_control_allow_credentials"})
+# Standard response headers whose names collide with a secret word but whose one valid
+# value is a policy declaration. The value check matters: target-controlled response
+# headers must not become a way to persist arbitrary secret material under a trusted
+# header name.
+_NON_SECRET_HEADER_VALUES = {
+    "access_control_allow_credentials": frozenset({"true"}),
+}
 _EXACT_SENSITIVE_KEYS = frozenset({
     "access_key", "access_key_id", "access_token", "api_key", "apikey",
     "aws_access_key_id", "client_secret", "key", "private_key", "refresh_token",
@@ -106,8 +108,10 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     if not parts:
         return False
     joined = "_".join(parts)
-    if joined in _NON_SECRET_HEADER_NAMES:
-        return False
+    allowed_header_values = _NON_SECRET_HEADER_VALUES.get(joined)
+    if allowed_header_values is not None:
+        normalized_item = str(item).strip().lower() if item is not _UNSET else ""
+        return normalized_item not in allowed_header_values
     describes = _describes_a_value(parts)
     # Only a bool. A descriptor name over a boolean is a statement about a secret --
     # `secret_values_visible: False` -- and a secret is never True or False. Numbers are
