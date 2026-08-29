@@ -35,8 +35,21 @@ TOOL_CASES: tuple[dict[str, Any], ...] = (
             ),
         },
     },
-    {"tool": "dalfox", "path": "/dast/xss?message=control", "budget": {"http_requests": 11, "tool_wall_seconds": 10}},
-    {"tool": "sqlmap", "path": "/dast/sqli?id=1", "budget": {"http_requests": 21, "tool_wall_seconds": 20}},
+    {
+        "tool": "dalfox",
+        "path": "/dast/xss?message=control",
+        "budget": {"http_requests": 11, "tool_wall_seconds": 10},
+        # Wire acceptance proves the same low-budget, runtime-limited path used
+        # for one candidate in a batch. Full verification keeps its larger
+        # declared floor and is covered separately by the contract suite.
+        "options": {"_batch_attempt": True},
+    },
+    {
+        "tool": "sqlmap",
+        "path": "/dast/sqli?id=1",
+        "budget": {"http_requests": 21, "tool_wall_seconds": 20},
+        "options": {"_batch_attempt": True},
+    },
     {"tool": "nmap", "path": "/", "budget": {"tcp_ports_attempted": 60, "tool_wall_seconds": 10}},
     {"tool": "naabu", "path": "/", "budget": {"tcp_ports_attempted": 200, "tool_wall_seconds": 10}},
 )

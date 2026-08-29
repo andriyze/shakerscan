@@ -116,6 +116,40 @@ def test_every_external_adapter_has_a_prelaunch_wire_proof(
     assert plan.timeout_ms <= reservation["tool_wall_seconds"] * 1_000
 
 
+def test_release_wire_gate_cases_have_prelaunch_enforcement_plans():
+    """Keep the live candidate gate aligned with the authoritative builder."""
+    for case in external_wire_acceptance.TOOL_CASES:
+        tool = str(case["tool"])
+        runtime = {}
+        if tool == "ffuf":
+            runtime = {
+                "ffuf_wordlist": "/tmp/shakerscan-wire-wordlist.txt",
+                "ffuf_word_count": int(case["budget"]["http_requests"]),
+            }
+        elif tool == "sqlmap":
+            runtime = {"sqlmap_output_dir": "/tmp/shakerscan-wire-sqlmap"}
+        plan = agent_tools.build_enforced_scanner_plan(
+            tool,
+            f"http://app.example.test:8080{case['path']}",
+            dict(case.get("options") or {}),
+            reserved_budget=dict(case["budget"]),
+            pinned_address="192.0.2.10",
+            pinned_proxy_url=(
+                None if tool in {"nmap", "naabu"}
+                else "socks5://127.0.0.1:41000"
+            ),
+            runtime_paths=runtime,
+        )
+
+        assert plan.enforcement_receipt()["hard_budget"]
+        assert all(
+            amount <= int(case["budget"][name])
+            for name, amount in plan.hard_budget_dict.items()
+        )
+        if tool in {"dalfox", "sqlmap"}:
+            assert plan.budget_proof["inputs"]["profile"] == "batch_attempt"
+
+
 @pytest.mark.parametrize(
     ("tool", "reservation"),
     [
