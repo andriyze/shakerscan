@@ -34,10 +34,36 @@ function AssuranceChip({ scan }: { scan: Scan }) {
   return (
     <span
       className={`rounded bg-gray-900 px-1.5 py-0.5 text-xs ${assuranceClass(assurance.band)}`}
-      title={`Assurance ${assurance.score}/100 - ${assurance.label}`}
+      title={`Examination strength ${assurance.score}/100 - ${assurance.label}`}
     >
-      {assurance.score}
+      {assurance.label} · {assurance.score}/100
     </span>
+  )
+}
+
+function ObservedPosture({ scan, compact = false }: { scan: Scan; compact?: boolean }) {
+  if (scan.status !== 'completed') {
+    return <span className="text-gray-500">Not available</span>
+  }
+  if (!scan.grade) {
+    return <span className="text-gray-500">No observed posture</span>
+  }
+  const assurance = scanAssurance(scan)
+  const weak = assurance && ['none', 'weak', 'limited'].includes(String(assurance.band || 'none'))
+  return (
+    <div className="min-w-0">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Observed posture</div>
+      <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+        <span
+          className={`${compact ? 'text-base' : 'text-lg'} font-bold ${weak ? 'text-gray-200' : getGradeColor(scan.grade)}`}
+          title={scan.grade.includes('*') ? 'The asterisk marks assurance limitations; this is not a clean bill of health.' : 'Risk observed by this run; this is not an overall safety score.'}
+        >
+          {scan.grade}
+        </span>
+        <span className="text-sm text-gray-500">{scan.score}/100</span>
+        <AssuranceChip scan={scan} />
+      </div>
+    </div>
   )
 }
 
@@ -551,15 +577,7 @@ function ScansContent() {
                     <ScanStatusBadge status={scan.status} />
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-                    {scan.grade ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-lg font-bold ${getGradeColor(scan.grade)}`}>{scan.grade}</span>
-                        <span className="text-gray-500">{scan.score}/100</span>
-                        <AssuranceChip scan={scan} />
-                      </div>
-                    ) : (
-                      <span className="text-gray-500">No score</span>
-                    )}
+                    <ObservedPosture scan={scan} compact />
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
                         href={`/findings?scan_id=${scan.id}`}
@@ -615,7 +633,7 @@ function ScansContent() {
                 <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
                 <th className="hidden 2xl:table-cell px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Score</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Observed posture</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Findings</th>
                 <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Duration</th>
                 <th className="hidden 2xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Date</th>
@@ -728,15 +746,7 @@ function ScansContent() {
                     <ScanStatusBadge status={scan.status} />
                   </td>
                   <td className="px-4 py-3">
-                    {scan.grade ? (
-                      <div className="flex items-center gap-2">
-                        <span className={`text-lg font-bold ${getGradeColor(scan.grade)}`}>{scan.grade}</span>
-                        <span className="text-sm text-gray-500">{scan.score}/100</span>
-                        <AssuranceChip scan={scan} />
-                      </div>
-                    ) : (
-                      <span className="text-gray-500">-</span>
-                    )}
+                    <ObservedPosture scan={scan} />
                   </td>
                   <td className="px-4 py-3">
                     {(scan.findings_count || 0) > 0 ? (
