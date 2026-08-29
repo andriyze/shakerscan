@@ -555,6 +555,7 @@ function ScansContent() {
                       <div className="flex items-center gap-1.5">
                         <span className={`text-lg font-bold ${getGradeColor(scan.grade)}`}>{scan.grade}</span>
                         <span className="text-gray-500">{scan.score}/100</span>
+                        <AssuranceChip scan={scan} />
                       </div>
                     ) : (
                       <span className="text-gray-500">No score</span>
@@ -731,6 +732,7 @@ function ScansContent() {
                       <div className="flex items-center gap-2">
                         <span className={`text-lg font-bold ${getGradeColor(scan.grade)}`}>{scan.grade}</span>
                         <span className="text-sm text-gray-500">{scan.score}/100</span>
+                        <AssuranceChip scan={scan} />
                       </div>
                     ) : (
                       <span className="text-gray-500">-</span>

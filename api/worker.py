@@ -17298,17 +17298,23 @@ async def process_scan_merge_job(job_data: dict):
             )[:2000]
 
     async with db_pool.acquire() as conn:
+        # Recomputed from the union, or cleared. Leaving it untouched let a parent keep an
+        # assurance value a single shard had written, which describes that shard's slice of
+        # the work rather than the whole scan.
+        merged_assurance = (merged.get("result") or {}).get("assurance_score")
         await conn.execute("""
             UPDATE scans SET status = $1, result = $2, score = $3, grade = $4,
                 findings_count = $5, completed_at = $6, duration_seconds = $7,
-                progress = 100, current_phase = $8, error_message = $9
+                progress = 100, current_phase = $8, error_message = $9,
+                assurance_score = $11
             WHERE id = $10
         """, parent_status, json.dumps(merged), agg_score, agg_grade,
              len(union_findings), completed_at, duration,
              ('completed_partial' if technically_incomplete else 'completed')
              if parent_status == 'completed' else 'failed',
              parent_error_message,
-             uuid.UUID(parent_id))
+             uuid.UUID(parent_id),
+             int(merged_assurance) if isinstance(merged_assurance, int) else None)
 
     # Continuous ASM: persist the UNION of every shard's discovered worklist
     # into the per-target inventory (docs §16). Closes the Phase-1 gap so

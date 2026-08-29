@@ -13400,6 +13400,14 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 target_id=target_uuid,
                 action_name="hunt.start.v2",
                 command="hunt.start.v2",
+                # The addresses a hunt may reach outside its resolved target are part of
+                # what the operator authorized, not a free field on the request that
+                # accompanies the receipt. Binding them here means an approval covers the
+                # exact origins it was granted for.
+                required_action_context=(
+                    {"direct_origin_addresses": sorted(contract.direct_origin_addresses)}
+                    if contract.direct_origin_addresses else None
+                ),
                 risk_tier=(
                     "credential"
                     if credential_rows

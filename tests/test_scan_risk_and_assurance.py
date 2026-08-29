@@ -141,8 +141,17 @@ def test_full_coverage_with_authenticated_traffic_scores_strong():
     coverage = {
         "planned_action_count": 10, "terminal_action_count": 10,
         "family_coverage": [
-            {"family": "xss", "selected": True, "status": "complete"},
-            {"family": "sqli", "selected": True, "status": "complete"},
+            # Proof escalation actually ran, which is what earns the verification credit.
+            {
+                "family": "xss", "selected": True, "status": "complete",
+                "verified_findings": 1,
+                "proof_escalation": {"attempted_candidates": 4},
+            },
+            {
+                "family": "sqli", "selected": True, "status": "complete",
+                "verified_findings": 0,
+                "proof_escalation": {"attempted_candidates": 2},
+            },
         ],
         "candidate_coverage": {
             "xss": {"planned_candidates": 20, "attempted_candidates": 20},
@@ -154,6 +163,25 @@ def test_full_coverage_with_authenticated_traffic_scores_strong():
     assert result["score"] == 100
     assert result["band"] == "strong"
     assert result["gaps"] == []
+
+
+def test_verification_credit_requires_verification_to_have_run():
+    """A passive scan plans no active verifier, so the zero-attempt reason never appears.
+    Reading only that reason handed it full marks for work it never attempted."""
+    coverage = {
+        "planned_action_count": 4, "terminal_action_count": 4,
+        "family_coverage": [{"family": "xss", "selected": True, "status": "complete"}],
+        "candidate_coverage": {"xss": {"planned_candidates": 5, "attempted_candidates": 5}},
+        "grade_reliability": {"reliable": True, "reasons": []},
+    }
+    assert "active_verification_attempted" in assurance(coverage)["gaps"]
+
+    escalated = dict(coverage)
+    escalated["family_coverage"] = [{
+        "family": "xss", "selected": True, "status": "complete",
+        "proof_escalation": {"attempted_candidates": 3},
+    }]
+    assert "active_verification_attempted" not in assurance(escalated)["gaps"]
 
 
 def test_an_incomplete_family_lowers_assurance_and_is_named():

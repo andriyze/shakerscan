@@ -65,3 +65,11 @@ test('the client sends every supported filter and reads the total', () => {
   }
   assert.match(client, /total: payload\.total/)
 })
+
+test('the assurance chip is actually rendered, not just defined', () => {
+  // It was defined and never used: the edit that added the two call sites aborted before
+  // writing, so the component shipped dead and no scan row showed assurance.
+  const scans = readFileSync(path.join(root, 'src/app/scans/page.tsx'), 'utf8')
+  const uses = scans.match(/<AssuranceChip scan=\{scan\} \/>/g) || []
+  assert.equal(uses.length, 2, 'both the card and table views must render it')
+})

@@ -1453,11 +1453,19 @@ async def _execute_hunt_capability_lifecycle(
                     for header in (request.input.get("headers") or {})
                 }
             ) if isinstance(request.input.get("headers"), Mapping) else False
+            # Sending a request to an operator-confirmed origin instead of the target's
+            # resolved address is at least as significant as forging a header: it is the
+            # act that demonstrates an edge bypass. Left on the capability's passive tier
+            # it consumed no active action and was never re-approved per call.
+            uses_direct_origin = bool(
+                str(request.input.get("via_address") or "").strip()
+            )
             requires_call_approval = (
                 spec.requires_active_approval
                 or principal_slot != "anonymous"
                 or uses_session
                 or forges_identity
+                or uses_direct_origin
             )
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -1468,7 +1476,7 @@ async def _execute_hunt_capability_lifecycle(
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
                     command=name, risk_tier=(
                         "credential" if principal_slot != "anonymous" or uses_session
-                        else "active" if forges_identity
+                        else "active" if forges_identity or uses_direct_origin
                         else str(spec.risk_tier)
                     ), always_require_receipt=True,
                     require_target_binding=True,

@@ -223,6 +223,14 @@ def assurance(
         state for state in auth_states if str(state) != "anonymous"
     ])
 
+    # Proof escalation actually attempted, across every selected family.
+    verifier_attempts = sum(
+        int((item.get("proof_escalation") or {}).get("attempted_candidates") or 0)
+        + int(item.get("verified_findings") or 0)
+        for item in families
+        if isinstance(item.get("proof_escalation"), Mapping)
+        or item.get("verified_findings") is not None
+    )
     planned_actions = int(coverage.get("planned_action_count") or 0)
     terminal_actions = int(coverage.get("terminal_action_count") or 0)
 
@@ -248,8 +256,14 @@ def assurance(
         ),
         "selected_families_complete": _ratio(len(complete), len(selected)),
         "candidates_attempted": _ratio(attempted, planned),
+        # Credit is for verification that actually ran. Awarding it whenever the
+        # zero-attempt reason was absent gave a passive scan -- which planned no active
+        # verifier at all -- full marks for work it never attempted, the same
+        # earned-versus-defaulted mistake the ratios above avoid.
         "active_verification_attempted": (
-            0.0 if "active_verifier_zero_attempts" in reasons else 1.0
+            0.0 if "active_verifier_zero_attempts" in reasons
+            else 1.0 if verifier_attempts > 0
+            else 0.0
         ),
         "authenticated_coverage": 1.0 if authenticated else 0.0,
         "placement_available": 0.0 if "placement_unavailable" in reasons else 1.0,

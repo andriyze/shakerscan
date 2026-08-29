@@ -200,3 +200,25 @@ def test_the_identity_header_vocabulary_has_one_owner():
     # so they are deliberately not part of this set.
     assert "authorization" not in agent_tools.IDENTITY_HEADERS
     assert "transfer-encoding" not in agent_tools.IDENTITY_HEADERS
+
+
+def test_a_direct_origin_request_is_metered_as_an_active_action():
+    """Reaching an address outside the target's resolved one is the act that demonstrates
+    a bypass. On the capability's passive tier it consumed no active action and was never
+    re-approved per call, so it ran to the HTTP ceiling instead."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    assert "uses_direct_origin" in source
+    assert "or uses_direct_origin" in source, "it must widen requires_call_approval"
+    assert 'else "active" if forges_identity or uses_direct_origin' in source
+
+
+def test_the_approval_receipt_binds_the_confirmed_addresses():
+    """Otherwise a receipt granted for a target also covers whatever addresses the request
+    body happens to name, and the operator's confirmation is not what authorised them."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    assert '"direct_origin_addresses": sorted(contract.direct_origin_addresses)' in source
+    assert "required_action_context=(" in source
