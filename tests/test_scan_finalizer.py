@@ -282,7 +282,7 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     # still-passing 90; the suspected critical alongside it is real evidence but does not
     # cap as if it were confirmed.
     assert (result["risk_score"], result["risk_grade"]) == (70, "C")
-    assert result["score_policy"] == "risk_and_assurance/v4"
+    assert result["score_policy"] == "risk_and_assurance/v5"
     assert result["grade"] == "C*" and result["grade_reliable"] is False
     assert result["score"] == result["risk_score"], "compatibility alias is the risk axis"
     assert "proven_high:1" in result["score_reasons"]

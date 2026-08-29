@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
+    from ..score_bands import grade_for
+except ImportError:  # flat scanner runtime
+    from score_bands import grade_for
+
+try:
     from defusedxml import ElementTree as ET
 except ImportError:  # pragma: no cover - minimal host test environment
     from xml.etree import ElementTree as ET
@@ -1256,7 +1261,7 @@ def _score(findings: list[dict[str, Any]], *, complete: bool) -> tuple[int, str]
     score = max(0, 100 - sum(weights.get(str(item.get("severity") or "info").lower(), 0) for item in findings))
     if not complete:
         score = min(score, 69)
-    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+    grade = grade_for(score)
     return score, grade
 
 

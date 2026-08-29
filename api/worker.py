@@ -8423,7 +8423,9 @@ def _device_score_with_web_findings(result: dict[str, Any]) -> None:
     )
     if execution_incomplete:
         score = min(score, 69)
-    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+    # Device posture keeps its product-specific severity weights, but letters still come
+    # from the shared band table.
+    grade = scan_scoring.grade_for(score)
     result.setdefault("result", {})["score"] = score
     result["result"]["grade"] = grade
     blocking = []

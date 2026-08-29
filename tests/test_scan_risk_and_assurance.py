@@ -348,3 +348,13 @@ def test_every_engine_resolves_letters_from_one_band_table():
         "A", "A", "B", "B", "C", "D", "F", "F",
     ]
     assert GRADE_BANDS[0] == (90, "A")
+
+
+def test_legacy_report_narrative_uses_the_canonical_risk_result():
+    from grading import grade
+
+    findings = [proven("critical"), suspected("high"), {"severity": "low"}]
+    canonical = risk(findings)
+    narrative = grade({"findings": findings, "http": {}})
+    assert narrative["score"] == canonical["score"]
+    assert narrative["grade"].rstrip("*") == canonical["grade"]

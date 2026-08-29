@@ -13767,46 +13767,28 @@ async def build_report(target: str,
             "medium": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "medium"),
             "low": sum(1 for f in focused_grade_findings if str(f.get("severity") or "").lower() == "low"),
         }
-        focused_score = 100
-        focused_score -= min(severity_counts_for_grade["critical"] * 15, 45)
-        focused_score -= min(severity_counts_for_grade["high"] * 10, 30)
-        focused_score -= min(severity_counts_for_grade["medium"] * 4, 20)
-        focused_score -= min(severity_counts_for_grade["low"] * 1, 10)
-        focused_score = max(0, min(100, focused_score))
-        max_severity = "info"
-        for sev in ("critical", "high", "medium", "low"):
-            if severity_counts_for_grade[sev]:
-                max_severity = sev
-                break
-        if max_severity == "critical":
-            focused_grade = "D" if focused_score >= 55 else "F"
-        elif max_severity == "high":
-            focused_grade = "C" if focused_score >= 70 else "D" if focused_score >= 55 else "F"
-        else:
-            focused_grade = (
-                "A" if focused_score >= 90 else
-                "B" if focused_score >= 80 else
-                "C" if focused_score >= 70 else
-                "D" if focused_score >= 55 else
-                "F"
-            )
+        try:
+            from .risk_scoring import risk as _focused_risk
+        except ImportError:
+            from risk_scoring import risk as _focused_risk
+        focused_risk = _focused_risk(focused_grade_findings)
+        focused_score = focused_risk["score"]
+        focused_grade = focused_risk["grade"]
 
         focused_notes = []
         if severity_counts_for_grade["critical"]:
             max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_grade_findings] or [0])
             focused_notes.append(
                 f"{severity_counts_for_grade['critical']} critical vulnerability(ies) found "
-                f"(max CVSS: {max_cvss:g}, penalty: -{min(severity_counts_for_grade['critical'] * 15, 45)})."
+                f"(max CVSS: {max_cvss:g})."
             )
         if severity_counts_for_grade["high"]:
             focused_notes.append(
-                f"{severity_counts_for_grade['high']} high severity issue(s) found "
-                f"(penalty: -{min(severity_counts_for_grade['high'] * 10, 30)})."
+                f"{severity_counts_for_grade['high']} high severity issue(s) found."
             )
         if severity_counts_for_grade["medium"]:
             focused_notes.append(
-                f"{severity_counts_for_grade['medium']} medium severity issue(s) found "
-                f"(penalty: -{min(severity_counts_for_grade['medium'] * 4, 20)})."
+                f"{severity_counts_for_grade['medium']} medium severity issue(s) found."
             )
 
         focused_remediation = _focused_family_remediation(family)

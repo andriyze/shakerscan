@@ -21,43 +21,20 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 try:
-    from ai_verdict_policy import (
-        has_deterministic_exploit_proof,
-        is_trusted_ai_false_positive,
+    from risk_scoring import (
+        HTTP_POSTURE_WEIGHT, PROVEN_CEILING, SEVERITY_WEIGHT, SUSPECTED_CEILING,
+        caps_risk_grade, proof_weight, risk,
     )
     from score_bands import GRADE_BANDS, grade_for
 except ModuleNotFoundError:  # package import layout
-    from scanner.ai_verdict_policy import (
-        has_deterministic_exploit_proof,
-        is_trusted_ai_false_positive,
+    from scanner.risk_scoring import (
+        HTTP_POSTURE_WEIGHT, PROVEN_CEILING, SEVERITY_WEIGHT, SUSPECTED_CEILING,
+        caps_risk_grade, proof_weight, risk,
     )
     from scanner.score_bands import GRADE_BANDS, grade_for
 
 
-SCORE_POLICY = "risk_and_assurance/v4"
-
-SEVERITY_WEIGHT: Mapping[str, int] = {
-    "critical": 20, "high": 10, "medium": 5, "low": 2, "info": 0,
-}
-# Deterministic baseline posture is evidence too. These deductions intentionally cover
-# application-layer headers that are meaningful on both public and local targets. Public
-# delivery controls such as HSTS, certificate health, DNSSEC, and mail policy require target
-# context and remain outside this narrow table until that context is part of the finalizer.
-HTTP_POSTURE_WEIGHT: Mapping[str, int] = {
-    "content-security-policy": 12,
-    "x-frame-options": 4,
-    "x-content-type-options": 4,
-    "referrer-policy": 2,
-}
-# The best risk score that may stand once a *proven* finding of this severity exists. One
-# proven critical is an F however few findings there are; one proven high cannot exceed C.
-# Low and informational have no ceiling: a single low-severity issue is not a reason to fail
-# an application, though it still costs weight.
-PROVEN_CEILING: Mapping[str, int] = {"critical": 40, "high": 70, "medium": 85}
-# A finding that is only suspected caps one band softer. It is evidence worth acting on, but
-# grading an application as if an unproven claim were confirmed is how a scanner loses the
-# reader's trust in every grade it emits.
-SUSPECTED_CEILING: Mapping[str, int] = {"critical": 70, "high": 85}
+SCORE_POLICY = "risk_and_assurance/v5"
 
 ASSURANCE_BANDS: tuple[tuple[int, str], ...] = (
     (85, "strong"), (70, "adequate"), (50, "limited"), (1, "weak"), (0, "none"),
@@ -69,132 +46,6 @@ def assurance_band(score: int) -> str:
         if score >= threshold:
             return band
     return "none"
-
-
-def _has_deterministic_proof(item: Mapping[str, Any]) -> bool:
-    """Whether a finding carries proof strong enough to be treated as demonstrated.
-
-    ``has_deterministic_exploit_proof`` was written against the legacy scanner's findings,
-    where a bare ``verified=True`` could come from a coarse heuristic and is deliberately
-    not trusted on its own. The V2 finalizer is different: it stamps ``verified`` together
-    with ``proof_state="verified"`` only on paths that already satisfied a deterministic
-    proof contract. Reading only the legacy helper graded a browser-proven XSS as merely
-    suspected, which is the opposite of the problem severity ceilings were added to fix.
-    """
-    if has_deterministic_exploit_proof(dict(item)):
-        return True
-    return (
-        item.get("verified") is True
-        and str(item.get("proof_state") or "") == "verified"
-    )
-
-
-def proof_weight(finding: Mapping[str, Any]) -> float:
-    """How much of a finding's severity weight counts against the risk score."""
-    item = dict(finding)
-    if is_trusted_ai_false_positive(item):
-        return 0.0
-    if _has_deterministic_proof(item):
-        return 1.0
-    if item.get("suspected") or item.get("needs_verification"):
-        return 0.25
-    try:
-        confidence = float(item.get("confidence"))
-    except (TypeError, ValueError):
-        confidence = 0.6
-    if confidence < 0.5:
-        return 0.25
-    if confidence < 0.65:
-        return 0.5
-    if confidence < 0.8:
-        return 0.75
-    return 1.0
-
-
-def caps_risk_grade(finding: Mapping[str, Any]) -> bool:
-    """Whether this finding's severity is proven well enough to cap the grade."""
-    item = dict(finding)
-    if is_trusted_ai_false_positive(item):
-        return False
-    if _has_deterministic_proof(item):
-        return True
-    if item.get("suspected") or item.get("needs_verification"):
-        return False
-    validation = item.get("validation")
-    validation = validation if isinstance(validation, Mapping) else {}
-    try:
-        confidence = float(item.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    return (
-        confidence >= 0.80
-        or str(validation.get("evidence_level") or "").lower() == "strong_indicator"
-    )
-
-
-def _severity(finding: Mapping[str, Any]) -> str:
-    name = str(finding.get("severity") or "info").strip().lower()
-    return name if name in SEVERITY_WEIGHT else "info"
-
-
-def risk(
-    findings: Sequence[Mapping[str, Any]],
-    *,
-    posture: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Score observed finding risk plus deterministic application posture weaknesses."""
-    penalty = 0.0
-    ceiling = 100
-    proven: dict[str, int] = {}
-    suspected: dict[str, int] = {}
-    for finding in findings:
-        severity = _severity(finding)
-        weight = proof_weight(finding)
-        penalty += SEVERITY_WEIGHT[severity] * weight
-        if weight <= 0.0:
-            # A trusted false positive contributes nothing and caps nothing.
-            continue
-        if caps_risk_grade(finding):
-            proven[severity] = proven.get(severity, 0) + 1
-            ceiling = min(ceiling, PROVEN_CEILING.get(severity, 100))
-        else:
-            suspected[severity] = suspected.get(severity, 0) + 1
-            ceiling = min(ceiling, SUSPECTED_CEILING.get(severity, 100))
-    http = (posture or {}).get("http")
-    http = http if isinstance(http, Mapping) else {}
-    missing_headers = {
-        str(header).strip().lower()
-        for header in (http.get("missing_security_headers") or ())
-        if str(header).strip()
-    }
-    posture_penalties = {
-        header: points
-        for header, points in HTTP_POSTURE_WEIGHT.items()
-        if header in missing_headers
-    }
-    posture_penalty = sum(posture_penalties.values())
-    penalty += posture_penalty
-
-    score = min(max(0, 100 - int(round(penalty))), ceiling)
-    reasons: list[str] = []
-    for severity in ("critical", "high", "medium"):
-        if proven.get(severity):
-            reasons.append(f"proven_{severity}:{proven[severity]}")
-        if suspected.get(severity):
-            reasons.append(f"suspected_{severity}:{suspected[severity]}")
-    reasons.extend(
-        f"posture_missing_{header}:{points}"
-        for header, points in posture_penalties.items()
-    )
-    return {
-        "score": score,
-        "grade": grade_for(score),
-        "reasons": reasons,
-        "proven_counts": proven,
-        "suspected_counts": suspected,
-        "posture_penalty": posture_penalty,
-        "posture_penalties": posture_penalties,
-    }
 
 
 # What assurance is made of, and what each part is worth. The weights say which gaps most

@@ -149,7 +149,7 @@ export function scanResultPresentation(scan, assurance) {
     missingHeaders,
     posturePenalty: finiteNumber(result.posture_penalty, null),
     scorePolicy: String(result.score_policy || ''),
-    postureIncluded: String(result.score_policy || '') === 'risk_and_assurance/v4',
+    postureIncluded: String(result.score_policy || '').startsWith('risk_and_assurance/v'),
     confirmedCount: confirmed.length,
     candidateCount: candidates.length,
   }
