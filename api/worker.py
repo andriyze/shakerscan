@@ -56,6 +56,13 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
+from runtime.worker_projection import (
+    AI_GATE_RUN_KINDS,
+    MODEL_INTAKE_RUN_KINDS,
+    runtime_destination_records as _runtime_destination_records,
+    subprocess_parser_error_reason as _subprocess_parser_error_reason,
+    truthy_module_output as _truthy_module_output,
+)
 import parallel_scan
 import asm_inventory
 import family_proof
@@ -384,8 +391,6 @@ WORKER_BUILD_REGISTRY_KEY = worker_role(
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
-AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
-MODEL_INTAKE_RUN_KINDS = {"model_intake"}
 ASM_RECON_RUN_KINDS = {"asm_recon"}
 ASM_BATCH_RUN_KINDS = {"asm_batch", "asm_dynamic_batch"}
 _RESEARCH_DISPATCH_CORRELATION_KEY = "research_dispatch_correlation"
@@ -806,51 +811,6 @@ async def _record_internal_executor_tool_receipt(
             if isinstance(scan_receipts, list) and receipt_id not in scan_receipts:
                 scan_receipts.append(receipt_id)
     return receipt_id
-
-
-def _truthy_module_output(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(v not in (None, "", [], {}) for v in value.values())
-    if isinstance(value, list):
-        return bool(value)
-    return value not in (None, "", [], {})
-
-
-def _subprocess_parser_error_reason(tool_name: str, receipt: dict[str, Any]) -> str | None:
-    """Conservatively classify known parser/output-format failures from subprocess previews."""
-    tool = str(tool_name or "").strip().lower()
-    parser_backed_tools = {
-        "httpx", "katana", "subfinder", "ffuf", "nuclei", "dalfox",
-        "sqlmap", "nmap", "sslyze", "testssl", "playwright",
-    }
-    if tool not in parser_backed_tools:
-        return None
-    if str(receipt.get("status") or "").strip() == "timeout" or receipt.get("timed_out"):
-        return None
-    combined = " ".join(
-        str(receipt.get(key) or "")
-        for key in ("stderr_preview", "stdout_preview")
-    ).lower()
-    if not combined:
-        return None
-    parser_markers = (
-        "json: cannot unmarshal",
-        "invalid character",
-        "unexpected end of json input",
-        "failed to parse json",
-        "failed parsing json",
-        "json parse error",
-        "parse error",
-        "could not parse",
-        "cannot parse",
-        "malformed json",
-        "invalid json",
-        "unmarshal type error",
-    )
-    for marker in parser_markers:
-        if marker in combined:
-            return marker
-    return None
 
 
 def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
@@ -7951,135 +7911,6 @@ run_scan = _NON_DAST_WORKER_HANDLER.run
 def _runtime_scope_guard_applies(options: dict[str, Any]) -> bool:
     guard = (options or {}).get("runtime_scope_guard")
     return isinstance(guard, dict) and bool(guard.get("requires_runtime_destination_check"))
-
-
-def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
-    run_kind = str((options or {}).get("run_kind") or "").strip()
-    records: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    def add(
-        label: str,
-        url: Any,
-        final_url: Any = None,
-        *,
-        source: str | None = None,
-        redirect_urls: Any = None,
-        resolved_ips: Any = None,
-        resolved_host: Any = None,
-    ) -> None:
-        raw_url = str(url or "").strip()
-        raw_final = str(final_url or raw_url).strip()
-        if not raw_url and not raw_final:
-            return
-        key = (label, raw_url, raw_final)
-        if key in seen:
-            return
-        seen.add(key)
-        record: dict[str, Any] = {"label": label, "url": raw_url or raw_final}
-        if raw_final:
-            record["final_url"] = raw_final
-        if source:
-            record["source"] = source
-        if isinstance(redirect_urls, (list, tuple)):
-            record["redirect_urls"] = [str(item) for item in redirect_urls if str(item or "").strip()]
-        if isinstance(resolved_ips, (list, tuple)):
-            record["resolved_ips"] = [str(item) for item in resolved_ips if str(item or "").strip()]
-        elif str(resolved_ips or "").strip():
-            record["resolved_ips"] = [str(resolved_ips).strip()]
-        if str(resolved_host or "").strip():
-            record["resolved_host"] = str(resolved_host).strip()
-        records.append(record)
-
-    if run_kind in {"device_posture", "device_probe"}:
-        posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
-        probe = result.get("device_probe") if isinstance(result.get("device_probe"), dict) else {}
-        locator = str(result.get("target") or "").strip()
-        resolved = str(result.get("resolved_target") or posture.get("resolved_target") or "").strip()
-        if locator:
-            formatted = f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator
-            port = probe.get("port") if probe else None
-            destination_url = f"http://{formatted}{f':{int(port)}' if port else ''}/"
-            add(
-                "device_target",
-                destination_url,
-                source=run_kind,
-                resolved_ips=[resolved] if resolved else None,
-                resolved_host=locator,
-            )
-        for item in posture.get("runtime_destinations") or ():
-            if isinstance(item, dict):
-                add(
-                    str(item.get("label") or "device_web_child"),
-                    item.get("url"),
-                    item.get("final_url"),
-                    source=item.get("source") or "device_web_dast",
-                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                    resolved_host=item.get("resolved_host"),
-                )
-        return records
-
-    if run_kind in AI_GATE_RUN_KINDS:
-        ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
-        for item in ai_gate.get("runtime_destinations") or ():
-            if isinstance(item, dict):
-                add(
-                    str(item.get("label") or "ai_gate"),
-                    item.get("url"),
-                    item.get("final_url"),
-                    source=item.get("source"),
-                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                    resolved_host=item.get("resolved_host"),
-                )
-        return records
-
-    if run_kind in MODEL_INTAKE_RUN_KINDS:
-        model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
-        for item in model_intake.get("runtime_destinations") or ():
-            if isinstance(item, dict):
-                add(
-                    str(item.get("label") or "model_intake"),
-                    item.get("url"),
-                    item.get("final_url"),
-                    source=item.get("source"),
-                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                    resolved_host=item.get("resolved_host"),
-                )
-        return records
-
-    runtime_destinations = result.get("runtime_destinations")
-    if isinstance(runtime_destinations, list):
-        for item in runtime_destinations:
-            if not isinstance(item, dict):
-                continue
-            add(
-                str(item.get("label") or "dast_action"),
-                item.get("url"),
-                item.get("final_url"),
-                source=item.get("source") or "canonical_action_observation",
-                redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                resolved_host=item.get("resolved_host"),
-            )
-        if records:
-            return records
-
-    http = result.get("http") if isinstance(result.get("http"), dict) else {}
-    final_url = str(http.get("final_url") or "").strip()
-    final_host = urllib.parse.urlparse(final_url).hostname if final_url else None
-    add(
-        "dast_http",
-        http.get("request_url") or final_url,
-        final_url,
-        source="http_observation",
-        redirect_urls=http.get("redirect_chain"),
-        resolved_ips=http.get("remote_ip"),
-        resolved_host=final_host,
-    )
-    return records
 
 
 def _evaluate_runtime_destination_records(

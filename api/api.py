@@ -8242,52 +8242,6 @@ def build_deployment_decision(
 # Edge types that are pure structural plumbing (endpoint enumeration). They
 # dominate edge volume and carry no exposure signal, so they are collapsed out
 # of the rendered subgraph unless endpoints are explicitly requested.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ============================================================
 # OWNED FLEET FOUNDATION
 # ============================================================

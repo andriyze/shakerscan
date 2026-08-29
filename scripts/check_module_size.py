@@ -29,8 +29,10 @@ import re
 # Lower these -- never raise them -- as each bounded domain is extracted into
 # api/<domain>/router.py plus services.
 LIMITS: dict[str, int] = {
-    "api/api.py": 20_903,
-    "api/worker.py": 23_359,
+    "api/api.py": 20_897,
+    "api/worker.py": 23_343,
+    "scanner/risk_scoring.py": 140,
+    "scanner/score_bands.py": 27,
 }
 
 # Lines that connect a module rather than implement anything in it. Extracting a domain
