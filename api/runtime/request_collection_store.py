@@ -86,13 +86,13 @@ CREATE TABLE IF NOT EXISTS request_collection_selections (
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT request_collection_selections_name_unique
-        UNIQUE (binding_id, name),
     CONSTRAINT request_collection_selections_binding_fk
         FOREIGN KEY (binding_id, collection_id)
         REFERENCES request_collection_bindings(id, collection_id)
         ON DELETE CASCADE
 );
+ALTER TABLE request_collection_selections
+DROP CONSTRAINT IF EXISTS request_collection_selections_name_unique;
 ALTER TABLE request_collection_selections
 DROP CONSTRAINT IF EXISTS request_collection_selections_replay_policy_check;
 ALTER TABLE request_collection_selections
@@ -101,6 +101,8 @@ ADD CONSTRAINT request_collection_selections_replay_policy_check CHECK (
 );
 CREATE INDEX IF NOT EXISTS idx_request_collection_selections_active
 ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_request_collection_selections_current_name
+ON request_collection_selections(binding_id, lower(name)) WHERE is_active=true;
 
 INSERT INTO request_collection_bindings (
     collection_id, target_kind, target_id, allowed_origins

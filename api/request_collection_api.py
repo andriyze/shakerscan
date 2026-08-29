@@ -956,24 +956,47 @@ async def upsert_request_collection_selection(
         mutating_count = sum(
             1 for item in selected if not item.get("safe_method")
         )
-        row = await conn.fetchrow(
-            """INSERT INTO request_collection_selections (
-                   collection_id, binding_id, name, replay_policy, selector_json,
-                   selection_digest, selected_request_count, selected_mutating_count
-               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-               ON CONFLICT (binding_id, name) DO UPDATE SET
-                   replay_policy=EXCLUDED.replay_policy,
-                   selector_json=EXCLUDED.selector_json,
-                   selection_digest=EXCLUDED.selection_digest,
-                   selected_request_count=EXCLUDED.selected_request_count,
-                   selected_mutating_count=EXCLUDED.selected_mutating_count,
-                   is_active=true, updated_at=NOW()
-               RETURNING *""",
-            collection_uuid, binding_uuid, request.name, request.replay_policy,
-            json.dumps(selector.public_dict()), digest, len(selected), mutating_count,
-        )
+        async with conn.transaction():
+            previous = await conn.fetchrow(
+                """SELECT id, selection_digest
+                   FROM request_collection_selections
+                   WHERE binding_id=$1 AND lower(name)=lower($2) AND is_active=true
+                   FOR UPDATE""",
+                binding_uuid, request.name,
+            )
+            if previous and str(previous["selection_digest"] or "") == digest:
+                row = await conn.fetchrow(
+                    """UPDATE request_collection_selections
+                       SET name=$2, updated_at=NOW()
+                       WHERE id=$1 RETURNING *""",
+                    previous["id"], request.name,
+                )
+            else:
+                if previous:
+                    await conn.execute(
+                        """UPDATE request_collection_selections
+                           SET is_active=false, updated_at=NOW()
+                           WHERE id=$1""",
+                        previous["id"],
+                    )
+                row = await conn.fetchrow(
+                    """INSERT INTO request_collection_selections (
+                           collection_id, binding_id, name, replay_policy,
+                           selector_json, selection_digest,
+                           selected_request_count, selected_mutating_count
+                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                       RETURNING *""",
+                    collection_uuid, binding_uuid, request.name,
+                    request.replay_policy, json.dumps(selector.public_dict()),
+                    digest, len(selected), mutating_count,
+                )
     return {
         "selection": _public_request_collection_selection(row),
+        "replaced_selection_id": (
+            str(previous["id"])
+            if previous and str(previous["selection_digest"] or "") != digest
+            else None
+        ),
         "preview": {
             "requests": selected[:200],
             "count": len(selected),

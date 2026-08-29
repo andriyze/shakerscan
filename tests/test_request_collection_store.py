@@ -153,3 +153,16 @@ def test_store_executes_one_idempotent_schema_bundle():
     assert len(conn.queries) == 1
     assert "CREATE TABLE IF NOT EXISTS request_collection_bindings" in conn.queries[0]
     assert "ON CONFLICT (collection_id, target_kind, target_id) DO NOTHING" in conn.queries[0]
+    assert "DROP CONSTRAINT IF EXISTS request_collection_selections_name_unique" in conn.queries[0]
+    assert "idx_request_collection_selections_current_name" in conn.queries[0]
+
+
+def test_selection_replacement_keeps_revision_rows_instead_of_overwriting_digest():
+    root = Path(__file__).resolve().parents[1]
+    router = (root / "api" / "request_collection_api.py").read_text()
+    worker = (root / "api" / "worker.py").read_text()
+
+    assert "ON CONFLICT (binding_id, name) DO UPDATE" not in router
+    assert "SET is_active=false, updated_at=NOW()" in router
+    assert '"replaced_selection_id"' in router
+    assert "AND s.binding_id=b.id AND s.is_active=true" not in worker

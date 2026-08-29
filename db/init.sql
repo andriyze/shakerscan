@@ -841,12 +841,13 @@ CREATE TABLE request_collection_selections (
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT request_collection_selections_name_unique UNIQUE (binding_id, name),
     CONSTRAINT request_collection_selections_binding_fk FOREIGN KEY (binding_id, collection_id)
         REFERENCES request_collection_bindings(id, collection_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_request_collection_selections_active
 ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
+CREATE UNIQUE INDEX idx_request_collection_selections_current_name
+ON request_collection_selections(binding_id, lower(name)) WHERE is_active=true;
 
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
