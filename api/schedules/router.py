@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import random
 from typing import Any, Callable, Optional
+import urllib.parse
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -167,7 +168,7 @@ def _refuse_raw_schedule_authentication(scan_options: dict) -> None:
 class ScheduleCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target_id: str
+    target_id: str = Field(min_length=1)
     name: Optional[str] = None
     frequency: str  # daily, weekly
     day_of_week: Optional[int] = None  # 0-6 (Monday-Sunday)
@@ -175,7 +176,7 @@ class ScheduleCreate(BaseModel):
     timezone: str = 'UTC'
     schedule_kind: str = 'normal_scan'
     scan_options: Optional[dict] = None
-    jitter_minutes: int = 30
+    jitter_minutes: int = Field(default=30, ge=0, le=1440)
 
 
 class ScheduleUpdate(BaseModel):
@@ -188,8 +189,22 @@ class ScheduleUpdate(BaseModel):
     timezone: Optional[str] = None
     schedule_kind: Optional[str] = None
     scan_options: Optional[dict] = None
-    jitter_minutes: Optional[int] = None
+    jitter_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     is_active: Optional[bool] = None
+
+
+def _reject_ambiguous_numeric_target(url: str) -> None:
+    """Reject legacy inet_aton-style integer hosts instead of reinterpreting them."""
+
+    host = str(urllib.parse.urlsplit(str(url)).hostname or "").strip()
+    if host.isascii() and host.isdigit():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Scheduled targets cannot use an ambiguous integer hostname. "
+                "Register and select the visibly normalized dotted IPv4 address instead."
+            ),
+        )
 
 
 async def _schedule_health_map_for_schedules(
@@ -394,9 +409,11 @@ async def create_schedule(request: ScheduleCreate):
 
     async with _pool().acquire() as conn:
         # Verify target exists
-        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1", uuid.UUID(request.target_id))
+        target_uuid = _uuid_or_400(request.target_id, "target id")
+        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1", target_uuid)
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
+        _reject_ambiguous_numeric_target(str(target["url"]))
 
         next_run = calculate_next_run(
             request.frequency,
@@ -414,7 +431,7 @@ async def create_schedule(request: ScheduleCreate):
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11)
             RETURNING id
         """,
-            uuid.UUID(request.target_id),
+            target_uuid,
             request.name,
             request.frequency,
             request.day_of_week,
@@ -612,12 +629,16 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
             updates.append(f"is_active = ${param_idx}")
             params.append(request.is_active)
             param_idx += 1
+            if request.is_active:
+                timing_changed = True
+            else:
+                updates.append("next_run_at = NULL")
 
         if not updates:
             raise HTTPException(status_code=400, detail="No updates provided")
 
         # Recalculate next_run_at if timing fields changed
-        if timing_changed:
+        if timing_changed and request.is_active is not False:
             freq = request.frequency or existing['frequency']
             dow = request.day_of_week if request.day_of_week is not None else existing['day_of_week']
             tod = request.time_of_day or existing['time_of_day'] or '02:00'

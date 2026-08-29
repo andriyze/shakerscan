@@ -175,10 +175,6 @@ function SchedulesContent() {
     if (showCreateModal) {
       getTargets().then(data => {
         setTargets(usableWebTargets(data.targets || []))
-        // Pre-select first target if none selected
-        if (!formTargetId && data.targets?.length > 0) {
-          setFormTargetId(data.targets[0].id)
-        }
       }).catch(err => console.error('Failed to fetch targets:', err))
     }
   }, [showCreateModal, formTargetId])
@@ -441,10 +437,19 @@ function SchedulesContent() {
                       {schedule.time_of_day} {schedule.timezone || 'UTC'}
                       {localTime && <span className="text-gray-500"> (= {localTime} local)</span>}
                     </span>
+                    <span title="Each dispatch is chosen within this window to avoid every scanner starting simultaneously.">
+                      Dispatch jitter ±{schedule.jitter_minutes || 0}m
+                    </span>
                   </div>
                   <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                    {schedule.next_run_at && (
-                      <span>Next: {formatRelativeTime(schedule.next_run_at)}</span>
+                    {!schedule.is_active ? (
+                      <span className="text-amber-300">Paused — no next run</span>
+                    ) : schedule.next_run_at ? (
+                      <span title={new Date(schedule.next_run_at).toLocaleString()}>
+                        Next jittered dispatch: {formatRelativeTime(schedule.next_run_at)}
+                      </span>
+                    ) : (
+                      <span>Next dispatch unavailable</span>
                     )}
                     {schedule.last_run_at && (
                       <span>Last: {formatRelativeTime(schedule.last_run_at)}</span>
@@ -761,6 +766,25 @@ function SchedulesContent() {
               {asmNeedsLabDepth && (
                 <p className="text-sm text-amber-300">BOLA/IDOR waves require Lab/deep checks before they can be scheduled.</p>
               )}
+
+              <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+                <p className="font-medium text-gray-200">Effective execution policy</p>
+                {formKind === 'normal_scan' ? (
+                  <ul className="mt-2 space-y-1">
+                    <li>Testing permission: Passive checks only</li>
+                    <li>Credentials: None</li>
+                    <li>Authorization receipt: Not required; active checks are not enabled</li>
+                    <li>Dispatch: {formTime} UTC with ±{editingSchedule?.jitter_minutes ?? 30} minute jitter</li>
+                  </ul>
+                ) : (
+                  <ul className="mt-2 space-y-1">
+                    <li>Wave: {formAsmFamily === 'all' ? 'Server-selected eligible families' : formAsmFamily.toUpperCase()}</li>
+                    <li>Lab/deep eligibility: {formAsmExploitDepth ? 'Enabled' : 'Disabled'}</li>
+                    <li>Credentials and active authority: None; checks that require them remain blocked</li>
+                    <li>Dispatch: {formTime} UTC with ±{editingSchedule?.jitter_minutes ?? 30} minute jitter</li>
+                  </ul>
+                )}
+              </div>
 
               {error && (
                 <p className="text-sm text-red-400">{error}</p>
