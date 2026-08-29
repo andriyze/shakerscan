@@ -2523,6 +2523,68 @@ def test_normalize_parallel_result_replaces_stale_backbone_coverage():
     }
 
 
+def test_normalize_scan_result_projects_legacy_score_without_losing_provenance():
+    report = {
+        "http": {
+            "missing_security_headers": [
+                "content-security-policy",
+                "referrer-policy",
+            ],
+        },
+        "findings": [],
+        "coverage": {
+            "status": "complete",
+            "planned_action_count": 2,
+            "terminal_action_count": 2,
+        },
+        "result": {
+            "score_policy": "risk_and_assurance/v3",
+            "score": 100,
+            "grade": "A",
+            "risk_score": 100,
+            "risk_grade": "A",
+            "assurance_score": 100,
+            "assurance_band": "strong",
+            "grade_reliable": True,
+        },
+    }
+
+    normalized = api_module._normalize_scan_result_for_api(report)
+
+    assert normalized["result"]["score_policy"] == "risk_and_assurance/v5"
+    assert normalized["result"]["risk_score"] == 86
+    assert normalized["result"]["score"] == 86
+    assert normalized["result"]["assurance_score"] < 100
+    assert normalized["result"]["score_projection"] == {
+        "recomputed_for_display": True,
+        "display_policy": "risk_and_assurance/v5",
+        "stored": {
+            "score_policy": "risk_and_assurance/v3",
+            "score": 100,
+            "grade": "A",
+            "risk_score": 100,
+            "risk_grade": "A",
+            "assurance_score": 100,
+            "assurance_band": "strong",
+        },
+    }
+
+
+def test_normalize_scan_result_leaves_current_score_projection_untouched():
+    report = {
+        "result": {
+            "score_policy": "risk_and_assurance/v5",
+            "score": 73,
+            "grade": "C",
+        },
+    }
+
+    normalized = api_module._normalize_scan_result_for_api(report)
+
+    assert normalized["result"] == report["result"]
+    assert "score_projection" not in normalized["result"]
+
+
 def test_scan_worker_container_name_filter_excludes_gungnir_worker():
     assert api_module._is_scan_worker_container_name("shakerscan-worker-1") is True
     assert api_module._is_scan_worker_container_name("/shakerscan-worker-5") is True

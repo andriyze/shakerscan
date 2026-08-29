@@ -339,6 +339,50 @@ def score_scan(
     }
 
 
+def project_current_score_policy(report: dict[str, Any]) -> dict[str, Any]:
+    """Project stored legacy reports through the current scorer for API/UI reads.
+
+    Historical result blobs are immutable evidence, but continuing to display a legacy
+    100 after the current policy would deduct deterministic posture weaknesses is equally
+    misleading.  Keep the stored values in an explicit provenance block and replace only
+    the read projection.  Current-policy reports are returned untouched.
+    """
+    result = report.get("result")
+    if not isinstance(result, dict):
+        return report
+    stored_policy = str(result.get("score_policy") or "legacy/unknown")
+    if stored_policy == SCORE_POLICY:
+        return report
+
+    computed = score_scan(
+        [item for item in (report.get("findings") or ()) if isinstance(item, Mapping)],
+        report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {},
+        smart_coverage=(
+            report.get("smart_coverage")
+            if isinstance(report.get("smart_coverage"), Mapping)
+            else {}
+        ),
+        posture=report,
+        grade_reliable=result.get("grade_reliable") is not False,
+    )
+    stored = {
+        "score_policy": stored_policy,
+        "score": result.get("score"),
+        "grade": result.get("grade"),
+        "risk_score": result.get("risk_score"),
+        "risk_grade": result.get("risk_grade"),
+        "assurance_score": result.get("assurance_score"),
+        "assurance_band": result.get("assurance_band"),
+    }
+    result.update(computed)
+    result["score_projection"] = {
+        "recomputed_for_display": True,
+        "display_policy": SCORE_POLICY,
+        "stored": stored,
+    }
+    return report
+
+
 __all__ = [
     "ASSURANCE_BANDS",
     "ASSURANCE_COMPONENTS",
@@ -353,6 +397,7 @@ __all__ = [
     "caps_risk_grade",
     "grade_for",
     "proof_weight",
+    "project_current_score_policy",
     "risk",
     "score_scan",
     "stamp_terminal_assurance",

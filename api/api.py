@@ -609,6 +609,7 @@ try:
         ScanStageCheckpointError,
     )
     from scan.parallel_compiler import summarize_parallel_action_coverage
+    from scan.scoring import project_current_score_policy
     from scan.surface_manifest import build_scan_surface_manifest
     from scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -734,6 +735,7 @@ except ModuleNotFoundError:
         ScanStageCheckpointError,
     )
     from api.scan.parallel_compiler import summarize_parallel_action_coverage
+    from api.scan.scoring import project_current_score_policy
     from api.scan.surface_manifest import build_scan_surface_manifest
     from api.scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -2266,7 +2268,7 @@ def _normalize_scan_result_for_api(scan_result: Any) -> Any:
             coverage_gaps["issues"] = issues
             coverage_gaps["count"] = len(issues)
 
-    return scan_result
+    return project_current_score_policy(scan_result)
 
 
 def synthesize_degraded_result(
