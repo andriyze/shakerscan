@@ -507,6 +507,12 @@ export interface TimelineEvent {
   blocked_by?: string[]
   next_action?: string | null
   next_eligible_at?: string | null
+  dispatch_at?: string | null
+  frequency?: string | null
+  day_of_week?: number | null
+  time_of_day?: string | null
+  timezone?: string | null
+  jitter_minutes?: number | null
   scan_type?: string | null
   name?: string | null
   schedule_id?: string | null

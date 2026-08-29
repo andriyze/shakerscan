@@ -13166,6 +13166,22 @@ def test_timeline_scan_status_maps_to_explicit_vocabulary():
     assert api_module._timeline_scan_status(None) == "queued"
 
 
+def test_timeline_submission_receipt_is_accepted_not_execution_complete():
+    assert ops_router_module._normalized_timeline_event_status(
+        "completed", command="scan.submit",
+    ) == "accepted"
+    assert ops_router_module._normalized_timeline_event_status(
+        "completed", command="scan.result",
+    ) == "completed"
+
+
+def test_timeline_blockers_override_success_like_receipt_status():
+    assert ops_router_module._normalized_timeline_event_status(
+        "completed", command="scan.runtime_scope_check",
+        blocked_by=["destination_not_allowed"],
+    ) == "blocked"
+
+
 def test_command_result_event_uses_live_scan_status_over_frozen_status():
     # command result was recorded "queued"; the joined scan is now running.
     row = {
