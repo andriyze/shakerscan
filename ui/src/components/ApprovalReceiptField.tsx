@@ -11,6 +11,8 @@ export function ApprovalReceiptField({
   receiptId,
   onReceiptIdChange,
   onScopeReceiptIdChange,
+  environment,
+  onEnvironmentChange,
   ttlMinutes,
   riskTier = 'active',
   required = false,
@@ -22,6 +24,8 @@ export function ApprovalReceiptField({
   receiptId: string
   onReceiptIdChange: (receiptId: string) => void
   onScopeReceiptIdChange?: (scopeReceiptId: string) => void
+  environment?: 'production' | 'lab'
+  onEnvironmentChange?: (environment: 'production' | 'lab') => void
   ttlMinutes: number
   riskTier?: 'active' | 'credential'
   required?: boolean
@@ -30,17 +34,19 @@ export function ApprovalReceiptField({
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expiresAt, setExpiresAt] = useState<string | null>(null)
-  const [scopeEnvironment, setScopeEnvironment] = useState<'production' | 'lab'>('production')
+  const [localEnvironment, setLocalEnvironment] = useState<'production' | 'lab'>('production')
+  const scopeEnvironment = environment ?? localEnvironment
   const missingTarget = !targetUrl.trim()
   const createDisabledReason = disabledReason
     || (missingTarget ? 'Choose one target first.' : null)
     || (!authorizationConfirmed ? 'Confirm that you are authorized to test this target first.' : null)
 
   useEffect(() => {
-    setScopeEnvironment('production')
+    setLocalEnvironment('production')
+    onEnvironmentChange?.('production')
     setExpiresAt(null)
     setError(null)
-  }, [targetId, targetUrl])
+  }, [targetId, targetUrl, onEnvironmentChange])
 
   async function createReceipt() {
     if (createDisabledReason) return
@@ -89,7 +95,9 @@ export function ApprovalReceiptField({
           aria-label="Approval scope environment"
           value={scopeEnvironment}
           onChange={(event) => {
-            setScopeEnvironment(event.target.value as 'production' | 'lab')
+            const nextEnvironment = event.target.value as 'production' | 'lab'
+            setLocalEnvironment(nextEnvironment)
+            onEnvironmentChange?.(nextEnvironment)
             onReceiptIdChange('')
             onScopeReceiptIdChange?.('')
             setExpiresAt(null)

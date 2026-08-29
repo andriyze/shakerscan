@@ -27,3 +27,13 @@ test('receipt creation carries the scope binding into Hunt and stays duration-bo
   assert.match(scan, /disabledReason=\{batchMode \? 'Create approvals from a single-target Scan; receipts are target-bound\.'/)
   assert.match(component, /Valid for about/)
 })
+
+test('authorized active Scan creates its required target-bound receipt during submission', () => {
+  assert.match(scan, /const approvalRequired = activeTesting \|\| networkDiscovery \|\| credentialUse \|\| allowStateChanging/)
+  assert.match(scan, /if \(approvalRequired && !effectiveApprovalReceipt\)/)
+  assert.match(scan, /await createTargetPolicyApprovalReceipt\(\{/)
+  assert.match(scan, /environment: approvalEnvironment/)
+  assert.match(scan, /Create approval & run scan/)
+  assert.match(scan, /Active approvals are exact-target-bound; submit one target at a time\./)
+  assert.doesNotMatch(scan, /if \(credentialUse && !approvalReceipt\.trim\(\)\)/)
+})

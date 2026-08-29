@@ -8,6 +8,8 @@ import {
   getTargets,
   getScanPublicContract,
   getWorkers,
+  createTarget,
+  createTargetPolicyApprovalReceipt,
   previewScanContract,
   submitBatchV2,
   submitScanV2,
@@ -69,6 +71,7 @@ export default function NewScanPage() {
   const [allowStateChanging, setAllowStateChanging] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [approvalReceipt, setApprovalReceipt] = useState('')
+  const [approvalEnvironment, setApprovalEnvironment] = useState<'production' | 'lab'>('production')
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
   const [primaryCredentialId, setPrimaryCredentialId] = useState('')
   const [secondaryCredentialId, setSecondaryCredentialId] = useState('')
@@ -142,7 +145,7 @@ export default function NewScanPage() {
   )
   const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
   const credentialUse = selectedCredentialIds.length > 0
-  const approvalRequired = networkDiscovery || credentialUse || allowStateChanging
+  const approvalRequired = activeTesting || networkDiscovery || credentialUse || allowStateChanging
   const currentWorkerCount = workerStats?.current_count ?? 0
   const staleWorkers = workerStats?.stale_count ?? workerStats?.stale_workers?.length ?? 0
   const pendingWorkers = workerStats?.pending_count ?? 0
@@ -286,28 +289,28 @@ export default function NewScanPage() {
       setError('Confirm that you own or are authorized to test every target with the selected permissions and identities.')
       return
     }
+    if (approvalRequired && batchMode) {
+      setError('Active testing and authenticated scanning require one target at a time because every approval receipt is bound to one exact target.')
+      return
+    }
     if (activeTesting && !currentFleetReady) {
       setError('Active testing requires at least one worker and a uniform fleet on the expected build. Refresh after rebuilding or restarting stale workers.')
       return
     }
-    if (networkDiscovery && (!activeTesting || !approvalReceipt.trim())) {
-      setError('Network discovery requires active testing, authorization confirmation, and a target-bound approval receipt ID.')
+    if (networkDiscovery && !activeTesting) {
+      setError('Network discovery requires active testing and authorization confirmation.')
       return
     }
     if (credentialUse && batchMode) {
       setError('Credential profiles are exact-target-bound and cannot be shared across a batch.')
       return
     }
-    if (credentialUse && !approvalReceipt.trim()) {
-      setError('Credential use requires a target-bound approval receipt ID.')
-      return
-    }
     if (requestCollectionIds.length && (batchMode || !selectedRegisteredTarget)) {
       setError('Request collection selections are exact-target-bound and require one registered target.')
       return
     }
-    if (allowStateChanging && (!activeTesting || !approvalReceipt.trim())) {
-      setError('State-changing collection replay requires active testing and a target-bound approval receipt ID.')
+    if (allowStateChanging && !activeTesting) {
+      setError('State-changing collection replay requires active testing.')
       return
     }
     const includedActiveFamily = scanContract?.families.find(
@@ -356,36 +359,57 @@ export default function NewScanPage() {
       advanced[key] = parsed
     }
     const endpointList = customEndpoints.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
-    const common = {
-      target_kind: targetKind,
-      budget_profile: budgetProfile,
-      policy: {
-        preset: familyPreset,
-        active_testing: activeTesting,
-        allow_state_changing_http: allowStateChanging,
-        subdomain_discovery: subdomainDiscovery,
-        network_discovery: networkDiscovery,
-        include_families: includeFamilies,
-        exclude_families: excludeFamilies,
-      },
-      request_collections: requestCollectionIds.map((id) => ({
-        id,
-        ...(requestCollectionMetadata[id]?.replayPolicy
-          ? { replay_policy: requestCollectionMetadata[id].replayPolicy }
-          : {}),
-      })),
-      credential_profile_ids: selectedCredentialIds,
-      advanced,
-      approval_receipt_id: approvalReceipt.trim() || undefined,
-      options: {
-        ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
-        parallel: topology === 'parallel',
-        require_current_workers: activeTesting,
-      },
-    }
-
     setLoading(true)
     try {
+      let effectiveApprovalReceipt = approvalReceipt.trim()
+      if (approvalRequired && !effectiveApprovalReceipt) {
+        let approvalTargetId = selectedRegisteredTarget?.id
+        if (!approvalTargetId) {
+          const registered = await createTarget(submittedTargets[0])
+          approvalTargetId = String(registered?.id || '').trim() || undefined
+        }
+        if (!approvalTargetId) {
+          throw new Error('The target could not be registered for a target-bound approval receipt.')
+        }
+        const createdApproval = await createTargetPolicyApprovalReceipt({
+          targetId: approvalTargetId,
+          targetUrl: submittedTargets[0],
+          ttlMinutes: approvalTtlMinutes,
+          riskTier: credentialUse ? 'credential' : 'active',
+          environment: approvalEnvironment,
+        })
+        effectiveApprovalReceipt = createdApproval.approvalReceiptId
+        setApprovalReceipt(effectiveApprovalReceipt)
+      }
+
+      const common = {
+        target_kind: targetKind,
+        budget_profile: budgetProfile,
+        policy: {
+          preset: familyPreset,
+          active_testing: activeTesting,
+          allow_state_changing_http: allowStateChanging,
+          subdomain_discovery: subdomainDiscovery,
+          network_discovery: networkDiscovery,
+          include_families: includeFamilies,
+          exclude_families: excludeFamilies,
+        },
+        request_collections: requestCollectionIds.map((id) => ({
+          id,
+          ...(requestCollectionMetadata[id]?.replayPolicy
+            ? { replay_policy: requestCollectionMetadata[id].replayPolicy }
+            : {}),
+        })),
+        credential_profile_ids: selectedCredentialIds,
+        advanced,
+        approval_receipt_id: effectiveApprovalReceipt || undefined,
+        options: {
+          ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
+          parallel: topology === 'parallel',
+          require_current_workers: activeTesting,
+        },
+      }
+
       if (batchMode) {
         const result = await submitBatchV2({ targets: submittedTargets, ...common })
         if (result.queued_count === 0) throw new Error(`No scans were queued (${result.failed_count} rejected).`)
@@ -428,6 +452,12 @@ export default function NewScanPage() {
               <input type="checkbox" checked={batchMode} onChange={(event) => {
                 setBatchMode(event.target.checked)
                 if (event.target.checked) {
+                  setActiveTesting(false)
+                  setFamilyPreset('passive')
+                  setAuthorized(false)
+                  setNetworkDiscovery(false)
+                  setAllowStateChanging(false)
+                  setApprovalReceipt('')
                   setPrimaryCredentialId('')
                   setSecondaryCredentialId('')
                   setRequestCollectionIds([])
@@ -444,6 +474,7 @@ export default function NewScanPage() {
             <Field label="Target URL or hostname" required>
               <input value={target} onChange={(event) => {
                 setTarget(event.target.value)
+                setApprovalReceipt('')
                 setPrimaryCredentialId('')
                 setSecondaryCredentialId('')
               }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
@@ -452,7 +483,7 @@ export default function NewScanPage() {
           <datalist id="known-targets">{existingTargets.map((item) => <option key={item.id} value={item.url} />)}</datalist>
           <label className="block text-sm text-gray-300">
             Target kind
-            <select value={targetKind} onChange={(event) => setTargetKind(event.target.value as 'web' | 'api')} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+            <select value={targetKind} onChange={(event) => { setTargetKind(event.target.value as 'web' | 'api'); setApprovalReceipt('') }} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
               <option value="web">Web application</option>
               <option value="api">API</option>
             </select>
@@ -489,10 +520,10 @@ export default function NewScanPage() {
             </p>
           </div>
           <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
-            <input className="mt-1" type="checkbox" checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (familyPreset === 'standard_active') setFamilyPreset('passive'); if (!credentialUse) setAuthorized(false); setNetworkDiscovery(false); setAllowStateChanging(false); removeConfirmedActiveSelections() } }} />
+            <input className="mt-1" type="checkbox" disabled={batchMode} checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (familyPreset === 'standard_active') setFamilyPreset('passive'); if (!credentialUse) { setAuthorized(false); setApprovalReceipt('') } setNetworkDiscovery(false); setAllowStateChanging(false); removeConfirmedActiveSelections() } }} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
-              <span className="block text-xs text-gray-500">Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.</span>
+              <span className="block text-xs text-gray-500">{batchMode ? 'Active approvals are exact-target-bound; submit one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
             </span>
           </label>
           {(activeTesting || credentialUse) && (
@@ -513,11 +544,16 @@ export default function NewScanPage() {
               authorizationConfirmed={authorized}
               receiptId={approvalReceipt}
               onReceiptIdChange={setApprovalReceipt}
+              environment={approvalEnvironment}
+              onEnvironmentChange={setApprovalEnvironment}
               ttlMinutes={approvalTtlMinutes}
               riskTier={credentialUse ? 'credential' : 'active'}
               required={approvalRequired}
               disabledReason={batchMode ? 'Create approvals from a single-target Scan; receipts are target-bound.' : undefined}
             />
+          )}
+          {approvalRequired && !approvalReceipt.trim() && !batchMode && (
+            <p className="text-xs text-gray-400">Run Scan will create the required target-bound approval automatically from your authorization confirmation.</p>
           )}
           {scanContract && (
             <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
@@ -625,7 +661,7 @@ export default function NewScanPage() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="text-sm text-gray-300">
                     Primary identity
-                    <select value={primaryCredentialId} onChange={(event) => setPrimaryCredentialId(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+                    <select value={primaryCredentialId} onChange={(event) => { setPrimaryCredentialId(event.target.value); setApprovalReceipt('') }} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
                       <option value="">Anonymous</option>
                       {credentialProfiles.map((profile) => {
                         const compatibility = credentialCompatibility(profile, 'primary')
@@ -639,7 +675,7 @@ export default function NewScanPage() {
                   </label>
                   <label className="text-sm text-gray-300">
                     Secondary identity
-                    <select value={secondaryCredentialId} onChange={(event) => setSecondaryCredentialId(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
+                    <select value={secondaryCredentialId} onChange={(event) => { setSecondaryCredentialId(event.target.value); setApprovalReceipt('') }} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
                       <option value="">No comparator</option>
                       {credentialProfiles.map((profile) => {
                         const compatibility = credentialCompatibility(profile, 'secondary')
@@ -690,7 +726,9 @@ export default function NewScanPage() {
         {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
-          <Button type="submit" loading={loading} disabled={activeTesting && !currentFleetReady}>Run Scan</Button>
+          <Button type="submit" loading={loading} disabled={activeTesting && !currentFleetReady}>
+            {approvalRequired && !approvalReceipt.trim() ? 'Create approval & run scan' : 'Run Scan'}
+          </Button>
         </div>
       </form>
     </div>
