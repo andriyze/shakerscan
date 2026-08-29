@@ -250,6 +250,7 @@ export default function Dashboard() {
   const staleCount = workers?.stale_workers?.length ?? 0
   const pendingWorkerCount = workers?.pending_count
     ?? Math.max(0, (workerCount ?? 0) - (workers?.current_count ?? 0) - staleCount)
+  const unavailableWorkerCount = (workers?.workers || []).filter((worker) => worker.status !== 'running').length
   const cohortCounts = useMemo(() => countCohorts(exposure?.assets || []), [exposure])
   const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
@@ -353,6 +354,11 @@ export default function Dashboard() {
             {pendingWorkerCount > 0 && (
               <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Running worker processes that have not reported a current build identity yet">
                 {pendingWorkerCount} starting
+              </span>
+            )}
+            {unavailableWorkerCount > 0 && (
+              <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300" title="Worker containers that are stopped, restarting, or otherwise unavailable">
+                {unavailableWorkerCount} unavailable
               </span>
             )}
             {!fleetEnabled && workersKnown && (

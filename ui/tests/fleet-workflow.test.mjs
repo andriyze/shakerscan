@@ -40,6 +40,7 @@ test('dashboard distinguishes logical scans, worker jobs, and worker processes',
   assert.match(dashboard, /ready to scan/)
   assert.match(dashboard, /\{workerCount\} running · max \{maxWorkers\}/)
   assert.match(dashboard, /\{pendingWorkerCount\} starting/)
+  assert.match(dashboard, /\{unavailableWorkerCount\} unavailable/)
   assert.doesNotMatch(dashboard, /workers · limit/)
 })
 
