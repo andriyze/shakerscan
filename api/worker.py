@@ -2987,6 +2987,29 @@ def _strip_null_bytes(value):
     return strip_null_bytes(value)
 
 
+def _bind_evidence_object_provenance(content, scan_id, finding_id):
+    """Stamp one immutable evidence subject and reject contradictory producer claims."""
+    if not content:
+        return None
+    if not isinstance(content, dict):
+        return content
+    expected_scan = str(scan_id)
+    existing = content.get("_provenance")
+    if isinstance(existing, dict):
+        claimed_scan = existing.get("evidence_producing_scan_id")
+        if claimed_scan and str(claimed_scan) != expected_scan:
+            raise ValueError("evidence-producing scan subject mismatch")
+    claimed_scan = content.get("evidence_producing_scan_id")
+    if claimed_scan and str(claimed_scan) != expected_scan:
+        raise ValueError("evidence-producing scan subject mismatch")
+    bound = dict(content)
+    bound["_provenance"] = {
+        "evidence_producing_scan_id": expected_scan,
+        "finding_id": str(finding_id),
+    }
+    return bound
+
+
 async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, evidence_redacted,
                                    *, tool_override: str | None = None) -> None:
     """Best-effort: persist a finding's (already null-stripped + redacted) evidence as
@@ -2998,7 +3021,7 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
     locked_sha: str | None = None
     identity_lock: str | None = None
     try:
-        content = evidence_redacted if evidence_redacted else None
+        content = _bind_evidence_object_provenance(evidence_redacted, scan_uuid, finding_id)
         tool = tool_override or finding.get("tool")
         object_type = (f"{tool}_evidence" if tool else "finding_evidence")[:64]
         # Lock the stable row identity before checking pending state. Otherwise a

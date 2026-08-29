@@ -2282,6 +2282,8 @@ export interface Finding {
   target_url?: string
   target_name?: string
   scan_id?: string
+  first_seen_scan_id?: string | null
+  last_seen_scan_id?: string | null
   target_id?: string
   ai_target_id?: string | null
   device_target_id?: string | null
@@ -5778,7 +5780,12 @@ export interface EvidenceObject {
 // storage URI) for a finding — distinct from the embedded `finding.evidence` blob.
 export async function getFindingEvidence(
   id: string
-): Promise<{ finding_id: string; evidence_objects: EvidenceObject[] }> {
+): Promise<{
+  finding_id: string
+  original_finding_scan_id?: string | null
+  latest_observation_scan_id?: string | null
+  evidence_objects: EvidenceObject[]
+}> {
   const res = await fetch(`${API_URL}/findings/${id}/evidence`)
   if (!res.ok) throw new Error('Failed to fetch finding evidence objects')
   return res.json()

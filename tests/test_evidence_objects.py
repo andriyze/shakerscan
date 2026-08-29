@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object))
 sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *a, **k: None))
@@ -27,6 +29,32 @@ def test_finding_evidence_identity_is_scan_scoped_in_fresh_and_upgrade_schemas()
     assert "DROP CONSTRAINT IF EXISTS evidence_objects_finding_type_unique" in upgrade
     assert "SET scan_id=findings.scan_id" in upgrade
     assert "CONSTRAINT evidence_objects_finding_type_unique UNIQUE" not in fresh
+    for source in (fresh, upgrade):
+        assert "first_seen_scan_id" in source
+        assert "last_seen_scan_id" in source
+        assert "bind_finding_observation_scans" in source
+
+
+def test_evidence_object_provenance_rejects_a_different_producing_scan():
+    bound = worker._bind_evidence_object_provenance(
+        {"proof": "ok"}, "scan-current", "finding-1"
+    )
+    assert bound["_provenance"] == {
+        "evidence_producing_scan_id": "scan-current",
+        "finding_id": "finding-1",
+    }
+
+    with pytest.raises(ValueError, match="subject mismatch"):
+        worker._bind_evidence_object_provenance(
+            {
+                "_provenance": {
+                    "evidence_producing_scan_id": "scan-other",
+                    "finding_id": "finding-1",
+                }
+            },
+            "scan-current",
+            "finding-1",
+        )
 
 
 class _CaptureConn:

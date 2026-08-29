@@ -997,6 +997,8 @@ CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
 CREATE TABLE findings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+    first_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    last_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
     ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
     device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
@@ -1479,6 +1481,23 @@ CREATE INDEX idx_ai_targets_created ON ai_targets(created_at DESC);
 
 -- Findings
 CREATE INDEX idx_findings_scan_id ON findings(scan_id);
+CREATE INDEX idx_findings_first_seen_scan_id ON findings(first_seen_scan_id);
+CREATE INDEX idx_findings_last_seen_scan_id ON findings(last_seen_scan_id);
+
+CREATE OR REPLACE FUNCTION bind_finding_observation_scans()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.scan_id IS NOT NULL THEN
+        NEW.first_seen_scan_id = COALESCE(NEW.first_seen_scan_id, NEW.scan_id);
+        NEW.last_seen_scan_id = NEW.scan_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_bind_finding_observation_scans
+BEFORE INSERT OR UPDATE OF scan_id ON findings
+FOR EACH ROW EXECUTE FUNCTION bind_finding_observation_scans();
 CREATE INDEX idx_findings_target_id ON findings(target_id);
 CREATE INDEX idx_findings_ai_target_id ON findings(ai_target_id) WHERE ai_target_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_findings_device_fingerprint ON findings(device_target_id, fingerprint) WHERE device_target_id IS NOT NULL;

@@ -727,6 +727,8 @@ async def list_finding_evidence(finding_id: str):
         )
     return {
         "finding_id": str(finding["id"]),
+        "original_finding_scan_id": str(finding.get("first_seen_scan_id") or finding.get("scan_id") or "") or None,
+        "latest_observation_scan_id": str(finding.get("last_seen_scan_id") or finding.get("scan_id") or "") or None,
         "evidence_objects": [_public_evidence_object_row(r) for r in rows],
     }
 

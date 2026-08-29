@@ -3801,6 +3801,37 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
             await conn.execute("""
+                ALTER TABLE findings
+                ADD COLUMN IF NOT EXISTS first_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS last_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                UPDATE findings
+                SET first_seen_scan_id=COALESCE(first_seen_scan_id, scan_id),
+                    last_seen_scan_id=COALESCE(last_seen_scan_id, scan_id)
+                WHERE scan_id IS NOT NULL
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_first_seen_scan_id ON findings(first_seen_scan_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_last_seen_scan_id ON findings(last_seen_scan_id)")
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION bind_finding_observation_scans()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF NEW.scan_id IS NOT NULL THEN
+                        NEW.first_seen_scan_id = COALESCE(NEW.first_seen_scan_id, NEW.scan_id);
+                        NEW.last_seen_scan_id = NEW.scan_id;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            await conn.execute("DROP TRIGGER IF EXISTS trg_bind_finding_observation_scans ON findings")
+            await conn.execute("""
+                CREATE TRIGGER trg_bind_finding_observation_scans
+                BEFORE INSERT OR UPDATE OF scan_id ON findings
+                FOR EACH ROW EXECUTE FUNCTION bind_finding_observation_scans()
+            """)
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_evidence_objects_retention_pending
                 ON evidence_objects(retention_delete_pending_at)
                 WHERE retention_delete_pending_at IS NOT NULL

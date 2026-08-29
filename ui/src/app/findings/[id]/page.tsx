@@ -312,6 +312,10 @@ function FindingDetailContent() {
   const findingId = params.id as string
   const [finding, setFinding] = useState<Finding | null>(null)
   const [evidenceObjects, setEvidenceObjects] = useState<EvidenceObject[]>([])
+  const [evidenceProvenance, setEvidenceProvenance] = useState<{
+    originalFindingScanId?: string | null
+    latestObservationScanId?: string | null
+  }>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
@@ -367,6 +371,10 @@ function FindingDetailContent() {
         setRetestHistory(retestData.retests || [])
       }
       setEvidenceObjects(evidenceData?.evidence_objects || [])
+      setEvidenceProvenance({
+        originalFindingScanId: evidenceData?.original_finding_scan_id,
+        latestObservationScanId: evidenceData?.latest_observation_scan_id,
+      })
       const exceptions = (exceptionData?.finding_exceptions || []).filter((item) =>
         item.finding_id === data.id || (data.fingerprint && item.fingerprint === data.fingerprint)
       )
@@ -931,13 +939,24 @@ function FindingDetailContent() {
                   )}
                 </div>
               )}
-              {finding.scan_id && (
+              {(finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id) && (
                 <div className="flex items-center gap-2">
-                  <span>Scan:</span>
-                  <Link href={`/scans/${finding.scan_id}`} className="text-blue-400 hover:text-blue-300 break-all">
-                    {finding.scan_id}
+                  <span>Latest observation scan:</span>
+                  <Link href={`/scans/${finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id}`} className="text-blue-400 hover:text-blue-300 break-all">
+                    {finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id}
                   </Link>
-                  <CopyButton text={finding.scan_id} label="Copy scan ID" />
+                  <CopyButton text={finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id || ''} label="Copy latest observation scan ID" />
+                </div>
+              )}
+              {(finding.first_seen_scan_id || evidenceProvenance.originalFindingScanId) && (
+                <div className="flex items-center gap-2">
+                  <span>Original finding scan:</span>
+                  <Link
+                    href={`/scans/${finding.first_seen_scan_id || evidenceProvenance.originalFindingScanId}`}
+                    className="break-all text-blue-400 hover:text-blue-300"
+                  >
+                    {finding.first_seen_scan_id || evidenceProvenance.originalFindingScanId}
+                  </Link>
                 </div>
               )}
               {finding.target_id && (
@@ -1507,6 +1526,12 @@ function FindingDetailContent() {
                     </div>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    {eo.scan_id && (
+                      <div className="flex gap-2 min-w-0">
+                        <span className="text-gray-500 shrink-0">evidence-producing scan</span>
+                        <Link href={`/scans/${eo.scan_id}`} className="break-all font-mono text-blue-300 hover:text-blue-200">{eo.scan_id}</Link>
+                      </div>
+                    )}
                     {eo.content_sha256 && (
                       <div className="flex gap-2 min-w-0">
                         <span className="text-gray-500 shrink-0">sha256</span>

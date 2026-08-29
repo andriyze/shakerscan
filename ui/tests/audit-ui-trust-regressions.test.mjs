@@ -43,6 +43,14 @@ test('finding copy failures and empty presentation have visible fallbacks', () =
   assert.match(candidates, /candidate\.claim\.trim\(\)\.toLowerCase\(\) !== candidate\.title/)
 })
 
+test('finding evidence names original, latest-observation, and producing scans separately', () => {
+  const detail = read('src/app/findings/[id]/page.tsx')
+  assert.match(detail, /Original finding scan:/)
+  assert.match(detail, /Latest observation scan:/)
+  assert.match(detail, /evidence-producing scan/)
+  assert.doesNotMatch(detail, /<span>Scan:<\/span>/)
+})
+
 test('docs and mobile operations expose truthful accessible labels', () => {
   const docs = read('src/app/docs/page.tsx')
   const dashboard = read('src/app/page.tsx')
