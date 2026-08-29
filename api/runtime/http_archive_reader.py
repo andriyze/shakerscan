@@ -114,6 +114,50 @@ async def count_transactions(conn, *, scan_id: str | None, hunt_run_id: str | No
     ) or 0)
 
 
+async def read_archive_stats(
+    conn, *, scan_id: str | None, hunt_run_id: str | None,
+) -> dict[str, int]:
+    """What the archive attempted for this run, against what it holds."""
+    owner_kind = "scan" if scan_id else "hunt"
+    owner_id = scan_id or hunt_run_id
+    row = await conn.fetchrow(
+        """SELECT attempted, stored, failed, dropped FROM http_archive_stats
+           WHERE owner_kind=$1 AND owner_id=$2""",
+        owner_kind, owner_id,
+    )
+    if row is None:
+        return {}
+    return {key: int(row[key] or 0) for key in ("attempted", "stored", "failed", "dropped")}
+
+
+def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]:
+    """Say honestly how much of the run this archive represents.
+
+    Labelling any non-empty archive "complete" made one surviving transaction stand for a
+    run whose capture mostly failed. Complete requires the counters to agree that nothing
+    was dropped and nothing failed.
+    """
+    if not stats and not total:
+        return "unavailable", "no calls were recorded for this run"
+    if not stats:
+        return (
+            "unknown",
+            "this run predates archive accounting, so completeness cannot be established",
+        )
+    attempted = int(stats.get("attempted") or 0)
+    stored = int(stats.get("stored") or 0)
+    failed = int(stats.get("failed") or 0)
+    dropped = int(stats.get("dropped") or 0)
+    if attempted == 0 and total == 0:
+        return "unavailable", "no calls were recorded for this run"
+    if failed or dropped or stored < attempted:
+        return "partial", (
+            f"{stored} of {attempted} recorded calls were stored"
+            + (f"; {dropped} were dropped at the capture ceiling" if dropped else "")
+        )
+    return "complete", f"all {stored} recorded calls were stored"
+
+
 def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
     """One archived call, redacted unless the caller explicitly asked for raw."""
     item = dict(row)
@@ -164,10 +208,12 @@ def export_document(
     redaction: str,
     owner: Mapping[str, Any],
     total: int,
+    stats: Mapping[str, int] | None = None,
     creator_version: str = "2.0.0",
 ) -> dict[str, Any]:
     """Build the export envelope, stating what it is and what it is not."""
     projected = [project(row, redaction=redaction) for row in rows]
+    fidelity, fidelity_detail = archive_fidelity(stats or {}, total=total)
     if export_format == "har":
         entries = [
             har_entry(
@@ -185,6 +231,8 @@ def export_document(
             "redaction": redaction,
             "exported": len(entries),
             "total": total,
+            "fidelity": fidelity,
+            "fidelity_detail": fidelity_detail,
         })
         return document
     return {
@@ -193,9 +241,11 @@ def export_document(
         # Stated, never implied. A redacted export that looks complete is worse than one
         # that says what was removed.
         "redaction": redaction,
-        # Runs that predate the archive have no transactions; that is not the same as
-        # having made none, and an export must not let the two look alike.
-        "fidelity": "complete" if total else "unavailable",
+        # Backed by counters rather than inferred from the row count, because capture and
+        # persistence failures are swallowed and one surviving row is not a whole run.
+        "fidelity": fidelity,
+        "fidelity_detail": fidelity_detail,
+        "capture_stats": dict(stats or {}),
         "exported": len(projected),
         "total": total,
         "truncated_export": len(projected) < total,
@@ -203,12 +253,68 @@ def export_document(
     }
 
 
+async def purge_transactions(
+    conn, *, scan_id: str | None, hunt_run_id: str | None,
+) -> dict[str, int]:
+    """Delete a run's archived calls and the blobs only they referenced.
+
+    The evidence retention sweep is target-scoped and reaches objects through a scan or
+    finding, which a Hunt archive blob has neither of. Without a direct path the one store
+    that certainly holds credentials would be the one an operator could never clear.
+    Content-addressed blobs are shared, so an object is removed only once nothing else
+    points at it.
+    """
+    owner_clause = "scan_id=$1" if scan_id else "hunt_run_id=$1"
+    owner_id = scan_id or hunt_run_id
+    async with conn.transaction():
+        objects = await conn.fetch(
+            f"""SELECT DISTINCT unnest(ARRAY[
+                    request_headers_object_id, request_body_object_id,
+                    response_headers_object_id, response_body_object_id
+                ]) AS object_id
+                FROM http_transactions WHERE {owner_clause}""",
+            owner_id,
+        )
+        removed = await conn.fetchval(
+            f"WITH gone AS (DELETE FROM http_transactions WHERE {owner_clause} RETURNING 1)"
+            " SELECT COUNT(*) FROM gone",
+            owner_id,
+        )
+        object_ids = [row["object_id"] for row in objects if row["object_id"]]
+        blobs = 0
+        if object_ids:
+            blobs = await conn.fetchval(
+                """WITH gone AS (
+                       DELETE FROM evidence_objects eo
+                       WHERE eo.id = ANY($1::uuid[])
+                         AND eo.finding_id IS NULL
+                         AND NOT EXISTS (
+                             SELECT 1 FROM http_transactions t
+                             WHERE eo.id IN (
+                                 t.request_headers_object_id, t.request_body_object_id,
+                                 t.response_headers_object_id, t.response_body_object_id
+                             )
+                         )
+                       RETURNING 1
+                   ) SELECT COUNT(*) FROM gone""",
+                object_ids,
+            )
+        await conn.execute(
+            "DELETE FROM http_archive_stats WHERE owner_kind=$1 AND owner_id=$2",
+            "scan" if scan_id else "hunt", owner_id,
+        )
+    return {"transactions_deleted": int(removed or 0), "blobs_deleted": int(blobs or 0)}
+
+
 __all__ = [
     "EXPORT_FORMATS",
     "MAX_EXPORT_ROWS",
     "REDACTION_MODES",
+    "archive_fidelity",
     "count_transactions",
+    "read_archive_stats",
     "export_document",
     "project",
+    "purge_transactions",
     "read_transactions",
 ]

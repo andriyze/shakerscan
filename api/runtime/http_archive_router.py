@@ -20,6 +20,8 @@ try:
         REDACTION_MODES,
         count_transactions,
         export_document,
+        purge_transactions,
+        read_archive_stats,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
@@ -29,6 +31,8 @@ except ModuleNotFoundError:  # package import layout
         REDACTION_MODES,
         count_transactions,
         export_document,
+        purge_transactions,
+        read_archive_stats,
         read_transactions,
     )
 
@@ -100,13 +104,16 @@ async def _export(
         _authorize_raw(request)
     async with _pool().acquire() as conn:
         total = await count_transactions(conn, scan_id=scan_id, hunt_run_id=hunt_run_id)
+        stats = await read_archive_stats(
+            conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+        )
         rows = await read_transactions(
             conn, scan_id=scan_id, hunt_run_id=hunt_run_id, method=method,
             status_code=status_code, limit=limit, offset=offset,
         )
     document = export_document(
         rows, export_format=export_format, redaction=redaction,
-        owner={"scan_id": scan_id, "hunt_id": hunt_run_id}, total=total,
+        owner={"scan_id": scan_id, "hunt_id": hunt_run_id}, total=total, stats=stats,
     )
     name = scan_id or hunt_run_id or "export"
     suffix = "har" if export_format == "har" else "json"
@@ -131,7 +138,12 @@ async def export_scan_transactions(
     limit: int = Query(1_000, ge=1, le=MAX_EXPORT_ROWS),
     offset: int = Query(0, ge=0),
 ):
-    """Every HTTP call this scan made, as ShakerScan JSON or HAR 1.2."""
+    """This scan's archived HTTP calls, as ShakerScan JSON or HAR 1.2.
+
+    The envelope's `fidelity` says how much of the run the archive represents. Coverage is
+    per capability: a call is archived only where its execution path records one, so an
+    export is not a promise that the scan made no other request.
+    """
     return await _export(
         request=request, scan_id=scan_id, hunt_run_id=None, export_format=format, redaction=redaction,
         method=method, status_code=status_code, limit=limit, offset=offset,
@@ -149,11 +161,42 @@ async def export_hunt_transactions(
     limit: int = Query(1_000, ge=1, le=MAX_EXPORT_ROWS),
     offset: int = Query(0, ge=0),
 ):
-    """Every HTTP call this hunt made, as ShakerScan JSON or HAR 1.2."""
+    """This hunt's archived HTTP calls, as ShakerScan JSON or HAR 1.2.
+
+    The envelope's `fidelity` says how much of the run the archive represents. Coverage is
+    per capability: a call is archived only where its execution path records one, so an
+    export is not a promise that the hunt made no other request.
+    """
     return await _export(
         request=request, scan_id=None, hunt_run_id=hunt_id, export_format=format, redaction=redaction,
         method=method, status_code=status_code, limit=limit, offset=offset,
     )
+
+
+async def _purge(request: Request, *, scan_id: str | None, hunt_run_id: str | None):
+    """Delete a run's archived calls.
+
+    Requires the operator credential, but deliberately not the raw-export switch. Making an
+    operator first enable *exporting* credentials before they may *delete* them would gate
+    the safe action behind the dangerous one.
+    """
+    _require_operator(request)
+    async with _pool().acquire() as conn:
+        return await purge_transactions(
+            conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+        )
+
+
+@router.delete("/scans/{scan_id}/http-transactions", tags=["Scan"])
+async def purge_scan_transactions(request: Request, scan_id: str):
+    """Delete this scan's archived calls and the blobs only they referenced."""
+    return await _purge(request, scan_id=scan_id, hunt_run_id=None)
+
+
+@router.delete("/hunts/{hunt_id}/http-transactions", tags=["Hunt"])
+async def purge_hunt_transactions(request: Request, hunt_id: str):
+    """Delete this hunt's archived calls and the blobs only they referenced."""
+    return await _purge(request, scan_id=None, hunt_run_id=hunt_id)
 
 
 __all__ = [
@@ -161,5 +204,7 @@ __all__ = [
     "raw_export_enabled",
     "export_hunt_transactions",
     "export_scan_transactions",
+    "purge_hunt_transactions",
+    "purge_scan_transactions",
     "router",
 ]

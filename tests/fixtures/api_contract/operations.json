@@ -945,6 +945,16 @@
     "operation_id": "health_health_get"
   },
   {
+    "path": "/hunt/skills",
+    "method": "get",
+    "operation_id": "list_hunt_skills_hunt_skills_get"
+  },
+  {
+    "path": "/hunt/skills/{skill_id}",
+    "method": "get",
+    "operation_id": "get_hunt_skill_hunt_skills__skill_id__get"
+  },
+  {
     "path": "/hunts",
     "method": "get",
     "operation_id": "list_hunts_hunts_get"
@@ -993,6 +1003,16 @@
     "path": "/hunts/{hunt_id}/finish",
     "method": "post",
     "operation_id": "finish_hunt_hunts__hunt_id__finish_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "method": "delete",
+    "operation_id": "purge_hunt_transactions_hunts__hunt_id__http_transactions_delete"
+  },
+  {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "method": "get",
+    "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get"
   },
   {
     "path": "/hunts/{hunt_id}/query",
@@ -1553,6 +1573,16 @@
     "path": "/scans/{scan_id}/device-activity",
     "method": "get",
     "operation_id": "get_scan_device_activity_scans__scan_id__device_activity_get"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "method": "delete",
+    "operation_id": "purge_scan_transactions_scans__scan_id__http_transactions_delete"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "method": "get",
+    "operation_id": "export_scan_transactions_scans__scan_id__http_transactions_get"
   },
   {
     "path": "/scans/{scan_id}/logs",

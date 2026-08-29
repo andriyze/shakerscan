@@ -44,8 +44,16 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "azure_sas_token",
         "bearer_token",
         "client_secret",
+        # A cookie header *is* a session credential. These were absent, so a redacted
+        # export masked Authorization and passed "sessionid=..." through untouched. Exact
+        # keys rather than a bare "cookie" fragment, so fields that merely describe cookie
+        # behaviour -- flag findings, name inventories -- keep their evidence.
+        "cookie",
+        "cookies",
         "credential",
         "credentials",
+        "set-cookie",
+        "set_cookie",
         "csrf",
         "csrf_token",
         "gcp_credentials",

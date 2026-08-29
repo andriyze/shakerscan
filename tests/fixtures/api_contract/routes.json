@@ -1346,6 +1346,20 @@
     "name": "health"
   },
   {
+    "path": "/hunt/skills",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_hunt_skills"
+  },
+  {
+    "path": "/hunt/skills/{skill_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_skill"
+  },
+  {
     "path": "/hunts",
     "methods": [
       "GET"
@@ -1414,6 +1428,20 @@
       "POST"
     ],
     "name": "finish_hunt"
+  },
+  {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "purge_hunt_transactions"
+  },
+  {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_hunt_transactions"
   },
   {
     "path": "/hunts/{hunt_id}/query",
@@ -2214,6 +2242,20 @@
       "GET"
     ],
     "name": "get_scan_device_activity"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "purge_scan_transactions"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_scan_transactions"
   },
   {
     "path": "/scans/{scan_id}/logs",

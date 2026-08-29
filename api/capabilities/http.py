@@ -106,13 +106,77 @@ def _origin_key(value: Any) -> tuple[str, str, int] | None:
     )
 
 
-def _archived_request_body(json_body: Any, form_body: Any) -> bytes | None:
-    """Serialize whichever body shape the request carried, for the archive only."""
-    if json_body is not None:
-        return json.dumps(json_body, separators=(",", ":")).encode("utf-8")
-    if form_body is not None:
-        return urllib.parse.urlencode(dict(form_body)).encode("utf-8")
-    return None
+def _emit_transaction(
+    recorder: Callable[[dict[str, Any]], None],
+    *,
+    request: Any,
+    response: Any,
+    body: bytes,
+    body_truncated: bool,
+    pinned_address: str | None,
+    direct_origin: bool,
+    principal_slot: str,
+    started: float,
+    fallback_method: str,
+    fallback_url: str,
+) -> None:
+    """Hand the archive the wire request and its response.
+
+    ``request`` is httpx's own object for the hop that produced this response, so its URL
+    carries the query string and its headers carry everything httpx added. Truncation is
+    passed through rather than recomputed: the executor reads only a bounded prefix, and
+    letting the archive measure that prefix would report it as the complete body.
+    """
+    request_headers: dict[str, str] = {}
+    request_body: bytes | None = None
+    url = fallback_url
+    method = fallback_method
+    if request is not None:
+        method = str(getattr(request, "method", method) or method)
+        # The connection is pinned to an address, so the built request's URL carries that
+        # address rather than the hostname. Take its path and query -- which the caller's
+        # arguments do not have -- and put them back on the logical origin, so an export
+        # reads as the application's URL while remaining exactly what was sent.
+        built = getattr(request, "url", None)
+        if built is not None:
+            logical = urllib.parse.urlsplit(url)
+            # httpx exposes the query as bytes. Coercing with str() first yielded the
+            # literal "b''" and put it in the URL as a parameter.
+            query = getattr(built, "query", b"") or b""
+            if isinstance(query, (bytes, bytearray)):
+                query = bytes(query).decode("ascii", errors="replace")
+            query = str(query)
+            url = urllib.parse.urlunsplit((
+                logical.scheme, logical.netloc,
+                str(getattr(built, "path", logical.path) or logical.path),
+                query, "",
+            ))
+        request_headers = {
+            str(name).lower(): str(value)
+            for name, value in getattr(request, "headers", {}).items()
+        }
+        request_body = getattr(request, "content", None) or None
+    recorder({
+        "method": method,
+        "url": url,
+        "http_version": str(getattr(response, "http_version", "") or ""),
+        "status_code": int(response.status_code),
+        "request_headers": request_headers,
+        "request_body": request_body,
+        "response_headers": {
+            str(name).lower(): str(value)
+            for name, value in response.headers.items()
+        },
+        "response_body": body,
+        # The executor stops reading at its own ceiling, so the archive is told the body is
+        # a prefix rather than measuring it and concluding it is whole.
+        "response_body_truncated": bool(body_truncated),
+        "remote_ip": pinned_address,
+        "direct_origin": direct_origin,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "principal_slot": str(principal_slot or "anonymous"),
+        "fidelity": "wire_request",
+    })
 
 
 def _trusted_headers(values: Mapping[str, Any] | None) -> dict[str, str]:
@@ -286,6 +350,7 @@ async def execute_bound_http_request(
     timeout = max(1, min(60, int(timeout_seconds)))
     started = time.perf_counter()
     redirect_chain: list[dict[str, Any]] = []
+    body_truncated = False
     hops_followed = 0
     connection_attempts = 0
     connected_addresses: list[str] = []
@@ -357,6 +422,10 @@ async def execute_bound_http_request(
                 finally:
                     await response.aclose()
                 body = b"".join(chunks)
+                # The loop reads one byte past the ceiling precisely so it can tell a body
+                # that fits from one that was cut. The archive is told which, rather than
+                # measuring the prefix and reporting it as the whole response.
+                body_truncated = received > MAX_BODY_BYTES
                 final_url = current_url
                 if (
                     not follow_redirects
@@ -414,15 +483,19 @@ async def execute_bound_http_request(
         # archive quietly describing a different, more successful run than the real one.
         if transaction_recorder is not None:
             try:
+                # No response means no built request to read, so this records what was
+                # attempted and labels the fidelity accordingly. A refused connection is
+                # still a call the scanner made and often the one that matters.
                 transaction_recorder({
                     "method": method, "url": final_url,
                     "request_headers": dict(headers),
-                    "request_body": _archived_request_body(json_body, form_body),
+                    "request_body": None,
                     "remote_ip": pinned_address,
                     "direct_origin": bool(via_address),
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                     "principal_slot": str(principal_slot or "anonymous"),
                     "error": f"request_error:{type(exc).__name__}",
+                    "fidelity": "attempted_no_response",
                 })
             except Exception:  # pragma: no cover - recording must never mask the error
                 pass
@@ -438,25 +511,25 @@ async def execute_bound_http_request(
             "request": request_view,
         }
     if transaction_recorder is not None:
+        # Recorded from the request httpx actually built and the response it actually
+        # returned, not from the arguments the caller passed in. The inputs lack the query
+        # string, the injected cookies, the Host header, and the content headers httpx
+        # generates -- and after a redirect they describe the first hop rather than the one
+        # that produced this response. An archive built from them cannot be replayed.
         try:
-            transaction_recorder({
-                "method": method,
-                "url": final_url,
-                "http_version": str(getattr(response, "http_version", "") or ""),
-                "status_code": int(response.status_code),
-                "request_headers": dict(headers),
-                "request_body": _archived_request_body(json_body, form_body),
-                "response_headers": {
-                    str(name).lower(): str(value)
-                    for name, value in response.headers.items()
-                },
-                "response_body": body,
-                "remote_ip": pinned_address,
-                "direct_origin": bool(via_address),
-                "elapsed_ms": int((time.perf_counter() - started) * 1000),
-                "principal_slot": str(principal_slot or "anonymous"),
-                "redirect_chain": list(redirect_chain),
-            })
+            _emit_transaction(
+                transaction_recorder,
+                request=getattr(response, "request", None),
+                response=response,
+                body=body,
+                body_truncated=body_truncated,
+                pinned_address=pinned_address,
+                direct_origin=bool(via_address),
+                principal_slot=principal_slot,
+                started=started,
+                fallback_method=method,
+                fallback_url=final_url,
+            )
         except Exception as exc:  # pragma: no cover - recording must never fail a probe
             # A scan that dies because its own archive failed is worse than one whose
             # archive has a hole, so this is reported and swallowed rather than raised.

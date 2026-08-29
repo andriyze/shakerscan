@@ -28,7 +28,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 ARCHIVE_SCHEMA = "http-transaction/v1"
-RETENTION_CLASS = "http_archive"
+# These blobs hold request and response bodies as sent, so they are credential-bearing by
+# construction. "sensitive" is both the accurate description and the only way the existing
+# retention sweep can reach them: it accepts a fixed set of classes, and a bespoke
+# "http_archive" class meant the one store that definitely holds secrets was the one the
+# cleanup could never delete.
+RETENTION_CLASS = "sensitive"
 
 # Modes an operator can choose. "metadata" keeps the ledger without bodies, for a deployment
 # that wants reviewability without holding payloads.
@@ -88,6 +93,9 @@ class HttpTransaction:
     request_body: bytes | None = None
     response_headers: Mapping[str, str] | None = None
     response_body: bytes | None = None
+    # True when the executor stopped reading before the body ended. Without it the archive
+    # measures the prefix it was handed and reports a cut response as complete.
+    response_body_truncated: bool = False
     remote_ip: str | None = None
     direct_origin: bool = False
     redirect_of: str | None = None
@@ -198,7 +206,11 @@ def transaction_rows(
             "started_at": item.started_at,
             "elapsed_ms": item.elapsed_ms,
             "error": str(item.error)[:2_000] if item.error else None,
-            "truncated": bool(request_body["truncated"] or response_body["truncated"]),
+            "truncated": bool(
+                request_body["truncated"]
+                or response_body["truncated"]
+                or item.response_body_truncated
+            ),
             "retention_class": RETENTION_CLASS,
             "metadata_json": json.dumps(dict(item.metadata or {}))[:16_000],
         })
@@ -221,10 +233,13 @@ __all__ = [
     "stores_bodies",
     "archive_http_transactions",
     "archive_recorded_calls",
+    "archive_scan_capture",
     "har_document",
+    "scan_transactions_from_capture",
     "hunt_call_recorder",
     "har_entry",
     "persist_transactions",
+    "record_archive_stats",
     "store_archive_blob",
     "transaction_rows",
 ]
@@ -271,9 +286,15 @@ async def persist_transactions(conn, rows: Sequence[Mapping[str, Any]]) -> int:
         return 0
     for row in payload:
         row.pop("schema_version", None)
+        # Left as an object. Serializing it here and then serializing the payload again
+        # stored a JSON string containing JSON, so metadata_json->>'fidelity' read null on
+        # a row that carried it -- the same double-encode the blob writer had.
         metadata = row.get("metadata_json")
-        if isinstance(metadata, (dict, list)):
-            row["metadata_json"] = json.dumps(metadata)
+        if isinstance(metadata, str):
+            try:
+                row["metadata_json"] = json.loads(metadata)
+            except json.JSONDecodeError:
+                row["metadata_json"] = {"raw": metadata}
         started = row.get("started_at")
         if hasattr(started, "isoformat"):
             row["started_at"] = started.isoformat()
@@ -436,7 +457,9 @@ async def archive_http_transactions(
             "redirect_of": item.redirect_of, "started_at": item.started_at,
             "elapsed_ms": item.elapsed_ms, "error": item.error,
             "truncated": bool(
-                entry["request_meta"]["truncated"] or entry["response_meta"]["truncated"]
+                entry["request_meta"]["truncated"]
+                or entry["response_meta"]["truncated"]
+                or item.response_body_truncated
             ),
             "retention_class": RETENTION_CLASS,
             "metadata_json": dict(item.metadata or {}),
@@ -488,30 +511,169 @@ def hunt_call_recorder(
             direct_origin=bool(captured.get("direct_origin")),
             elapsed_ms=captured.get("elapsed_ms"),
             error=captured.get("error"),
+            response_body_truncated=bool(captured.get("response_body_truncated")),
             started_at=clock(),
         ))
 
     return collected, record
 
 
+def _default_store(results_dir):
+    """The blob writer every plane uses. Built here so a caller does not have to know the
+    evidence store's signature just to archive a call."""
+    try:
+        from evidence_storage import store_evidence_content
+    except ModuleNotFoundError:  # package import layout
+        from ..evidence_storage import store_evidence_content
+    return lambda content: store_evidence_content(content, results_dir=results_dir)
+
+
+async def archive_scan_capture(
+    conn,
+    captured: Mapping[str, Any],
+    *,
+    scan_id: str,
+    target_id: Any,
+    results_dir,
+) -> None:
+    """Project and persist one scan's captured calls in a single step."""
+    await archive_recorded_calls(
+        conn,
+        scan_transactions_from_capture(captured, scan_id=scan_id, target_id=target_id),
+        results_dir=results_dir,
+        label=f"scan {scan_id}",
+        owner_kind="scan",
+        owner_id=scan_id,
+        dropped=int(captured.get("dropped") or 0),
+    )
+
+
+async def record_archive_stats(
+    conn,
+    *,
+    owner_kind: str,
+    owner_id: str,
+    attempted: int,
+    stored: int,
+    failed: int,
+    dropped: int,
+) -> None:
+    """Accumulate what the archive attempted against what it holds.
+
+    Capture and persistence failures are swallowed so they cannot fail a scan, which means
+    the row count alone cannot answer "is this the whole run". Without these counts an
+    export would call one surviving transaction complete.
+    """
+    try:
+        await conn.execute(
+            """INSERT INTO http_archive_stats (
+                   owner_kind, owner_id, attempted, stored, failed, dropped
+               ) VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT (owner_kind, owner_id) DO UPDATE SET
+                   attempted = http_archive_stats.attempted + EXCLUDED.attempted,
+                   stored = http_archive_stats.stored + EXCLUDED.stored,
+                   failed = http_archive_stats.failed + EXCLUDED.failed,
+                   dropped = GREATEST(http_archive_stats.dropped, EXCLUDED.dropped),
+                   updated_at = NOW()""",
+            owner_kind, owner_id, int(attempted), int(stored), int(failed), int(dropped),
+        )
+    except Exception as exc:  # pragma: no cover - stats must not fail the work either
+        print(
+            f"[http-archive] {owner_kind} {owner_id}: stats not recorded: "
+            f"{type(exc).__name__}",
+            flush=True,
+        )
+
+
 async def archive_recorded_calls(
     conn,
     collected: Sequence[HttpTransaction],
     *,
-    store,
+    results_dir,
     label: str,
+    owner_kind: str | None = None,
+    owner_id: str | None = None,
+    dropped: int = 0,
 ) -> None:
     """Persist a run's calls, reporting a failure rather than raising into execution.
 
     A scan or hunt that dies because its own archive failed is worse than one whose archive
-    has a hole, and the hole is visible in the export's totals.
+    has a hole. The hole is then visible in the stats rather than left to be inferred.
     """
-    if not collected:
-        return
-    try:
-        await archive_http_transactions(conn, collected, store=store)
-    except Exception as exc:  # pragma: no cover - archiving must not fail the work
-        print(
-            f"[http-archive] {label}: calls not archived: {type(exc).__name__}: {exc}",
-            flush=True,
+    attempted = len(collected)
+    stored = 0
+    if collected:
+        try:
+            stored = await archive_http_transactions(
+                conn, collected, store=_default_store(results_dir),
+            ) or 0
+        except Exception as exc:  # pragma: no cover - archiving must not fail the work
+            print(
+                f"[http-archive] {label}: calls not archived: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+    if owner_kind and owner_id and (attempted or dropped):
+        await record_archive_stats(
+            conn, owner_kind=owner_kind, owner_id=owner_id,
+            attempted=attempted, stored=stored,
+            failed=max(0, attempted - stored), dropped=dropped,
         )
+
+
+def _as_bytes(value: Any) -> bytes | None:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return str(value).encode("utf-8", errors="replace")
+
+
+def scan_transactions_from_capture(
+    captured: Mapping[str, Any],
+    *,
+    scan_id: str,
+    target_id: Any = None,
+    now=None,
+) -> list[HttpTransaction]:
+    """Project a scanner-side capture into archive transactions.
+
+    Fidelity differs by plane and travels with each row. curl exposes its argv and stdout
+    but no response headers unless the caller dumped them, so a curl row is a partial
+    record and says so; letting it look like a complete one would misrepresent the scan.
+    """
+    from datetime import datetime, timezone
+
+    clock = now or (lambda: datetime.now(timezone.utc))
+    calls = captured.get("calls") or []
+    dropped = int(captured.get("dropped") or 0)
+    transactions: list[HttpTransaction] = []
+    for index, call in enumerate(calls):
+        if not call.get("url"):
+            continue
+        transactions.append(HttpTransaction(
+            plane="scan",
+            sequence=index,
+            scan_id=scan_id,
+            target_id=str(target_id) if target_id else None,
+            capability_name=str(call.get("source") or "scanner"),
+            adapter=str(call.get("source") or "scanner"),
+            method=call.get("method") or "GET",
+            url=call.get("url"),
+            status_code=call.get("status_code"),
+            request_headers=call.get("request_headers") or None,
+            request_body=_as_bytes(call.get("request_body")),
+            response_headers=call.get("response_headers") or None,
+            response_body=_as_bytes(call.get("response_body")),
+            elapsed_ms=call.get("elapsed_ms"),
+            error=call.get("error"),
+            response_body_truncated=bool(call.get("response_body_truncated")),
+            started_at=clock(),
+            metadata={
+                "fidelity": call.get("fidelity"),
+                "redacted_argv": call.get("redacted_argv"),
+                # Stated on every row so a bounded archive is never mistaken for the
+                # complete traffic of the run.
+                "dropped_calls": dropped,
+            },
+        ))
+    return transactions

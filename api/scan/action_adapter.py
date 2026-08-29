@@ -139,6 +139,7 @@ except (ImportError, ModuleNotFoundError):
     from scanner.redaction import redact_text
 
 try:
+    from scanner_tools import http_archive_capture as _scan_capture
     from scanner_tools.common import run_streaming
     from scanner_tools.request_replay import (
         ReplayPlan,
@@ -146,6 +147,7 @@ try:
         bind_replay_credential_headers,
     )
 except (ImportError, ModuleNotFoundError):
+    from scanner.scanner_tools import http_archive_capture as _scan_capture
     from scanner.scanner_tools.common import run_streaming
     from scanner.scanner_tools.request_replay import (
         ReplayPlan,
@@ -752,6 +754,9 @@ class DatabaseNeutralScanActionDispatcher:
                 args,
                 target=self.target,
                 allow_write=False,
+                # The deterministic Scan plane records here for the same reason Hunt does:
+                # without it a scan export was empty while the endpoint claimed coverage.
+                transaction_recorder=_scan_capture.record_scan_call,
                 timeout_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
                 allow_bound_origin_redirects=follow,
                 trusted_headers=(

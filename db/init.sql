@@ -2124,11 +2124,11 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     plane TEXT NOT NULL CHECK (plane IN ('scan','hunt','device','interactive')),
     sequence INTEGER NOT NULL DEFAULT 0,
     scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
-    hunt_run_id UUID,
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE CASCADE,
     hunt_action_id UUID,
     scan_action_id TEXT,
     target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
-    device_target_id UUID,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL,
     capability_name TEXT,
     adapter TEXT,
     principal_slot TEXT,
@@ -2136,12 +2136,12 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     url TEXT NOT NULL,
     http_version TEXT,
     status_code INTEGER,
-    request_headers_object_id UUID,
-    request_body_object_id UUID,
+    request_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+    request_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
     request_body_sha256 TEXT,
     request_body_bytes INTEGER NOT NULL DEFAULT 0,
-    response_headers_object_id UUID,
-    response_body_object_id UUID,
+    response_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+    response_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
     response_body_sha256 TEXT,
     response_body_bytes INTEGER NOT NULL DEFAULT 0,
     remote_ip TEXT,
@@ -2164,3 +2164,17 @@ CREATE INDEX IF NOT EXISTS idx_http_transactions_hunt
     ON http_transactions(hunt_run_id, sequence) WHERE hunt_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_http_transactions_target
     ON http_transactions(target_id, started_at DESC) WHERE target_id IS NOT NULL;
+
+-- What the archive attempted versus what it holds. Capture and persistence failures are
+-- swallowed so they cannot fail a scan, so the row count alone cannot say whether an
+-- archive is the whole run.
+CREATE TABLE IF NOT EXISTS http_archive_stats (
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
+    owner_id UUID NOT NULL,
+    attempted INTEGER NOT NULL DEFAULT 0,
+    stored INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    dropped INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner_kind, owner_id)
+);

@@ -173,9 +173,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "e82d99da3d78433ca95d2dc13c43bd7cf20bdd8898417db1c5505c737480b0c3",
+  "contract_sha256": "9ba39b2096ecc79beaf9bb6833f72a62d6db45c552376538b9c618bfa3887f41",
   "openapi": "3.1.0",
-  "operation_count": 386,
+  "operation_count": 388,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -309,6 +309,21 @@
       "surface": null,
       "tags": []
     },
+    "DELETE /hunts/{hunt_id}/http-transactions": {
+      "deprecated": false,
+      "operation_id": "purge_hunt_transactions_hunts__hunt_id__http_transactions_delete",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
     "DELETE /model-intake/trust-anchors/{anchor_id}": {
       "deprecated": false,
       "operation_id": "deactivate_model_intake_trust_anchor_model_intake_trust_anchors__anchor_id__delete",
@@ -376,6 +391,21 @@
       "surface": "collections",
       "tags": [
         "request-collections"
+      ]
+    },
+    "DELETE /scans/{scan_id}/http-transactions": {
+      "deprecated": false,
+      "operation_id": "purge_scan_transactions_scans__scan_id__http_transactions_delete",
+      "parameters_sha256": "94ca5d9c47b5c08044f16ead9d8a02b0633c3ad354da736e6f5f45bf0f545664",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "scan",
+      "tags": [
+        "Scan"
       ]
     },
     "DELETE /schedules/{schedule_id}": {
@@ -5231,6 +5261,7 @@
       "POST /evidence/retention/sweep"
     ],
     "hunt": [
+      "DELETE /hunts/{hunt_id}/http-transactions",
       "GET /hunts",
       "GET /hunts/contract",
       "GET /hunts/lifecycle-metrics",
@@ -5306,6 +5337,7 @@
       "POST /model-intake/trust-anchors"
     ],
     "scan": [
+      "DELETE /scans/{scan_id}/http-transactions",
       "GET /scan/contracts",
       "GET /scans",
       "GET /scans/{scan_id}",

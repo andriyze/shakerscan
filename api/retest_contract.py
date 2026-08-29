@@ -3168,6 +3168,26 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_http_transactions_target
                 ON http_transactions(target_id, started_at DESC) WHERE target_id IS NOT NULL
             """)
+            # What the archive attempted versus what it holds. Recording and persistence
+            # failures are swallowed so they cannot fail a scan, which means the row count
+            # alone cannot say whether an archive is the whole run; without this an export
+            # would call one surviving transaction "complete".
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS http_archive_stats (
+                    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
+                    owner_id UUID NOT NULL,
+                    attempted INTEGER NOT NULL DEFAULT 0,
+                    stored INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0,
+                    dropped INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (owner_kind, owner_id)
+                )
+            """)
+            await conn.execute("""
+                UPDATE evidence_objects SET retention_class='sensitive'
+                WHERE retention_class='http_archive'
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_cancellable_jobs (
                     hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,

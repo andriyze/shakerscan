@@ -245,6 +245,7 @@ from scan.execution_backend import (
 )
 from runtime import http_archive
 from scan import scoring as scan_scoring
+from scanner_tools import http_archive_capture as scanner_http_capture
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
@@ -13712,6 +13713,11 @@ async def process_scan_job(job_data: dict):
     )
     heartbeat_thread.start()
 
+    # Scanner tools run in this process, so their calls are collected here and archived
+    # when the scan finishes. A broker result came from another node with its own record.
+    if not job_data.get("_broker_result_id"):
+        scanner_http_capture.start_capture()
+
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -14018,6 +14024,10 @@ async def process_scan_job(job_data: dict):
                 # Stored beside the score so a list view can show that a clean grade came
                 # from a shallow scan without opening the report.
                 assurance_score = (result.get("result") or {}).get("assurance_score")
+                await http_archive.archive_scan_capture(  # reports, never raises
+                    conn, scanner_http_capture.drain_capture(),
+                    scan_id=scan_id, target_id=target_id, results_dir=RESULTS_DIR,
+                )
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'completed',
@@ -22584,14 +22594,11 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         }
         settled_session = None
         async with db_pool.acquire() as conn:
-            # Outside the settlement transaction on purpose: an archive failure must not
-            # poison the transaction that reconciles the action's budget.
+            # Outside the settlement transaction: an archive failure must not poison the
+            # transaction that reconciles the action's budget.
             await http_archive.archive_recorded_calls(
-                conn, archived_calls, label=f"hunt {hunt_id}",
-                store=lambda content: store_evidence_content(
-                    content, results_dir=RESULTS_DIR,
-                ),
-            )
+                conn, archived_calls, label=f"hunt {hunt_id}", results_dir=RESULTS_DIR,
+                owner_kind="hunt", owner_id=str(run["id"]))
             async with conn.transaction():
                 locked = await conn.fetchrow(
                     "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,

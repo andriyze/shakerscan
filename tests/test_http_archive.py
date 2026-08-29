@@ -142,6 +142,7 @@ def test_the_export_states_its_redaction_and_fidelity():
     document = export_document(
         rows, export_format="transactions", redaction="redacted",
         owner={"hunt_id": "h1"}, total=1,
+        stats={"attempted": 1, "stored": 1, "failed": 0, "dropped": 0},
     )
     assert document["redaction"] == "redacted"
     assert document["fidelity"] == "complete"
@@ -154,6 +155,42 @@ def test_the_export_states_its_redaction_and_fidelity():
     assert empty["fidelity"] == "unavailable", (
         "a run with no archived calls must not look like one that made none"
     )
+
+
+def test_fidelity_is_backed_by_counters_not_by_row_count():
+    """Capture and persistence failures are swallowed so they cannot fail a scan, so one
+    surviving transaction must not be allowed to stand for a whole run."""
+    rows = [{"id": "1", "method": "GET", "url": "https://t/", "sequence": 0, "plane": "hunt"}]
+
+    lost = export_document(
+        rows, export_format="transactions", redaction="redacted", owner={}, total=1,
+        stats={"attempted": 40, "stored": 1, "failed": 39, "dropped": 0},
+    )
+    assert lost["fidelity"] == "partial"
+    assert "1 of 40" in lost["fidelity_detail"]
+
+    capped = export_document(
+        rows, export_format="transactions", redaction="redacted", owner={}, total=1,
+        stats={"attempted": 1, "stored": 1, "failed": 0, "dropped": 900},
+    )
+    assert capped["fidelity"] == "partial"
+    assert "dropped" in capped["fidelity_detail"]
+
+    # A run archived before the counters existed cannot claim completeness either.
+    legacy = export_document(
+        rows, export_format="transactions", redaction="redacted", owner={}, total=1,
+    )
+    assert legacy["fidelity"] == "unknown"
+
+
+def test_a_truncated_response_is_marked_even_when_the_prefix_fits():
+    """The executor stops reading at its own ceiling. Measuring the prefix it handed over
+    would report a cut response as the complete body."""
+    rows = transaction_rows([HttpTransaction(
+        plane="scan", method="GET", url="https://t/big", scan_id="s1",
+        response_body=b"prefix", response_body_truncated=True,
+    )], store_blob=lambda content: "blob")
+    assert rows[0]["truncated"] is True
 
 
 def test_a_partial_export_says_so():
@@ -241,3 +278,72 @@ def test_redacted_export_needs_no_operator_credential(monkeypatch):
     monkeypatch.setattr(archive_router, "_require_operator", _fail)
     # Nothing to call: _authorize_raw is only reached for redaction="raw".
     assert refused == []
+
+
+# --- second archive review ---------------------------------------------------------------
+
+def test_cookie_headers_do_not_survive_a_redacted_export():
+    """Authorization was masked while Cookie and Set-Cookie passed through, so a session
+    credential left the machine in the default export."""
+    row = {
+        "id": "1", "method": "GET", "url": "https://t/", "sequence": 0, "plane": "scan",
+        "request_headers": {"cookie": "sessionid=supersecret"},
+        "response_headers": {"set-cookie": "sessionid=supersecret; Path=/"},
+    }
+    redacted = json.dumps(project(row, redaction="redacted"))
+    assert "supersecret" not in redacted
+    assert "supersecret" in json.dumps(project(row, redaction="raw"))
+
+
+def test_evidence_describing_cookies_is_not_masked_away():
+    """The fix is exact header keys, not a bare 'cookie' fragment, so findings about cookie
+    behaviour keep the detail that makes them actionable."""
+    row = {
+        "id": "1", "method": "GET", "url": "https://t/", "sequence": 0, "plane": "scan",
+        "response_headers": {"content-type": "text/html"},
+        "response_body": '{"cookie_flags": {"httponly": false}, "cookie_names": ["sid"]}',
+    }
+    exported = json.dumps(project(row, redaction="redacted"))
+    assert "httponly" in exported and "cookie_names" in exported
+
+
+def test_the_archive_records_the_request_that_was_built():
+    """The recorder took the caller's arguments, which lack the query string, the injected
+    cookies, the Host header and everything httpx generates -- and after a redirect describe
+    the wrong hop. An archive built from them cannot be replayed."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    assert "def _emit_transaction(" in source
+    assert 'getattr(response, "request", None)' in source
+    assert 'getattr(built, "query", b"")' in source, "the query string must come from the built URL"
+    assert "body_truncated=body_truncated" in source, "truncation is passed, not recomputed"
+
+
+def test_the_deterministic_scan_plane_records_its_calls():
+    """No Scan call site passed a recorder, so every scan export was empty while the
+    endpoint advertised coverage."""
+    from tests.api_sources import api_tree_source
+
+    assert "transaction_recorder=_scan_capture.record_scan_call" in api_tree_source()
+
+
+def test_archive_blobs_use_a_retention_class_the_sweep_accepts():
+    """A bespoke http_archive class meant the one store that certainly holds credentials
+    was the one the retention sweep could never reach."""
+    from api.runtime.http_archive import RETENTION_CLASS
+
+    assert RETENTION_CLASS in {"short", "sensitive", "standard", "audit"}
+    assert RETENTION_CLASS == "sensitive", "bodies as sent are credential-bearing"
+
+
+def test_deleting_the_archive_does_not_require_enabling_raw_export():
+    """Gating the safe action behind the dangerous one would mean an operator had to enable
+    exporting credentials before they were allowed to delete them."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    purge = source[source.index("async def _purge("):]
+    purge = purge[:purge.index("@router.delete")]
+    assert "_require_operator(request)" in purge
+    assert "_authorize_raw" not in purge

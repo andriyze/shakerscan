@@ -38,6 +38,8 @@ surfaces:
     canonical_replacement: null
     new_writes_allowed: true
     routes: ["/scans/*/http-transactions", "/hunts/*/http-transactions"]
+    # DELETE is how stored credentials are cleared; the evidence sweep reaches objects
+    # through a scan or finding, which a Hunt archive blob has neither of.
 
   - id: credentials
     owner: credentials

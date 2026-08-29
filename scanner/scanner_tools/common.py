@@ -19,6 +19,11 @@ except ImportError:  # pragma: no cover - flat-module fallback
     from request_meter import RequestBudgetExceeded, get_request_meter
 
 try:
+    from . import http_archive_capture as _http_capture
+except ImportError:  # pragma: no cover - flat-module fallback
+    import http_archive_capture as _http_capture
+
+try:
     from ..redaction import redact_text as _shared_redact_text
 except ImportError:  # pragma: no cover - flat-module fallback
     from redaction import redact_text as _shared_redact_text
@@ -475,6 +480,17 @@ async def run(
                     stdout=out,
                     stderr=err,
                 )
+                if is_http_request:
+                    # The one place ~270 curl call sites converge. Recording here archives
+                    # the DAST plane's traffic without touching a single tool.
+                    try:
+                        _http_capture.record_curl_invocation(
+                            cmd, stdout=out, stderr=err,
+                            returncode=int(proc.returncode or 0),
+                            started=_req_started,
+                        )
+                    except Exception:  # pragma: no cover - capture must not fail a probe
+                        pass
                 return out.strip(), err.strip(), proc.returncode
             except asyncio.CancelledError:
                 if proc is not None:
