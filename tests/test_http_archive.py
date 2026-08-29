@@ -139,6 +139,19 @@ def test_the_har_document_is_valid_1_2():
     assert document["log"]["creator"]["name"] == "ShakerScan"
 
 
+def test_har_is_always_raw_and_honestly_labelled():
+    secret_url = "https://admin:hunter2@t.example/x?access_token=LIVE_TOKEN"
+    document = export_document(
+        [{"id": "1", "method": "GET", "url": secret_url, "sequence": 0, "plane": "scan"}],
+        export_format="har", redaction="redacted", owner={}, total=1,
+    )
+    comment = json.loads(document["log"]["comment"])
+    assert document["log"]["entries"][0]["request"]["url"] == secret_url
+    assert comment["redaction"] == "raw"
+    assert comment["sensitive"] is True
+    assert "Treat this export as sensitive" in comment["redaction_detail"]
+
+
 def test_the_export_states_its_redaction_and_fidelity():
     """A redacted export that looks complete is worse than one that says what it removed,
     and a run predating the archive made calls that were simply never recorded."""
@@ -154,6 +167,8 @@ def test_the_export_states_its_redaction_and_fidelity():
         stats={"attempted": 1, "stored": 1, "failed": 0, "dropped": 0},
     )
     assert document["redaction"] == "redacted"
+    assert document["residual_secret_risk"] is True
+    assert "arbitrary target-controlled bodies" in document["redaction_detail"]
     assert document["fidelity"] == "complete"
     assert document["exported"] == 1 and document["total"] == 1
     assert document["truncated_export"] is False

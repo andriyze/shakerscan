@@ -205,7 +205,11 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                 return _row(
                     id=uuid.UUID(hunt_id), status="completed",
                     notes=[{"note": "Review authorization"}],
-                    final_debrief={"summary": "Done", "next_actions": ["Retest"]},
+                    final_debrief={
+                        "summary": "Admin token LEAKED_TOKEN_ABC123 exposed",
+                        "next_actions": ["mysql -u root -pHunter2"],
+                    },
+                    context_pack={"ssh_plan": "mysql -u root -pHunter2"},
                 )
             if "FROM http_archive_stats" in query:
                 return {"attempted": 0, "stored": 0, "failed": 0, "dropped": 0}
@@ -239,7 +243,10 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
     assert record["trace_policy"]["kind"] == "explicit_decision_trace"
     assert "hidden_model_chain_of_thought" in record["trace_policy"]["excludes"]
     assert record["decision_trace"][0]["decision"]["input"]["path"] == "/health"
-    assert record["hunt"]["final_debrief"]["summary"] == "Done"
+    assert "LEAKED_TOKEN_ABC123" not in json.dumps(record)
+    assert "Hunter2" not in json.dumps(record)
+    assert "context_pack" not in record["hunt"]
+    assert record["trace_policy"]["residual_secret_risk"] is True
     assert record["http_archive"]["fidelity"] == "unavailable"
 
 

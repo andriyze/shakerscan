@@ -19,6 +19,14 @@ test('archive browser supports server-side search, method, status and pagination
   assert.match(source, /params\.set\('method'/)
   assert.match(source, /params\.set\('status_code'/)
   assert.match(source, /void load\(offset \+ PAGE_SIZE\)/)
+  assert.match(source, /fetch\(archiveUrl\(format, 0\)\)/)
+})
+
+test('HAR export is explicitly raw, sensitive, and confirmation-gated', () => {
+  assert.match(source, /Raw HAR 1\.2/)
+  assert.match(source, /window\.confirm/)
+  assert.match(source, /authentication headers, cookies, request bodies, and response data/)
+  assert.match(source, /RAW\.har/)
 })
 
 test('archive viewer explains historical and partial capture instead of implying completeness', () => {

@@ -38,6 +38,7 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "auth_headers_json",
         "auth_scenario_json",
         "authorization",
+        "proxy_authorization",
         "aws_access_key_id",
         "aws_secret_access_key",
         "aws_session_token",
@@ -67,11 +68,14 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "secret_access_key",
         "secret_value",
         "session_token",
+        "sessionid",
+        "sessionidentifier",
         "token",
         "user2_cookies",
         "user2_header",
         "xsrf",
         "xsrf_token",
+        "x_api_key",
     }
 )
 
@@ -96,12 +100,18 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
         "awsaccesskeyid",
         "csrf",
         "csrf-token",
+        "code",
         "expires",
         "x-amz-credential",
         "x-amz-security-token",
         "x-amz-signature",
         "signature",
         "sig",
+        "pass",
+        "passwd",
+        "password",
+        "session-id",
+        "sessionid",
         "token",
         "xsrf",
         "xsrf-token",
@@ -129,6 +139,7 @@ _SENSITIVE_COLON_KEY = (
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)
     (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
+    (re.compile(r"(?i)(proxy-authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
     # Cookie / Set-Cookie / X-API-Key / X-Auth-Token header lines (mask value to EOL)
     (re.compile(r"(?i)\b((?:set-)?cookie|x-api-key|x-auth-token)(\s*:\s*)[^\r\n]+"), r"\1\2***"),
     # key=value (query / env / form) for any sensitive key name (password family included)
@@ -139,6 +150,32 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\'])[^"\']*(["\'])'),
         r"\1\2***\3",
+    ),
+    # JSON numeric/boolean/null secret values.
+    (
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(?:-?\d+(?:\.\d+)?|true|false|null)'),
+        r'\1"***"',
+    ),
+    # HTML multipart/form fields and simple XML credential elements.
+    (
+        re.compile(rf'(?is)(name=["\']{_SENSITIVE_TEXT_KEY}["\'][^\r\n]*\r?\n\r?\n).*?(?=\r?\n--|$)'),
+        r"\1***",
+    ),
+    (
+        re.compile(rf'(?is)(<({_SENSITIVE_TEXT_KEY})(?:\s[^>]*)?>).*?(</\2\s*>)'),
+        r"\1***\3",
+    ),
+    # Standalone JWTs and common command-line password forms in planner/free-text output.
+    (
+        re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"),
+        "***",
+    ),
+    (re.compile(r"(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)"), r"\1***"),
+    # Planner prose such as "token LEAKED_TOKEN_ABC123". Require an opaque-looking value
+    # to avoid masking ordinary phrases such as "token bucket".
+    (
+        re.compile(r"(?i)(\b(?:token|password|secret|api[_-]?key)\s+)(?=[A-Za-z0-9_./+=-]{8,}\b)(?=[A-Za-z0-9_./+=-]*[0-9_./+=-])[A-Za-z0-9_./+=-]+"),
+        r"\1***",
     ),
     # connection strings  scheme://user:password@host
     (

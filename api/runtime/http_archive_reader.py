@@ -276,8 +276,21 @@ def export_document(
     creator_version: str = "2.0.0",
 ) -> dict[str, Any]:
     """Build the export envelope, stating what it is and what it is not."""
+    # HAR is replay evidence. Redacting its URL, cookies, headers, or bodies would make it
+    # look authoritative while changing the request. JSON remains the share-oriented view.
+    if export_format == "har":
+        redaction = "raw"
     projected = [project(row, redaction=redaction) for row in rows]
-    fidelity, fidelity_detail = archive_fidelity(stats or {}, total=total)
+    fidelity, fidelity_detail = archive_fidelity(
+        stats or {}, total=archive_total if archive_total is not None else total,
+    )
+    redaction_detail = (
+        "Verbatim captured traffic; headers, cookies, request bodies, response bodies, and "
+        "URL credentials may contain secrets. Treat this export as sensitive."
+        if redaction == "raw"
+        else "Known credential keys, headers, URL parameters, and common token shapes are masked; "
+        "arbitrary target-controlled bodies may still contain secrets."
+    )
     if export_format == "har":
         entries = [
             har_entry(
@@ -293,6 +306,8 @@ def export_document(
         document = har_document(entries, creator_version=creator_version)
         document["log"]["comment"] = json.dumps({
             "redaction": redaction,
+            "redaction_detail": redaction_detail,
+            "sensitive": redaction == "raw",
             "exported": len(entries),
             "total": total,
             "archive_total": archive_total if archive_total is not None else total,
@@ -306,6 +321,8 @@ def export_document(
         # Stated, never implied. A redacted export that looks complete is worse than one
         # that says what was removed.
         "redaction": redaction,
+        "redaction_detail": redaction_detail,
+        "residual_secret_risk": redaction != "raw",
         # Backed by counters rather than inferred from the row count, because capture and
         # persistence failures are swallowed and one surviving row is not a whole run.
         "fidelity": fidelity,

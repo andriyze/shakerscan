@@ -101,7 +101,10 @@ async def _export(
         raise HTTPException(status_code=400, detail=f"unsupported export format {export_format}")
     if redaction not in REDACTION_MODES:
         raise HTTPException(status_code=400, detail=f"unsupported redaction mode {redaction}")
-    if redaction == "raw":
+    # HAR is always verbatim replay evidence. The raw JSON mode remains the privileged
+    # diagnostic surface; HAR is the explicitly labelled workflow selected by the operator.
+    effective_redaction = "raw" if export_format == "har" else redaction
+    if effective_redaction == "raw" and export_format != "har":
         _authorize_raw(request)
     async with _pool().acquire() as conn:
         archive_total = await count_transactions(
@@ -119,18 +122,21 @@ async def _export(
             status_code=status_code, search=search, limit=limit, offset=offset,
         )
     document = export_document(
-        rows, export_format=export_format, redaction=redaction,
+        rows, export_format=export_format, redaction=effective_redaction,
         owner={"scan_id": scan_id, "hunt_id": hunt_run_id}, total=total,
         archive_total=archive_total, stats=stats,
     )
     name = scan_id or hunt_run_id or "export"
-    suffix = "har" if export_format == "har" else "json"
+    suffix = "RAW.har" if export_format == "har" else "json"
     return JSONResponse(
         document,
         headers={
             "content-disposition": f'attachment; filename="shakerscan-{name}.{suffix}"',
             "x-shakerscan-archive-total": str(total),
-            "x-shakerscan-archive-redaction": redaction,
+            "x-shakerscan-archive-redaction": effective_redaction,
+            "x-shakerscan-archive-sensitive": (
+                "true" if effective_redaction == "raw" else "possibly"
+            ),
         },
     )
 

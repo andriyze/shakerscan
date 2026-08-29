@@ -357,7 +357,11 @@ class HuntRunService:
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
             )
-        run = public_hunt_run(row)
+        run = redact_sensitive(
+            public_hunt_run(row, include_context=False),
+            redact_strings=True,
+            scrub_text=True,
+        )
         notes = _decode_json(_row_dict(row).get("notes"), [])
         return {
             "schema_version": "hunt-record/v1",
@@ -367,13 +371,16 @@ class HuntRunService:
                 "includes": [
                     "objective", "bound_skills", "policy", "budgets",
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
-                    "operator_notes", "final_debrief", "http_transactions",
+                    "persisted_notes", "final_debrief", "http_transactions",
                 ],
-                "excludes": ["hidden_model_chain_of_thought", "credential_values"],
+                "excludes": ["hidden_model_chain_of_thought", "context_pack"],
                 "detail": (
                     "This export preserves explicit choices and durable outcomes; it does "
-                    "not expose private model chain-of-thought."
+                    "not expose private model chain-of-thought or the worker context pack. "
+                    "Known secret shapes are masked, but planner and target-controlled free "
+                    "text must still be handled as potentially sensitive."
                 ),
+                "residual_secret_risk": True,
             },
             "hunt": run,
             "decision_trace": [public_hunt_action_trace(action) for action in actions],
