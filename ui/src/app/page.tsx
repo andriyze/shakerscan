@@ -63,6 +63,8 @@ export default function Dashboard() {
   const workersInFlight = useRef(false)
   const gungnirInFlight = useRef(false)
   const overviewInFlight = useRef(false)
+  const overviewRefreshPending = useRef(false)
+  const cohortViewRef = useRef<CohortView>('operational')
 
   const fetchDashboard = async (showLoading = false): Promise<boolean | undefined> => {
     if (dashboardInFlight.current) return undefined
@@ -142,12 +144,15 @@ export default function Dashboard() {
     }
   }
 
-  const fetchOverview = async () => {
-    if (overviewInFlight.current) return
+  const fetchOverview = async (force = false) => {
+    if (overviewInFlight.current) {
+      if (force) overviewRefreshPending.current = true
+      return
+    }
     overviewInFlight.current = true
     try {
       const [exposureResult, targetsResult, timelineResult] = await Promise.allSettled([
-        getExposureAssets({ limit: 1000 }),
+        getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }),
         getTargetsGrouped({ sort_by: 'active_findings_count', sort_order: 'desc' }),
         getMissionTimeline({ limit: 12 }),
       ])
@@ -157,6 +162,10 @@ export default function Dashboard() {
     } finally {
       overviewInFlight.current = false
       setOverviewLoading(false)
+      if (overviewRefreshPending.current) {
+        overviewRefreshPending.current = false
+        void fetchOverview(true)
+      }
     }
   }
 
@@ -185,10 +194,15 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    fetchOverview()
+    fetchOverview(true)
     const interval = setInterval(fetchOverview, OVERVIEW_REFRESH_MS)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    cohortViewRef.current = cohortView
+    fetchOverview()
+  }, [cohortView])
 
   const handleManualRefresh = async () => {
     if (refreshing) return
@@ -251,7 +265,10 @@ export default function Dashboard() {
   const pendingWorkerCount = workers?.pending_count
     ?? Math.max(0, (workerCount ?? 0) - (workers?.current_count ?? 0) - staleCount)
   const unavailableWorkerCount = (workers?.workers || []).filter((worker) => worker.status !== 'running').length
-  const cohortCounts = useMemo(() => countCohorts(exposure?.assets || []), [exposure])
+  const cohortCounts = useMemo(
+    () => exposure?.cohort_counts || countCohorts(exposure?.assets || []),
+    [exposure],
+  )
   const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
   const scopedTargetIds = useMemo(() => new Set(scopedTargets.flatMap((domain) => [domain.root_target, ...domain.subdomains].filter(Boolean).map((target) => target!.id))), [scopedTargets])
@@ -548,7 +565,7 @@ function metricsFromAssets(assets: ExposureAsset[]): ExposureAssetMetrics {
 }
 
 function scopeExposure(exposure: ExposureAssetsResponse | null, view: CohortView): ExposureAssetsResponse | null {
-  if (!exposure || view === 'all') return exposure
+  if (!exposure || exposure.cohort === view || (view === 'all' && exposure.cohort === 'all')) return exposure
   const assets = exposure.assets.filter((asset) => cohortMatches(asset.cohort, view))
   return {
     ...exposure,

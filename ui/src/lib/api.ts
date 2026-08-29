@@ -3005,6 +3005,9 @@ export interface ExposureAssetsResponse {
   offset?: number
   new_count: number
   metrics: ExposureAssetMetrics
+  cohort?: string
+  cohort_counts?: Record<string, number>
+  truncated?: boolean
 }
 
 export interface ExposureAttackStep {
@@ -4042,12 +4045,14 @@ export async function getExposureNodes(params?: {
 export async function getExposureAssets(params?: {
   root_domain?: string
   kind?: ExposureAssetKind
+  cohort?: 'operational' | 'non_operational' | TargetCohort | 'all'
   limit?: number
   offset?: number
 }): Promise<ExposureAssetsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.kind) searchParams.set('kind', params.kind)
+  if (params?.cohort) searchParams.set('cohort', params.cohort)
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.offset) searchParams.set('offset', String(params.offset))
   const query = searchParams.toString()

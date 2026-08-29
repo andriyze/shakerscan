@@ -63,7 +63,7 @@ try:
         bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
     from action_scope import scope_origin_matches_target
-    from asset_cohorts import target_cohort
+    from asset_cohorts import target_cohort, target_exposure_class
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -90,7 +90,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
     )
-    from ..asset_cohorts import target_cohort
+    from ..asset_cohorts import target_cohort, target_exposure_class
     from ..runtime.credential_store import CredentialStoreError
     from ..runtime.models import TargetBinding
     from ..scan.action_plan import ScanActionPlanError
@@ -2829,12 +2829,18 @@ def _public_target_row(row: Any) -> dict[str, Any]:
     metadata = _decode_json_value(target.get("metadata_json")) or {}
     if not isinstance(metadata, dict):
         metadata = {}
-    target["metadata_json"] = metadata
+    target.pop("metadata_json", None)
+    target["owner"] = str(metadata.get("owner") or metadata.get("asset_owner") or "").strip() or None
+    target["environment"] = str(metadata.get("environment") or "").strip().lower() or None
+    target["risk_tier"] = str(metadata.get("risk_tier") or "").strip().lower() or None
+    exposure_class = target_exposure_class(target.get("url"))
+    target["exposure_class"] = exposure_class
     target["cohort"] = target_cohort(
         url=target.get("url"),
         name=target.get("name"),
         discovery_source=target.get("discovery_source"),
         metadata=metadata,
+        exposure_class=exposure_class,
     )
     if str(target.get("discovery_source") or "").lower() != "model-intake":
         values = _decode_json_value(target.get("origins")) or []
