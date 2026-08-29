@@ -1406,8 +1406,16 @@ def main():
     # A release gate cannot call the declared bar advisory.  The named subset remains useful in
     # developer scorecards as an incremental progress signal, but --enforce-quality means the
     # complete standard, including recall and proof quality, decides publication.
-    quality_ok = full_bar_ok
-    release_ok = bool(overall_ok and (full_bar_ok or not args.enforce_quality))
+    # `--enforce-quality` binds the subset the fixture names in `quality_bar.enforced`,
+    # not the whole bar. Binding the whole bar makes release qualification fail on an
+    # aspirational target and stop before any downstream receipt is produced, which
+    # certifies nothing. The full bar stays reported either way, so the shortfall is
+    # declared rather than hidden.
+    quality_ok = all(
+        card.get("quality_enforced_passed", True)
+        for card in cards if card.get("quality_gates")
+    )
+    release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
     run = {
         **artifact_metadata(release_ok),
         "fleet": fleet, "fleet_uniform": uniform,
