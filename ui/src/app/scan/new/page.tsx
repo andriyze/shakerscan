@@ -80,6 +80,7 @@ export default function NewScanPage() {
   const [customFamilies, setCustomFamilies] = useState<string[]>([])
   const [contractPreview, setContractPreview] = useState<ScanContractPreview | null>(null)
   const [contractPreviewError, setContractPreviewError] = useState<string | null>(null)
+  const [contractPreviewLoading, setContractPreviewLoading] = useState(true)
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [customEndpoints, setCustomEndpoints] = useState('')
@@ -168,6 +169,7 @@ export default function NewScanPage() {
 
   useEffect(() => {
     let cancelled = false
+    setContractPreviewLoading(true)
     const timer = window.setTimeout(() => {
       previewScanContract({
         preset: familyPreset,
@@ -180,8 +182,8 @@ export default function NewScanPage() {
         subdomain_discovery: subdomainDiscovery,
         execution_topology: topology === 'parallel' ? 'parallel' : 'single_worker',
       })
-        .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null) } })
-        .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable') } })
+        .then((preview) => { if (!cancelled) { setContractPreview(preview); setContractPreviewError(null); setContractPreviewLoading(false) } })
+        .catch((cause) => { if (!cancelled) { setContractPreview(null); setContractPreviewError(cause instanceof Error ? cause.message : 'Preview unavailable'); setContractPreviewLoading(false) } })
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology])
@@ -287,7 +289,7 @@ export default function NewScanPage() {
       setError('Batch submission supports at most 50 unique targets.')
       return
     }
-    if (contractPreviewError || !contractPreview) {
+    if (contractPreviewLoading || contractPreviewError || !contractPreview) {
       setError(contractPreviewError || 'Wait for the Scan family preview before submitting.')
       return
     }
@@ -727,7 +729,7 @@ export default function NewScanPage() {
           <Button
             type="submit"
             loading={loading}
-            disabled={((activeTesting || credentialUse) && !authorized) || (activeTesting && !activeWorkerAvailable)}
+            disabled={contractPreviewLoading || !contractPreview || ((activeTesting || credentialUse) && !authorized) || (activeTesting && !activeWorkerAvailable)}
           >
             Run Scan
           </Button>

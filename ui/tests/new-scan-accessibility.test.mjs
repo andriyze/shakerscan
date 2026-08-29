@@ -40,5 +40,11 @@ test('ordinary active scans need one runnable worker, not release-fleet uniformi
 test('active testing expresses active coverage intent and requires ownership before submit', () => {
   assert.match(page, /if \(familyPreset === 'passive'\) setFamilyPreset\('standard_active'\)/)
   assert.match(page, /\(activeTesting \|\| credentialUse\) && !authorized/)
-  assert.match(page, /disabled=\{\(\(activeTesting \|\| credentialUse\) && !authorized\)/)
+  assert.match(page, /\(activeTesting \|\| credentialUse\) && !authorized/)
+})
+
+test('submission waits for the family preview matching the current controls', () => {
+  assert.match(page, /setContractPreviewLoading\(true\)/)
+  assert.match(page, /contractPreviewLoading \|\| contractPreviewError \|\| !contractPreview/)
+  assert.match(page, /disabled=\{contractPreviewLoading \|\| !contractPreview/)
 })
