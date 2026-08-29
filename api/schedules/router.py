@@ -11,9 +11,12 @@ The database pool is supplied by the composition root through
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+import ipaddress
 import json
 import random
+import socket
 from typing import Any, Callable, Optional
 import urllib.parse
 import uuid
@@ -193,18 +196,78 @@ class ScheduleUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
-def _reject_ambiguous_numeric_target(url: str) -> None:
-    """Reject legacy inet_aton-style integer hosts instead of reinterpreting them."""
+class ScheduleTargetSafetyError(ValueError):
+    """A recurring job cannot safely bind the target destination."""
 
-    host = str(urllib.parse.urlsplit(str(url)).hostname or "").strip()
-    if host.isascii() and host.isdigit():
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Scheduled targets cannot use an ambiguous integer hostname. "
-                "Register and select the visibly normalized dotted IPv4 address instead."
-            ),
+
+async def _default_schedule_resolver(host: str, port: int) -> list[Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.getaddrinfo(
+        host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM,
+    )
+
+
+async def validate_schedule_target_destination(
+    url: str,
+    *,
+    resolver: Callable[[str, int], Any] | None = None,
+) -> tuple[str, ...]:
+    """Resolve a recurring target and require every destination to be public.
+
+    Validation is repeated at dispatch because a hostname that was public when the
+    schedule was saved may later resolve to a private or metadata address.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+        host = str(parsed.hostname or "").strip().lower().rstrip(".")
+        if parsed.scheme.lower() not in {"http", "https"} or not host:
+            raise ValueError
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except (TypeError, ValueError) as exc:
+        raise ScheduleTargetSafetyError(
+            "Scheduled targets must use a valid HTTP(S) URL."
+        ) from exc
+
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        raise ScheduleTargetSafetyError(
+            "Scheduled targets must not resolve to a local or internal destination."
         )
+
+    addresses: set[str] = set()
+    try:
+        addresses.add(str(ipaddress.ip_address(host)))
+    except ValueError:
+        try:
+            records = await asyncio.wait_for(
+                (resolver or _default_schedule_resolver)(host, port), timeout=5.0,
+            )
+        except (asyncio.TimeoutError, OSError, socket.gaierror) as exc:
+            raise ScheduleTargetSafetyError(
+                "Scheduled target DNS resolution failed."
+            ) from exc
+        for record in records or ():
+            raw = record
+            if isinstance(record, (tuple, list)) and len(record) >= 5:
+                sockaddr = record[4]
+                raw = sockaddr[0] if isinstance(sockaddr, (tuple, list)) else sockaddr
+            try:
+                addresses.add(str(ipaddress.ip_address(str(raw).split("%", 1)[0])))
+            except ValueError:
+                continue
+
+    if not addresses:
+        raise ScheduleTargetSafetyError(
+            "Scheduled target did not resolve to a usable IP address."
+        )
+    unsafe = sorted(
+        address for address in addresses if not ipaddress.ip_address(address).is_global
+    )
+    if unsafe:
+        raise ScheduleTargetSafetyError(
+            "Scheduled targets must not resolve to private, loopback, link-local, "
+            "reserved, or metadata addresses."
+        )
+    return tuple(sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value)))))
 
 
 async def _schedule_health_map_for_schedules(
@@ -413,7 +476,10 @@ async def create_schedule(request: ScheduleCreate):
         target = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1", target_uuid)
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
-        _reject_ambiguous_numeric_target(str(target["url"]))
+        try:
+            await validate_schedule_target_destination(str(target["url"]))
+        except ScheduleTargetSafetyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         next_run = calculate_next_run(
             request.frequency,
@@ -474,9 +540,18 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
     """Update a schedule."""
     async with _pool().acquire() as conn:
         # Get existing schedule to check timing field changes
-        existing = await conn.fetchrow("SELECT * FROM schedules WHERE id = $1", uuid.UUID(schedule_id))
+        existing = await conn.fetchrow(
+            """SELECT s.*, t.url AS target_url
+               FROM schedules s JOIN targets t ON t.id=s.target_id
+               WHERE s.id=$1""",
+            uuid.UUID(schedule_id),
+        )
         if not existing:
             raise HTTPException(status_code=404, detail="Schedule not found")
+        try:
+            await validate_schedule_target_destination(str(existing["target_url"]))
+        except ScheduleTargetSafetyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         updates = []
         params = []
