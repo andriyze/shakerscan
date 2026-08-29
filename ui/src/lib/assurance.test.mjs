@@ -20,9 +20,9 @@ test('a missing score is absent, not zero', () => {
   assert.equal(scanAssurance(null), null)
 })
 
-test('the scan row is preferred over the report body', () => {
+test('the current detail projection is preferred over the stored scan row', () => {
   const scan = { assurance_score: 90, result: { assurance_score: 10 } }
-  assert.equal(scanAssurance(scan).score, 90)
+  assert.equal(scanAssurance(scan).score, 10)
 })
 
 test('a report-only score is still read for scans stored before the column existed', () => {
@@ -32,8 +32,8 @@ test('a report-only score is still read for scans stored before the column exist
 
 test('gaps are rendered as readable phrases', () => {
   assert.deepEqual(
-    assuranceGapLabels(['authenticated_coverage', 'candidates_attempted']),
-    ['only anonymous traffic', 'planned candidates were not attempted'],
+    assuranceGapLabels(['authenticated_coverage', 'candidates_attempted', 'examination_breadth']),
+    ['only anonymous traffic', 'planned candidates were not attempted', 'the examination was narrow'],
   )
   assert.deepEqual(assuranceGapLabels(['something_new']), ['something new'])
   assert.deepEqual(assuranceGapLabels(undefined), [])

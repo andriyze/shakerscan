@@ -75,6 +75,28 @@ test('non-device score presentation is unchanged', () => {
 })
 
 
+test('non-device detail prefers current-policy result projection over legacy row score', () => {
+  assert.deepEqual(deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A',
+    score: 100,
+    result: {
+      result: {
+        risk_grade: 'B',
+        risk_score: 86,
+        score_policy: 'risk_and_assurance/v5',
+      },
+    },
+  }), {
+    isDevice: false,
+    status: 'final',
+    grade: 'B',
+    score: 86,
+    note: null,
+  })
+})
+
+
 test('unreliable DAST grade is explicitly provisional and never displayed as A star', () => {
   const presentation = deviceScorePresentation({
     run_kind: 'web_dast',

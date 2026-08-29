@@ -22,12 +22,19 @@ export function deviceScorePresentation(scan) {
     || scanRecord.run_kind === 'device_posture'
     || Object.keys(posture).length > 0
   )
-  const gradeValue = scanRecord.grade ?? resultSummary.grade
+  // Device rows keep their posture score in the scan columns. Web scan detail reports,
+  // however, may carry a current-policy read projection for an immutable legacy result;
+  // that projection must win over the stale row-level score.
+  const gradeValue = isDevice
+    ? (scanRecord.grade ?? resultSummary.grade)
+    : (resultSummary.risk_grade ?? resultSummary.grade ?? scanRecord.grade)
   const storedGrade = gradeValue === null || gradeValue === undefined || gradeValue === ''
     ? null
     : String(gradeValue)
   const grade = storedGrade?.replace(/\*+$/, '') || null
-  const score = finiteScore(scanRecord.score ?? resultSummary.score)
+  const score = finiteScore(isDevice
+    ? (scanRecord.score ?? resultSummary.score)
+    : (resultSummary.risk_score ?? resultSummary.score ?? scanRecord.score))
 
   if (!isDevice) {
     const coverage = record(scanResult.coverage)

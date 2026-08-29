@@ -19,6 +19,7 @@ const GAP_LABELS = {
   active_verification_attempted: 'active verification never ran',
   authenticated_coverage: 'only anonymous traffic',
   placement_available: 'a worker placement was unavailable',
+  examination_breadth: 'the examination was narrow',
 }
 
 export function assuranceBand(score) {
@@ -42,15 +43,15 @@ export function assuranceGapLabels(gaps) {
   return gaps.map((gap) => GAP_LABELS[gap] || String(gap).replaceAll('_', ' '))
 }
 
-// Reads the scan row first so a list view does not need the full report, then falls back to
-// the report body for scans stored before the column existed.
+// Detail reports may project an immutable legacy result through the current policy, so the
+// report body wins when present. List rows still fall back to the stored column.
 export function scanAssurance(scan) {
   if (!scan || typeof scan !== 'object') return null
   const result = (scan.result && typeof scan.result === 'object') ? scan.result : {}
   const inner = (result.result && typeof result.result === 'object') ? result.result : result
-  const score = typeof scan.assurance_score === 'number'
-    ? scan.assurance_score
-    : (typeof inner.assurance_score === 'number' ? inner.assurance_score : null)
+  const score = typeof inner.assurance_score === 'number'
+    ? inner.assurance_score
+    : (typeof scan.assurance_score === 'number' ? scan.assurance_score : null)
   if (score === null) return null
   const band = assuranceBand(score)
   return {
