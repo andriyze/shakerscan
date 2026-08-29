@@ -11,6 +11,9 @@ test('query filter history preserves the App Router route identity', () => {
   assert.match(source, /\.\.\.\(window\.history\.state \|\| \{\}\)/)
   assert.doesNotMatch(source, /pushState\(null/)
   assert.doesNotMatch(source, /replaceState\(null/)
+  assert.match(source, /setSearchString\(queryString\)/)
+  assert.match(source, /addEventListener\('popstate', syncFromBrowserHistory\)/)
+  assert.match(source, /new URLSearchParams\(searchString\)/)
 })
 
 test('exposure filters drive metrics, map, and priorities with one asset set', () => {

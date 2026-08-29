@@ -79,3 +79,27 @@ test('filtered scan history stays synchronized through Back and Forward', async 
   await expect(page).toHaveURL(new RegExp(`/scans/${scan.id}`))
   await expect(page.getByRole('heading', { name: scan.target_url, exact: true })).toBeVisible()
 })
+
+test('internal scan visibility toggles immediately and follows browser history', async ({ page }) => {
+  test.skip(!REAL_STACK, 'release-only non-mutating navigation acceptance')
+
+  await page.goto('/scans')
+  const checkbox = page.getByLabel('Show ASM and internal scans', { exact: true })
+  await expect(checkbox).not.toBeChecked()
+
+  await checkbox.check()
+  await expect(checkbox).toBeChecked()
+  await expect(page).toHaveURL(/include_internal=true/)
+
+  await checkbox.uncheck()
+  await expect(checkbox).not.toBeChecked()
+  await expect(page).not.toHaveURL(/include_internal=true/)
+
+  await page.goBack()
+  await expect(checkbox).toBeChecked()
+  await expect(page).toHaveURL(/include_internal=true/)
+
+  await page.goForward()
+  await expect(checkbox).not.toBeChecked()
+  await expect(page).not.toHaveURL(/include_internal=true/)
+})
