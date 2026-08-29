@@ -7,7 +7,7 @@ import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupe
 import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
-import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
+import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, gradeTextColor, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 
 const SEARCH_DEBOUNCE_MS = 300
@@ -702,7 +702,7 @@ function TargetsContent() {
                         className="hidden text-xs text-gray-400 sm:inline"
                         title="Historical posture observed by the latest scan. Review that scan's examination strength before relying on it."
                       >
-                        Observed {domain.root_target.last_grade} · review coverage
+                        Observed <span className={`font-semibold ${gradeTextColor(domain.root_target.last_grade)}`}>{domain.root_target.last_grade}</span> · review coverage
                       </span>
                     )}
                     {/* Schedule Button */}
@@ -922,7 +922,7 @@ function TargetsContent() {
                           className="hidden text-xs text-gray-400 sm:inline"
                           title="Historical posture observed by the latest scan. Review that scan's examination strength before relying on it."
                         >
-                          Observed {subdomain.last_grade} · review coverage
+                          Observed <span className={`font-semibold ${gradeTextColor(subdomain.last_grade)}`}>{subdomain.last_grade}</span> · review coverage
                         </span>
                       )}
 
