@@ -35,6 +35,12 @@ test('structured diagnostic failures and real exceptions remain errors', () => {
   assert.equal(scanLogEntry('Traceback: connection failed').kind, 'error')
 })
 
+test('budget-skipped diagnostics are warnings even when the adapter records an error class', () => {
+  const entry = scanLogEntry('Diagnostic Discover Web Content · outcome=skipped · reason=insufficient_plan_budget · error=unclassified_adapter_error · execution=not_started')
+  assert.equal(entry.kind, 'warning')
+  assert.equal(entry.label, 'attention')
+})
+
 test('a shallow clean scan leads with an honest conclusion instead of a perfect score', () => {
   const result = scanResultPresentation({
     score: 100,
