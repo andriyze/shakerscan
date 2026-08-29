@@ -618,6 +618,10 @@ function FindingDetailContent() {
   const statusCode = evidence.statusCode
   const responseAnomaly = evidence.responseAnomaly
   const summaryDescription = finding?.description || evidence.description || ''
+  const showSummaryDescription = Boolean(
+    summaryDescription.trim()
+    && summaryDescription.trim().toLowerCase() !== String(finding?.title || '').trim().toLowerCase()
+  )
   const rawEvidence =
     finding?.evidence && typeof finding.evidence === 'string'
       ? finding.evidence
@@ -850,7 +854,7 @@ function FindingDetailContent() {
                 )}
               </div>
               <h2 className="text-xl font-semibold text-white mt-2 break-words">{finding.title}</h2>
-              {summaryDescription && (
+              {showSummaryDescription && (
                 <p className="text-sm text-gray-300 mt-2 whitespace-pre-wrap">{summaryDescription}</p>
               )}
               <div className="flex flex-wrap gap-2 mt-3 text-xs text-gray-400">

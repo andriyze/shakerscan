@@ -40,6 +40,7 @@ test('finding copy failures and empty presentation have visible fallbacks', () =
   assert.match(detail, /select text/)
   assert.match(detail, /cvss_score !== null/)
   assert.match(detail, /Canonical lifecycle/)
+  assert.match(detail, /summaryDescription\.trim\(\)\.toLowerCase\(\) !== String\(finding\?\.title/)
   assert.match(candidates, /candidate\.claim\.trim\(\)\.toLowerCase\(\) !== candidate\.title/)
 })
 
