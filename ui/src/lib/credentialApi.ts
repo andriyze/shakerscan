@@ -20,6 +20,7 @@ export interface CredentialProfile {
     schema_version: string
     auth_kind: CredentialAuthKind
     username_configured: boolean
+    secret_configured: boolean
     secondary_secret_configured: boolean
     header_name?: string | null
     endpoint_configured: boolean

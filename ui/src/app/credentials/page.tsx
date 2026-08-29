@@ -117,8 +117,18 @@ function isSsh(kind: CredentialAuthKind): boolean {
   return kind.startsWith('ssh_')
 }
 
-function needsUsername(kind: CredentialAuthKind): boolean {
-  return ['basic_auth', 'form_login', 'oauth_password'].includes(kind) || isSsh(kind)
+// Mirrors IDENTITY_PAIR_KINDS in api/runtime/credentials.py. These flows accept either half
+// of the username/secret pair on its own, so neither field is individually required -- but at
+// least one must be present. A UI test asserts this list matches the backend constant.
+const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password']
+
+function isIdentityPair(kind: CredentialAuthKind): boolean {
+  return IDENTITY_PAIR_KINDS.includes(kind)
+}
+
+// Which kinds show a username field at all. SSH additionally requires it.
+function showsUsername(kind: CredentialAuthKind): boolean {
+  return isIdentityPair(kind) || isSsh(kind)
 }
 
 function needsEndpoint(kind: CredentialAuthKind): boolean {
@@ -128,7 +138,7 @@ function needsEndpoint(kind: CredentialAuthKind): boolean {
 function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
   const errors: DraftErrors = {}
   if (!rotating && !draft.name.trim()) errors.name = 'Enter a profile name.'
-  if (needsUsername(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'
+  if (isSsh(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'
   if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {
     errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'
   }
@@ -136,6 +146,12 @@ function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
   if (draft.authKind === 'oauth_client_credentials' && !draft.clientId.trim()) errors.clientId = 'Enter the OAuth client ID.'
   if (draft.authKind === 'custom_headers') {
     if (!draft.customHeaders.trim()) errors.customHeaders = 'Enter at least one Name: value header.'
+  } else if (isIdentityPair(draft.authKind)) {
+    if (!draft.username.trim() && !draft.secret.trim()) {
+      const message = 'Enter a username, a secret, or both.'
+      errors.username = message
+      errors.secret = message
+    }
   } else if (!draft.secret.trim()) {
     errors.secret = draft.authKind.startsWith('ssh_private_key') ? 'Paste the private key.' : 'Enter the secret value.'
   }
@@ -148,8 +164,15 @@ function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
 function secretPayload(draft: Draft): CredentialSecretPayload {
   const kind = draft.authKind
   const payload: CredentialSecretPayload = {}
-  if (kind !== 'custom_headers') payload.secret = draft.secret
-  if (needsUsername(kind)) payload.username = draft.username
+  // A pair kind omits the half it does not hold rather than sending an empty string, so the
+  // stored envelope records absence instead of a blank value.
+  if (isIdentityPair(kind)) {
+    if (draft.secret.trim()) payload.secret = draft.secret
+    if (draft.username.trim()) payload.username = draft.username
+  } else {
+    if (kind !== 'custom_headers') payload.secret = draft.secret
+    if (showsUsername(kind)) payload.username = draft.username
+  }
   if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret
   if (kind === 'api_key_header') payload.header_name = draft.headerName
   if (kind === 'query_parameter') payload.parameter_name = draft.headerName
@@ -163,6 +186,18 @@ function secretPayload(draft: Draft): CredentialSecretPayload {
   if (kind === 'custom_headers') payload.custom_headers = customHeaders(draft.customHeaders)
   if (draft.expiresAt) payload.expires_at = new Date(draft.expiresAt).toISOString()
   return payload
+}
+
+// Content-free description of which half of a username/secret pair a profile holds. Only
+// meaningful for pair kinds, where either half alone is a valid identity.
+function identityComposition(profile: CredentialProfile): string | null {
+  if (!isIdentityPair(profile.auth_kind)) return null
+  const hasUsername = profile.configuration.username_configured
+  const hasSecret = profile.configuration.secret_configured
+  if (hasUsername && hasSecret) return 'username + secret'
+  if (hasUsername) return 'username only'
+  if (hasSecret) return 'secret only'
+  return null
 }
 
 function statusClass(profile: CredentialProfile): string {
@@ -436,6 +471,7 @@ export default function CredentialsPage() {
                   </div>
                   <p className="mt-1 text-sm text-gray-400">
                     {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
+                    {identityComposition(profile) ? ` · ${identityComposition(profile)}` : ''}
                     {profile.principal_label ? ` · ${profile.principal_label}` : ''}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
@@ -490,7 +526,7 @@ export default function CredentialsPage() {
           </Field>
           {!rotating && <Field label="Principal slot"><Select value={draft.principalSlot} disabled={isSsh(draft.authKind)} onChange={(event) => updateDraft({ principalSlot: event.target.value as CredentialPrincipalSlot })}><option value="primary">Primary</option><option value="secondary">Secondary</option><option value="service">Service</option>{isSsh(draft.authKind) && <option value="ssh">SSH</option>}</Select></Field>}
           {!rotating && <Field label="Principal label"><Input value={draft.principalLabel} onChange={(event) => updateDraft({ principalLabel: event.target.value })} placeholder="Optional human-readable identity" /></Field>}
-          {needsUsername(draft.authKind) && <Field label="Username" error={draftErrors.username} required><Input autoComplete="off" value={draft.username} onChange={(event) => updateDraft({ username: event.target.value })} /></Field>}
+          {showsUsername(draft.authKind) && <Field label="Username" error={draftErrors.username} required={isSsh(draft.authKind)} hint={isIdentityPair(draft.authKind) ? 'Optional if you supply a secret below.' : undefined}><Input autoComplete="off" value={draft.username} onChange={(event) => updateDraft({ username: event.target.value })} /></Field>}
           {(draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && <Field label={draft.authKind === 'query_parameter' ? 'Parameter name' : 'Header name'} error={draftErrors.headerName} required><Input value={draft.headerName} onChange={(event) => updateDraft({ headerName: event.target.value })} /></Field>}
           {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" error={draftErrors.endpointUrl} required><Input value={draft.endpointUrl} onChange={(event) => updateDraft({ endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
           {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} error={draftErrors.clientId} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => updateDraft({ clientId: event.target.value })} /></Field>}
@@ -498,7 +534,7 @@ export default function CredentialsPage() {
           {draft.authKind !== 'custom_headers' && (draft.authKind === 'ssh_private_key' || draft.authKind === 'ssh_private_key_with_passphrase' ? (
             <Field className="sm:col-span-2" label="Private key" error={draftErrors.secret} required><Textarea rows={7} value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
           ) : (
-            <Field className="sm:col-span-2" label={draft.authKind === 'authorization_header' ? 'Full Authorization value' : draft.authKind === 'cookie' ? 'Cookie value' : 'Secret'} error={draftErrors.secret} required><Input type="password" autoComplete="new-password" value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
+            <Field className="sm:col-span-2" label={draft.authKind === 'authorization_header' ? 'Full Authorization value' : draft.authKind === 'cookie' ? 'Cookie value' : 'Secret'} error={draftErrors.secret} required={!isIdentityPair(draft.authKind)} hint={isIdentityPair(draft.authKind) ? 'Optional if you supply a username above.' : undefined}><Input type="password" autoComplete="new-password" value={draft.secret} onChange={(event) => updateDraft({ secret: event.target.value })} /></Field>
           ))}
           {draft.authKind === 'ssh_private_key_with_passphrase' && <Field className="sm:col-span-2" label="Key passphrase" error={draftErrors.secondarySecret} required><Input type="password" autoComplete="new-password" value={draft.secondarySecret} onChange={(event) => updateDraft({ secondarySecret: event.target.value })} /></Field>}
           {draft.authKind === 'custom_headers' && <Field className="sm:col-span-2" label="Headers" hint="One Name: value pair per line. Values are encrypted and will not be shown again." error={draftErrors.customHeaders} required><Textarea rows={6} value={draft.customHeaders} onChange={(event) => updateDraft({ customHeaders: event.target.value })} /></Field>}

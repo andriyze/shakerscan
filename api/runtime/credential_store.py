@@ -25,6 +25,7 @@ PUBLIC_CONFIGURATION_KEYS = frozenset({
     "schema_version",
     "auth_kind",
     "username_configured",
+    "secret_configured",
     "secondary_secret_configured",
     "header_name",
     "endpoint_configured",

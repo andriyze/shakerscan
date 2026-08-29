@@ -13,6 +13,7 @@ import urllib.parse
 import uuid
 
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
+from runtime.credentials import IDENTITY_PAIR_KINDS
 from runtime.models import TargetBinding
 
 try:
@@ -172,14 +173,20 @@ def _validate_material(credential: TargetBoundSessionCredential) -> None:
         for value in values
     ):
         raise SessionCredentialContractError("session credential material is invalid")
-    if not credential.endpoint_url or not credential.secret:
+    if not credential.endpoint_url:
         raise SessionCredentialContractError("session credential material is incomplete")
-    if credential.auth_kind == "form_login" and not credential.username:
-        raise SessionCredentialContractError("form login requires a username")
+    if credential.auth_kind in IDENTITY_PAIR_KINDS:
+        # The profile contract admits either half of the pair, so the session gate has to
+        # admit the same set. Requiring both here would accept a profile at save time and
+        # then fail it at login, which is the worst place to discover it.
+        if not credential.username and not credential.secret:
+            raise SessionCredentialContractError(
+                "session credential requires a username, a secret, or both"
+            )
+    elif not credential.secret:
+        raise SessionCredentialContractError("session credential material is incomplete")
     if credential.auth_kind == "oauth_client_credentials" and not credential.client_id:
         raise SessionCredentialContractError("OAuth client credentials require a client ID")
-    if credential.auth_kind == "oauth_password" and not credential.username:
-        raise SessionCredentialContractError("OAuth password flow requires a username")
     if (
         credential.auth_kind == "oauth_password"
         and not credential.oauth_password_explicitly_allowed
@@ -456,8 +463,13 @@ async def establish_target_bound_http_session(
                 page.body().decode("utf-8", errors="replace"), page_url,
             )
             password_field = form.pop("__password_field__")
-            form[username_field] = str(credential.username)
-            form[password_field] = credential.secret
+            # A one-sided profile submits only the half it holds. Assigning unconditionally
+            # posted the literal string "None" as the username, which the target reads as a
+            # real account name and which no operator would ever see in the redacted receipt.
+            if credential.username:
+                form[username_field] = credential.username
+            if credential.secret:
+                form[password_field] = credential.secret
             _bounded_form_size(form)
             action_origin, action_path, _public_action = _endpoint_args(
                 action, target=target, relative_to=origin,
@@ -487,8 +499,10 @@ async def establish_target_bound_http_session(
             if credential.auth_kind == "oauth_client_credentials":
                 form["client_secret"] = credential.secret
             else:
-                form["username"] = str(credential.username)
-                form["password"] = credential.secret
+                if credential.username:
+                    form["username"] = credential.username
+                if credential.secret:
+                    form["password"] = credential.secret
             if credential.scopes:
                 form["scope"] = " ".join(credential.scopes)
             _bounded_form_size(form)

@@ -12,7 +12,11 @@ from typing import Any, Mapping, Sequence
 
 from .credential_resolver import CredentialResolutionError, ResolvedCredential
 from .credential_store import CredentialProfileMetadata
-from .credentials import HTTP_CREDENTIAL_KINDS, IMMEDIATE_HTTP_HEADER_KINDS
+from .credentials import (
+    HTTP_CREDENTIAL_KINDS,
+    IDENTITY_PAIR_KINDS,
+    IMMEDIATE_HTTP_HEADER_KINDS,
+)
 
 
 SCAN_CREDENTIAL_CAPABILITY = "scan.execute"
@@ -425,11 +429,16 @@ def resolve_scan_interactive_credential(
             "Scan interactive credential selects multiple session flows"
         )
     selected = candidates[0]
-    if not selected["username"] and selected["auth_kind"] in {
-        "form_login", "oauth_password",
-    }:
-        raise ScanCredentialError("Scan interactive credential username is missing")
-    if not selected["secret"] or not selected["endpoint_url"]:
+    if not selected["endpoint_url"]:
+        raise ScanCredentialError("Scan interactive credential material is incomplete")
+    if selected["auth_kind"] in IDENTITY_PAIR_KINDS:
+        # Mirrors the profile and session contracts: either half of the pair is a complete
+        # identity, and this lane must not be stricter than the store that fed it.
+        if not selected["username"] and not selected["secret"]:
+            raise ScanCredentialError(
+                "Scan interactive credential requires a username, a secret, or both"
+            )
+    elif not selected["secret"]:
         raise ScanCredentialError("Scan interactive credential material is incomplete")
     if (
         selected["auth_kind"] == "oauth_client_credentials"

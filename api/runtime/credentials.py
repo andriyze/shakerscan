@@ -34,6 +34,18 @@ SSH_CREDENTIAL_KINDS = frozenset({
     "ssh_private_key_with_passphrase",
 })
 CREDENTIAL_KINDS = HTTP_CREDENTIAL_KINDS | SSH_CREDENTIAL_KINDS
+# HTTP kinds whose identity is a username/secret pair. Either half alone is a real
+# configuration -- a shared secret with no account name, or an account whose secret is
+# supplied by a separate flow -- so these require at least one of the two rather than both.
+# SSH is deliberately excluded: a login carrying neither a password nor a key cannot
+# authenticate, so relaxing it would only accept profiles that fail at execution instead of
+# at save time. Every layer that gates on this pair imports this name; the requirement was
+# previously restated in four places and drifted.
+IDENTITY_PAIR_KINDS = frozenset({
+    "basic_auth",
+    "form_login",
+    "oauth_password",
+})
 CREDENTIAL_KIND_ALIASES = {
     "multi_header": "custom_headers",
     "query_param": "query_parameter",
@@ -166,7 +178,9 @@ def build_credential_secret(
 ) -> str:
     """Validate and serialize one plaintext envelope for immediate encryption."""
     kind = normalize_credential_kind(auth_kind)
-    needs_secret = kind != "custom_headers"
+    pair_kind = kind in IDENTITY_PAIR_KINDS
+    # A pair kind validates the two halves together below, so neither is required alone.
+    needs_secret = kind != "custom_headers" and not pair_kind
     primary = _text(
         secret,
         name="secret",
@@ -181,9 +195,13 @@ def build_credential_secret(
     user = _text(
         username,
         name="username",
-        required=kind in {"basic_auth", "form_login", "oauth_password", *SSH_CREDENTIAL_KINDS},
+        required=kind in SSH_CREDENTIAL_KINDS,
         maximum=1_000,
     )
+    if pair_kind and not primary and not user:
+        raise CredentialContractError(
+            f"{kind} requires a username, a secret, or both"
+        )
     secondary = _text(
         secondary_secret,
         name="secondary_secret",
@@ -297,8 +315,11 @@ def immediate_http_headers(material: Mapping[str, Any]) -> dict[str, str]:
     if kind == "cookie":
         return {"Cookie": secret}
     if kind == "basic_auth":
+        # Either half may be absent by contract, so both sides are coerced. RFC 7617 defines
+        # the credential as user-id ":" password with either part allowed to be empty, so a
+        # one-sided profile still produces a well-formed header rather than the string "None".
         token = base64.b64encode(
-            f"{material.get('username') or ''}:{secret}".encode("utf-8")
+            f"{material.get('username') or ''}:{secret or ''}".encode("utf-8")
         ).decode("ascii")
         return {"Authorization": f"Basic {token}"}
     return {str(name): str(value) for name, value in dict(material["custom_headers"]).items()}
@@ -311,6 +332,10 @@ def public_credential_configuration(material: Mapping[str, Any]) -> dict[str, An
         "schema_version": CREDENTIAL_SECRET_SCHEMA,
         "auth_kind": kind,
         "username_configured": bool(material.get("username")),
+        # Published alongside the username flag so a client can tell which half of a
+        # username/secret pair a profile actually holds. Reporting only the username left a
+        # secret-only profile indistinguishable from an empty one.
+        "secret_configured": bool(material.get("secret")),
         "secondary_secret_configured": bool(material.get("secondary_secret")),
         "header_name": material.get("header_name"),
         "endpoint_configured": bool(material.get("endpoint_url")),
