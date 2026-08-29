@@ -34,7 +34,7 @@ jobs:
             --exclude='**/.pytest_cache' \
             -czf "$RUNNER_TEMP/shakerscan-v2-source.tar.gz" .
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: shakerscan-v2-source-${{ github.sha }}
           path: |
