@@ -21,7 +21,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       ui: ${{ steps.filter.outputs.ui }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
@@ -327,7 +327,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Set up supported Node runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
@@ -360,7 +360,7 @@ jobs:
       MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
       MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # The upgrade receipt resolves the v0.8.17 baseline tag to its exact
           # source commit. A depth-1 checkout contains only the candidate.

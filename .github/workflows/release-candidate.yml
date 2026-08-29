@@ -53,7 +53,7 @@ jobs:
       workflow_sha: ${{ steps.meta.outputs.workflow_sha }}
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # Manual publication validates and builds the explicitly approved
           # candidate, even when main has moved on with workflow-only fixes.
@@ -126,7 +126,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout approved candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
           # The upgrade smoke loads the 0.5.7 schema from its historical
@@ -324,7 +324,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
@@ -462,7 +462,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
@@ -543,7 +543,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
@@ -805,7 +805,7 @@ jobs:
             skip_files: ""
     steps:
       - name: Checkout waiver policy
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
@@ -863,7 +863,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout exact candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
           fetch-depth: 0
