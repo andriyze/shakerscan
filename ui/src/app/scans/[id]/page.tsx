@@ -15,6 +15,7 @@ import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
 import { scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -1420,8 +1421,8 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
     .trim() || 'No specific error was reported.'
   const legacyLogExcerpt = String(failureParts[1] || '').trim().slice(0, 4000)
   const targetUrl = String(scan?.target_url || scan?.target || '').trim()
-  const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(rawFailureMessage)
   const isShard = scan?.scan_role === 'shard' && Boolean(scan?.parent_scan_id)
+  const nextStep = scanFailureRecommendation(rawFailureMessage, isShard)
 
   return (
     <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-5 mb-6">
@@ -1458,11 +1459,7 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
           <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
             <p className="text-sm font-medium text-amber-200">Recommended next step</p>
             <p className="mt-1 text-sm text-amber-100/80">
-              {isShard
-                ? 'Open the parent Scan to review sibling status and the authoritative final result.'
-                : looksLikeReachabilityFailure
-                  ? 'Confirm the target address is correct and reachable from the scanner, then try again.'
-                  : 'Review the failure above, then retry this target when the underlying problem is resolved.'}
+              {nextStep}
             </p>
             {isShard ? (
               <Link
