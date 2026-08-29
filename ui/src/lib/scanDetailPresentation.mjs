@@ -99,11 +99,16 @@ function structuredLogFailure(raw, source) {
   if (['error', 'fatal', 'exception', 'traceback'].includes(normalizedSource)) return true
   const outcome = structuredValue(raw, '(?:outcome|status|result)')
   if (['error', 'failed', 'failure', 'fatal', 'exception'].includes(outcome)) return true
+  const error = structuredValue(raw, 'error')
   // A structured action outcome is authoritative. Skipped/partial/degraded
   // actions often retain an adapter error class explaining why no execution
   // occurred; that is attention-worthy, not an execution failure.
+  if (
+    error
+    && !['none', 'null', 'false', 'no', '0', 'nil', 'success', 'ok', '-'].includes(error)
+    && !['warning', 'partial', 'degraded', 'timeout', 'timed_out', 'skipped'].includes(outcome)
+  ) return true
   if (['success', 'ok', 'complete', 'completed', 'warning', 'partial', 'degraded', 'timeout', 'timed_out', 'skipped'].includes(outcome)) return false
-  const error = structuredValue(raw, 'error')
   if (error && !['none', 'null', 'false', 'no', '0', 'nil', 'success', 'ok', '-'].includes(error)) return true
   const withoutBenignFields = raw
     .replace(/(?:^|[\s·])(?:error|reason)=(?:none|null|false|no|0|nil|success|ok|-)(?=$|[\s·])/gi, ' ')

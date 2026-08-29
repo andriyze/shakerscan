@@ -75,12 +75,17 @@ test('executive posture defaults to an explicit operational cohort scope', () =>
   assert.match(dashboard, /buildCohortActions\(scopedExposure\)/)
   assert.match(targets, /<option value="calibration">Calibration<\/option>/)
   assert.match(triage, /Executive cohort/)
+  assert.match(triage, /<option value="unclassified">unclassified<\/option>/)
+  const targetsApi = read('../api/targets/router.py')
+  assert.match(targetsApi, /TargetUpdate[\s\S]+"unclassified"/)
 })
 
 test('scan submission titles follow the live execution status', () => {
   const timeline = read('src/app/timeline/page.tsx')
   assert.match(timeline, /completed: 'Scan completed'/)
   assert.match(timeline, /blocked: 'Scan blocked'/)
+  assert.match(timeline, /effectiveEventStatus\(event\)/)
+  assert.match(timeline, /event\.blocked_by\.length > 0/)
   assert.doesNotMatch(timeline, /'Scan\.submit': 'Scan queued'/)
 })
 

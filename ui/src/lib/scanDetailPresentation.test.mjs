@@ -33,6 +33,7 @@ test('structured diagnostic failures and real exceptions remain errors', () => {
   assert.equal(scanLogEntry('Diagnostic Discover Web Crawl · outcome=failed · error=connection_refused').kind, 'error')
   assert.equal(scanLogEntry('[error] worker aborted').kind, 'error')
   assert.equal(scanLogEntry('Traceback: connection failed').kind, 'error')
+  assert.equal(scanLogEntry('Diagnostic · outcome=success · error=connection_refused').kind, 'error')
 })
 
 test('budget-skipped diagnostics are warnings even when the adapter records an error class', () => {

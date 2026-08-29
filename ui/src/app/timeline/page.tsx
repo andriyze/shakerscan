@@ -55,7 +55,7 @@ function eventTitle(event: TimelineEvent): string {
       cancelled: 'Scan cancelled',
       blocked: 'Scan blocked',
     }
-    return scanTitles[event.status] || 'Scan submission'
+    return scanTitles[effectiveEventStatus(event)] || 'Scan submission'
   }
   const friendly: Record<string, string> = {
     'Experiment.workflow': 'Autonomous test completed',
@@ -74,6 +74,13 @@ function eventTitle(event: TimelineEvent): string {
   }
   if (friendly[raw]) return friendly[raw]
   return raw.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
+}
+
+function effectiveEventStatus(event: TimelineEvent): string {
+  if (event.status === 'blocked' || (Array.isArray(event.blocked_by) && event.blocked_by.length > 0)) {
+    return 'blocked'
+  }
+  return event.status
 }
 
 function eventKindLabel(event: TimelineEvent): string {
@@ -105,7 +112,7 @@ function EventRow({ event }: { event: TimelineEvent }) {
     <div className="flex flex-col gap-2 border-b border-gray-800 py-3 last:border-b-0 md:flex-row md:items-start md:justify-between">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <TimelineStatusBadge status={event.status} />
+          <TimelineStatusBadge status={effectiveEventStatus(event)} />
           <RiskTierBadge tier={event.risk_tier} />
           <span className="text-sm font-medium text-white">{eventTitle(event)}</span>
           <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
