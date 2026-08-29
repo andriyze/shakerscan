@@ -413,10 +413,10 @@ async def list_findings(
                    ait.name as ai_target_name,
                    latest_retest.status AS latest_retest_status,
                    latest_retest.result_status AS latest_retest_result_status,
-                   latest_retest.verdict AS latest_retest_verdict,
-                   latest_retest.confidence AS latest_retest_confidence,
-                   latest_retest.completed_at AS latest_retest_completed_at,
-                   latest_retest.verification_mode AS latest_retest_mode,
+                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
+                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
+                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
+                   CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END AS latest_retest_mode,
                    COUNT(*) OVER() AS total_count
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
@@ -2081,10 +2081,10 @@ async def get_finding_record(conn, finding_id: str):
                    ait.name as ai_target_name,
                    latest_retest.status AS latest_retest_status,
                    latest_retest.result_status AS latest_retest_result_status,
-                   latest_retest.verdict AS latest_retest_verdict,
-                   latest_retest.confidence AS latest_retest_confidence,
-                   latest_retest.completed_at AS latest_retest_completed_at,
-                   latest_retest.verification_mode AS latest_retest_mode
+                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
+                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
+                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
+                   CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END AS latest_retest_mode
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
@@ -2111,10 +2111,10 @@ async def get_finding_record(conn, finding_id: str):
                    ait.name as ai_target_name,
                    latest_retest.status AS latest_retest_status,
                    latest_retest.result_status AS latest_retest_result_status,
-                   latest_retest.verdict AS latest_retest_verdict,
-                   latest_retest.confidence AS latest_retest_confidence,
-                   latest_retest.completed_at AS latest_retest_completed_at,
-                   latest_retest.verification_mode AS latest_retest_mode
+                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
+                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
+                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
+                   CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END AS latest_retest_mode
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
@@ -2142,10 +2142,10 @@ async def get_finding_record(conn, finding_id: str):
                    ait.name as ai_target_name,
                    latest_retest.status AS latest_retest_status,
                    latest_retest.result_status AS latest_retest_result_status,
-                   latest_retest.verdict AS latest_retest_verdict,
-                   latest_retest.confidence AS latest_retest_confidence,
-                   latest_retest.completed_at AS latest_retest_completed_at,
-                   latest_retest.verification_mode AS latest_retest_mode
+                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
+                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
+                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
+                   CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END AS latest_retest_mode
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
