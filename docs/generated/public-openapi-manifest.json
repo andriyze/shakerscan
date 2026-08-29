@@ -173,9 +173,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "6f68ad2fa3e257d25c5b408f47f97f00e97c0c34c42297e3644d8fae7a305d89",
+  "contract_sha256": "55b86ecaf10e557049f5273d62393ade1c3debb5adb88d3d8ea0877f05c92e76",
   "openapi": "3.1.0",
-  "operation_count": 388,
+  "operation_count": 389,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1617,6 +1617,21 @@
       "deprecated": false,
       "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get",
       "parameters_sha256": "38e2c79a0bb4f25daa2d39ce30f124db8296705f9392e511e3efeb7211672f7f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/record": {
+      "deprecated": false,
+      "operation_id": "export_hunt_record_hunts__hunt_id__record_get",
+      "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -5267,6 +5282,7 @@
       "GET /hunts/lifecycle-metrics",
       "GET /hunts/{hunt_id}",
       "GET /hunts/{hunt_id}/http-transactions",
+      "GET /hunts/{hunt_id}/record",
       "POST /hunts",
       "POST /hunts/{hunt_id}/cancel",
       "POST /hunts/{hunt_id}/candidates",

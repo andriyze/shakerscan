@@ -6,6 +6,7 @@ import { API_URL } from '@/lib/api'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
 
 type ArchiveFormat = 'transactions' | 'har'
+type DownloadKind = ArchiveFormat | 'hunt-record'
 
 interface ArchivedTransaction {
   id: string
@@ -101,7 +102,7 @@ export default function HttpArchiveExport({
   compact?: boolean
 }) {
   const toast = useToast()
-  const [downloading, setDownloading] = useState<ArchiveFormat | null>(null)
+  const [downloading, setDownloading] = useState<DownloadKind | null>(null)
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [archive, setArchive] = useState<ArchiveDocument | null>(null)
@@ -171,6 +172,31 @@ export default function HttpArchiveExport({
     }
   }
 
+  const downloadHuntRecord = async () => {
+    setDownloading('hunt-record')
+    try {
+      const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(ownerId)}/record`)
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null)
+        throw new Error(detail?.detail || `Hunt record export failed (${response.status})`)
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `shakerscan-hunt-${ownerId}.json`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success('Full Hunt record downloaded')
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Could not export the Hunt record')
+    } finally {
+      setDownloading(null)
+    }
+  }
+
   const body = (
     <>
       <div className="flex flex-wrap items-start gap-3">
@@ -181,6 +207,11 @@ export default function HttpArchiveExport({
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
+          {ownerKind === 'hunt' && (
+            <Button size="sm" variant="secondary" onClick={downloadHuntRecord} disabled={downloading !== null}>
+              <Download className="h-4 w-4" />{downloading === 'hunt-record' ? 'Preparing…' : 'Full Hunt record'}
+            </Button>
+          )}
           <Button size="sm" variant="secondary" onClick={() => download('transactions')} disabled={downloading !== null}>
             <Download className="h-4 w-4" />{downloading === 'transactions' ? 'Preparing…' : 'Requests JSON'}
           </Button>

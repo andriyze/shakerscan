@@ -8,7 +8,12 @@ import uuid
 import pytest
 
 from api.hunt import run_router
-from api.hunt.run_service import HuntRunService, public_hunt_action, public_hunt_run
+from api.hunt.run_service import (
+    HuntRunService,
+    public_hunt_action,
+    public_hunt_action_trace,
+    public_hunt_run,
+)
 
 
 def _row(**overrides):
@@ -141,6 +146,27 @@ def test_public_hunt_action_prefers_canonical_worker_observation_count():
     }
 
 
+def test_explicit_hunt_trace_preserves_decision_without_secrets_or_hidden_thoughts():
+    trace = public_hunt_action_trace({
+        "id": uuid.uuid4(),
+        "capability_name": "http.request",
+        "status": "completed",
+        "input_summary": {
+            "input": {"method": "POST", "path": "/login", "password": "opaque"},
+            "input_digest": "input-digest",
+            "idempotency_key_sha256": "key-digest",
+        },
+        "result_summary": {"ok": True, "secret": "response-secret"},
+    })
+
+    assert trace["decision"]["kind"] == "explicit_capability_selection"
+    assert trace["decision"]["input"]["path"] == "/login"
+    assert trace["decision"]["input"]["password"] == "***"
+    assert trace["outcome"]["secret"] == "***"
+    assert "opaque" not in json.dumps(trace)
+    assert "response-secret" not in json.dumps(trace)
+
+
 def test_hunt_run_service_get_includes_canonical_action_ledger():
     hunt_id = str(uuid.uuid4())
 
@@ -168,6 +194,53 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
+
+
+def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                return _row(
+                    id=uuid.UUID(hunt_id), status="completed",
+                    notes=[{"note": "Review authorization"}],
+                    final_debrief={"summary": "Done", "next_actions": ["Retest"]},
+                )
+            if "FROM http_archive_stats" in query:
+                return {"attempted": 0, "stored": 0, "failed": 0, "dropped": 0}
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if query.startswith("SELECT COUNT(*) FROM http_transactions"):
+                return 0
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM hunt_actions WHERE hunt_run_id=$1" in query:
+                return [{
+                    "id": uuid.uuid4(),
+                    "capability_name": "http.request",
+                    "status": "completed",
+                    "input_summary": {"input": {"method": "GET", "path": "/health"}},
+                    "result_summary": {"ok": True},
+                    "receipt_id": uuid.uuid4(),
+                    "started_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+                    "completed_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+                }]
+            if "FROM http_transactions t" in query:
+                return []
+            raise AssertionError(query)
+
+    service = HuntRunService(lambda: _Pool(Connection()))
+    record = asyncio.run(service.export_record(hunt_id))
+
+    assert record["schema_version"] == "hunt-record/v1"
+    assert record["trace_policy"]["kind"] == "explicit_decision_trace"
+    assert "hidden_model_chain_of_thought" in record["trace_policy"]["excludes"]
+    assert record["decision_trace"][0]["decision"]["input"]["path"] == "/health"
+    assert record["hunt"]["final_debrief"]["summary"] == "Done"
+    assert record["http_archive"]["fidelity"] == "unavailable"
 
 
 def test_hunt_run_service_lists_without_context_or_capability_expansion():
@@ -253,6 +326,7 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
             "get_hunt_lifecycle_metrics",
         ),
         (frozenset({"GET"}), "/hunts/{hunt_id}", "get_hunt"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/record", "export_hunt_record"),
         (frozenset({"GET"}), "/hunts", "list_hunts"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/finish", "finish_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/cancel", "cancel_hunt"),

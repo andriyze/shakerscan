@@ -2,13 +2,35 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import importlib
 import json
 from typing import Any, Mapping
 import uuid
 
 from fastapi import HTTPException
+
+try:
+    from redaction import redact_sensitive
+except ModuleNotFoundError:  # package import layout
+    from scanner.redaction import redact_sensitive
+
+try:
+    from runtime.http_archive_reader import (
+        MAX_EXPORT_ROWS,
+        count_transactions,
+        export_document,
+        read_archive_stats,
+        read_transactions,
+    )
+except ModuleNotFoundError:  # package import layout
+    from ..runtime.http_archive_reader import (
+        MAX_EXPORT_ROWS,
+        count_transactions,
+        export_document,
+        read_archive_stats,
+        read_transactions,
+    )
 
 agent_tools = importlib.import_module(
     "agent_tools" if __package__ == "hunt" else "api.agent_tools"
@@ -176,6 +198,35 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     }
 
 
+def public_hunt_action_trace(row: Any) -> dict[str, Any]:
+    """One explicit, redacted planner decision and its persisted outcome.
+
+    This is deliberately not hidden model chain-of-thought. It contains the operator-visible
+    capability choice, planner-supplied input, durable receipt references and outcome that
+    ShakerScan actually used to authorize and settle the action.
+    """
+    item = _row_dict(row)
+    input_summary = _decode_json(item.get("input_summary"), {})
+    result_summary = _decode_json(item.get("result_summary"), {})
+    decision_input = input_summary.get("input")
+    if not isinstance(decision_input, Mapping):
+        decision_input = {}
+    return {
+        **public_hunt_action(row),
+        "decision": {
+            "kind": "explicit_capability_selection",
+            "input": redact_sensitive(
+                dict(decision_input), redact_strings=True, scrub_text=True,
+            ),
+            "input_digest": input_summary.get("input_digest"),
+            "idempotency_key_sha256": input_summary.get("idempotency_key_sha256"),
+        },
+        "outcome": redact_sensitive(
+            result_summary, redact_strings=True, scrub_text=True,
+        ),
+    }
+
+
 def public_hunt_run(
     row: Any,
     *,
@@ -283,6 +334,55 @@ class HuntRunService:
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         return result
+
+    async def export_record(self, hunt_id: str) -> dict[str, Any]:
+        """Return the complete redacted, explicit Hunt record and its HTTP archive."""
+        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+        async with self._pool().acquire() as connection:
+            row = await hunt_run_or_404(connection, hunt_id)
+            actions = await connection.fetch(
+                """SELECT id, capability_name, status, input_summary,
+                          result_summary, receipt_id, started_at, completed_at
+                   FROM hunt_actions WHERE hunt_run_id=$1
+                   ORDER BY started_at ASC, id ASC""",
+                hunt_uuid,
+            )
+            total = await count_transactions(
+                connection, scan_id=None, hunt_run_id=hunt_id,
+            )
+            stats = await read_archive_stats(
+                connection, scan_id=None, hunt_run_id=hunt_id,
+            )
+            transactions = await read_transactions(
+                connection, scan_id=None, hunt_run_id=hunt_id,
+                limit=MAX_EXPORT_ROWS, offset=0,
+            )
+        run = public_hunt_run(row)
+        notes = _decode_json(_row_dict(row).get("notes"), [])
+        return {
+            "schema_version": "hunt-record/v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "trace_policy": {
+                "kind": "explicit_decision_trace",
+                "includes": [
+                    "objective", "bound_skills", "policy", "budgets",
+                    "planner_capability_inputs", "action_outcomes", "receipt_references",
+                    "operator_notes", "final_debrief", "http_transactions",
+                ],
+                "excludes": ["hidden_model_chain_of_thought", "credential_values"],
+                "detail": (
+                    "This export preserves explicit choices and durable outcomes; it does "
+                    "not expose private model chain-of-thought."
+                ),
+            },
+            "hunt": run,
+            "decision_trace": [public_hunt_action_trace(action) for action in actions],
+            "notes": redact_sensitive(notes, redact_strings=True, scrub_text=True),
+            "http_archive": export_document(
+                transactions, export_format="transactions", redaction="redacted",
+                owner={"hunt_id": hunt_id}, total=total, archive_total=total, stats=stats,
+            ),
+        }
 
     async def list(
         self,

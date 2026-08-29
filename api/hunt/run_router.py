@@ -8,7 +8,7 @@ from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
@@ -238,6 +238,19 @@ async def get_hunt_lifecycle_metrics():
 @router.get("/hunts/{hunt_id}")
 async def get_hunt(hunt_id: str):
     return await _service().get(hunt_id)
+
+
+@router.get("/hunts/{hunt_id}/record", tags=["Hunt"])
+async def export_hunt_record(hunt_id: str):
+    """Download the redacted explicit decision trace plus archived HTTP calls."""
+    document = await _service().export_record(hunt_id)
+    return JSONResponse(
+        document,
+        headers={
+            "content-disposition": f'attachment; filename="shakerscan-hunt-{hunt_id}.json"',
+            "x-shakerscan-trace-kind": "explicit_decision_trace",
+        },
+    )
 
 
 @router.get("/hunts")
