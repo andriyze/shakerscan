@@ -248,6 +248,8 @@ export default function Dashboard() {
   const totalAvailable = fleetEnabled ? (executionCapacity?.total_available ?? localAvailable) : localAvailable
   const maxWorkers = workers?.max_allowed && workers.max_allowed > 0 ? workers.max_allowed : 20
   const staleCount = workers?.stale_workers?.length ?? 0
+  const pendingWorkerCount = workers?.pending_count
+    ?? Math.max(0, (workerCount ?? 0) - (workers?.current_count ?? 0) - staleCount)
   const cohortCounts = useMemo(() => countCohorts(exposure?.assets || []), [exposure])
   const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
@@ -337,7 +339,7 @@ export default function Dashboard() {
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
               {workersKnown ? totalAvailable : '--'}
             </span>
-            <span className="text-xs text-gray-500">{fleetEnabled ? 'schedulable workers' : 'current workers'}</span>
+            <span className="text-xs text-gray-500">{fleetEnabled ? 'ready across fleet' : 'ready to scan'}</span>
             {fleetEnabled && (
               <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
                 {localAvailable} local
@@ -348,9 +350,14 @@ export default function Dashboard() {
                 {staleCount} stale
               </span>
             )}
+            {pendingWorkerCount > 0 && (
+              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Running worker processes that have not reported a current build identity yet">
+                {pendingWorkerCount} starting
+              </span>
+            )}
             {!fleetEnabled && workersKnown && (
-              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`Worker safety limit: ${maxWorkers}`}>
-                {workerCount} workers · limit {maxWorkers}
+              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
+                {workerCount} running · max {maxWorkers}
               </span>
             )}
             <span className="h-5 w-px bg-gray-800" aria-hidden="true" />

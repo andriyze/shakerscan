@@ -61,7 +61,7 @@ test('docs and mobile operations expose truthful accessible labels', () => {
   const sidebar = read('src/components/Sidebar.tsx')
   assert.match(docs, /h1: \(\{ children \}\) => \(\s*<h2/)
   assert.match(dashboard, />Emergency clear<\/span>/)
-  assert.match(dashboard, /current workers/)
+  assert.match(dashboard, /ready to scan/)
   assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer\)/)
   assert.doesNotMatch(sidebar, /Interactive Testing, Leads/)
 })
