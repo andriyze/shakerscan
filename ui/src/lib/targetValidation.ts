@@ -3,6 +3,56 @@ import { MAX_SCAN_TARGET_CHARS } from './targetLimits.mjs'
 const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i
 const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/
 
+function targetHostname(value: string): string {
+  const trimmed = value.trim()
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+  try {
+    return new URL(candidate).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+// Approval receipts are an internal Scan implementation detail. This only
+// selects the server's scope policy for targets that are unmistakably local;
+// ordinary DNS names stay production-scoped and cannot silently reach private
+// destinations through DNS.
+export function scanScopeEnvironment(value: string): 'production' | 'lab' {
+  const host = targetHostname(value)
+  if (!host) return 'production'
+  if (
+    host === 'localhost'
+    || host.endsWith('.localhost')
+    || host.endsWith('.internal')
+    || host.endsWith('.local')
+    || (!host.includes('.') && !host.includes(':'))
+  ) return 'lab'
+
+  if (IPV4_PATTERN.test(host)) {
+    const octets = host.split('.').map(Number)
+    const [first, second] = octets
+    if (
+      first === 0
+      || first === 10
+      || first === 127
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || (first === 198 && (second === 18 || second === 19))
+    ) return 'lab'
+  }
+
+  if (
+    host === '::1'
+    || host.startsWith('fc')
+    || host.startsWith('fd')
+    || /^fe[89ab]/.test(host)
+  ) return 'lab'
+
+  return 'production'
+}
+
 export function validateScanTarget(value: string): string | null {
   const trimmed = value.trim()
   if (!trimmed) {

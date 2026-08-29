@@ -142,8 +142,9 @@ test('authorized active Scan creates a target-bound approval and submits it in o
   await page.getByLabel('Allow active testing').check()
   await page.getByLabel(/I own or have explicit authorization/).check()
   await expect(page.getByText(/Resolved families:.*xss/)).toBeVisible()
+  await expect(page.getByText(/Approval receipt/i)).toHaveCount(0)
 
-  const submit = page.getByRole('button', { name: 'Create approval & run scan' })
+  const submit = page.getByRole('button', { name: 'Run Scan' })
   await expect(submit).toBeEnabled()
   await submit.click()
 

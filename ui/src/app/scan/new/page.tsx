@@ -24,8 +24,7 @@ import {
   RequestCollectionPicker,
   type RequestCollectionSelectionMetadata,
 } from '@/components/RequestCollectionPicker'
-import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
-import { validateScanTarget } from '@/lib/targetValidation'
+import { scanScopeEnvironment, validateScanTarget } from '@/lib/targetValidation'
 import { usableWebTargets } from '@/lib/targetChoices'
 
 const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
@@ -71,7 +70,6 @@ export default function NewScanPage() {
   const [allowStateChanging, setAllowStateChanging] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [approvalReceipt, setApprovalReceipt] = useState('')
-  const [approvalEnvironment, setApprovalEnvironment] = useState<'production' | 'lab'>('production')
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
   const [primaryCredentialId, setPrimaryCredentialId] = useState('')
   const [secondaryCredentialId, setSecondaryCredentialId] = useState('')
@@ -290,7 +288,7 @@ export default function NewScanPage() {
       return
     }
     if (approvalRequired && batchMode) {
-      setError('Active testing and authenticated scanning require one target at a time because every approval receipt is bound to one exact target.')
+      setError('Active testing and authenticated scanning must be submitted one target at a time.')
       return
     }
     if (activeTesting && !currentFleetReady) {
@@ -369,15 +367,20 @@ export default function NewScanPage() {
           approvalTargetId = String(registered?.id || '').trim() || undefined
         }
         if (!approvalTargetId) {
-          throw new Error('The target could not be registered for a target-bound approval receipt.')
+          throw new Error('The target could not be registered for active scanning.')
         }
-        const createdApproval = await createTargetPolicyApprovalReceipt({
-          targetId: approvalTargetId,
-          targetUrl: submittedTargets[0],
-          ttlMinutes: approvalTtlMinutes,
-          riskTier: credentialUse ? 'credential' : 'active',
-          environment: approvalEnvironment,
-        })
+        let createdApproval
+        try {
+          createdApproval = await createTargetPolicyApprovalReceipt({
+            targetId: approvalTargetId,
+            targetUrl: submittedTargets[0],
+            ttlMinutes: approvalTtlMinutes,
+            riskTier: credentialUse ? 'credential' : 'active',
+            environment: scanScopeEnvironment(submittedTargets[0]),
+          })
+        } catch {
+          throw new Error('Active scan authorization could not be established for this target. Check the target and try again.')
+        }
         effectiveApprovalReceipt = createdApproval.approvalReceiptId
         setApprovalReceipt(effectiveApprovalReceipt)
       }
@@ -523,7 +526,7 @@ export default function NewScanPage() {
             <input className="mt-1" type="checkbox" disabled={batchMode} checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (familyPreset === 'standard_active') setFamilyPreset('passive'); if (!credentialUse) { setAuthorized(false); setApprovalReceipt('') } setNetworkDiscovery(false); setAllowStateChanging(false); removeConfirmedActiveSelections() } }} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
-              <span className="block text-xs text-gray-500">{batchMode ? 'Active approvals are exact-target-bound; submit one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
+              <span className="block text-xs text-gray-500">{batchMode ? 'Active testing is available for one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
             </span>
           </label>
           {(activeTesting || credentialUse) && (
@@ -534,27 +537,9 @@ export default function NewScanPage() {
           )}
           <div className="grid gap-3 md:grid-cols-2">
             <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} />Discover subdomains</label>
-            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services (approval receipt required)</label>
+            <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services</label>
             <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} />Allow explicitly selected state-changing HTTP requests</label>
           </div>
-          {(activeTesting || credentialUse || approvalReceipt) && (
-            <ApprovalReceiptField
-              targetId={selectedRegisteredTarget?.id}
-              targetUrl={batchMode ? '' : target.trim()}
-              authorizationConfirmed={authorized}
-              receiptId={approvalReceipt}
-              onReceiptIdChange={setApprovalReceipt}
-              environment={approvalEnvironment}
-              onEnvironmentChange={setApprovalEnvironment}
-              ttlMinutes={approvalTtlMinutes}
-              riskTier={credentialUse ? 'credential' : 'active'}
-              required={approvalRequired}
-              disabledReason={batchMode ? 'Create approvals from a single-target Scan; receipts are target-bound.' : undefined}
-            />
-          )}
-          {approvalRequired && !approvalReceipt.trim() && !batchMode && (
-            <p className="text-xs text-gray-400">Run Scan will create the required target-bound approval automatically from your authorization confirmation.</p>
-          )}
           {scanContract && (
             <div className="rounded-lg border border-gray-800 bg-gray-950 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -642,7 +627,7 @@ export default function NewScanPage() {
 
         <Card className="overflow-hidden">
           <button type="button" aria-expanded={showAdvanced} aria-controls="advanced-scan-options" onClick={() => setShowAdvanced((value) => !value)} className="flex w-full items-center justify-between p-5 text-left">
-            <span><span className="block font-medium text-white">Advanced</span><span className="block text-xs text-gray-500">Authentication, known endpoints, approval, and custom ceilings.</span></span>
+            <span><span className="block font-medium text-white">Advanced</span><span className="block text-xs text-gray-500">Authentication, known endpoints, and custom ceilings.</span></span>
             <span className="text-gray-500">{showAdvanced ? '−' : '+'}</span>
           </button>
           {showAdvanced && (
@@ -690,7 +675,7 @@ export default function NewScanPage() {
                 </div>
               )}
               {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
-              <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates approval and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
+              <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates target authorization and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
               <RequestCollectionPicker
                 targetId={batchMode ? undefined : selectedRegisteredTarget?.id}
                 targetKind={targetKind}
@@ -726,9 +711,7 @@ export default function NewScanPage() {
         {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
-          <Button type="submit" loading={loading} disabled={activeTesting && !currentFleetReady}>
-            {approvalRequired && !approvalReceipt.trim() ? 'Create approval & run scan' : 'Run Scan'}
-          </Button>
+          <Button type="submit" loading={loading} disabled={activeTesting && !currentFleetReady}>Run Scan</Button>
         </div>
       </form>
     </div>
