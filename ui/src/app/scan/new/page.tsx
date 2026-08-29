@@ -147,13 +147,8 @@ export default function NewScanPage() {
   const currentWorkerCount = workerStats?.current_count ?? 0
   const staleWorkers = workerStats?.stale_count ?? workerStats?.stale_workers?.length ?? 0
   const pendingWorkers = workerStats?.pending_count ?? 0
-  const currentFleetReady = Boolean(
-    workerStats
-    && workerStats.fleet_uniform === true
-    && currentWorkerCount > 0
-    && staleWorkers === 0
-    && pendingWorkers === 0,
-  )
+  const runnableWorkerCount = workerStats?.execution_capacity?.total_available ?? currentWorkerCount
+  const activeWorkerAvailable = !workerStats || runnableWorkerCount > 0
   const reportedFingerprints = workerStats?.distinct_fingerprints?.length
     ? workerStats.distinct_fingerprints
     : Array.from(new Set((workerStats?.workers || []).map((worker) => worker.build_fingerprint).filter((value): value is string => Boolean(value))))
@@ -291,8 +286,8 @@ export default function NewScanPage() {
       setError('Active testing and authenticated scanning must be submitted one target at a time.')
       return
     }
-    if (activeTesting && !currentFleetReady) {
-      setError('Active testing requires at least one worker and a uniform fleet on the expected build. Refresh after rebuilding or restarting stale workers.')
+    if (activeTesting && !activeWorkerAvailable) {
+      setError('No scan worker is currently available. Try again after a worker becomes ready.')
       return
     }
     if (networkDiscovery && !activeTesting) {
@@ -409,7 +404,7 @@ export default function NewScanPage() {
         options: {
           ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
           parallel: topology === 'parallel',
-          require_current_workers: activeTesting,
+          require_current_workers: false,
         },
       }
 
@@ -587,13 +582,13 @@ export default function NewScanPage() {
               </div>
             </div>
           )}
-          {activeTesting && !currentFleetReady && (
+          {activeTesting && !activeWorkerAvailable && (
             <div className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200" role="alert">
-              <p className="font-medium">Active testing is paused until the worker fleet is uniformly current.</p>
+              <p className="font-medium">No scan worker is ready yet.</p>
               <p className="mt-1 text-xs text-amber-100/80">
                 {workerReadinessError
                   ? workerReadinessError
-                  : `${currentWorkerCount} current · ${staleWorkers} stale · ${pendingWorkers} awaiting build identity.`}
+                  : 'The scan can start as soon as one compatible worker is available.'}
                 {workerStats?.fleet?.enabled && <> <Link href="/fleet" className="font-medium underline">Open Fleet</Link>.</>}
               </p>
             </div>
@@ -711,7 +706,7 @@ export default function NewScanPage() {
         {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
-          <Button type="submit" loading={loading} disabled={activeTesting && !currentFleetReady}>Run Scan</Button>
+          <Button type="submit" loading={loading} disabled={activeTesting && !activeWorkerAvailable}>Run Scan</Button>
         </div>
       </form>
     </div>

@@ -27,11 +27,12 @@ test('New Scan clears stale validation when the operator edits the form', () => 
   assert.match(page, /setBudgetProfile\(budget\.value\); setError\(null\)/)
 })
 
-test('active scans use fingerprint-authoritative current worker readiness', () => {
-  assert.match(page, /workerStats\.fleet_uniform === true/)
-  assert.match(page, /require_current_workers: activeTesting/)
+test('ordinary active scans need one runnable worker, not release-fleet uniformity', () => {
+  assert.match(page, /execution_capacity\?\.total_available \?\? currentWorkerCount/)
+  assert.match(page, /require_current_workers: false/)
   assert.match(page, /placementPreviewLabel\(topology, currentWorkerCount\)/)
   assert.match(page, /Expected build:/)
   assert.match(page, /Reported running builds:/)
-  assert.match(page, /disabled=\{activeTesting && !currentFleetReady\}/)
+  assert.match(page, /disabled=\{activeTesting && !activeWorkerAvailable\}/)
+  assert.doesNotMatch(page, /Active testing is paused until the worker fleet is uniformly current/)
 })
