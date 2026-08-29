@@ -625,6 +625,15 @@ function FindingDetailContent() {
   const latestRetestStatus = latestRetest?.status || finding?.latest_retest_status
   const latestRetestConfidence = latestRetest?.confidence ?? finding?.latest_retest_confidence
   const latestRetestCompletedAt = latestRetest?.completed_at || finding?.latest_retest_completed_at
+  const canonicalProofVerified = finding?.is_verified === true || finding?.proof_state === 'verified'
+  const canonicalProofState = canonicalProofVerified
+    ? 'Deterministically verified'
+    : finding?.is_suspected === true || finding?.proof_state === 'suspected'
+      ? 'Suspected — proof not satisfied'
+      : 'Not deterministically verified'
+  const latestAiRetest = retestHistory.find((entry) => (
+    entry.verification_mode === 'ai_driven' && Boolean(entry.ai_reasoning || entry.ai_plan || entry.verdict)
+  ))
   // An inconclusive retest that is retryable means "we couldn't decide, try
   // again" — distinct from a terminal verdict. Surfaced so users understand the
   // finding stays active because verification didn't conclude.
@@ -727,7 +736,15 @@ function FindingDetailContent() {
             </span>
           )}
           {!deviceFinding && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
-            <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Proof replay</span>
+            <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Finding proof</span>
+            <span className={`rounded px-2 py-1 text-xs font-medium ${
+              canonicalProofVerified
+                ? 'bg-emerald-500/15 text-emerald-300'
+                : 'bg-amber-500/15 text-amber-300'
+            }`}>
+              {canonicalProofState}
+            </span>
+            <span className="border-l border-gray-800 pl-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Latest replay</span>
             <RetestVerdictBadge
               verdict={latestRetestVerdict}
               pending={hasPendingRetest}
@@ -1089,6 +1106,18 @@ function FindingDetailContent() {
 
       <SectionCard id="retest" title="Retest Verification">
         <div className="space-y-3">
+          <div className={`rounded border px-3 py-2 ${
+            canonicalProofVerified
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+              : 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+          }`}>
+            <p className="text-sm font-medium">Canonical finding proof: {canonicalProofState}</p>
+            <p className="mt-1 text-xs text-gray-300">
+              {canonicalProofVerified
+                ? 'The stored scan-time deterministic proof contract was satisfied. Later replay and AI assessments remain separate evidence and cannot downgrade that proof.'
+                : 'No stored deterministic proof contract currently verifies this finding. Replay and AI assessments may inform triage but do not become proof by themselves.'}
+            </p>
+          </div>
           {!retestSupported && (
             <div className="text-xs rounded px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
               Automated retest unavailable: {retestUnsupportedMessage}
@@ -1139,10 +1168,10 @@ function FindingDetailContent() {
             </div>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <InfoItem label="Last status">
+            <InfoItem label="Latest retest status">
               <span className="capitalize">{latestRetestStatus?.replaceAll('_', ' ') || 'not tested'}</span>
             </InfoItem>
-            <InfoItem label="Last verdict">
+            <InfoItem label="Latest retest verdict">
               {latestRetestVerdict ? (
                 <div className="flex flex-col items-start gap-1">
                   <RetestVerdictBadge verdict={latestRetestVerdict} />
@@ -1154,12 +1183,12 @@ function FindingDetailContent() {
                 <span className="text-gray-400">n/a</span>
               )}
             </InfoItem>
-            <InfoItem label="Last confidence">
+            <InfoItem label="Latest retest confidence">
               {typeof latestRetestConfidence === 'number'
                 ? `${Math.round(latestRetestConfidence * 100)}%`
                 : 'N/A'}
             </InfoItem>
-            <InfoItem label="Last verified">
+            <InfoItem label="Latest retest completed">
               {latestRetestCompletedAt ? formatDate(latestRetestCompletedAt) : 'N/A'}
             </InfoItem>
             <InfoItem label="Retest attempts">
@@ -1203,6 +1232,24 @@ function FindingDetailContent() {
                     <div className="text-gray-400 mt-1">
                       mode: {entry.verification_mode.replaceAll('_', ' ')}
                     </div>
+                  )}
+                  {entry.primary_tested_endpoint && (
+                    <div className="mt-1 flex min-w-0 gap-1 text-gray-400">
+                      <span className="shrink-0">primary tested endpoint:</span>
+                      <code className="break-all text-blue-300">{entry.primary_tested_endpoint}</code>
+                    </div>
+                  )}
+                  {Array.isArray(entry.tested_endpoints) && entry.tested_endpoints.length > 1 && (
+                    <details className="mt-1 rounded border border-gray-700/70 bg-gray-900/40 px-2 py-1.5">
+                      <summary className="cursor-pointer text-gray-300">
+                        Tested scope ({entry.tested_endpoints.length} endpoints)
+                      </summary>
+                      <ul className="mt-1 space-y-1">
+                        {entry.tested_endpoints.map((endpoint) => (
+                          <li key={endpoint}><code className="break-all text-blue-300">{endpoint}</code></li>
+                        ))}
+                      </ul>
+                    </details>
                   )}
                   <div className="mt-1 flex flex-wrap gap-2 text-gray-400">
                     <span>deterministic proof: <strong className={entry.deterministic_proof_state === 'proven' ? 'text-emerald-300' : 'text-amber-300'}>{entry.deterministic_proof_state === 'proven' ? 'proven' : 'not proven'}</strong></span>
@@ -1502,7 +1549,7 @@ function FindingDetailContent() {
       )}
 
       <SectionCard id="ai-analysis" title="AI Analysis">
-        {finding.ai_verdict || finding.ai_rationale || finding.ai_recommendations ? (
+        {finding.ai_verdict || finding.ai_rationale || finding.ai_recommendations || latestAiRetest ? (
           <div className="space-y-3">
             {finding.ai_verdict && (
               <div className="flex items-center gap-2">
@@ -1545,6 +1592,27 @@ function FindingDetailContent() {
                   <pre className="text-xs text-gray-300 whitespace-pre-wrap break-words">
                     {JSON.stringify(finding.ai_recommendations, null, 2)}
                   </pre>
+                )}
+              </div>
+            )}
+            {!finding.ai_verdict && !finding.ai_rationale && !finding.ai_recommendations && latestAiRetest && (
+              <div className="rounded border border-violet-500/25 bg-violet-500/5 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-300">
+                    Latest advisory AI retest
+                  </span>
+                  {latestAiRetest.verdict && (
+                    <span className="text-xs text-gray-300">{latestAiRetest.verdict.replaceAll('_', ' ')}</span>
+                  )}
+                  {typeof latestAiRetest.confidence === 'number' && (
+                    <span className="text-xs text-gray-400">{Math.round(latestAiRetest.confidence * 100)}% confidence</span>
+                  )}
+                </div>
+                <p className="mt-2 text-xs text-violet-200/80">
+                  Advisory only — this assessment cannot override the canonical deterministic proof state.
+                </p>
+                {latestAiRetest.ai_reasoning && (
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-gray-300">{latestAiRetest.ai_reasoning}</p>
                 )}
               </div>
             )}

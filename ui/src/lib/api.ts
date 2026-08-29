@@ -2383,6 +2383,9 @@ export interface RetestRecord {
   ai_reasoning?: string | null
   deterministic_proof_state?: 'proven' | 'not_proven'
   verdict_basis?: 'deterministic_proof' | 'ai_assessment' | 'execution_result'
+  primary_tested_endpoint?: string | null
+  tested_endpoints?: string[]
+  tested_scope?: 'single_endpoint' | 'multiple_endpoints'
   confidence?: number | null
   retry_class?: string | null
   retryable?: boolean

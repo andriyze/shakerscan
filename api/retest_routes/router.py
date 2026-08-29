@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any, Callable, Optional
+from urllib.parse import urljoin
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -61,6 +62,43 @@ def _get(name: str) -> Any:
 __all__ = ["configure_retest_router", "router"]
 
 
+def _tested_endpoint(value: Any, base_url: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if isinstance(base_url, str) and base_url.strip():
+        return urljoin(base_url.strip().rstrip("/") + "/", candidate)
+    return candidate
+
+
+def _tested_scope(result: dict[str, Any]) -> tuple[str | None, list[str]]:
+    """Derive the actual replay scope from immutable public artifacts and plan steps."""
+    base_url = result.get("target_url")
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    plan = result.get("ai_plan") if isinstance(result.get("ai_plan"), dict) else {}
+    raw_candidates: list[Any] = [
+        artifacts.get("attempted_url"),
+        artifacts.get("target_url"),
+        result.get("original_url"),
+    ]
+    steps = plan.get("steps")
+    if isinstance(steps, list):
+        raw_candidates.extend(
+            step.get("url") for step in steps if isinstance(step, dict)
+        )
+
+    endpoints: list[str] = []
+    for value in raw_candidates:
+        endpoint = _tested_endpoint(value, base_url)
+        if endpoint and endpoint not in endpoints:
+            endpoints.append(endpoint)
+    if not endpoints:
+        endpoint = _tested_endpoint(base_url, None)
+        if endpoint:
+            endpoints.append(endpoint)
+    return (endpoints[0] if endpoints else None, endpoints)
+
+
 def public_retest_row(row: Any) -> dict[str, Any]:
     """Return one replay with typed proof and an explicit authority boundary.
 
@@ -88,6 +126,10 @@ def public_retest_row(row: Any) -> dict[str, Any]:
         if mode == "ai_driven" and result.get("verdict")
         else "execution_result"
     )
+    primary_endpoint, tested_endpoints = _tested_scope(result)
+    result["primary_tested_endpoint"] = primary_endpoint
+    result["tested_endpoints"] = tested_endpoints
+    result["tested_scope"] = "multiple_endpoints" if len(tested_endpoints) > 1 else "single_endpoint"
     return result
 
 

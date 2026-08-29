@@ -31,3 +31,26 @@ def test_satisfied_replay_is_labeled_deterministic_proof():
 
     assert row["deterministic_proof_state"] == "proven"
     assert row["verdict_basis"] == "deterministic_proof"
+
+
+def test_retest_exposes_exact_tested_scope_without_conflating_base_target():
+    row = public_retest_row({
+        "target_url": "http://host.docker.internal:3001",
+        "original_url": "/rest/products/search",
+        "artifacts": {"target_url": "/rest/products/search?q=test"},
+        "ai_plan": {
+            "steps": [
+                {"url": "http://host.docker.internal:3001/"},
+                {"url": "/rest/products/search?q=probe"},
+            ]
+        },
+    })
+
+    assert row["primary_tested_endpoint"] == "http://host.docker.internal:3001/rest/products/search?q=test"
+    assert row["tested_endpoints"] == [
+        "http://host.docker.internal:3001/rest/products/search?q=test",
+        "http://host.docker.internal:3001/rest/products/search",
+        "http://host.docker.internal:3001/",
+        "http://host.docker.internal:3001/rest/products/search?q=probe",
+    ]
+    assert row["tested_scope"] == "multiple_endpoints"
