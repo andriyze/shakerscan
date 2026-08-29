@@ -166,6 +166,9 @@ export function scanResultPresentation(scan, assurance) {
   const missingHeaders = Array.isArray(record(report.http).missing_security_headers)
     ? record(report.http).missing_security_headers
     : []
+  const scorePolicy = String(result.score_policy || '')
+  const posturePenalty = finiteNumber(result.posture_penalty, null)
+  const policyVersion = Number(scorePolicy.match(/^risk_and_assurance\/v(\d+)$/)?.[1] || 0)
 
   return {
     headline,
@@ -182,9 +185,11 @@ export function scanResultPresentation(scan, assurance) {
     resolvedFamilies,
     requestCount: finiteNumber(budgetUsed.http_requests, null),
     missingHeaders,
-    posturePenalty: finiteNumber(result.posture_penalty, null),
-    scorePolicy: String(result.score_policy || ''),
-    postureIncluded: String(result.score_policy || '').startsWith('risk_and_assurance/v'),
+    posturePenalty,
+    scorePolicy,
+    // v3 was briefly reused for both pre- and post-posture calculations.
+    // The emitted penalty disambiguates those rows; v4+ has stable provenance.
+    postureIncluded: posturePenalty !== null || policyVersion >= 4,
     confirmedCount: confirmed.length,
     candidateCount: candidates.length,
   }

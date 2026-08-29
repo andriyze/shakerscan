@@ -79,3 +79,22 @@ test('confirmed and candidate material findings get distinct conclusions', () =>
   }, { band: 'limited', label: 'Limited coverage' })
   assert.match(candidate.headline, /potential material issue needs verification/)
 })
+
+test('ambiguous v3 reports claim posture deductions only when they carry one', () => {
+  const legacy = scanResultPresentation({
+    result: {
+      result: { score_policy: 'risk_and_assurance/v3', score: 100 },
+      http: { missing_security_headers: ['content-security-policy'] },
+    },
+  }, { band: 'weak', label: 'Weak coverage' })
+  assert.equal(legacy.postureIncluded, false)
+
+  const postureAware = scanResultPresentation({
+    result: {
+      result: { score_policy: 'risk_and_assurance/v3', score: 78, posture_penalty: 22 },
+      http: { missing_security_headers: ['content-security-policy'] },
+    },
+  }, { band: 'weak', label: 'Weak coverage' })
+  assert.equal(postureAware.postureIncluded, true)
+  assert.equal(postureAware.posturePenalty, 22)
+})
