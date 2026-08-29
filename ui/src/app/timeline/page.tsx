@@ -45,11 +45,22 @@ interface TimelineFilters {
 
 function eventTitle(event: TimelineEvent): string {
   const raw = event.action_name || event.command || event.kind
+  if (raw === 'scan.submit') {
+    const scanTitles: Record<string, string> = {
+      accepted: 'Scan accepted for queueing',
+      queued: 'Scan queued',
+      running: 'Scan running',
+      completed: 'Scan completed',
+      failed: 'Scan failed',
+      cancelled: 'Scan cancelled',
+      blocked: 'Scan blocked',
+    }
+    return scanTitles[event.status] || 'Scan submission'
+  }
   const friendly: Record<string, string> = {
     'Experiment.workflow': 'Autonomous test completed',
     'Research.episode': 'Investigation update',
     'Finding.retest': 'Finding verification',
-    'Scan.submit': event.status === 'accepted' ? 'Scan accepted for queueing' : 'Scan queued',
     'Scan.result': 'Scan reviewed',
     'Scan.runtime scope check': 'Scan blocked by scope policy',
     'Asm.improve': 'Coverage work queued',

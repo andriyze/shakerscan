@@ -64,3 +64,10 @@ test('executive posture defaults to an explicit operational cohort scope', () =>
   assert.match(targets, /<option value="calibration">Calibration<\/option>/)
   assert.match(triage, /Executive cohort/)
 })
+
+test('scan submission titles follow the live execution status', () => {
+  const timeline = read('src/app/timeline/page.tsx')
+  assert.match(timeline, /completed: 'Scan completed'/)
+  assert.match(timeline, /blocked: 'Scan blocked'/)
+  assert.doesNotMatch(timeline, /'Scan\.submit': 'Scan queued'/)
+})

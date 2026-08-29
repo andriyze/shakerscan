@@ -958,11 +958,13 @@ function activityHref(event: TimelineEvent): string | null {
 
 function activityTitle(event: TimelineEvent): string {
   const raw = event.action_name || event.command || event.kind
+  if (raw === 'scan.submit') {
+    return ({ accepted: 'Scan accepted for queueing', queued: 'Scan queued', running: 'Scan running', completed: 'Scan completed', failed: 'Scan failed', cancelled: 'Scan cancelled', blocked: 'Scan blocked' } as Record<string, string>)[event.status] || 'Scan submission'
+  }
   const labels: Record<string, string> = {
     'Experiment.workflow': 'Autonomous test completed',
     'Research.episode': 'Investigation update',
     'Finding.retest': 'Finding verification',
-    'Scan.submit': 'Scan queued',
     'Scan.result': 'Scan reviewed',
     evidence_bound: 'Evidence recorded',
     evidence_instance: 'Evidence recorded',
