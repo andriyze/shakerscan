@@ -82,9 +82,13 @@ test('scan submission titles follow the live execution status', () => {
 
 test('scoped dashboard refuses unbound and unscoped historical rows', () => {
   const dashboard = read('src/app/page.tsx')
+  const targets = read('src/app/targets/page.tsx')
   assert.match(dashboard, /rowMatchesCohort\(scan\.target_id, scan\.target_url/)
   assert.match(dashboard, /What changed is hidden in scoped mode/)
   assert.match(dashboard, /Observed posture \{scan\.grade\}/)
+  assert.match(dashboard, /assurance\.label.*assurance\.score/)
+  assert.match(targets, /Observed \{domain\.root_target\.last_grade\} · review coverage/)
+  assert.doesNotMatch(targets, /hidden text-xl font-bold sm:inline/)
   const scans = read('src/app/scans/page.tsx')
   assert.match(scans, />Observed posture</)
   assert.match(scans, /Examination strength \$\{assurance\.score\}\/100/)

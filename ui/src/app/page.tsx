@@ -23,6 +23,7 @@ import {
 } from '@/components/ui'
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
+import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 
 const DASHBOARD_REFRESH_MS = 10000
 const QUEUE_REFRESH_MS = 15000
@@ -901,7 +902,9 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
       </div>
       <div className="divide-y divide-gray-800">
         {loading ? Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="m-4 h-10" />)
-          : scans.length ? scans.slice(0, 5).map((scan) => (
+          : scans.length ? scans.slice(0, 5).map((scan) => {
+            const assurance = scanAssurance(scan)
+            return (
             <Link key={scan.id} href={`/scans/${scan.id}`} className={`flex items-center gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>
               <span className="rounded-lg bg-blue-500/10 p-2 text-blue-300"><ScanLine className="h-4 w-4" /></span>
               <span className="min-w-0 flex-1">
@@ -909,10 +912,18 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
                 <span className="block text-xs text-gray-500">{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
               </span>
               {typeof scan.findings_count === 'number' ? <span className="hidden text-xs tabular-nums text-gray-500 sm:block">{scan.findings_count} findings</span> : null}
-              {scan.grade ? <span className={`text-xs font-medium ${getGradeColor(scan.grade)}`} title="Observed posture grade; * means assurance limitations apply">Observed posture {scan.grade}</span> : null}
+              {scan.grade ? (
+                <span className="hidden text-right sm:block">
+                  <span className={`block text-xs font-medium ${getGradeColor(scan.grade)}`} title="Risk observed by this run; not an overall safety score">Observed posture {scan.grade}</span>
+                  <span className={`block text-[11px] ${assuranceClass(assurance?.band)}`}>
+                    {assurance ? `${assurance.label} · ${assurance.score}/100` : 'Examination strength unavailable'}
+                  </span>
+                </span>
+              ) : null}
               <ScanStatusBadge status={scan.status} />
             </Link>
-          )) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
+            )
+          }) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
       </div>
     </Card>
   )

@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, getGradeColor, type Target, type GroupedDomain } from '@/lib/api'
+import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, type Target, type GroupedDomain } from '@/lib/api'
 import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
@@ -698,8 +698,11 @@ function TargetsContent() {
                       </Link>
                     </div>
                     {domain.root_target.last_grade && (
-                      <span className={`hidden text-xl font-bold sm:inline ${getGradeColor(domain.root_target.last_grade)}`}>
-                        {domain.root_target.last_grade}
+                      <span
+                        className="hidden text-xs text-gray-400 sm:inline"
+                        title="Historical posture observed by the latest scan. Review that scan's examination strength before relying on it."
+                      >
+                        Observed {domain.root_target.last_grade} · review coverage
                       </span>
                     )}
                     {/* Schedule Button */}
@@ -915,8 +918,11 @@ function TargetsContent() {
                       </div>
 
                       {subdomain.last_grade && (
-                        <span className={`hidden text-lg font-bold sm:inline ${getGradeColor(subdomain.last_grade)}`}>
-                          {subdomain.last_grade}
+                        <span
+                          className="hidden text-xs text-gray-400 sm:inline"
+                          title="Historical posture observed by the latest scan. Review that scan's examination strength before relying on it."
+                        >
+                          Observed {subdomain.last_grade} · review coverage
                         </span>
                       )}
 
