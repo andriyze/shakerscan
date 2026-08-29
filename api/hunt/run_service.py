@@ -152,9 +152,22 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     item = _row_dict(row)
     input_summary = _decode_json(item.get("input_summary"), {})
     result_summary = _decode_json(item.get("result_summary"), {})
-    budget_consumed = result_summary.get("budget_consumed")
-    if not isinstance(budget_consumed, Mapping):
-        budget_consumed = {}
+    def numeric_budget(value: Any) -> dict[str, int | float]:
+        if not isinstance(value, Mapping):
+            return {}
+        return {
+            str(key): amount
+            for key, amount in value.items()
+            if isinstance(amount, (int, float)) and not isinstance(amount, bool)
+        }
+
+    budget_consumed = numeric_budget(result_summary.get("budget_consumed"))
+    raw_accounting = result_summary.get("budget_accounting")
+    has_exact_accounting = isinstance(raw_accounting, Mapping)
+    accounting = dict(raw_accounting) if has_exact_accounting else {}
+    budget_actual = numeric_budget(accounting.get("actual"))
+    if has_exact_accounting and not budget_actual:
+        budget_actual = budget_consumed
     observations = result_summary.get("observations")
     if isinstance(observations, list):
         observation_count = len(observations)
@@ -188,10 +201,22 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
             "partial": result_summary.get("partial") is True,
             "timed_out": result_summary.get("timed_out") is True,
             "observation_count": observation_count,
-            "budget_consumed": {
-                str(key): amount
-                for key, amount in budget_consumed.items()
-                if isinstance(amount, (int, float)) and not isinstance(amount, bool)
+            # Compatibility field. New clients should use budget_accounting so a
+            # reservation ceiling can never be presented as measured consumption.
+            "budget_consumed": budget_actual if has_exact_accounting else budget_consumed,
+            "budget_accounting": {
+                "schema_version": "hunt-budget-settlement/v1",
+                "basis": "exact_settlement" if has_exact_accounting else "legacy_reported_charge",
+                "charge_basis": (
+                    str(accounting.get("charge_basis") or "capability_reported_settlement")
+                    if has_exact_accounting else "legacy_unknown"
+                ),
+                "reserved": numeric_budget(accounting.get("reserved")),
+                "actual": budget_actual,
+                "released": numeric_budget(accounting.get("released")),
+                "used_after_reconciliation": numeric_budget(
+                    accounting.get("used_after_reconciliation")
+                ),
             },
             "reference_ids": _action_reference_ids(result_summary),
         },

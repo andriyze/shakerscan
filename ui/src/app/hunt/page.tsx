@@ -74,6 +74,20 @@ function huntActionStatusClass(status: string): string {
   return 'bg-blue-500/10 text-blue-300'
 }
 
+function formatHuntDuration(startedAt?: string, completedAt?: string | null): string | null {
+  if (!startedAt) return null
+  const start = Date.parse(startedAt)
+  const end = completedAt ? Date.parse(completedAt) : Date.now()
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
+  const seconds = Math.max(0, Math.round((end - start) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  if (minutes < 60) return `${minutes}m ${remainder}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
 function HuntHistory({
   targetId,
   runs,
@@ -800,7 +814,15 @@ function HuntContent() {
                   <code className="break-all text-xs text-gray-300">{hunt.hunt_id}</code>
                 </div>
               </div>
-              {hunt.created_at && <p className="text-xs text-gray-500">Started {new Date(hunt.created_at).toLocaleString()}</p>}
+              {hunt.created_at && (
+                <div className="space-y-1 text-xs text-gray-500">
+                  <p>Started {new Date(hunt.created_at).toLocaleString()}</p>
+                  {hunt.completed_at && <p>Completed {new Date(hunt.completed_at).toLocaleString()}</p>}
+                  {formatHuntDuration(hunt.created_at, hunt.completed_at) && (
+                    <p>{hunt.completed_at ? 'Elapsed' : 'Elapsed so far'} {formatHuntDuration(hunt.created_at, hunt.completed_at)}</p>
+                  )}
+                </div>
+              )}
               {hunt.status === 'active' && (
                 <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
                   {HUNT_SESSION_NON_AUTONOMOUS_NOTICE}
@@ -888,7 +910,14 @@ function HuntContent() {
                 <div className="mt-4 space-y-3">
                   {(hunt.actions || []).map((action) => {
                     const references = action.result.reference_ids
-                    const budget = Object.entries(action.result.budget_consumed)
+                    const accounting = action.result.budget_accounting
+                    const actualBudget = Object.entries(accounting.actual)
+                    const reservedBudget = Object.entries(accounting.reserved)
+                    const releasedBudget = Object.entries(accounting.released).filter(([, amount]) => amount > 0)
+                    const legacyBudget = Object.entries(action.result.budget_consumed)
+                    const formatBudget = (entries: Array<[string, number]>) => entries
+                      .map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`)
+                      .join(' · ')
                     return (
                       <div key={action.action_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -902,9 +931,21 @@ function HuntContent() {
                           {action.started_at && <span>Started {new Date(action.started_at).toLocaleString()}</span>}
                           {action.completed_at && <span>Finished {new Date(action.completed_at).toLocaleString()}</span>}
                         </div>
-                        {budget.length > 0 && (
-                          <p className="mt-2 text-xs text-gray-500">
-                            Used {budget.map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`).join(' · ')}
+                        {accounting.basis === 'exact_settlement' && (
+                          <div className="mt-2 space-y-1 text-xs text-gray-500">
+                            <p>Settled charge: {actualBudget.length > 0 ? formatBudget(actualBudget) : 'none'}</p>
+                            <p>
+                              Charge basis: {accounting.charge_basis === 'conservative_full_reservation'
+                                ? 'conservative upper bound; measured consumption was unavailable'
+                                : 'capability-reported settlement'}
+                            </p>
+                            {reservedBudget.length > 0 && <p>Temporarily reserved: {formatBudget(reservedBudget)}</p>}
+                            {releasedBudget.length > 0 && <p>Released after settlement: {formatBudget(releasedBudget)}</p>}
+                          </div>
+                        )}
+                        {accounting.basis === 'legacy_reported_charge' && legacyBudget.length > 0 && (
+                          <p className="mt-2 text-xs text-amber-300/80">
+                            Legacy reported charge: {formatBudget(legacyBudget)} · reservation versus actual was not retained
                           </p>
                         )}
                         {(references.scan_ids.length > 0 || references.finding_ids.length > 0) && (

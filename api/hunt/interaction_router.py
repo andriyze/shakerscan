@@ -108,6 +108,37 @@ _deps: dict[str, Callable[..., Any]] = {}
 _AGENT_TOOL_MAX_QUERY_ROWS = 100
 
 
+def _hunt_budget_accounting(
+    reserved: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    used_after_reconciliation: Mapping[str, Any],
+    *,
+    charge_basis: str = "capability_reported_settlement",
+) -> dict[str, Any]:
+    """Publish exact settlement semantics without conflating holds and charges."""
+
+    normalized_reserved = {
+        str(key): max(0, int(value)) for key, value in reserved.items()
+    }
+    normalized_actual = {
+        str(key): max(0, int(value)) for key, value in actual.items()
+    }
+    return {
+        "schema_version": "hunt-budget-settlement/v1",
+        "charge_basis": charge_basis,
+        "reserved": normalized_reserved,
+        "actual": normalized_actual,
+        "released": {
+            key: max(0, amount - int(normalized_actual.get(key) or 0))
+            for key, amount in normalized_reserved.items()
+        },
+        "used_after_reconciliation": {
+            str(key): max(0, int(value))
+            for key, value in used_after_reconciliation.items()
+        },
+    }
+
+
 def configure_hunt_interaction_router(
     pool_provider: Callable[[], Any], **collaborators: Callable[..., Any]
 ) -> None:
@@ -2820,6 +2851,18 @@ async def _execute_hunt_capability_lifecycle(
                         receipt_payload["budget_consumed"] = dict(
                             terminal_record.actual
                         )
+                        receipt_payload["budget_accounting"] = (
+                            _hunt_budget_accounting(
+                                terminal_record.requested,
+                                terminal_record.actual,
+                                reconciled_used,
+                                charge_basis=(
+                                    "conservative_full_reservation"
+                                    if name == "candidate.verify"
+                                    else "capability_reported_settlement"
+                                ),
+                            )
+                        )
                     updated_action = await conn.execute(
                         """UPDATE hunt_actions
                            SET status=$2, result_summary=$3, receipt_id=$4,
@@ -2949,6 +2992,18 @@ async def _execute_hunt_capability_lifecycle(
                     receipt_id = receipt_result.get("tool_receipt", {}).get("id")
                 except Exception:
                     logger.exception("Failed to record Hunt capability receipt", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
+                if isinstance(receipt_payload, dict):
+                    receipt_payload["budget_consumed"] = dict(actual_charges)
+                    receipt_payload["budget_accounting"] = _hunt_budget_accounting(
+                        charges,
+                        actual_charges,
+                        reconciled_used,
+                        charge_basis=(
+                            "conservative_full_reservation"
+                            if name == "candidate.verify"
+                            else "capability_reported_settlement"
+                        ),
+                    )
                 await conn.execute(
                     """UPDATE hunt_actions SET status=$2, result_summary=$3, receipt_id=$4, completed_at=NOW() WHERE id=$1""",
                     action_id, status, json.dumps(_arsenal_routes._redact_agent_payload(receipt_payload), default=str),

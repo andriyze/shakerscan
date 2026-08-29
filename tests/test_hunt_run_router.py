@@ -91,6 +91,13 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
             "secret": "must-not-leak",
             "observations": [{"message": "must-not-leak"}],
             "budget_consumed": {"agent_actions": 1, "invalid": "hidden"},
+            "budget_accounting": {
+                "charge_basis": "capability_reported_settlement",
+                "reserved": {"agent_actions": 1, "http_requests": 24},
+                "actual": {"agent_actions": 1, "http_requests": 1},
+                "released": {"http_requests": 23},
+                "used_after_reconciliation": {"agent_actions": 4, "http_requests": 7},
+            },
             "data": {
                 "scan_id": str(scan_id),
                 "finding_ids": [str(finding_id), "not-a-uuid"],
@@ -105,7 +112,19 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
     assert "must-not-leak" not in serialized
     assert action["input_digest"] == "input-digest"
     assert action["result"]["observation_count"] == 1
-    assert action["result"]["budget_consumed"] == {"agent_actions": 1}
+    assert action["result"]["budget_consumed"] == {
+        "agent_actions": 1,
+        "http_requests": 1,
+    }
+    assert action["result"]["budget_accounting"] == {
+        "schema_version": "hunt-budget-settlement/v1",
+        "basis": "exact_settlement",
+        "charge_basis": "capability_reported_settlement",
+        "reserved": {"agent_actions": 1, "http_requests": 24},
+        "actual": {"agent_actions": 1, "http_requests": 1},
+        "released": {"http_requests": 23},
+        "used_after_reconciliation": {"agent_actions": 4, "http_requests": 7},
+    }
     assert action["result"]["reference_ids"]["scan_ids"] == [str(scan_id)]
     assert action["result"]["reference_ids"]["finding_ids"] == [str(finding_id)]
 
@@ -144,6 +163,9 @@ def test_public_hunt_action_prefers_canonical_worker_observation_count():
         "http_requests": 1,
         "agent_actions": 1,
     }
+    assert action["result"]["budget_accounting"]["basis"] == "legacy_reported_charge"
+    assert action["result"]["budget_accounting"]["charge_basis"] == "legacy_unknown"
+    assert action["result"]["budget_accounting"]["actual"] == {}
 
 
 def test_explicit_hunt_trace_preserves_decision_without_secrets_or_hidden_thoughts():

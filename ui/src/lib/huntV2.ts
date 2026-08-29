@@ -24,6 +24,15 @@ export interface HuntActionV2 {
     timed_out: boolean
     observation_count: number
     budget_consumed: Record<string, number>
+    budget_accounting: {
+      schema_version: 'hunt-budget-settlement/v1'
+      basis: 'exact_settlement' | 'legacy_reported_charge'
+      charge_basis: 'capability_reported_settlement' | 'conservative_full_reservation' | 'legacy_unknown' | string
+      reserved: Record<string, number>
+      actual: Record<string, number>
+      released: Record<string, number>
+      used_after_reconciliation: Record<string, number>
+    }
     reference_ids: {
       scan_ids: string[]
       finding_ids: string[]
