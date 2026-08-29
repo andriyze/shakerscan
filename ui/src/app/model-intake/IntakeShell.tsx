@@ -16,10 +16,10 @@ import {
 // eight stacked panels with two competing numbering schemes, so this shell
 // keeps the shared context pinned and shows one phase at a time.
 export const INTAKE_PHASES = [
-  { id: 'source', label: 'Source', helper: 'Model and deployment target' },
-  { id: 'preflight', label: 'Preflight', helper: 'Technical evidence scan' },
-  { id: 'admission', label: 'Admission', helper: 'Controlled deployment decision' },
-  { id: 'status', label: 'Status', helper: 'Adapters, runners, admissions' },
+  { id: 'source', number: '1', label: 'Source', helper: 'Model and deployment target' },
+  { id: 'preflight', number: '2–3', label: 'Preflight', helper: 'Policy and technical evidence scan' },
+  { id: 'admission', number: '4', label: 'Admission', helper: 'Controlled deployment decision' },
+  { id: 'status', number: null, label: 'Status', helper: 'Adapters, runners, admissions' },
 ] as const
 
 export type IntakePhase = (typeof INTAKE_PHASES)[number]['id']
@@ -150,7 +150,7 @@ export function IntakePhaseTabs({
 }) {
   return (
     <nav aria-label="Model Intake phases" className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-      {INTAKE_PHASES.map((item, index) => {
+      {INTAKE_PHASES.map((item) => {
         const active = item.id === phase
         const done = Boolean(completed[item.id])
         return (
@@ -170,7 +170,7 @@ export function IntakePhaseTabs({
             )}
             <span className="min-w-0">
               <span className="block text-sm font-medium text-white">
-                {item.id === 'status' ? item.label : `${index + 1}. ${item.label}`}
+                {item.number ? `${item.number}. ${item.label}` : item.label}
               </span>
               <span className="mt-0.5 block break-words text-xs text-gray-500">{item.helper}</span>
             </span>

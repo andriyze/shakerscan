@@ -133,6 +133,8 @@ test('page stages are numbered in the order they are rendered', () => {
   for (const stage of ['4.1', '4.2', '4.3', '4.4', '4.5', '4.6']) {
     assert.ok(workflow.includes(`>${stage} `), `controlled stage ${stage} is missing`)
   }
+  assert.match(shell, /number: '2–3', label: 'Preflight'/)
+  assert.match(shell, /number: '4', label: 'Admission'/)
 })
 
 test('local installs receive a scoped browser session without the operator secret', () => {
@@ -305,6 +307,10 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(page, /Clear HTML report \+ AIBOM, with machine exports when needed/)
   assert.match(page, /The controller keeps working if this page is closed or the API restarts/)
   assert.match(page, /Firecracker is ready\. Automatic reviews will include isolated load and repeat-inference evidence/)
+  assert.match(page, /they are not microVM runtime qualification/)
+  assert.match(page, /terminal \? 'Workflow ended'/)
+  assert.match(page, /This is not 100% control completion/)
+  assert.match(page, /!terminal &&/)
   assert.match(page, /review\.source_label/)
   assert.match(page, /Workflow steps/)
   assert.match(page, /exportAutomaticBom/)
