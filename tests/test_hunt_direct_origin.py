@@ -92,12 +92,34 @@ def test_only_literal_addresses_are_accepted():
         )
 
 
+@pytest.mark.parametrize("address", [
+    "127.0.0.1", "10.0.0.8", "169.254.169.254", "::1", "fc00::8", "fe80::1",
+    "::ffff:10.0.0.8",
+])
+def test_private_and_local_direct_origins_are_refused(address):
+    with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
+        _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+
+
 def test_both_address_families_are_accepted_and_deduplicated():
     contract = _start(
         direct_origin_addresses=["203.0.113.10", "2001:db8::10", "203.0.113.10"],
         policy=AUTHORIZED,
     )
     assert list(contract.direct_origin_addresses) == ["203.0.113.10", "2001:db8::10"]
+
+
+def test_approval_address_binding_is_order_independent_but_exact():
+    from api.api import _approval_context_value_matches
+
+    assert _approval_context_value_matches(
+        "direct_origin_addresses",
+        ["2001:db8::10", "203.0.113.10"],
+        ["203.0.113.10", "2001:db8::10"],
+    )
+    assert not _approval_context_value_matches(
+        "direct_origin_addresses", ["203.0.113.11"], ["203.0.113.10"],
+    )
 
 
 def test_the_confirmed_list_is_bounded():

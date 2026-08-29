@@ -15216,6 +15216,24 @@ def _host_matches_receipt_scope(host: str, scope: dict[str, Any]) -> bool:
     return False
 
 
+def _approval_context_value_matches(key: str, actual: Any, expected: Any) -> bool:
+    """Compare structured approval fields without making set-like values order-sensitive."""
+    if key != "direct_origin_addresses":
+        return actual == expected
+    if not isinstance(actual, (list, tuple)) or not isinstance(expected, (list, tuple)):
+        return False
+    try:
+        actual_addresses = sorted({
+            str(ipaddress.ip_address(str(item))) for item in actual
+        })
+        expected_addresses = sorted({
+            str(ipaddress.ip_address(str(item))) for item in expected
+        })
+    except (TypeError, ValueError):
+        return False
+    return actual_addresses == expected_addresses
+
+
 async def _validate_approval_receipt_for_action(
     conn,
     approval_receipt_id: str | None,
@@ -15343,7 +15361,8 @@ async def _validate_approval_receipt_for_action(
     expected_context = required_action_context or {}
     actual_context = approval.get("action_context") if isinstance(approval.get("action_context"), dict) else {}
     for key, expected in expected_context.items():
-        if str(actual_context.get(key) or "") != str(expected or ""):
+        actual = actual_context.get(key)
+        if not _approval_context_value_matches(key, actual, expected):
             await _deny(
                 "approval_receipt_context_mismatch",
                 f"Approval receipt is not bound to this {key}",

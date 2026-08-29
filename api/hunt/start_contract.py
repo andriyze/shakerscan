@@ -528,13 +528,28 @@ def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
             f"{MAX_DIRECT_ORIGIN_ADDRESSES} IP addresses"
         )
     addresses: list[str] = []
+    forbidden_networks = tuple(ipaddress.ip_network(network) for network in (
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+        "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7",
+        "fe80::/10", "ff00::/8",
+    ))
     for item in value:
         try:
-            address = str(ipaddress.ip_address(str(item).strip()))
+            parsed = ipaddress.ip_address(str(item).strip())
         except ValueError as exc:
             raise HuntStartContractError(
                 f"{field} must contain literal IP addresses"
             ) from exc
+        comparable = getattr(parsed, "ipv4_mapped", None) or parsed
+        if any(
+            comparable.version == network.version and comparable in network
+            for network in forbidden_networks
+        ):
+            raise HuntStartContractError(
+                f"{field} cannot contain private, local, or non-routable addresses"
+            )
+        address = str(parsed)
         if address not in addresses:
             addresses.append(address)
     return tuple(addresses)
