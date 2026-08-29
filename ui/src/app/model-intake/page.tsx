@@ -1607,12 +1607,12 @@ function ModelIntakeSettingsContent() {
         ) : (
           <div className="mt-4 grid gap-3">
             {automaticReviews.slice(0, showAllAutomaticReviews ? automaticReviews.length : 5).map((review, reviewIndex) => {
-              const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
+              const terminal = review.workflow_terminal ?? ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
               const displayedProgress = review.effective_progress ?? review.progress
               const displayedStep = review.effective_current_step || review.current_step
               const workflowComplete = review.state === 'technical_review_complete'
               const outcome = (review.technical_outcome || '').toUpperCase()
-              const passed = workflowComplete && outcome === 'PASS'
+              const passed = review.required_technical_controls_complete ?? (workflowComplete && outcome === 'PASS')
               const blocked = workflowComplete && outcome === 'BLOCK'
               const incomplete = workflowComplete && outcome === 'INCOMPLETE'
               const queuedForRunner = review.active_runner_job_state === 'pending'

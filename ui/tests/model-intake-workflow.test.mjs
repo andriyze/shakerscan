@@ -309,6 +309,8 @@ test('one pasted Hugging Face link queues the complete technical review', () => 
   assert.match(page, /Firecracker is ready\. Automatic reviews will include isolated load and repeat-inference evidence/)
   assert.match(page, /they are not microVM runtime qualification/)
   assert.match(page, /terminal \? 'Workflow ended'/)
+  assert.match(page, /review\.workflow_terminal \?\?/)
+  assert.match(page, /review\.required_technical_controls_complete \?\?/)
   assert.match(page, /This is not 100% control completion/)
   assert.match(page, /!terminal &&/)
   assert.match(page, /review\.source_label/)

@@ -5689,6 +5689,18 @@ def _model_intake_automatic_review_payload(row: Any) -> dict[str, Any]:
     payload["active_runner_job_state"] = active_runner_job_state or None
     if active_runner_job_state == "pending":
         effective_step = f"{effective_step}_queued"
+    state = str(payload.get("state") or "")
+    outcome = str(payload.get("technical_outcome") or "").upper()
+    workflow_terminal = state in {
+        "technical_review_complete", "attention_required", "failed", "cancelled",
+    }
+    controls_complete = state == "technical_review_complete" and outcome == "PASS"
+    payload["progress_semantics"] = "workflow_lifecycle_percentage"
+    payload["workflow_terminal"] = workflow_terminal
+    payload["required_technical_controls_complete"] = controls_complete
+    payload["required_technical_controls_status"] = (
+        "complete" if controls_complete else "incomplete" if workflow_terminal else "pending"
+    )
     payload["effective_progress"] = effective_progress
     payload["effective_current_step"] = effective_step
     return payload

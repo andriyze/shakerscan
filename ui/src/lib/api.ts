@@ -1633,6 +1633,10 @@ export interface ModelIntakeAutomaticReview {
   progress: number
   effective_current_step?: string
   effective_progress?: number
+  progress_semantics?: 'workflow_lifecycle_percentage'
+  workflow_terminal?: boolean
+  required_technical_controls_complete?: boolean
+  required_technical_controls_status?: 'pending' | 'complete' | 'incomplete'
   active_runner_job_state?: string | null
   static_scan_status?: string | null
   static_scan_progress?: number | null
