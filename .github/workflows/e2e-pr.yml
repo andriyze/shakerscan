@@ -67,7 +67,10 @@ jobs:
       - name: Start ShakerScan stack
         if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true'
         run: |
-          docker compose up -d --build
+          # The API image builds FROM shakerscan-worker:local, which compose will not
+          # build for it -- see tests/test_ci_builds_before_composing.py.
+          ./scanner.sh build
+          docker compose up -d
           for i in $(seq 1 90); do
             curl -sf http://localhost:8080/health && break
             sleep 5

@@ -68,7 +68,15 @@ jobs:
 
       - name: Start ShakerScan and pinned Juice Shop
         run: |
-          docker compose --profile e2e up -d --build
+          # `docker compose up --build` cannot build this stack from scratch. The API
+          # image builds FROM shakerscan-worker:local, which is a Dockerfile base rather
+          # than a compose dependency, so on a clean runner compose tried to PULL it and
+          # failed with "pull access denied". `scanner.sh build` builds the shared scanner
+          # runtime first and binds the sandbox and API images to that exact image, which
+          # is what docker-compose.yml's own comment says is required and what
+          # v2-contracts.yml already does.
+          ./scanner.sh build
+          docker compose --profile e2e up -d
           for i in $(seq 1 90); do
             curl -sf http://localhost:8080/health && break
             sleep 5
