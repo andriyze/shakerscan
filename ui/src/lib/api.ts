@@ -1958,6 +1958,37 @@ export interface AsmCoverageRollup {
   coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
   coverage_reconciles?: boolean
   attempted?: number
+  metric_contract?: AsmCoverageMetricContract
+}
+
+export interface AsmCoverageMetricContract {
+  schema_version: 'asm_coverage_metrics/v2' | string
+  snapshot_at?: string | null
+  inventory: {
+    canonical_routes: number
+    route_variants: number
+    retired_variants: number
+  }
+  examination: {
+    canonical_routes_ever_completed: number
+    variants_ever_completed: number
+    current_fresh_variants: number
+    stale_variants: number
+    never_attempted_variants: number
+  }
+  execution: {
+    attempts: number
+    latest_attempted_variants: number
+    latest_completed_variants: number
+    latest_partial_variants: number
+    latest_auth_blocked_variants: number
+    latest_rate_limited_variants: number
+    latest_error_variants: number
+  }
+  proof: {
+    proof_bearing_variants: number
+  }
+  definitions?: Record<string, string>
 }
 
 export interface Target {
@@ -2009,6 +2040,7 @@ export interface AsmCoverage {
   coverage: number
   coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
   coverage_reconciles?: boolean
+  metric_contract?: AsmCoverageMetricContract
   status_coverage?: Record<string, number | string>
   attempt_coverage?: Record<string, number | string>
   detail?: {

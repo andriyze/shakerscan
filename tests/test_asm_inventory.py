@@ -517,6 +517,12 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     conn = _CoverageConn(
         {
             "total": 5,
+            "canonical_routes": 2,
+            "canonical_routes_ever_completed": 1,
+            "variants_ever_completed": 3,
+            "proof_bearing_variants": 1,
+            "execution_attempts": 12,
+            "snapshot_at": None,
             "tested": 1,
             "untested": 4,
             "in_progress": 0,
@@ -559,6 +565,17 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     }
     # §11: headline carries one labeled denominator (testable = total - gone).
     assert summary["denominator"] == 4
+    contract = summary["metric_contract"]
+    assert contract["schema_version"] == "asm_coverage_metrics/v2"
+    assert contract["inventory"] == {
+        "canonical_routes": 2,
+        "route_variants": 4,
+        "retired_variants": 1,
+    }
+    assert contract["examination"]["variants_ever_completed"] == 3
+    assert contract["execution"]["attempts"] == 12
+    assert contract["proof"]["proof_bearing_variants"] == 1
+    assert "method + normalized path + auth state" in contract["definitions"]["route_variant"]
 
 
 def test_coverage_summary_degrades_unversioned_completed_attempt():
