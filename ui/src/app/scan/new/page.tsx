@@ -230,6 +230,24 @@ export default function NewScanPage() {
     ))
   }
 
+  function handleActiveTestingChange(enabled: boolean) {
+    setActiveTesting(enabled)
+    if (enabled) {
+      // The primary control should match the operator's intent. They can still
+      // explicitly return to Passive or choose Custom after granting permission.
+      if (familyPreset === 'passive') setFamilyPreset('standard_active')
+      return
+    }
+    if (familyPreset === 'standard_active') setFamilyPreset('passive')
+    if (!credentialUse) {
+      setAuthorized(false)
+      setApprovalReceipt('')
+    }
+    setNetworkDiscovery(false)
+    setAllowStateChanging(false)
+    removeConfirmedActiveSelections()
+  }
+
   useEffect(() => {
     let cancelled = false
     setPrimaryCredentialId('')
@@ -518,7 +536,7 @@ export default function NewScanPage() {
             </p>
           </div>
           <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-950 p-4">
-            <input className="mt-1" type="checkbox" disabled={batchMode} checked={activeTesting} onChange={(event) => { setActiveTesting(event.target.checked); if (!event.target.checked) { if (familyPreset === 'standard_active') setFamilyPreset('passive'); if (!credentialUse) { setAuthorized(false); setApprovalReceipt('') } setNetworkDiscovery(false); setAllowStateChanging(false); removeConfirmedActiveSelections() } }} />
+            <input className="mt-1" type="checkbox" disabled={batchMode} checked={activeTesting} onChange={(event) => handleActiveTestingChange(event.target.checked)} />
             <span>
               <span className="block text-sm font-medium text-white">Allow active testing</span>
               <span className="block text-xs text-gray-500">{batchMode ? 'Active testing is available for one target at a time.' : 'Permit bounded XSS, SQL injection, authorization, and other proof-oriented probes.'}</span>
@@ -706,7 +724,13 @@ export default function NewScanPage() {
         {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
-          <Button type="submit" loading={loading} disabled={activeTesting && !activeWorkerAvailable}>Run Scan</Button>
+          <Button
+            type="submit"
+            loading={loading}
+            disabled={((activeTesting || credentialUse) && !authorized) || (activeTesting && !activeWorkerAvailable)}
+          >
+            Run Scan
+          </Button>
         </div>
       </form>
     </div>

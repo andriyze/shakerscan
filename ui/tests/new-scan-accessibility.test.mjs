@@ -33,6 +33,12 @@ test('ordinary active scans need one runnable worker, not release-fleet uniformi
   assert.match(page, /placementPreviewLabel\(topology, currentWorkerCount\)/)
   assert.match(page, /Expected build:/)
   assert.match(page, /Reported running builds:/)
-  assert.match(page, /disabled=\{activeTesting && !activeWorkerAvailable\}/)
+  assert.match(page, /activeTesting && !activeWorkerAvailable/)
   assert.doesNotMatch(page, /Active testing is paused until the worker fleet is uniformly current/)
+})
+
+test('active testing expresses active coverage intent and requires ownership before submit', () => {
+  assert.match(page, /if \(familyPreset === 'passive'\) setFamilyPreset\('standard_active'\)/)
+  assert.match(page, /\(activeTesting \|\| credentialUse\) && !authorized/)
+  assert.match(page, /disabled=\{\(\(activeTesting \|\| credentialUse\) && !authorized\)/)
 })

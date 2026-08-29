@@ -140,11 +140,12 @@ test('authorized active Scan creates a target-bound approval and submits it in o
   await page.goto('/scan/new')
   await page.getByLabel('Target URL or hostname').fill(target.url)
   await page.getByLabel('Allow active testing').check()
+  const submit = page.getByRole('button', { name: 'Run Scan' })
+  await expect(submit).toBeDisabled()
   await page.getByLabel(/I own or have explicit authorization/).check()
   await expect(page.getByText(/Resolved families:.*xss/)).toBeVisible()
   await expect(page.getByText(/Approval receipt/i)).toHaveCount(0)
 
-  const submit = page.getByRole('button', { name: 'Run Scan' })
   await expect(submit).toBeEnabled()
   await submit.click()
 
@@ -152,7 +153,7 @@ test('authorized active Scan creates a target-bound approval and submits it in o
   expect(submittedPayload).toMatchObject({
     target: target.url,
     approval_receipt_id: approvalId,
-    policy: { active_testing: true },
-    options: { require_current_workers: true },
+    policy: { preset: 'standard_active', active_testing: true },
+    options: { require_current_workers: false },
   })
 })
