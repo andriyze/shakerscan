@@ -7,6 +7,8 @@ function finiteScore(value) {
   return Number.isFinite(score) ? score : null
 }
 
+export const DEVICE_POSTURE_FRESHNESS_DAYS = 7
+
 /**
  * Keep a stored device score visible without presenting incomplete posture as a
  * final pass. The scanner may retain a provisional score while its deployment
@@ -95,7 +97,7 @@ export function deviceScorePresentation(scan) {
 
 /** Preserve a stored score in device list/detail summaries without turning an
  * explicitly incomplete latest posture into an apparent pass. */
-export function deviceTargetScorePresentation(target) {
+export function deviceTargetScorePresentation(target, { nowMs = Date.now() } = {}) {
   const targetRecord = record(target)
   const gradeValue = targetRecord.last_grade
   const grade = gradeValue === null || gradeValue === undefined || gradeValue === ''
@@ -104,6 +106,28 @@ export function deviceTargetScorePresentation(target) {
   const score = finiteScore(targetRecord.last_score)
   if (grade === null && score === null) {
     return { status: 'unavailable', grade: null, score: null, note: 'No posture score is available.' }
+  }
+  const reachability = record(targetRecord.last_reachability)
+  const reachabilityStatus = String(reachability.status || '').toLowerCase()
+  if (reachabilityStatus !== 'online') {
+    return {
+      status: 'unavailable',
+      grade: null,
+      score: null,
+      note: reachabilityStatus
+        ? `The latest reachability result is ${reachabilityStatus}; a retained posture score is not current proof.`
+        : 'No current positive reachability receipt is available, so the retained posture score is withheld.',
+    }
+  }
+  const observedAt = Date.parse(String(reachability.checked_at || targetRecord.last_scanned_at || ''))
+  const staleAfterMs = DEVICE_POSTURE_FRESHNESS_DAYS * 24 * 60 * 60 * 1000
+  if (!Number.isFinite(observedAt) || Math.max(0, nowMs - observedAt) > staleAfterMs) {
+    return {
+      status: 'provisional',
+      grade,
+      score,
+      note: `The latest positive device evidence is older than ${DEVICE_POSTURE_FRESHNESS_DAYS} days; refresh it before relying on this posture.`,
+    }
   }
   const decision = String(targetRecord.last_posture_decision || '').toLowerCase()
   if (targetRecord.last_posture_complete === false || decision === 'needs_review') {

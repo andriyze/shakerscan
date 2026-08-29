@@ -47,11 +47,41 @@ test('device summaries preserve the latest scan provisional state', () => {
     last_score: 100,
     last_posture_complete: false,
     last_posture_decision: 'needs_review',
-  })
+    last_reachability: { status: 'online', checked_at: '2026-08-28T00:00:00Z' },
+  }, { nowMs: Date.parse('2026-08-29T00:00:00Z') })
   assert.equal(presentation.status, 'provisional')
   assert.equal(presentation.grade, 'A')
   assert.equal(presentation.score, 100)
   assert.match(presentation.note, /not a pass verdict/)
+})
+
+
+test('device summaries withhold a retained A when latest reachability is inconclusive', () => {
+  const presentation = deviceTargetScorePresentation({
+    last_grade: 'A',
+    last_score: 100,
+    last_posture_complete: true,
+    last_posture_decision: 'allow',
+    last_reachability: { status: 'inconclusive', checked_at: '2026-08-29T00:00:00Z' },
+  }, { nowMs: Date.parse('2026-08-29T01:00:00Z') })
+  assert.equal(presentation.status, 'unavailable')
+  assert.equal(presentation.grade, null)
+  assert.equal(presentation.score, null)
+  assert.match(presentation.note, /not current proof/)
+})
+
+
+test('device summaries qualify stale positive evidence', () => {
+  const presentation = deviceTargetScorePresentation({
+    last_grade: 'A',
+    last_score: 100,
+    last_posture_complete: true,
+    last_posture_decision: 'allow',
+    last_reachability: { status: 'online', checked_at: '2026-08-15T00:00:00Z' },
+  }, { nowMs: Date.parse('2026-08-29T00:00:00Z') })
+  assert.equal(presentation.status, 'provisional')
+  assert.equal(presentation.grade, 'A')
+  assert.match(presentation.note, /older than 7 days/)
 })
 
 

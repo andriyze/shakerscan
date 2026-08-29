@@ -147,7 +147,7 @@ export default function DevicesPage() {
           return <Card key={device.id} className="p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0"><Link href={`/devices/${device.id}`} className="font-semibold text-white hover:text-blue-300">{device.name}</Link><p className="mt-1 truncate font-mono text-xs text-gray-400">{device.primary_locator}</p></div>
-              {posture.grade ? <span title={posture.note || undefined} className={`rounded-md px-2 py-1 text-sm font-bold ${posture.status === 'provisional' ? 'bg-amber-500/15 text-amber-200' : 'bg-gray-800 text-gray-200'}`}>{posture.status === 'provisional' ? `Provisional ${posture.grade}` : posture.grade}</span> : null}
+              {posture.grade ? <span title={posture.note || undefined} className={`rounded-md px-2 py-1 text-sm font-bold ${posture.status === 'provisional' ? 'bg-amber-500/15 text-amber-200' : 'bg-gray-800 text-gray-200'}`}>{posture.status === 'provisional' ? `Provisional ${posture.grade}` : posture.grade}</span> : <span title={posture.note || undefined} className="rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-200">No reliable score</span>}
             </div>
             <div className="mt-3"><span className={`rounded-full px-2 py-1 text-xs ${device.last_reachability?.status === 'online' ? 'bg-emerald-500/15 text-emerald-300' : device.last_reachability?.status === 'unreachable' ? 'bg-red-500/15 text-red-300' : 'bg-amber-500/15 text-amber-300'}`}>{device.last_reachability ? `Reachability: ${device.last_reachability.status}` : 'Reachability: not checked'}</span></div>
             <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
