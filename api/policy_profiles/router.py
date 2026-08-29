@@ -63,6 +63,35 @@ class PolicyProfileRequest(BaseModel):
     is_active: bool = True
 
 
+POLICY_PRODUCT_AREAS = {"ai_gate", "model_intake", "dast"}
+POLICY_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+
+
+def _validate_policy_profile_request(req: PolicyProfileRequest) -> None:
+    if not req.name.strip():
+        raise HTTPException(status_code=422, detail="name is required")
+    if req.product_area not in POLICY_PRODUCT_AREAS:
+        raise HTTPException(status_code=422, detail="product_area must be ai_gate, model_intake, or dast")
+    if req.minimum_block_severity not in POLICY_SEVERITIES:
+        raise HTTPException(status_code=422, detail="minimum_block_severity is invalid")
+    if not req.environment.strip():
+        raise HTTPException(status_code=422, detail="environment is required")
+    if req.expires_days < 1 or req.expires_days > 3650:
+        raise HTTPException(status_code=422, detail="expires_days must be between 1 and 3650")
+    if req.strict_model_intake and req.product_area != "model_intake":
+        raise HTTPException(
+            status_code=422,
+            detail="strict_model_intake is only valid for model_intake policy profiles",
+        )
+    if req.required_trust_anchor_ids and not (
+        req.product_area == "model_intake" and req.strict_model_intake
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="required_trust_anchor_ids require a strict model_intake policy profile",
+        )
+
+
 async def _validate_policy_profile_required_anchor_ids(conn, req: PolicyProfileRequest) -> list[str]:
     try:
         required_anchor_ids = [str(uuid.UUID(item)) for item in _str_list(req.required_trust_anchor_ids)]
@@ -96,6 +125,7 @@ async def list_policy_profiles():
 @router.post("/policy-profiles")
 async def create_policy_profile(req: PolicyProfileRequest, http_request: Request):
     _model_intake_authenticated_subject(http_request)
+    _validate_policy_profile_request(req)
     async with _pool().acquire() as conn:
         required_anchor_ids = await _validate_policy_profile_required_anchor_ids(conn, req)
         try:
@@ -121,6 +151,7 @@ async def create_policy_profile(req: PolicyProfileRequest, http_request: Request
 @router.patch("/policy-profiles/{profile_id}")
 async def update_policy_profile(profile_id: str, req: PolicyProfileRequest, http_request: Request):
     actor = _model_intake_authenticated_subject(http_request)
+    _validate_policy_profile_request(req)
     async with _pool().acquire() as conn, conn.transaction():
         previous = await conn.fetchrow(
             "SELECT * FROM policy_profiles WHERE id=$1 FOR UPDATE",
@@ -185,6 +216,7 @@ async def delete_policy_profile(profile_id: str, http_request: Request):
 
 __all__ = [
     "PolicyProfileRequest",
+    "_validate_policy_profile_request",
     "_validate_policy_profile_required_anchor_ids",
     "configure_policy_profile_router",
     "create_policy_profile",
