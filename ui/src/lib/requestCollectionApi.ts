@@ -71,6 +71,7 @@ export interface RequestCollectionSelection {
   selected_request_count: number
   selected_mutating_count: number
   is_active: boolean
+  revoked_at?: string | null
   secret_values_visible: false
 }
 

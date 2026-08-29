@@ -12960,7 +12960,7 @@ async def _execute_scan_request_collections(
                          ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
                        JOIN request_collection_selections s
                          ON s.id=$3 AND s.collection_id=c.id
-                        AND s.binding_id=b.id
+                        AND s.binding_id=b.id AND s.revoked_at IS NULL
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
@@ -19632,7 +19632,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                          ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
                        JOIN request_collection_selections s
                          ON s.id=$3 AND s.collection_id=c.id
-                        AND s.binding_id=b.id
+                        AND s.binding_id=b.id AND s.revoked_at IS NULL
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true

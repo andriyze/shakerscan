@@ -10293,7 +10293,7 @@ async def _generic_collection_refs(
                       s.selected_request_count, s.selected_mutating_count
                FROM request_collections rc
                LEFT JOIN request_collection_selections s
-                 ON s.collection_id=rc.id AND s.id=$1 AND s.is_active=true
+                 ON s.collection_id=rc.id AND s.id=$1 AND s.revoked_at IS NULL
                WHERE rc.is_active=true AND (rc.id=$1 OR s.id=$1)
                ORDER BY (s.id=$1) DESC LIMIT 1""",
             reference_id,

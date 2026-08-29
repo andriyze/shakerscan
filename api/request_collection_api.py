@@ -1017,8 +1017,8 @@ async def deactivate_request_collection_selection(
     async with _pool().acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE request_collection_selections
-               SET is_active=false, updated_at=NOW()
-               WHERE id=$1 AND collection_id=$2 AND is_active=true
+               SET is_active=false, revoked_at=NOW(), updated_at=NOW()
+               WHERE id=$1 AND collection_id=$2 AND revoked_at IS NULL
                RETURNING *""",
             selection_uuid, collection_uuid,
         )
@@ -1027,7 +1027,7 @@ async def deactivate_request_collection_selection(
             status_code=404, detail="Request collection selection not found",
         )
     return {
-        "status": "deactivated",
+        "status": "revoked",
         "selection": _public_request_collection_selection(row),
     }
 

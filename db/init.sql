@@ -839,6 +839,7 @@ CREATE TABLE request_collection_selections (
     selected_request_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_request_count >= 0),
     selected_mutating_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_mutating_count >= 0),
     is_active BOOLEAN NOT NULL DEFAULT true,
+    revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT request_collection_selections_binding_fk FOREIGN KEY (binding_id, collection_id)
@@ -847,7 +848,8 @@ CREATE TABLE request_collection_selections (
 CREATE INDEX idx_request_collection_selections_active
 ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
 CREATE UNIQUE INDEX idx_request_collection_selections_current_name
-ON request_collection_selections(binding_id, lower(name)) WHERE is_active=true;
+ON request_collection_selections(binding_id, lower(name))
+WHERE is_active=true AND revoked_at IS NULL;
 
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

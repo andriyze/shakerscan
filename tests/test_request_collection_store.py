@@ -154,6 +154,8 @@ def test_store_executes_one_idempotent_schema_bundle():
     assert "CREATE TABLE IF NOT EXISTS request_collection_bindings" in conn.queries[0]
     assert "ON CONFLICT (collection_id, target_kind, target_id) DO NOTHING" in conn.queries[0]
     assert "DROP CONSTRAINT IF EXISTS request_collection_selections_name_unique" in conn.queries[0]
+    assert "ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ" in conn.queries[0]
+    assert "ranked_current_selections" in conn.queries[0]
     assert "idx_request_collection_selections_current_name" in conn.queries[0]
 
 
@@ -164,5 +166,25 @@ def test_selection_replacement_keeps_revision_rows_instead_of_overwriting_digest
 
     assert "ON CONFLICT (binding_id, name) DO UPDATE" not in router
     assert "SET is_active=false, updated_at=NOW()" in router
+    assert "SET is_active=false, revoked_at=NOW(), updated_at=NOW()" in router
     assert '"replaced_selection_id"' in router
     assert "AND s.binding_id=b.id AND s.is_active=true" not in worker
+    assert worker.count("AND s.binding_id=b.id AND s.revoked_at IS NULL") >= 2
+
+
+def test_operator_revocation_and_revision_supersession_are_distinct_states():
+    root = Path(__file__).resolve().parents[1]
+    router = (root / "api" / "request_collection_api.py").read_text()
+    api = (root / "api" / "api.py").read_text()
+    worker = (root / "api" / "worker.py").read_text()
+    broker = (root / "api" / "fleet_routes" / "router.py").read_text()
+
+    # Publishing a replacement retires only the current-name pointer; it does
+    # not revoke immutable revisions already bound to queued work.
+    assert "SET is_active=false, updated_at=NOW()" in router
+    # Explicit deletion is the safety revocation and every admission/execution
+    # boundary consumes the same predicate.
+    assert "SET is_active=false, revoked_at=NOW(), updated_at=NOW()" in router
+    assert "s.id=$1 AND s.revoked_at IS NULL" in api
+    assert worker.count("s.revoked_at IS NULL") >= 2
+    assert "s.binding_id=b.id AND s.revoked_at IS NULL" in broker
