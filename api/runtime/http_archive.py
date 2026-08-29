@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -253,6 +254,7 @@ __all__ = [
     "persist_transactions",
     "record_archive_stats",
     "store_archive_blob",
+    "store_archive_blobs",
     "transaction_rows",
 ]
 
@@ -405,6 +407,103 @@ async def store_archive_blob(conn, content: Any, *, scan_id: str | None, store) 
     return str(row["id"]) if row else None
 
 
+BLOB_INSERT_SQL = """
+INSERT INTO evidence_objects (
+    id, scan_id, object_type, content_sha256, size_bytes, storage_uri,
+    redaction_profile, retention_class, content
+) SELECT
+    r.id, r.scan_id, 'http_archive_blob', r.content_sha256, r.size_bytes,
+    r.storage_uri, 'none', $2, r.content
+FROM jsonb_to_recordset($1::jsonb) AS r(
+    id uuid, scan_id uuid, content_sha256 text, size_bytes int,
+    storage_uri text, content jsonb
+)
+"""
+
+
+async def store_archive_blobs(
+    conn,
+    contents: Sequence[tuple[str | None, Any]],
+    *,
+    store,
+) -> dict[tuple[str | None, str], str | None]:
+    """Persist unique archive payloads with a bounded number of DB round trips.
+
+    The evidence storage backend remains content-addressed. One lookup reuses objects already
+    owned by the same scan (or the shared Hunt owner), and one JSONB insert persists every
+    missing object. A large capture therefore does not issue four SQL statements per request.
+    """
+    stored_by_key: dict[tuple[str | None, str], Mapping[str, Any]] = {}
+    canonical_by_input: dict[tuple[str | None, str], tuple[str | None, str]] = {}
+    for owner_scan_id, content in contents:
+        if content is None:
+            continue
+        if isinstance(content, (bytes, bytearray)):
+            encoded = bytes(content)
+        else:
+            encoded = json.dumps(
+                content, sort_keys=True, separators=(",", ":"), default=str,
+            ).encode("utf-8", errors="replace")
+        input_key = (owner_scan_id, hashlib.sha256(encoded).hexdigest())
+        stored = store(content)
+        digest = stored.get("content_sha256")
+        if digest:
+            canonical_key = (owner_scan_id, str(digest))
+            stored_by_key.setdefault(canonical_key, stored)
+            canonical_by_input[input_key] = canonical_key
+    if not stored_by_key:
+        return {}
+
+    owners = sorted({owner for owner, _digest in stored_by_key if owner is not None})
+    digests = sorted({digest for _owner, digest in stored_by_key})
+    existing_rows = await conn.fetch(
+        """SELECT DISTINCT ON (scan_id, content_sha256)
+                  id, scan_id, content_sha256
+           FROM evidence_objects
+           WHERE object_type = 'http_archive_blob'
+             AND content_sha256 = ANY($1::text[])
+             AND (scan_id = ANY($2::uuid[]) OR scan_id IS NULL)
+           ORDER BY scan_id, content_sha256, created_at""",
+        digests,
+        owners,
+    )
+    object_ids: dict[tuple[str | None, str], str | None] = {
+        (
+            str(row["scan_id"]) if row.get("scan_id") is not None else None,
+            str(row["content_sha256"]),
+        ): str(row["id"])
+        for row in existing_rows
+    }
+
+    inserts: list[dict[str, Any]] = []
+    for key, stored in stored_by_key.items():
+        if key in object_ids:
+            continue
+        object_id = str(uuid.uuid4())
+        inline_content = stored.get("content")
+        if isinstance(inline_content, str):
+            try:
+                inline_content = json.loads(inline_content)
+            except json.JSONDecodeError:
+                # A custom storage adapter may return plain text instead of serialized JSON.
+                pass
+        inserts.append({
+            "id": object_id,
+            "scan_id": key[0],
+            "content_sha256": key[1],
+            "size_bytes": stored.get("size_bytes"),
+            "storage_uri": stored.get("storage_uri"),
+            "content": inline_content,
+        })
+        object_ids[key] = object_id
+    if inserts:
+        await conn.execute(BLOB_INSERT_SQL, json.dumps(inserts, default=str), RETENTION_CLASS)
+    return {
+        input_key: object_ids.get(canonical_key)
+        for input_key, canonical_key in canonical_by_input.items()
+    }
+
+
 async def archive_http_transactions(
     conn,
     transactions: Sequence[HttpTransaction],
@@ -417,9 +516,9 @@ async def archive_http_transactions(
         return 0
     async def _prepare() -> list[Mapping[str, Any]]:
         pending: list[dict[str, Any]] = []
-        blob_cache: dict[tuple[str | None, str], str | None] = {}
+        blob_contents: dict[tuple[str | None, str], Any] = {}
 
-        async def prepare_blob(content: Any, *, owner_scan_id: str | None) -> str | None:
+        def prepare_blob(content: Any, *, owner_scan_id: str | None) -> tuple[str | None, str] | None:
             if content is None:
                 return None
             if isinstance(content, (bytes, bytearray)):
@@ -429,11 +528,8 @@ async def archive_http_transactions(
                     content, sort_keys=True, separators=(",", ":"), default=str,
                 ).encode("utf-8", errors="replace")
             key = (owner_scan_id, hashlib.sha256(encoded).hexdigest())
-            if key not in blob_cache:
-                blob_cache[key] = await store_archive_blob(
-                    conn, content, scan_id=owner_scan_id, store=store,
-                )
-            return blob_cache[key]
+            blob_contents.setdefault(key, content)
+            return key
 
         for item in transactions:
             body = capped_body(item.request_body if stores_bodies() else None)
@@ -449,21 +545,30 @@ async def archive_http_transactions(
             owner_scan_id = item.scan_id or scan_id
             pending.append({
                 "item": item,
-                "request_headers": await prepare_blob(
+                "request_headers": prepare_blob(
                     normalized_headers(item.request_headers), owner_scan_id=owner_scan_id,
                 ) if item.request_headers else None,
-                "request_body": await prepare_blob(
+                "request_body": prepare_blob(
                     body["content"], owner_scan_id=owner_scan_id,
                 ) if body["content"] else None,
-                "response_headers": await prepare_blob(
+                "response_headers": prepare_blob(
                     normalized_headers(item.response_headers), owner_scan_id=owner_scan_id,
                 ) if item.response_headers else None,
-                "response_body": await prepare_blob(
+                "response_body": prepare_blob(
                     response["content"], owner_scan_id=owner_scan_id,
                 ) if response["content"] else None,
                 "request_meta": body,
                 "response_meta": response,
             })
+        object_ids = await store_archive_blobs(
+            conn,
+            [(key[0], content) for key, content in blob_contents.items()],
+            store=store,
+        )
+        for entry in pending:
+            for field in ("request_headers", "request_body", "response_headers", "response_body"):
+                cache_key = entry[field]
+                entry[field] = object_ids.get(cache_key) if cache_key else None
         return pending
 
     prepared = await _prepare()

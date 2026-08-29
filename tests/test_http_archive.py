@@ -554,12 +554,16 @@ async def test_archive_batch_reuses_identical_evidence_blobs():
     class Conn:
         def __init__(self):
             self.blob_inserts = 0
+            self.blob_insert_statements = 0
 
-        async def fetchrow(self, query, *params):
-            self.blob_inserts += 1
-            return {"id": f"00000000-0000-4000-8000-{self.blob_inserts:012d}"}
+        async def fetch(self, query, *params):
+            assert "FROM evidence_objects" in query
+            return []
 
         async def execute(self, query, *params):
+            if "INSERT INTO evidence_objects" in query:
+                self.blob_insert_statements += 1
+                self.blob_inserts += len(json.loads(params[0]))
             return "INSERT 0 2"
 
     conn = Conn()
@@ -577,6 +581,37 @@ async def test_archive_batch_reuses_identical_evidence_blobs():
     }
     assert await archive_http_transactions(conn, transactions, store=stored) == 2
     assert conn.blob_inserts == 2, "one shared header object and one shared body object"
+    assert conn.blob_insert_statements == 1, "all unique blobs use one DB insert statement"
+
+
+@pytest.mark.asyncio
+async def test_archive_batch_reuses_existing_content_addressed_blob():
+    existing_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    class Conn:
+        async def fetch(self, query, *params):
+            return [{
+                "id": existing_id,
+                "scan_id": None,
+                "content_sha256": params[0][0],
+            }]
+
+        async def execute(self, query, *params):
+            assert "INSERT INTO evidence_objects" not in query
+            return "INSERT 0 1"
+
+    transaction = HttpTransaction(
+        plane="hunt", hunt_run_id="22222222-2222-4222-8222-222222222222",
+        method="GET", url="https://t/existing", request_headers={"accept": "text/plain"},
+    )
+    stored = lambda content: {
+        "content_sha256": hashlib.sha256(
+            json.dumps(content, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+        "size_bytes": 10, "storage_uri": "inline:evidence_objects", "content": content,
+    }
+
+    assert await archive_http_transactions(Conn(), [transaction], store=stored) == 1
 
 
 @pytest.mark.asyncio
