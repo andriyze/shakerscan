@@ -1,0 +1,229 @@
+"""Scoring is two axes, and neither may be inferred from the other.
+
+Risk answers "how bad is what we found", discounted by how well each finding is proven.
+Assurance answers "how much did we actually examine". Blending them produced the failure this
+replaces: an application nobody managed to scan graded A, because finding nothing and looking
+nowhere were indistinguishable.
+
+The severity-ceiling behaviour that this file inherits from
+``test_scan_grade_severity_ceiling`` is preserved for *proven* findings: scoring was once
+purely subtractive, so one proven critical scored 80 and graded B next to a proven injection.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from api.scan.scoring import (
+    ASSURANCE_COMPONENTS,
+    GRADE_BANDS,
+    assurance,
+    caps_risk_grade,
+    grade_for,
+    proof_weight,
+    risk,
+    score_scan,
+)
+
+
+def proven(severity):
+    """The shape the V2 finalizer stamps once a deterministic proof contract is satisfied."""
+    return {
+        "severity": severity, "verified": True, "suspected": False,
+        "proof_state": "verified",
+    }
+
+
+def suspected(severity):
+    return {"severity": severity, "suspected": True}
+
+
+# --- risk: proven findings still cap the grade -------------------------------------------
+
+def test_one_proven_critical_cannot_grade_above_f():
+    assert risk([proven("critical")])["grade"] == "F"
+
+
+def test_one_proven_high_cannot_grade_above_c():
+    assert risk([proven("high")])["grade"] in {"C", "D", "F"}
+
+
+def test_one_proven_medium_cannot_grade_above_b():
+    assert risk([proven("medium")])["grade"] in {"B", "C", "D", "F"}
+
+
+def test_a_clean_scan_scores_full_marks():
+    result = risk([])
+    assert (result["score"], result["grade"]) == (100, "A")
+
+
+def test_informational_findings_do_not_move_the_grade():
+    assert risk([proven("info"), proven("info")])["score"] == 100
+
+
+def test_a_low_finding_still_permits_a_high_grade():
+    result = risk([proven("low")])
+    assert result["grade"] == "A"
+    assert result["score"] < 100, "it should still cost something"
+
+
+def test_volume_eventually_matters_below_the_ceiling():
+    one = risk([proven("high")])["score"]
+    several = risk([proven("high")] * 3)["score"]
+    many = risk([proven("high")] * 6)["score"]
+    assert several == one, "the ceiling dominates until the weight exceeds it"
+    assert many < one, "volume must eventually matter"
+
+
+def test_the_worst_proven_severity_sets_the_ceiling():
+    assert risk([proven("critical"), proven("low")])["grade"] == "F"
+
+
+def test_an_unknown_severity_is_treated_as_informational():
+    assert risk([{"severity": "bogus"}])["score"] == 100
+
+
+# --- risk: proof tier changes the ceiling ------------------------------------------------
+
+def test_a_suspected_finding_caps_one_band_softer_than_a_proven_one():
+    """Grading an unproven claim as if it were confirmed costs the reader's trust in every
+    grade the scanner emits."""
+    assert risk([proven("critical")])["grade"] == "F"
+    assert risk([suspected("critical")])["grade"] == "C"
+    assert risk([proven("high")])["score"] < risk([suspected("high")])["score"]
+
+
+def test_a_suspected_finding_still_costs_something():
+    assert risk([suspected("critical")])["score"] < 100
+
+
+def test_the_v2_finalizer_proof_shape_counts_as_proven():
+    """verified plus proof_state together are what the finalizer stamps after a proof
+    contract. Reading only the legacy helper graded a browser-proven XSS as suspected."""
+    assert caps_risk_grade(proven("high")) is True
+    assert proof_weight(proven("high")) == 1.0
+
+
+def test_a_bare_verified_flag_is_not_proof_on_its_own():
+    """It can come from a coarse scanner heuristic, so it does not cap the grade."""
+    assert caps_risk_grade({"severity": "critical", "verified": True}) is False
+
+
+def test_a_trusted_ai_false_positive_neither_scores_nor_caps():
+    finding = {
+        "severity": "critical",
+        "ai_verdict": "false_positive",
+        "ai_confidence": 0.99,
+        "ai_classification_source": "semantic_judge",
+    }
+    assert proof_weight(finding) == 0.0
+    assert risk([finding])["score"] == 100
+
+
+def test_reasons_separate_proven_from_suspected_counts():
+    result = risk([proven("high"), suspected("high"), suspected("critical")])
+    assert "proven_high:1" in result["reasons"]
+    assert "suspected_high:1" in result["reasons"]
+    assert "suspected_critical:1" in result["reasons"]
+
+
+# --- assurance: it must be earned --------------------------------------------------------
+
+def test_a_scan_that_examined_nothing_scores_zero_assurance():
+    """The whole point of the second axis. Silence is not safety."""
+    result = assurance({})
+    assert result["score"] == 0
+    assert result["band"] == "none"
+    assert result["gaps"] == ["no_examination_recorded"]
+
+
+def test_full_coverage_with_authenticated_traffic_scores_strong():
+    coverage = {
+        "planned_action_count": 10, "terminal_action_count": 10,
+        "family_coverage": [
+            {"family": "xss", "selected": True, "status": "complete"},
+            {"family": "sqli", "selected": True, "status": "complete"},
+        ],
+        "candidate_coverage": {
+            "xss": {"planned_candidates": 20, "attempted_candidates": 20},
+            "sqli": {"planned_candidates": 20, "attempted_candidates": 20},
+        },
+        "grade_reliability": {"reliable": True, "reasons": []},
+    }
+    result = assurance(coverage, smart_coverage={"principal_contexts_exercised": 2})
+    assert result["score"] == 100
+    assert result["band"] == "strong"
+    assert result["gaps"] == []
+
+
+def test_an_incomplete_family_lowers_assurance_and_is_named():
+    coverage = {
+        "planned_action_count": 10, "terminal_action_count": 10,
+        "family_coverage": [
+            {"family": "xss", "selected": True, "status": "complete"},
+            {"family": "sqli", "selected": True, "status": "partial"},
+        ],
+        "candidate_coverage": {
+            "sqli": {"planned_candidates": 20, "attempted_candidates": 5},
+        },
+        "grade_reliability": {"reliable": False, "reasons": ["selected_family_incomplete"]},
+    }
+    result = assurance(coverage)
+    assert result["score"] < 100
+    assert "selected_families_complete" in result["gaps"]
+    assert "candidates_attempted" in result["gaps"]
+
+
+def test_a_cancelled_scan_cannot_report_high_assurance():
+    coverage = {
+        "status": "cancelled",
+        "planned_action_count": 10, "terminal_action_count": 10,
+        "family_coverage": [{"family": "xss", "selected": True, "status": "complete"}],
+        "candidate_coverage": {"xss": {"planned_candidates": 5, "attempted_candidates": 5}},
+        "grade_reliability": {"reliable": True, "reasons": []},
+    }
+    assert assurance(coverage)["score"] <= 40
+
+
+def test_anonymous_only_coverage_is_not_full_assurance():
+    coverage = {
+        "planned_action_count": 4, "terminal_action_count": 4,
+        "family_coverage": [{"family": "xss", "selected": True, "status": "complete"}],
+        "candidate_coverage": {"xss": {"planned_candidates": 5, "attempted_candidates": 5}},
+        "grade_reliability": {"reliable": True, "reasons": []},
+    }
+    result = assurance(coverage, smart_coverage={"auth_states_tested": ["anonymous"]})
+    assert "authenticated_coverage" in result["gaps"]
+
+
+def test_the_component_weights_total_one_hundred():
+    assert sum(weight for _, weight in ASSURANCE_COMPONENTS) == 100
+
+
+# --- the two axes stay separate ----------------------------------------------------------
+
+def test_a_clean_but_shallow_scan_reports_a_good_grade_and_poor_assurance():
+    """The case the old single number could not express."""
+    result = score_scan([], {}, grade_reliable=True)
+    assert result["risk_grade"] == "A"
+    assert result["assurance_score"] == 0
+    assert result["assurance_band"] == "none"
+
+
+def test_the_compatibility_projection_carries_the_risk_axis():
+    result = score_scan([proven("critical")], {}, grade_reliable=True)
+    assert result["score"] == result["risk_score"]
+    assert result["grade"] == result["risk_grade"] == "F"
+
+
+def test_an_unreliable_grade_still_renders_the_star():
+    result = score_scan([], {}, grade_reliable=False)
+    assert result["grade"].endswith("*")
+    assert result["grade_reliable"] is False
+
+
+def test_every_engine_resolves_letters_from_one_band_table():
+    assert [grade_for(score) for score in (100, 90, 89, 80, 70, 60, 59, 0)] == [
+        "A", "A", "B", "B", "C", "D", "F", "F",
+    ]
+    assert GRADE_BANDS[0] == (90, "A")

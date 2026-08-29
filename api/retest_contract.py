@@ -1150,7 +1150,12 @@ async def run_schema_migrations(pool) -> None:
 
             # Parallel scan orchestration (parent/shard/merge fan-out).
             await conn.execute("""
+                ALTER TABLE targets
+                ADD COLUMN IF NOT EXISTS last_assurance_score INTEGER
+            """)
+            await conn.execute("""
                 ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS assurance_score INTEGER,
                 ADD COLUMN IF NOT EXISTS parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS scan_role TEXT NOT NULL DEFAULT 'standalone',
                 ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
@@ -1530,6 +1535,7 @@ async def run_schema_migrations(pool) -> None:
                             last_scanned_at = NEW.completed_at,
                             last_score = NEW.score,
                             last_grade = NEW.grade,
+                            last_assurance_score = NEW.assurance_score,
                             total_scans = total_scans + 1,
                             active_findings_count = (
                                 SELECT COUNT(*) FROM findings

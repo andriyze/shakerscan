@@ -46,6 +46,7 @@ CREATE TABLE targets (
     last_scanned_at TIMESTAMPTZ,
     last_score INTEGER,
     last_grade TEXT,
+    last_assurance_score INTEGER,
     total_scans INTEGER DEFAULT 0,
     active_findings_count INTEGER DEFAULT 0,
 
@@ -128,6 +129,9 @@ CREATE TABLE scans (
     result JSONB,
     score INTEGER,
     grade TEXT,
+    -- How much of the application was examined, scored independently of how bad the
+    -- findings are. A clean scan that looked nowhere must not read as a safe one.
+    assurance_score INTEGER,
     findings_count INTEGER DEFAULT 0,
 
     -- Delta (change detection)

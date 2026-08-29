@@ -8,6 +8,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
+from . import scoring
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus
 from .continuation import (
@@ -18,19 +19,8 @@ from .continuation import (
 
 
 SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
-_SEVERITY_WEIGHT = {
-    "critical": 20,
-    "high": 10,
-    "medium": 5,
-    "low": 2,
-    "info": 0,
-}
-# The best score a scan can hold once a finding of this severity exists. Grade bands are
-# A>=90, B>=80, C>=70, D>=60, F<60 -- so one critical is an F however few findings there are, one
-# high cannot exceed C, and one medium cannot exceed B. Low and informational have no ceiling: a
-# single low-severity issue is not a reason to fail an application, though it still costs weight.
-# Reported as missing when absent from a response, so the report says what is not there rather
-# than only what is.
+# Reported as missing when absent from a response, so the report says what is not there
+# rather than only what is.
 _EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
     "content-security-policy",
     "referrer-policy",
@@ -38,11 +28,6 @@ _EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
     "x-content-type-options",
     "x-frame-options",
 )
-_SEVERITY_SCORE_CEILING = {
-    "critical": 40,
-    "high": 70,
-    "medium": 85,
-}
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
@@ -660,7 +645,7 @@ def _findings_for_action(
                 findings.append(finding)
         elif kind == "template_match":
             severity = str(item.get("severity") or "info").strip().lower()
-            if severity not in _SEVERITY_WEIGHT:
+            if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
             finding = _base_finding(
                 tool="nuclei",
@@ -778,26 +763,6 @@ def _runtime_destinations(
             }
             destinations.append(destination)
     return destinations
-
-
-def _score(findings: Sequence[Mapping[str, Any]]) -> tuple[int, str]:
-    """Score a scan so the worst thing found sets the ceiling and the count moves it within.
-
-    Subtracting a weight per finding from 100 made severity a dent rather than a verdict: one
-    proven critical injection scored 80 and graded B, one high scored 90 and graded A. On a
-    deliberately vulnerable application that produced pages of A grades beside proven injections.
-    A security grade has to answer "how bad is the worst thing here", so severity caps the score
-    and the subtractive weight then differentiates within that cap.
-    """
-    severities = [str(item.get("severity") or "info").strip().lower() for item in findings]
-    score = max(0, 100 - sum(_SEVERITY_WEIGHT.get(name, 0) for name in severities))
-    ceiling = min(
-        (_SEVERITY_SCORE_CEILING[name] for name in severities if name in _SEVERITY_SCORE_CEILING),
-        default=100,
-    )
-    score = min(score, ceiling)
-    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
-    return score, grade
 
 
 # The report contract the UI and AGENTS.md both name, mapped from the header the
@@ -1146,7 +1111,6 @@ def finalize_scan_report(
             "budget_consumed": dict(result.budget_consumed),
         })
     findings = list(findings_by_id.values())
-    score, grade = _score(findings)
 
     # Family-aware coverage: every selected family (one that produced a batch or
     # verifier action) is reported with attempts, findings, budget, and a status.
@@ -1382,7 +1346,6 @@ def finalize_scan_report(
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set()))
     grade_reliable = not reliability_reasons
-    rendered_grade = grade if grade_reliable else f"{grade}*"
     coverage_reasons = sorted(
         set(reasons)
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
@@ -1500,52 +1463,57 @@ def finalize_scan_report(
         coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
+    coverage_block = {
+        "status": coverage_status,
+        "reasons": coverage_reasons,
+        "planned_action_count": len(plan.actions),
+        "terminal_action_count": len(action_rows),
+        "finalization_action_id": finalization_action.action_id,
+        "capability_coverage": capability_coverage,
+        "grade_reliability": {
+            "reliable": grade_reliable,
+            "reasons": reliability_reasons,
+        },
+        "optional_gaps": optional_gaps,
+        "active_zero_attempt_actions": zero_attempt_actions,
+        "candidate_coverage": candidate_coverage,
+        "family_coverage": sorted(
+            family_coverage.values(), key=lambda row: row["family"],
+        ),
+        "selected_family_gaps": selected_family_gaps,
+    }
+    smart_coverage_block = {
+        "auth_states_tested": auth_states_tested,
+        "principal_contexts_exercised": principal_contexts,
+        "principal_context_semantics": (
+            "server_observed_authenticated_target_traffic"
+        ),
+    }
+    # Scored after coverage exists, because the assurance axis reads it. The severity-only
+    # scorer ran ~350 lines earlier and every one of these signals was computed and then
+    # used for nothing but appending a star to the letter.
+    result_block = scoring.score_scan(
+        findings, coverage_block,
+        smart_coverage=smart_coverage_block,
+        grade_reliable=grade_reliable,
+    )
     report = {
         "schema_version": SCAN_REPORT_SCHEMA,
         "target": str(target_url),
         "runtime_destinations": runtime_destinations,
         "findings": findings,
-        "result": {
-            "score": score,
-            "grade": rendered_grade,
-            "grade_reliable": grade_reliable,
-            "score_policy": "verified_and_suspected_severity_ceiling/v2",
-        },
+        "result": result_block,
         # Posture belongs on the envelope, not inside the nested "result": the stored
         # `result_json` IS what a client reads as `scan.result`, so a section nested one
         # level deeper is documented as `result.tls` and served as `result.result.tls`.
         **_posture_sections(observations),
-        "coverage": {
-            "status": coverage_status,
-            "reasons": coverage_reasons,
-            "planned_action_count": len(plan.actions),
-            "terminal_action_count": len(action_rows),
-            "finalization_action_id": finalization_action.action_id,
-            "capability_coverage": capability_coverage,
-            "grade_reliability": {
-                "reliable": grade_reliable,
-                "reasons": reliability_reasons,
-            },
-            "optional_gaps": optional_gaps,
-            "active_zero_attempt_actions": zero_attempt_actions,
-            "candidate_coverage": candidate_coverage,
-            "family_coverage": sorted(
-                family_coverage.values(), key=lambda row: row["family"],
-            ),
-            "selected_family_gaps": selected_family_gaps,
-        },
+        "coverage": coverage_block,
         "verification_summary": {
             "verified": verified,
             "suspected": suspected,
             "unproven_critical_high": unproven_critical_high,
         },
-        "smart_coverage": {
-            "auth_states_tested": auth_states_tested,
-            "principal_contexts_exercised": principal_contexts,
-            "principal_context_semantics": (
-                "server_observed_authenticated_target_traffic"
-            ),
-        },
+        "smart_coverage": smart_coverage_block,
         "canonical_action_execution": {
             "schema_version": "canonical-scan-action-execution/v1",
             "plan_digest": plan.plan_digest,

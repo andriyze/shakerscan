@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react'
 import Link from 'next/link'
 import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScanV2, type Campaign, type Scan } from '@/lib/api'
+import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES } from '@/lib/constants'
 import { Plus, Search } from 'lucide-react'
@@ -23,6 +24,22 @@ const AUTH_OPTION_KEYS = [
   'user2_header',
   'user2_cookies'
 ]
+
+// A grade alone cannot say whether a clean result came from a thorough scan or one that
+// barely ran. The chip sits next to the letter, not in its own column, so the two are read
+// together.
+function AssuranceChip({ scan }: { scan: Scan }) {
+  const assurance = scanAssurance(scan)
+  if (!assurance) return null
+  return (
+    <span
+      className={`rounded bg-gray-900 px-1.5 py-0.5 text-xs ${assuranceClass(assurance.band)}`}
+      title={`Assurance ${assurance.score}/100 - ${assurance.label}`}
+    >
+      {assurance.score}
+    </span>
+  )
+}
 
 function hasConfiguredValue(value: unknown): boolean {
   if (value === null || value === undefined) return false

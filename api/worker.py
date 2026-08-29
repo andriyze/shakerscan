@@ -243,6 +243,7 @@ from scan.execution_backend import (
     ActionLease,
     PostgresScanExecutionBackend,
 )
+from scan import scoring as scan_scoring
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
@@ -14013,6 +14014,9 @@ async def process_scan_job(job_data: dict):
                     if command_result_id:
                         metadata["runtime_scope_command_result_id"] = command_result_id
                         result["scan_metadata"] = metadata
+                # Stored beside the score so a list view can show that a clean grade came
+                # from a shallow scan without opening the report.
+                assurance_score = (result.get("result") or {}).get("assurance_score")
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'completed',
@@ -14024,11 +14028,13 @@ async def process_scan_job(job_data: dict):
                         duration_seconds = $6,
                         progress = 100,
                         current_phase = 'completed',
-                        coverage_status = $7, coverage_json = $8, budget_used_json = $9
+                        coverage_status = $7, coverage_json = $8, budget_used_json = $9,
+                        assurance_score = $11
                     WHERE id = $10
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, coverage_status, json.dumps(result_coverage),
-                     json.dumps(budget_used), uuid.UUID(scan_id))
+                     json.dumps(budget_used), uuid.UUID(scan_id),
+                     int(assurance_score) if isinstance(assurance_score, int) else None)
                 candidate_settlement = result.get("candidate_verification") if isinstance(result.get("candidate_verification"), dict) else {}
                 candidate_id = str(candidate_settlement.get("candidate_id") or "")
                 if candidate_id:
@@ -14600,23 +14606,11 @@ def _recompute_focused_parent_result(
         "medium": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "medium"),
         "low": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "low"),
     }
-    score = 100
-    score -= min(severity_counts["critical"] * 15, 45)
-    score -= min(severity_counts["high"] * 10, 30)
-    score -= min(severity_counts["medium"] * 4, 20)
-    score -= min(severity_counts["low"] * 1, 10)
-    score = max(0, min(100, score))
-    max_severity = "info"
-    for sev in ("critical", "high", "medium", "low"):
-        if severity_counts[sev]:
-            max_severity = sev
-            break
-    if max_severity == "critical":
-        grade = "D" if score >= 55 else "F"
-    elif max_severity == "high":
-        grade = "C" if score >= 70 else "D" if score >= 55 else "F"
-    else:
-        grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 55 else "F"
+    # One scorer, one band table. This path used to carry a third weight table and its own
+    # D>=55 bands, so the same findings rendered a different letter depending on whether a
+    # focused-family parent or the canonical finalizer produced the row.
+    focused_risk = scan_scoring.risk(focused_findings)
+    score, grade = focused_risk["score"], focused_risk["grade"]
 
     notes: list[str] = []
     if severity_counts["critical"]:
@@ -14647,7 +14641,13 @@ def _recompute_focused_parent_result(
         "focused_active_scope": True,
         "focused_family": family,
         "focused_context_findings": max(0, len(union_findings) - len(focused_findings)),
-        "grade_reliable": True,
+        "score_reasons": focused_risk["reasons"],
+        "risk_score": score,
+        "risk_grade": grade,
+        "score_policy": scan_scoring.SCORE_POLICY,
+        # Previously hardcoded True, which overrode whatever reliability the underlying
+        # merge had determined and made a partial focused scan look fully covered.
+        "grade_reliable": bool(merged.get("result", {}).get("grade_reliable", True)),
     })
     for stale_key in ("grade_warning", "coverage_issues", "original_grade"):
         result.pop(stale_key, None)
@@ -17014,11 +17014,16 @@ async def process_scan_merge_job(job_data: dict):
     _graded_block = None
     try:
         from grading import grade as _grade_report
+        # grading.grade still produces the human-readable summary, notes, remediation and
+        # compliance narrative. Its score and letter are discarded: it used D>=55 bands
+        # while the canonical finalizer used D>=60, so the two disagreed about the same
+        # findings. The shared scorer decides both here.
         _graded = _grade_report(merged)
-        _gs = _graded.get('score')
-        if _gs is not None and (min_score is None or _gs <= min_score):
+        _risk = scan_scoring.risk(union_findings)
+        _gs = _risk["score"]
+        if min_score is None or _gs <= min_score:
             agg_score = _gs
-            agg_grade = _graded.get('grade')
+            agg_grade = _risk["grade"]
             _graded_block = _graded
     except Exception as e:
         print(f"[merge {parent_id[:8]}] parent grade recompute skipped: {e}", flush=True)
@@ -17036,6 +17041,10 @@ async def process_scan_merge_job(job_data: dict):
         for _k in ("summary", "notes", "remediation", "cvss_metrics", "compliance"):
             if _graded_block.get(_k) is not None:
                 merged["result"][_k] = _graded_block[_k]
+        merged["result"]["score_policy"] = scan_scoring.SCORE_POLICY
+        if agg_score is not None:
+            merged["result"]["risk_score"] = agg_score
+            merged["result"]["risk_grade"] = agg_grade
 
     # Recompute the verification/triage summary from the final union so the parent's
     # counts reflect recon + every shard, not a single shard's stale view.
@@ -18368,13 +18377,17 @@ async def process_exploit_batch_job(job_data: dict):
                 final_status = current['status']
                 terminal_phase = current['status']
             else:
+                # Stored beside the score so a list view can show that a clean grade came
+                # from a shallow scan without opening the report.
+                assurance = (result.get("result") or {}).get("assurance_score")
                 await conn.execute(
                     """UPDATE scans SET status=$1, result=$2, score=$3, grade=$4, findings_count=$5,
                            completed_at=$6, duration_seconds=$7, progress=100, current_phase=$8,
-                           error_message=$10 WHERE id=$9""",
+                           error_message=$10, assurance_score=$11 WHERE id=$9""",
                     final_status, json.dumps(result), score, grade, len(findings),
                     completed_at, duration, terminal_phase, uuid.UUID(scan_id),
                     (error if error else None),
+                    int(assurance) if isinstance(assurance, int) else None,
                 )
         r.hset(f"job:{job_id}", mapping={
             'status': final_status, 'result_path': filepath,

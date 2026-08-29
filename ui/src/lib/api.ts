@@ -1185,6 +1185,8 @@ export interface Scan {
   current_phase?: string
   score?: number
   grade?: string
+  // How much of the application the scan examined, scored independently of the findings.
+  assurance_score?: number | null
   findings_count: number
   created_at: string
   started_at?: string | null

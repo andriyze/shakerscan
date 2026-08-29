@@ -24,6 +24,7 @@ try:
         EndpointPatterns,
     )
     from .target_context import is_local_or_private_scan_target
+    from .score_bands import grade_for
     from .ai_verdict_policy import has_deterministic_exploit_proof, is_trusted_ai_false_positive
 except ImportError:
     from constants import (
@@ -38,6 +39,7 @@ except ImportError:
         EndpointPatterns,
     )
     from target_context import is_local_or_private_scan_target
+    from score_bands import grade_for
     from ai_verdict_policy import has_deterministic_exploit_proof, is_trusted_ai_false_positive
 
 
@@ -692,18 +694,14 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     # Final score and grade
     score = max(0, min(100, score))
 
+    # Bands come from the shared table so this path and the canonical finalizer cannot
+    # disagree about the same score. A proven critical or high still caps the letter here,
+    # below whatever the numeric band would otherwise allow.
+    letter = grade_for(score)
     if max_severity == "critical":
-        letter = "D" if score >= 55 else "F"
+        letter = "D" if score >= 60 else "F"
     elif max_severity == "high":
-        letter = "C" if score >= 70 else "D" if score >= 55 else "F"
-    else:
-        letter = (
-            "A" if score >= 90 else
-            "B" if score >= 80 else
-            "C" if score >= 70 else
-            "D" if score >= 55 else
-            "F"
-        )
+        letter = "C" if score >= 70 else "D" if score >= 60 else "F"
 
     unproven_high_critical = [
         finding for finding in findings

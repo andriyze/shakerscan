@@ -11798,6 +11798,7 @@ async def list_scans(
         scan_columns = "s.*" if include_details else """
                    s.id, s.target_id, s.target_url, s.status, s.progress,
                    s.current_phase, s.options, s.scan_type, s.score, s.grade,
+                   s.assurance_score,
                    s.findings_count, s.created_at, s.started_at, s.completed_at,
                    s.duration_seconds, s.error_message, s.run_kind, s.ai_target_id,
                    s.device_target_id, s.parent_scan_id, s.scan_role,

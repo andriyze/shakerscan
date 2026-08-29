@@ -9,6 +9,7 @@ import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
@@ -98,6 +99,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
     .filter(([, count]) => count > 0)
   const totalCounted = severityEntries.reduce((sum, [, count]) => sum + count, 0)
   const scorePresentation = deviceScorePresentation(scan)
+  const assurance = scanAssurance(scan)
   const hasGrade = Boolean(scorePresentation.grade)
   const hasScore = typeof scorePresentation.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
@@ -139,6 +141,26 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
             )}
             {scorePresentation.note && (
               <p className="mt-1 max-w-md text-xs text-amber-200/80">{scorePresentation.note}</p>
+            )}
+          </div>
+        )}
+        {assurance && (
+          <div>
+            {/* The second axis. Without it a clean grade over a scan that examined almost
+                nothing is indistinguishable from a clean grade over a thorough one. */}
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Assurance
+            </p>
+            <div className="flex items-baseline gap-3">
+              <span className={`text-3xl font-bold ${assuranceClass(assurance.band)}`}>
+                {assurance.score}
+              </span>
+              <span className="text-sm text-gray-400">/100 · {assurance.label}</span>
+            </div>
+            {assurance.gaps.length > 0 && (
+              <p className="mt-1 max-w-md text-xs text-gray-500">
+                Not covered: {assurance.gaps.join(', ')}
+              </p>
             )}
           </div>
         )}
