@@ -85,7 +85,7 @@ test('scan submission titles follow the live execution status', () => {
   assert.match(timeline, /completed: 'Scan completed'/)
   assert.match(timeline, /blocked: 'Scan blocked'/)
   assert.match(timeline, /effectiveEventStatus\(event\)/)
-  assert.match(timeline, /event\.blocked_by\.length > 0/)
+  assert.match(timeline, /if \(stored\) return stored/)
   assert.doesNotMatch(timeline, /'Scan\.submit': 'Scan queued'/)
 })
 

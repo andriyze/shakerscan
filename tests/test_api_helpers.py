@@ -13176,10 +13176,16 @@ def test_timeline_submission_receipt_is_accepted_not_execution_complete():
     ) == "completed"
 
 
-def test_timeline_blockers_override_success_like_receipt_status():
+def test_timeline_blockers_do_not_erase_an_explicit_execution_status():
     assert ops_router_module._normalized_timeline_event_status(
         "completed", command="scan.runtime_scope_check",
         blocked_by=["destination_not_allowed"],
+    ) == "completed"
+    assert ops_router_module._normalized_timeline_event_status(
+        "approval_required", blocked_by=["approval_receipt_missing"],
+    ) == "approval_required"
+    assert ops_router_module._normalized_timeline_event_status(
+        None, blocked_by=["destination_not_allowed"],
     ) == "blocked"
 
 

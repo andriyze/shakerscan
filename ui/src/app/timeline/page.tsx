@@ -77,10 +77,9 @@ function eventTitle(event: TimelineEvent): string {
 }
 
 function effectiveEventStatus(event: TimelineEvent): string {
-  if (event.status === 'blocked' || (Array.isArray(event.blocked_by) && event.blocked_by.length > 0)) {
-    return 'blocked'
-  }
-  return event.status
+  const stored = String(event.status || '').trim()
+  if (stored) return stored
+  return Array.isArray(event.blocked_by) && event.blocked_by.length > 0 ? 'blocked' : 'queued'
 }
 
 function eventKindLabel(event: TimelineEvent): string {

@@ -1329,12 +1329,9 @@ def _normalized_timeline_event_status(
     scan_status: Any = None,
     blocked_by: Any = None,
 ) -> str:
-    blockers = [str(item) for item in (blocked_by or []) if str(item).strip()]
-    if blockers:
-        return "blocked"
     if scan_status:
         return _timeline_scan_status(scan_status)
-    status = str(raw or "").strip().lower()
+    raw_status = str(raw or "").strip().lower()
     status = {
         "pending": "queued",
         "dispatching": "queued",
@@ -1342,7 +1339,10 @@ def _normalized_timeline_event_status(
         "success": "completed",
         "error": "failed",
         "canceled": "cancelled",
-    }.get(status, status or "queued")
+    }.get(raw_status, raw_status)
+    if not status:
+        blockers = [str(item) for item in (blocked_by or []) if str(item).strip()]
+        return "blocked" if blockers else "queued"
     if str(command or "").strip().lower() in _SUBMISSION_COMMANDS and status == "completed":
         return "accepted"
     return status
