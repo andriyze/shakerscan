@@ -64,9 +64,11 @@ class _CaptureConn:
 
     async def fetchval(self, sql, *args):
         self.fetchval_calls.append((sql, args))
-        if "SELECT retention_delete_preview_id" in sql:
-            return None
         return True
+
+    async def fetchrow(self, sql, *args):
+        self.fetchval_calls.append((sql, args))
+        return None
 
     async def execute(self, sql, *args):
         self.calls.append((sql, args))
@@ -90,6 +92,8 @@ def test_evidence_object_is_hashed_redaction_profiled_and_retention_classed():
     query = conn.calls[0][0]
     assert "ON CONFLICT (finding_id, object_type, scan_id)" in query
     assert "finding_id IS NOT NULL AND scan_id IS NOT NULL" in query
+    assert "DO NOTHING" in query
+    assert "DO UPDATE" not in query
     assert any("pg_advisory_lock" in sql for sql, _ in conn.fetchval_calls)
     assert any("pg_advisory_unlock" in sql for sql, _ in conn.fetchval_calls)
 
@@ -250,11 +254,9 @@ def test_no_write_without_finding_id():
 
 def test_retention_pending_object_is_not_rewritten():
     class _PendingConn(_CaptureConn):
-        async def fetchval(self, sql, *args):
+        async def fetchrow(self, sql, *args):
             self.fetchval_calls.append((sql, args))
-            if "SELECT retention_delete_preview_id" in sql:
-                return "preview-uuid"
-            return True
+            return {"id": "evidence-uuid", "retention_delete_preview_id": "preview-uuid"}
 
     conn = _PendingConn()
     asyncio.run(worker._persist_evidence_object(conn, "s", "f", {}, {"x": 1}))
@@ -263,12 +265,37 @@ def test_retention_pending_object_is_not_rewritten():
     assert lock_keys == ["evidence-row:f:finding_evidence:s"]
     pending_query, pending_args = next(
         (sql, args) for sql, args in conn.fetchval_calls
-        if "SELECT retention_delete_preview_id" in sql
+        if "SELECT id, retention_delete_preview_id" in sql
     )
     assert "scan_id=$3" in pending_query
     assert pending_args == ("f", "finding_evidence", "s")
     assert any("pg_advisory_unlock" in sql for sql, _ in conn.fetchval_calls)
     assert not any("evidence-blob:" in str(args) for _sql, args in conn.fetchval_calls)
+
+
+def test_existing_evidence_identity_is_never_rewritten():
+    class _ExistingConn(_CaptureConn):
+        async def fetchrow(self, sql, *args):
+            self.fetchval_calls.append((sql, args))
+            return {"id": "evidence-uuid", "retention_delete_preview_id": None}
+
+    conn = _ExistingConn()
+    asyncio.run(worker._persist_evidence_object(conn, "s", "f", {}, {"new": "bytes"}))
+
+    assert conn.calls == []
+
+
+def test_inline_evidence_hash_is_verified_and_mismatches_are_withheld(tmp_path):
+    content = {"proof": "original"}
+    stored = worker.store_evidence_content(content, results_dir=tmp_path)
+    verified = hydrate_evidence_content(dict(stored), results_dir=tmp_path)
+    assert verified["storage_integrity"] == "verified"
+
+    tampered = dict(stored)
+    tampered["content"] = '{"proof": "tampered"}'
+    withheld = hydrate_evidence_content(tampered, results_dir=tmp_path)
+    assert withheld["storage_integrity"] == "mismatch"
+    assert withheld["content"] is None
 
 
 def test_never_raises_on_db_error():

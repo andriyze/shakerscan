@@ -420,6 +420,25 @@ def hydrate_evidence_content(row: dict[str, Any], *, results_dir: Path) -> dict[
         return _hydrate_s3_evidence(row, storage_uri)
     if not storage_uri.startswith(LOCAL_STORAGE_PREFIX):
         row.setdefault("storage_status", "inline")
+        content = row.get("content")
+        expected = str(row.get("content_sha256") or "")
+        if not expected:
+            row["storage_integrity"] = "not_checked"
+            return row
+        if content is None:
+            row["storage_integrity"] = "missing"
+            return row
+        if isinstance(content, str):
+            raw = content
+        else:
+            raw, _sha, _size = serialize_evidence_content(content)
+            raw = raw or ""
+        actual = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+        if not hmac.compare_digest(actual, expected):
+            row["storage_integrity"] = "mismatch"
+            row["content"] = None
+        else:
+            row["storage_integrity"] = "verified"
         return row
 
     path = local_evidence_path(results_dir, storage_uri)

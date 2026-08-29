@@ -3032,18 +3032,20 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
         identity_lock = await _acquire_evidence_identity_lock(
             conn, finding_id, object_type, scan_uuid,
         )
-        pending_preview = await conn.fetchval(
+        existing_object = await conn.fetchrow(
             """
-            SELECT retention_delete_preview_id
+            SELECT id, retention_delete_preview_id
             FROM evidence_objects
             WHERE finding_id=$1 AND object_type=$2 AND scan_id=$3
-              AND retention_delete_pending_at IS NOT NULL
             """,
             finding_id,
             object_type,
             scan_uuid,
         )
-        if pending_preview:
+        # Evidence identity is append-only. A repeated producer observation for
+        # the same finding/type/scan may confirm the row exists, but it cannot
+        # rewrite the bytes, hash, retention state, or creation timestamp.
+        if existing_object:
             return
         locked_sha = await _acquire_evidence_blob_lock(conn, content)
         stored = store_evidence_content(content, results_dir=RESULTS_DIR)
@@ -3058,11 +3060,7 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
             ON CONFLICT (finding_id, object_type, scan_id)
                 WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
-            DO UPDATE SET
-                content_sha256=EXCLUDED.content_sha256, size_bytes=EXCLUDED.size_bytes,
-                storage_uri=EXCLUDED.storage_uri, content=EXCLUDED.content,
-                retention_class=EXCLUDED.retention_class, created_at=NOW()
-            WHERE evidence_objects.retention_delete_pending_at IS NULL
+            DO NOTHING
         """, scan_uuid, finding_id, object_type,
              stored["content_sha256"], stored["size_bytes"], stored["storage_uri"],
              "redact_sensitive_v1", retention, stored["content"])
