@@ -13981,7 +13981,7 @@ async def process_scan_job(job_data: dict):
                         metadata["runtime_scope_command_result_id"] = command_result_id
                         result["scan_metadata"] = metadata
                 failure_result = _failure_result_for_scan_error(result, error, diag)
-                failure_assurance = _stamp_terminal_assurance(
+                failure_assurance = scan_scoring.stamp_terminal_assurance(
                     failure_result, status="failed",
                 )
                 await conn.execute("""
@@ -14655,22 +14655,6 @@ def _recompute_focused_parent_result(
     return score, grade
 
 
-def _parallel_result_is_partial(result: dict[str, Any] | None) -> bool:
-    if not isinstance(result, dict):
-        return True
-    meta = result.get('scan_metadata') if isinstance(result.get('scan_metadata'), dict) else {}
-    if any(meta.get(key) is True for key in ('partial', 'degraded', 'timed_out', 'cancelled')):
-        return True
-    result_block = result.get('result') if isinstance(result.get('result'), dict) else {}
-    if result_block.get('grade_reliable') is False:
-        return True
-    coverage = result.get('smart_coverage') if isinstance(result.get('smart_coverage'), dict) else {}
-    status = str(coverage.get('status') or '').strip().lower()
-    if status in {'partial', 'incomplete', 'failed', 'timed_out', 'cancelled'}:
-        return True
-    return False
-
-
 def _mark_parallel_parent_degraded(
     merged: dict[str, Any],
     *,
@@ -14735,66 +14719,6 @@ def _mark_parallel_parent_degraded(
                 result.setdefault("original_grade", grade_text)
                 result["grade"] = f"{grade_text}*"
     return True
-
-
-def _recompute_parallel_parent_assurance(
-    merged: dict[str, Any], *, completed_count: int, total_count: int,
-) -> int:
-    """Score the merged execution record, never a copied shard's result block."""
-    coverage = merged.get("coverage") if isinstance(merged.get("coverage"), dict) else {}
-    coverage = dict(coverage)
-    if total_count > 0 and completed_count < total_count:
-        coverage["status"] = "failed" if completed_count == 0 else "partial"
-    computed = scan_scoring.assurance(
-        coverage,
-        smart_coverage=(
-            merged.get("smart_coverage")
-            if isinstance(merged.get("smart_coverage"), dict) else {}
-        ),
-    )
-    score = int(computed["score"])
-    gaps = list(computed.get("gaps") or ())
-    if total_count > 0 and completed_count < total_count:
-        # The merged action ledger normally carries the same loss. This ceiling is the
-        # fail-closed backstop when a failed child produced no action rows to merge.
-        score = min(score, int(round(100 * completed_count / total_count)))
-        if "parallel_shards_incomplete" not in gaps:
-            gaps.append("parallel_shards_incomplete")
-    result = merged.setdefault("result", {})
-    if not isinstance(result, dict):
-        result = {}
-        merged["result"] = result
-    result.update({
-        "assurance_score": score,
-        "assurance_band": scan_scoring.assurance_band(score),
-        "assurance_components": computed.get("components") or {},
-        "assurance_gaps": sorted(gaps),
-    })
-    return score
-
-
-def _stamp_terminal_assurance(report: dict[str, Any], *, status: str) -> int:
-    """Persist an explicit assurance value on every deterministic terminal report."""
-    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
-    coverage = {**coverage, "status": status}
-    computed = scan_scoring.assurance(
-        coverage,
-        smart_coverage=(
-            report.get("smart_coverage")
-            if isinstance(report.get("smart_coverage"), dict) else {}
-        ),
-    )
-    result = report.setdefault("result", {})
-    if not isinstance(result, dict):
-        result = {}
-        report["result"] = result
-    result.update({
-        "assurance_score": int(computed["score"]),
-        "assurance_band": computed["band"],
-        "assurance_components": computed["components"],
-        "assurance_gaps": computed["gaps"],
-    })
-    return int(computed["score"])
 
 
 async def _record_endpoint_telemetry_attempts(
@@ -16694,9 +16618,9 @@ async def process_scan_shard_job(job_data: dict):
         findings = result.get('findings', [])
         error = result.get('error')
         partial = bool(
-            not error and not parallel_discovery and _parallel_result_is_partial(result)
+            not error and not parallel_discovery and scan_scoring.parallel_result_is_partial(result)
         )
-        shard_assurance = _stamp_terminal_assurance(
+        shard_assurance = scan_scoring.stamp_terminal_assurance(
             result, status="failed" if error else "partial" if partial else "completed",
         )
         filepath = await persist_result_artifact(
@@ -16970,7 +16894,7 @@ async def process_scan_merge_job(job_data: dict):
         child_options = _as_report_dict(ch['options']) or {}
         child_partial = bool(
             str(ch.get('current_phase') or '') == 'partial'
-            or (status == 'completed' and _parallel_result_is_partial(cres))
+            or (status == 'completed' and scan_scoring.parallel_result_is_partial(cres))
         )
         sc = cres.get('smart_coverage') if isinstance(cres, dict) else None
         shard_coverage_records.append({
@@ -17199,7 +17123,7 @@ async def process_scan_merge_job(job_data: dict):
         1 for c in children
         if c['status'] == 'completed' and (
             str(c.get('current_phase') or '') == 'partial'
-            or _parallel_result_is_partial(_as_report_dict(c.get('result')))
+            or scan_scoring.parallel_result_is_partial(_as_report_dict(c.get('result')))
         )
     )
     strategy = parent_options.get('parallel_strategy')
@@ -17289,7 +17213,7 @@ async def process_scan_merge_job(job_data: dict):
             agg_score = merged['result'].get('score', agg_score)
     technically_incomplete = bool(failed_n or cancelled_n or partial_n)
     merged['technical_outcome'] = 'INCOMPLETE' if technically_incomplete else 'COMPLETE'
-    _recompute_parallel_parent_assurance(
+    scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=completed_n, total_count=len(children),
     )
 

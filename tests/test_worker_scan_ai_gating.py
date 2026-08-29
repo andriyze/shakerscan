@@ -6023,7 +6023,7 @@ def test_parallel_parent_assurance_is_recomputed_and_capped_by_all_shards():
         "smart_coverage": {"principal_contexts_exercised": 2},
     }
 
-    score = worker._recompute_parallel_parent_assurance(
+    score = worker.scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=1, total_count=6,
     )
 
@@ -6035,7 +6035,7 @@ def test_parallel_parent_assurance_is_recomputed_and_capped_by_all_shards():
 
 def test_parallel_parent_assurance_clears_a_copied_score_without_coverage():
     merged = {"result": {"assurance_score": 92, "assurance_band": "strong"}}
-    assert worker._recompute_parallel_parent_assurance(
+    assert worker.scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=0, total_count=3,
     ) == 0
     assert merged["result"]["assurance_band"] == "none"
@@ -6043,7 +6043,7 @@ def test_parallel_parent_assurance_clears_a_copied_score_without_coverage():
 
 def test_terminal_failure_stamps_zero_assurance_in_report():
     report = {"error": "worker failed", "result": {"assurance_score": 99}}
-    assert worker._stamp_terminal_assurance(report, status="failed") == 0
+    assert worker.scan_scoring.stamp_terminal_assurance(report, status="failed") == 0
     assert report["result"]["assurance_score"] == 0
     assert report["result"]["assurance_band"] == "none"
 

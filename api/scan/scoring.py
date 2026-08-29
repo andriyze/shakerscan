@@ -234,6 +234,80 @@ def severity_notes(findings: Sequence[Mapping[str, Any]]) -> list[str]:
     return notes
 
 
+def stamp_terminal_assurance(report: dict[str, Any], *, status: str) -> int:
+    """Write an explicit assurance projection onto one deterministic terminal report."""
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
+    coverage = {**coverage, "status": status}
+    computed = assurance(
+        coverage,
+        smart_coverage=(
+            report.get("smart_coverage")
+            if isinstance(report.get("smart_coverage"), dict) else {}
+        ),
+    )
+    result = report.setdefault("result", {})
+    if not isinstance(result, dict):
+        result = {}
+        report["result"] = result
+    result.update({
+        "assurance_score": int(computed["score"]),
+        "assurance_band": computed["band"],
+        "assurance_components": computed["components"],
+        "assurance_gaps": computed["gaps"],
+    })
+    return int(computed["score"])
+
+
+def recompute_parallel_parent_assurance(
+    merged: dict[str, Any], *, completed_count: int, total_count: int,
+) -> int:
+    """Score a merged execution record and cap missing shard evidence fail-closed."""
+    coverage = merged.get("coverage") if isinstance(merged.get("coverage"), dict) else {}
+    coverage = dict(coverage)
+    if total_count > 0 and completed_count < total_count:
+        coverage["status"] = "failed" if completed_count == 0 else "partial"
+    computed = assurance(
+        coverage,
+        smart_coverage=(
+            merged.get("smart_coverage")
+            if isinstance(merged.get("smart_coverage"), dict) else {}
+        ),
+    )
+    score = int(computed["score"])
+    gaps = list(computed.get("gaps") or ())
+    if total_count > 0 and completed_count < total_count:
+        score = min(score, int(round(100 * completed_count / total_count)))
+        if "parallel_shards_incomplete" not in gaps:
+            gaps.append("parallel_shards_incomplete")
+    result = merged.setdefault("result", {})
+    if not isinstance(result, dict):
+        result = {}
+        merged["result"] = result
+    result.update({
+        "assurance_score": score,
+        "assurance_band": assurance_band(score),
+        "assurance_components": computed.get("components") or {},
+        "assurance_gaps": sorted(gaps),
+    })
+    return score
+
+
+def parallel_result_is_partial(result: dict[str, Any] | None) -> bool:
+    """Whether one shard report is incomplete for parent assurance and reliability."""
+    if not isinstance(result, dict):
+        return True
+    meta = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
+    if any(meta.get(key) is True for key in ("partial", "degraded", "timed_out", "cancelled")):
+        return True
+    result_block = result.get("result") if isinstance(result.get("result"), dict) else {}
+    if result_block.get("grade_reliable") is False:
+        return True
+    coverage = result.get("smart_coverage") if isinstance(result.get("smart_coverage"), dict) else {}
+    return str(coverage.get("status") or "").strip().lower() in {
+        "partial", "incomplete", "failed", "timed_out", "cancelled",
+    }
+
+
 def score_scan(
     findings: Sequence[Mapping[str, Any]],
     coverage: Mapping[str, Any],
@@ -281,4 +355,7 @@ __all__ = [
     "proof_weight",
     "risk",
     "score_scan",
+    "stamp_terminal_assurance",
+    "recompute_parallel_parent_assurance",
+    "parallel_result_is_partial",
 ]

@@ -57,6 +57,30 @@ def _canonical_host(value: str | None) -> str:
         return host
 
 
+def approval_context_value_matches(key: str, actual: Any, expected: Any) -> bool:
+    """Compare approval context, treating confirmed origin addresses as an exact set."""
+    if key != "direct_origin_addresses":
+        return actual == expected
+    if not isinstance(actual, (list, tuple)) or not isinstance(expected, (list, tuple)):
+        return False
+    try:
+        actual_addresses = sorted({str(ipaddress.ip_address(str(item))) for item in actual})
+        expected_addresses = sorted({str(ipaddress.ip_address(str(item))) for item in expected})
+    except (TypeError, ValueError):
+        return False
+    return actual_addresses == expected_addresses
+
+
+def approval_context_mismatch(
+    actual: dict[str, Any], expected: dict[str, Any],
+) -> str | None:
+    """Return the first approval context field that does not match."""
+    return next((
+        key for key, value in expected.items()
+        if not approval_context_value_matches(key, actual.get(key), value)
+    ), None)
+
+
 def _host_matches(host: str, allowed_hosts: tuple[str, ...], allowed_root_domains: tuple[str, ...]) -> bool:
     if host in allowed_hosts:
         return True
