@@ -277,7 +277,7 @@ jobs:
             /tmp/verify-installed-runtime.py
 
       - name: Set up supported Node runtime
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
           cache: npm
@@ -965,7 +965,7 @@ jobs:
             scripts/upgrade_smoke.sh
 
       - name: Set up supported Node browser runtime
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
           cache: npm
