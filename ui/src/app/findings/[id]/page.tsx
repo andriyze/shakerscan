@@ -607,10 +607,14 @@ function FindingDetailContent() {
   const research = finding ? getFindingResearchProvenance(finding) : null
   const autonomousTargetUrl = finding ? autonomousWebTargetUrl(finding) : null
   const latestRetest = retestHistory[0]
+  const latestRetestVerdict = latestRetest?.verdict || latestRetest?.result_status || finding?.latest_retest_verdict
+  const latestRetestStatus = latestRetest?.status || finding?.latest_retest_status
+  const latestRetestConfidence = latestRetest?.confidence ?? finding?.latest_retest_confidence
+  const latestRetestCompletedAt = latestRetest?.completed_at || finding?.latest_retest_completed_at
   // An inconclusive retest that is retryable means "we couldn't decide, try
   // again" — distinct from a terminal verdict. Surfaced so users understand the
   // finding stays active because verification didn't conclude.
-  const lastVerdictInconclusive = finding?.last_verification_verdict === 'inconclusive'
+  const lastVerdictInconclusive = latestRetestVerdict === 'inconclusive'
   const lastRetestRetryable = Boolean(
     lastVerdictInconclusive && latestRetest && latestRetest.status !== 'queued' && latestRetest.status !== 'running' && latestRetest.retryable
   )
@@ -711,7 +715,7 @@ function FindingDetailContent() {
           {!deviceFinding && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
             <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Proof replay</span>
             <RetestVerdictBadge
-              verdict={finding.last_verification_verdict}
+              verdict={latestRetestVerdict}
               pending={hasPendingRetest}
             />
             <select
@@ -1102,7 +1106,7 @@ function FindingDetailContent() {
               finding status is set by analysts using the status controls below.
             </div>
           )}
-          {finding.status === 'active' && finding.last_verification_verdict === 'false_positive' && (
+          {finding.status === 'active' && latestRetestVerdict === 'false_positive' && (
             <div className="text-xs rounded px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
               The latest retest judged this a <span className="text-gray-300">false positive</span> with high
               confidence. The finding is still <span className="text-yellow-400">active</span> — retests never
@@ -1112,12 +1116,12 @@ function FindingDetailContent() {
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
             <InfoItem label="Last status">
-              <span className="capitalize">{finding.last_verification_status || 'not tested'}</span>
+              <span className="capitalize">{latestRetestStatus?.replaceAll('_', ' ') || 'not tested'}</span>
             </InfoItem>
             <InfoItem label="Last verdict">
-              {finding.last_verification_verdict ? (
+              {latestRetestVerdict ? (
                 <div className="flex flex-col items-start gap-1">
-                  <RetestVerdictBadge verdict={finding.last_verification_verdict} />
+                  <RetestVerdictBadge verdict={latestRetestVerdict} />
                   {lastRetestRetryable && (
                     <span className="text-[11px] text-amber-300/80">retryable — re-run to retry</span>
                   )}
@@ -1127,14 +1131,14 @@ function FindingDetailContent() {
               )}
             </InfoItem>
             <InfoItem label="Last confidence">
-              {typeof finding.last_verification_confidence === 'number'
-                ? `${Math.round(finding.last_verification_confidence * 100)}%`
+              {typeof latestRetestConfidence === 'number'
+                ? `${Math.round(latestRetestConfidence * 100)}%`
                 : 'N/A'}
             </InfoItem>
             <InfoItem label="Last verified">
-              {finding.last_verified_at ? formatDate(finding.last_verified_at) : 'N/A'}
+              {latestRetestCompletedAt ? formatDate(latestRetestCompletedAt) : 'N/A'}
             </InfoItem>
-            <InfoItem label="Verification count">
+            <InfoItem label="Retest attempts">
               {finding.verification_count ?? 0}
             </InfoItem>
           </div>
@@ -1176,6 +1180,11 @@ function FindingDetailContent() {
                       mode: {entry.verification_mode.replaceAll('_', ' ')}
                     </div>
                   )}
+                  <div className="mt-1 flex flex-wrap gap-2 text-gray-400">
+                    <span>deterministic proof: <strong className={entry.deterministic_proof_state === 'proven' ? 'text-emerald-300' : 'text-amber-300'}>{entry.deterministic_proof_state === 'proven' ? 'proven' : 'not proven'}</strong></span>
+                    {entry.result_status && <span>execution result: <strong className="font-medium text-gray-300">{entry.result_status.replaceAll('_', ' ')}</strong></span>}
+                    {entry.verdict_basis === 'ai_assessment' && <span className="text-violet-300">verdict basis: advisory AI assessment</span>}
+                  </div>
                   {typeof entry.confidence === 'number' && (
                     <div className="text-gray-400 mt-1">
                       confidence: {Math.round(entry.confidence * 100)}%
@@ -1184,8 +1193,8 @@ function FindingDetailContent() {
                   {entry.verdict_reason && <div className="text-gray-400 mt-1">{entry.verdict_reason}</div>}
                   {!entry.verdict_reason && entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
                   {entry.ai_reasoning && (
-                    <div className="text-gray-400 mt-1">
-                      ai: {entry.ai_reasoning}
+                    <div className="mt-1 rounded border border-violet-500/20 bg-violet-500/5 p-2 text-gray-400">
+                      <span className="font-medium text-violet-300">AI assessment — advisory, cannot override deterministic proof:</span> {entry.ai_reasoning}
                     </div>
                   )}
                   {entry.ai_plan && (

@@ -2263,6 +2263,12 @@ export interface Finding {
   last_verification_confidence?: number
   last_verified_at?: string
   verification_count?: number
+  latest_retest_status?: string | null
+  latest_retest_result_status?: string | null
+  latest_retest_verdict?: string | null
+  latest_retest_confidence?: number | null
+  latest_retest_completed_at?: string | null
+  latest_retest_mode?: 'deterministic' | 'ai_driven' | string | null
   // Single proof-state (docs §7): derived server-side so list and detail agree.
   is_verified?: boolean
   is_suspected?: boolean
@@ -2329,6 +2335,8 @@ export interface RetestRecord {
   auth_context?: Record<string, unknown> | null
   ai_plan?: Record<string, unknown> | null
   ai_reasoning?: string | null
+  deterministic_proof_state?: 'proven' | 'not_proven'
+  verdict_basis?: 'deterministic_proof' | 'ai_assessment' | 'execution_result'
   confidence?: number | null
   retry_class?: string | null
   retryable?: boolean

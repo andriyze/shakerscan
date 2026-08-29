@@ -59,6 +59,38 @@ def _get(name: str) -> Any:
 
 
 __all__ = ["configure_retest_router", "router"]
+
+
+def public_retest_row(row: Any) -> dict[str, Any]:
+    """Return one replay with typed proof and an explicit authority boundary.
+
+    ``verdict`` can contain an AI assessment such as ``likely_vulnerable`` even
+    when the deterministic replay did not satisfy its proof contract. Expose
+    those as separate facts so clients never present model prose as execution
+    proof.
+    """
+    result = row_to_dict(row)
+    for field in ("proof", "artifacts", "auth_context", "ai_plan", "replay_commands"):
+        value = result.get(field)
+        if isinstance(value, str):
+            try:
+                result[field] = json.loads(value)
+            except (TypeError, ValueError):
+                pass
+    proof = result.get("proof") if isinstance(result.get("proof"), dict) else {}
+    proof_proven = proof.get("proven") is True
+    mode = str(result.get("verification_mode") or "").lower()
+    result["deterministic_proof_state"] = "proven" if proof_proven else "not_proven"
+    result["verdict_basis"] = (
+        "deterministic_proof"
+        if proof_proven
+        else "ai_assessment"
+        if mode == "ai_driven" and result.get("verdict")
+        else "execution_result"
+    )
+    return result
+
+
 @router.get("/retests/finding/{finding_id:path}")
 async def list_finding_retests(finding_id: str, limit: int = Query(20, ge=1, le=200)):
     """List retest history for a finding."""
@@ -77,7 +109,7 @@ async def list_finding_retests(finding_id: str, limit: int = Query(20, ge=1, le=
 
     return {
         "finding_id": str(finding["id"]),
-        "retests": [row_to_dict(r) for r in rows],
+        "retests": [public_retest_row(r) for r in rows],
         "count": len(rows),
     }
 
@@ -101,4 +133,4 @@ async def get_retest(retest_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="Retest not found")
 
-    return row_to_dict(row)
+    return public_retest_row(row)

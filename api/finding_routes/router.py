@@ -411,11 +411,24 @@ async def list_findings(
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
                    ait.name as ai_target_name,
+                   latest_retest.status AS latest_retest_status,
+                   latest_retest.result_status AS latest_retest_result_status,
+                   latest_retest.verdict AS latest_retest_verdict,
+                   latest_retest.confidence AS latest_retest_confidence,
+                   latest_retest.completed_at AS latest_retest_completed_at,
+                   latest_retest.verification_mode AS latest_retest_mode,
                    COUNT(*) OVER() AS total_count
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             LEFT JOIN device_targets dt ON f.device_target_id = dt.id
+            LEFT JOIN LATERAL (
+                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
+                FROM finding_verifications
+                WHERE finding_id=f.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) latest_retest ON TRUE
             WHERE 1=1
         """
         params: list = []
@@ -2059,11 +2072,24 @@ async def get_finding_record(conn, finding_id: str):
                    COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
-                   ait.name as ai_target_name
+                   ait.name as ai_target_name,
+                   latest_retest.status AS latest_retest_status,
+                   latest_retest.result_status AS latest_retest_result_status,
+                   latest_retest.verdict AS latest_retest_verdict,
+                   latest_retest.confidence AS latest_retest_confidence,
+                   latest_retest.completed_at AS latest_retest_completed_at,
+                   latest_retest.verification_mode AS latest_retest_mode
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             LEFT JOIN device_targets dt ON f.device_target_id = dt.id
+            LEFT JOIN LATERAL (
+                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
+                FROM finding_verifications
+                WHERE finding_id=f.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) latest_retest ON TRUE
             WHERE f.id = $1
         """, finding_uuid)
     except ValueError:
@@ -2076,11 +2102,24 @@ async def get_finding_record(conn, finding_id: str):
                    COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
-                   ait.name as ai_target_name
+                   ait.name as ai_target_name,
+                   latest_retest.status AS latest_retest_status,
+                   latest_retest.result_status AS latest_retest_result_status,
+                   latest_retest.verdict AS latest_retest_verdict,
+                   latest_retest.confidence AS latest_retest_confidence,
+                   latest_retest.completed_at AS latest_retest_completed_at,
+                   latest_retest.verification_mode AS latest_retest_mode
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             LEFT JOIN device_targets dt ON f.device_target_id = dt.id
+            LEFT JOIN LATERAL (
+                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
+                FROM finding_verifications
+                WHERE finding_id=f.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) latest_retest ON TRUE
             WHERE f.fingerprint = $1
             ORDER BY f.last_seen_at DESC
             LIMIT 1
@@ -2094,11 +2133,24 @@ async def get_finding_record(conn, finding_id: str):
                    COALESCE(t.name, ait.name, dt.name) as target_name,
                    t.root_domain,
                    ait.endpoint_url as ai_target_url,
-                   ait.name as ai_target_name
+                   ait.name as ai_target_name,
+                   latest_retest.status AS latest_retest_status,
+                   latest_retest.result_status AS latest_retest_result_status,
+                   latest_retest.verdict AS latest_retest_verdict,
+                   latest_retest.confidence AS latest_retest_confidence,
+                   latest_retest.completed_at AS latest_retest_completed_at,
+                   latest_retest.verification_mode AS latest_retest_mode
             FROM findings f
             LEFT JOIN targets t ON f.target_id = t.id
             LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
             LEFT JOIN device_targets dt ON f.device_target_id = dt.id
+            LEFT JOIN LATERAL (
+                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
+                FROM finding_verifications
+                WHERE finding_id=f.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) latest_retest ON TRUE
             WHERE f.fingerprint = $1
             ORDER BY f.last_seen_at DESC
             LIMIT 1
@@ -2130,4 +2182,3 @@ def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], overrid
     # Shared title/tool inference from retest_contract so API, worker, and
     # auto-retest policy always agree on whether a finding is retestable.
     return infer_type_from_title_tool(finding.get("title"), finding.get("tool"))
-
