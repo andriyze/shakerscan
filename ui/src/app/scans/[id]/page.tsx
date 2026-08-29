@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, Suspense, useRef } from 'react'
+import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding } from '@/lib/api'
@@ -14,6 +14,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
+import { scanLogEntry, scanPhasePresentation } from '@/lib/scanDetailPresentation.mjs'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -91,6 +92,28 @@ function CoverageMetric({ label, value, accent = 'text-white' }: { label: string
       <div className="mt-0.5 text-xs text-gray-500">{label}</div>
     </div>
   )
+}
+
+type ScanLogFilter = 'key' | 'all' | 'warnings' | 'findings'
+
+function scanLogTone(kind: string): string {
+  switch (kind) {
+    case 'error': return 'border-red-500/30 bg-red-500/5 text-red-100'
+    case 'warning': return 'border-amber-500/30 bg-amber-500/5 text-amber-100'
+    case 'finding': return 'border-fuchsia-500/30 bg-fuchsia-500/5 text-fuchsia-100'
+    case 'milestone': return 'border-blue-500/25 bg-blue-500/5 text-blue-100'
+    default: return 'border-transparent text-gray-300'
+  }
+}
+
+function scanLogBadgeTone(kind: string): string {
+  switch (kind) {
+    case 'error': return 'bg-red-500/15 text-red-300'
+    case 'warning': return 'bg-amber-500/15 text-amber-300'
+    case 'finding': return 'bg-fuchsia-500/15 text-fuchsia-300'
+    case 'milestone': return 'bg-blue-500/15 text-blue-300'
+    default: return 'bg-gray-800 text-gray-400'
+  }
 }
 
 function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; buildVersion?: string | null; buildFingerprint?: string | null }) {
@@ -1569,6 +1592,10 @@ function ScanDetailContent() {
   const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
   const [logsError, setLogsError] = useState<string | null>(null)
+  const [logFilter, setLogFilter] = useState<ScanLogFilter>('key')
+  const [logSearch, setLogSearch] = useState('')
+  const [autoFollowLogs, setAutoFollowLogs] = useState(true)
+  const [logsUpdatedAt, setLogsUpdatedAt] = useState<Date | null>(null)
   const [buildVersion, setBuildVersion] = useState<string | null>(null)
   const [buildFingerprint, setBuildFingerprint] = useState<string | null>(null)
   const [deploymentDecision, setDeploymentDecision] = useState<DeploymentDecision | null>(null)
@@ -1639,7 +1666,7 @@ function ScanDetailContent() {
           refreshDeploymentDecision()
         }
         try {
-          const logData = await getScanLogs(scanId, 200)
+          const logData = await getScanLogs(scanId, 500)
           let nextLogs = logData?.lines || []
           const isDeviceScan = ['device_posture', 'device_probe'].includes(
             String(data?.run_kind || data?.scan_type),
@@ -1653,6 +1680,7 @@ function ScanDetailContent() {
             }
           }
           setLogs(nextLogs)
+          setLogsUpdatedAt(new Date())
           setLogsError(null)
         } catch {
           setLogsError('Failed to load logs')
@@ -1671,7 +1699,7 @@ function ScanDetailContent() {
       if (statusRef.current === 'running' || statusRef.current === 'pending') {
         fetchScanAndLogs()
       }
-    }, 5000)
+    }, 3000)
     return () => clearInterval(interval)
   }, [scanId, retryNonce])
 
@@ -1685,35 +1713,144 @@ function ScanDetailContent() {
   }, [])
 
   useEffect(() => {
-    if (logsRef.current) {
+    if (autoFollowLogs && logsRef.current) {
       logsRef.current.scrollTop = logsRef.current.scrollHeight
     }
-  }, [logs])
+  }, [logs, autoFollowLogs])
+
+  const parsedLogs = useMemo(() => logs.map(scanLogEntry), [logs])
+  const filteredLogs = useMemo(() => {
+    const query = logSearch.trim().toLowerCase()
+    return parsedLogs.filter((entry: any) => {
+      const filterMatch = (
+        logFilter === 'all'
+        || (logFilter === 'key' && entry.kind !== 'detail')
+        || (logFilter === 'warnings' && ['warning', 'error'].includes(entry.kind))
+        || (logFilter === 'findings' && entry.kind === 'finding')
+      )
+      return filterMatch && (!query || entry.raw.toLowerCase().includes(query))
+    })
+  }, [parsedLogs, logFilter, logSearch])
 
   const renderScanActivityLogs = (live: boolean) => {
     const isModelIntake = scan?.run_kind === 'model_intake' || scan?.scan_type === 'model_intake'
-    const title = isModelIntake ? 'Model Intake Activity' : live ? 'Live Logs' : 'Scan Logs'
+    const title = isModelIntake ? 'Model Intake activity' : live ? 'Live scan activity' : 'Scan activity'
+    const filterOptions: Array<{ value: ScanLogFilter; label: string }> = [
+      { value: 'key', label: 'Key activity' },
+      { value: 'all', label: 'All logs' },
+      { value: 'warnings', label: 'Warnings & errors' },
+      { value: 'findings', label: 'Finding signals' },
+    ]
+    const copyVisibleLogs = async () => {
+      try {
+        await navigator.clipboard.writeText(filteredLogs.map((entry: any) => entry.raw).join('\n'))
+      } catch {
+        setLogsError('Could not copy logs to the clipboard.')
+      }
+    }
     return (
-      <Card className="p-4">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-semibold text-gray-400">{title}</h2>
-          <span className="text-xs text-gray-500">{logs.length} lines</span>
+      <Card className="overflow-hidden p-0">
+        <div className="border-b border-gray-800 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                {live && <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" aria-hidden="true" />}
+                <h2 className="text-sm font-semibold text-gray-200">{title}</h2>
+                {live && <span className="sr-only">Updating automatically</span>}
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {live
+                  ? `Updates every 3 seconds${logsUpdatedAt ? ` · last checked ${logsUpdatedAt.toLocaleTimeString()}` : ''}`
+                  : 'A durable record of the worker activity captured for this scan.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <span>{filteredLogs.length} shown · {logs.length} total</span>
+              <button
+                type="button"
+                onClick={copyVisibleLogs}
+                disabled={filteredLogs.length === 0}
+                className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Copy shown
+              </button>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap gap-1" aria-label="Log filters">
+              {filterOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={logFilter === option.value}
+                  onClick={() => setLogFilter(option.value)}
+                  className={`rounded px-2.5 py-1 text-xs transition ${
+                    logFilter === option.value
+                      ? 'bg-blue-500/20 text-blue-200 ring-1 ring-blue-500/40'
+                      : 'bg-gray-900 text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <label className="min-w-52 flex-1">
+              <span className="sr-only">Search scan logs</span>
+              <input
+                type="search"
+                value={logSearch}
+                onChange={(event) => setLogSearch(event.target.value)}
+                placeholder="Search logs"
+                className="w-full rounded border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 focus:border-blue-500 focus:outline-none"
+              />
+            </label>
+            {live && (
+              <button
+                type="button"
+                aria-pressed={autoFollowLogs}
+                onClick={() => setAutoFollowLogs((current) => !current)}
+                className={`rounded px-2.5 py-1 text-xs ${
+                  autoFollowLogs ? 'bg-emerald-500/15 text-emerald-300' : 'bg-gray-900 text-gray-400'
+                }`}
+              >
+                {autoFollowLogs ? 'Following latest' : 'Auto-follow paused'}
+              </button>
+            )}
+          </div>
         </div>
-        <div ref={logsRef} className="max-h-64 overflow-y-auto bg-black/30 rounded p-3 font-mono text-xs text-gray-300">
-          {logs.length > 0 ? (
-            logs.map((line, idx) => (
-              <div key={idx} className="whitespace-pre-wrap break-words">
-                {line}
+        <div
+          ref={logsRef}
+          aria-live={live ? 'polite' : 'off'}
+          className="max-h-[30rem] space-y-1 overflow-y-auto bg-black/25 p-3 font-mono text-xs"
+        >
+          {filteredLogs.length > 0 ? (
+            filteredLogs.map((entry: any, idx: number) => (
+              <div key={`${idx}-${entry.raw}`} className={`rounded border px-3 py-2 ${scanLogTone(entry.kind)}`}>
+                <div className="flex flex-wrap items-start gap-2">
+                  <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${scanLogBadgeTone(entry.kind)}`}>
+                    {entry.label}
+                  </span>
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words leading-5">{entry.message}</span>
+                  {entry.meta && <span className="shrink-0 text-[10px] text-gray-500">{entry.meta}</span>}
+                </div>
               </div>
             ))
+          ) : logs.length > 0 ? (
+            <div className="px-2 py-8 text-center text-gray-500">
+              No log entries match the current filter.
+            </div>
           ) : (
-            <div className="text-gray-500">
-              {isModelIntake ? 'No Model Intake activity has been recorded yet.' : 'No logs yet.'}
+            <div className="px-2 py-8 text-center text-gray-500">
+              {isModelIntake
+                ? 'No Model Intake activity has been recorded yet.'
+                : live
+                  ? 'Waiting for the worker’s first activity update…'
+                  : 'No scan activity was recorded.'}
             </div>
           )}
         </div>
         {logsError && (
-          <p className="text-red-400 text-xs mt-2">{logsError}</p>
+          <p role="alert" className="border-t border-red-500/20 bg-red-500/5 px-4 py-2 text-xs text-red-300">{logsError}</p>
         )}
       </Card>
     )
@@ -1753,41 +1890,87 @@ function ScanDetailContent() {
 
   // Show progress bar while running
   if (scan.status === 'running' || scan.status === 'pending') {
+    const phase = scanPhasePresentation(scan)
+    const startedAt = scan.started_at || scan.created_at
+    const elapsedSeconds = startedAt
+      ? Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
+      : null
+    const executionPlan = scan?.options?.scan_execution_plan || {}
+    const policy = executionPlan.policy || scan?.options?.scan_policy || {}
+    const budgetProfile = executionPlan.budget_profile || scan?.options?.budget_profile || 'balanced'
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <Link href={backUrl} className="text-gray-400 hover:text-white">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <h1 className="break-words text-2xl font-bold text-white">{boundedDisplayText(scan.target_url, 200)}</h1>
-        </div>
-        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-6">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-blue-400 font-medium text-lg">
-              {scan.status === 'pending'
-                ? 'Waiting to start...'
-                : `Scanning: ${(scan.current_phase || 'Processing').replace(/_/g, ' ')}`}
-            </span>
-            <span className="text-blue-400 text-xl font-bold">{scan.progress || 0}%</span>
-          </div>
-          <div className="w-full bg-blue-500/20 rounded-full h-3">
+        <PageHeader title={boundedDisplayText(scan.target_url, 200)} backHref={backUrl} backLabel="Back to scans" />
+        <section aria-labelledby="scan-progress-heading" className="overflow-hidden rounded-xl border border-blue-500/25 bg-gradient-to-br from-blue-500/10 to-gray-950">
+          <div className="p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="mb-2 flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${scan.status === 'running' ? 'animate-pulse bg-emerald-400' : 'bg-amber-400'}`} />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-blue-300">
+                    {scan.status === 'running' ? 'Scan running' : 'Queued'}
+                  </span>
+                </div>
+                <h1 id="scan-progress-heading" className="text-xl font-semibold text-white">{phase.label}</h1>
+                <p className="mt-1 max-w-2xl text-sm text-gray-400">{phase.description}</p>
+              </div>
+              <div className="text-right">
+                <div className="text-3xl font-bold tabular-nums text-blue-300">{phase.progress}%</div>
+                <div className="mt-1 text-xs text-gray-500">Updates automatically</div>
+              </div>
+            </div>
             <div
-              className="bg-blue-500 h-3 rounded-full transition-all duration-500"
-              style={{ width: `${scan.progress || 0}%` }}
-            ></div>
+              role="progressbar"
+              aria-label="Scan progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={phase.progress}
+              className="mt-5 h-3 overflow-hidden rounded-full bg-blue-500/15"
+            >
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
+                style={{ width: `${phase.progress}%` }}
+              />
+            </div>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Current phase</div>
+                <div className="mt-1 truncate text-sm font-medium capitalize text-gray-200" title={String(scan.current_phase || '')}>
+                  {String(scan.current_phase || 'Waiting').replaceAll('_', ' ')}
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Elapsed</div>
+                <div className="mt-1 text-sm font-medium text-gray-200">
+                  {elapsedSeconds === null ? 'Not started' : formatDuration(elapsedSeconds)}
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Scan budget</div>
+                <div className="mt-1 text-sm font-medium capitalize text-gray-200">{String(budgetProfile)}</div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Testing permission</div>
+                <div className="mt-1 text-sm font-medium text-gray-200">
+                  {policy.active_testing ? 'Active testing allowed' : 'Passive checks only'}
+                </div>
+              </div>
+            </div>
           </div>
-          <p className="text-gray-400 text-sm mt-4">
-            The scan is in progress. This page will automatically update when complete.
-          </p>
-        </div>
+          <div className="border-t border-blue-500/15 bg-blue-500/5 px-6 py-3 text-xs text-gray-400">
+            You can leave this page. The scan continues in the worker queue and the complete activity record is retained.
+          </div>
+        </section>
         <ShardContextBanner scan={scan} />
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
-        <ExecutionPlanCard scan={scan} />
-
         {renderScanActivityLogs(true)}
+        <details className="rounded-lg border border-gray-800 bg-gray-900/50">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+            Scan plan and worker details
+          </summary>
+          <div className="px-4 pb-4"><ExecutionPlanCard scan={scan} /></div>
+        </details>
       </div>
     )
   }
