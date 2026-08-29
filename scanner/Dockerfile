@@ -9,7 +9,7 @@
 # results into one multi-arch manifest, so there is no QEMU emulation (which is
 # what blew past GitHub's 6h job limit on the v0.5.4 build) and katana's CGO
 # dependency (go-tree-sitter) compiles cleanly.
-FROM golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599 AS go-builder
+FROM golang:1.26.7-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS go-builder
 
 # Naabu supports both SYN and CONNECT discovery, and its Go packet-capture
 # dependency is compiled even though ShakerScan deliberately invokes CONNECT
@@ -46,9 +46,13 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go mod init "shakerscan.local/${tool_name}" >/dev/null || return 1; \
       go get "${tool_package}@${tool_version}" || return 1; \
       go get \
-        golang.org/x/crypto@v0.53.0 \
-        golang.org/x/net@v0.56.0 \
-        golang.org/x/text@v0.39.0 \
+        github.com/getkin/kin-openapi@v0.144.0 \
+        github.com/go-git/go-git/v5@v5.19.2 \
+        github.com/labstack/echo/v4@v4.15.3 \
+        golang.org/x/crypto@v0.55.0 \
+        golang.org/x/mod@v0.40.0 \
+        golang.org/x/net@v0.58.0 \
+        golang.org/x/text@v0.41.0 \
         github.com/jackc/pgx/v5@v5.9.0 || return 1; \
       go build -mod=mod -trimpath -o "/go/bin/${tool_name}" "${tool_package}" || return 1; \
       cd /; \
@@ -60,7 +64,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       build_tool katana github.com/projectdiscovery/katana/cmd/katana v1.7.0 && \
       build_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder v2.15.0 && \
       build_tool naabu github.com/projectdiscovery/naabu/v2/cmd/naabu v2.3.7 && \
-      build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.0 && \
+      build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1 && \
       build_tool dalfox github.com/hahwul/dalfox/v2 v2.13.0 && \
       build_tool ffuf github.com/ffuf/ffuf/v2 v2.2.1 && \
       build_tool meg github.com/tomnomnom/meg v0.3.0 && \
@@ -185,7 +189,9 @@ WORKDIR /app
 COPY scanner/requirements.txt /app/requirements.txt
 COPY scanner/requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed --require-hashes \
-    -r /app/requirements.lock
+    -r /app/requirements.lock && \
+    pip uninstall -y --break-system-packages msgpack setuptools && \
+    pip check
 
 # Model-intake evidence adapters live in separate, hash-locked virtual
 # environments. Their dependency graphs cannot alter the API/worker runtime.

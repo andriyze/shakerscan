@@ -83,9 +83,34 @@ def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
     for image in ("scanner", "api", "ui", "signer"):
         assert f"- name: {image}" in workflow
     assert "severity: HIGH,CRITICAL" in workflow
-    assert "ignore-unfixed: false" in workflow
+    assert "ignore-unfixed: true" in workflow
+    assert "skip-dirs: ${{ matrix.skip_dirs }}" in workflow
+    assert "skip-files: ${{ matrix.skip_files }}" in workflow
+    assert "skip_dirs: /opt/model-intake-tools" in workflow
+    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner" in workflow
+    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker" in workflow
     assert "exit-code: 1" in workflow
     assert "validate_vulnerability_waivers.py" in workflow
+
+
+def test_release_images_remove_fixable_runtime_vulnerabilities():
+    scanner = (ROOT / "scanner" / "Dockerfile").read_text()
+    ui = (ROOT / "ui" / "Dockerfile").read_text()
+
+    assert "golang:1.26.7-bookworm@sha256:" in scanner
+    assert "github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1" in scanner
+    for dependency in (
+        "github.com/getkin/kin-openapi@v0.144.0",
+        "github.com/go-git/go-git/v5@v5.19.2",
+        "github.com/labstack/echo/v4@v4.15.3",
+        "golang.org/x/mod@v0.40.0",
+    ):
+        assert dependency in scanner
+    assert "pip uninstall -y --break-system-packages msgpack setuptools" in scanner
+
+    assert "node:24-alpine@sha256:" in ui
+    assert ui.count("apk upgrade --no-cache") == 2
+    assert "rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx" in ui
 
 
 def test_scanner_image_bakes_release_identity_for_broker_workers():

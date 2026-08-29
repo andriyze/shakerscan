@@ -1,7 +1,11 @@
 # ShakerScan UI
-FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS builder
+FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS builder
 
 WORKDIR /app
+
+# Apply current Alpine security updates even when the immutable Node manifest
+# predates a repository package fix by a few days.
+RUN apk upgrade --no-cache
 
 # Install pinned dependencies from the lockfile
 COPY package.json package-lock.json ./
@@ -21,11 +25,14 @@ RUN printf '%s\n' "$UI_SOURCE_REVISION" > /app/UI_SOURCE_REVISION
 RUN npm run build
 
 # Production image
-FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS runner
+FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
+
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Copy built assets
 COPY --from=builder /app/.next/standalone ./
