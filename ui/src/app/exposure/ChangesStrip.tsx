@@ -55,7 +55,7 @@ function ChangeTile({ category }: { category: ExposureChangeCategory }) {
       <div className={`text-lg font-semibold ${tone}`}>{category.count}</div>
       <div className="text-[10px] uppercase tracking-wide text-gray-600">{category.label}</div>
       {first && category.count > 0 && (
-        <div className="mt-0.5 max-w-44 truncate text-[11px] text-gray-500">{first.label}</div>
+        <div className="mt-0.5 line-clamp-2 break-words text-[11px] leading-4 text-gray-500">{first.label}</div>
       )}
     </>
   )
@@ -64,13 +64,13 @@ function ChangeTile({ category }: { category: ExposureChangeCategory }) {
       <Link
         href={category.href}
         title={exampleTitle(category)}
-        className="min-w-0 rounded px-2.5 py-1.5 transition-colors hover:bg-gray-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="min-w-0 rounded px-2.5 py-2 transition-colors hover:bg-gray-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         {body}
       </Link>
     )
   }
-  return <div className="min-w-0 px-2.5 py-1.5">{body}</div>
+  return <div className="min-w-0 px-2.5 py-2">{body}</div>
 }
 
 export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDomain?: string; storageKey?: string }) {
@@ -117,7 +117,7 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
 
   return (
     <div className={`${styles.module} ${styles.corners} p-3`}>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
         <div className="mr-1 flex shrink-0 items-center gap-2">
           <History className="h-3.5 w-3.5 text-teal-200/50" aria-hidden="true" />
           <div>
@@ -149,7 +149,9 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
         ) : data && data.total_changes === 0 ? (
           <span className="text-xs text-gray-600">No changes in this window.</span>
         ) : (
-          data?.categories.map((category) => <ChangeTile key={category.key} category={category} />)
+          <div className="grid min-w-0 flex-1 grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-6">
+            {data?.categories.map((category) => <ChangeTile key={category.key} category={category} />)}
+          </div>
         )}
       </div>
     </div>

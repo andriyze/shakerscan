@@ -903,31 +903,79 @@ function ExposureView() {
     return searchIndex.filter((n) => n.label.toLowerCase().includes(q)).slice(0, 12)
   }, [searchQuery, searchIndex])
 
-  const byId = useMemo(() => new Map((graph?.nodes || []).map((node) => [node.id, node])), [graph])
+  const filteredAssets = useMemo(() => {
+    const query = triageQuery.trim().toLowerCase()
+    return assets.filter((asset) =>
+      (triageKind === 'all' || asset.kind === triageKind)
+      && postureMatches(asset, triagePosture, triageNewWindow)
+      && (!query
+        || asset.label.toLowerCase().includes(query)
+        || (asset.url || '').toLowerCase().includes(query)
+        || (asset.root_domain || '').toLowerCase().includes(query))
+    )
+  }, [assets, triageKind, triageNewWindow, triagePosture, triageQuery])
+
+  const graphView = useMemo(() => {
+    if (!graph) return null
+    const filterActive = triageKind !== 'all' || triagePosture !== 'all' || Boolean(triageQuery.trim())
+    if (!filterActive) return graph
+    const allAssetIds = new Set(assets.map((asset) => asset.node_id))
+    const allowedAssetIds = new Set(filteredAssets.map((asset) => asset.node_id))
+    const adjacency = new Map<string, string[]>()
+    for (const edge of graph.edges) {
+      adjacency.set(edge.source, [...(adjacency.get(edge.source) || []), edge.target])
+      adjacency.set(edge.target, [...(adjacency.get(edge.target) || []), edge.source])
+    }
+    const retained = new Set<string>(allowedAssetIds)
+    let frontier = [...allowedAssetIds]
+    for (let depthIndex = 0; depthIndex < 2; depthIndex += 1) {
+      const next: string[] = []
+      for (const nodeId of frontier) {
+        for (const neighbor of adjacency.get(nodeId) || []) {
+          if (allAssetIds.has(neighbor) && !allowedAssetIds.has(neighbor)) continue
+          if (!retained.has(neighbor)) {
+            retained.add(neighbor)
+            next.push(neighbor)
+          }
+        }
+      }
+      frontier = next
+    }
+    const nodes = graph.nodes.filter((node) => retained.has(node.id))
+    const nodeIds = new Set(nodes.map((node) => node.id))
+    const edges = graph.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+    return { ...graph, nodes, edges }
+  }, [assets, filteredAssets, graph, triageKind, triagePosture, triageQuery])
+
+  const byId = useMemo(() => new Map((graphView?.nodes || []).map((node) => [node.id, node])), [graphView])
 
   // Restore the selected-node panel from a deep-linked ?focus= once the graph
   // arrives. Never clobbers an interactive selection (handleFocus sets that).
   useEffect(() => {
-    if (!focusId || !graph) return
+    if (!focusId || !graphView) return
     setSelectedNode((prev) => prev ?? byId.get(focusId) ?? null)
-  }, [focusId, graph, byId])
-  const summary = graph?.summary
-  const nodeTypeCounts = summary?.node_type_counts || {}
+  }, [focusId, graphView, byId])
+  const summary = graphView?.summary
+  const nodeTypeCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const node of graphView?.nodes || []) counts[node.type] = (counts[node.type] || 0) + 1
+    return counts
+  }, [graphView])
 
   // The Map's priority panel reuses the triage action ranking so the two lenses
   // agree on what's urgent. `assets` arrives pre-sorted by action_score desc, so
   // we take the top action-needing assets (graph hotspots ranked by raw finding
   // count instead — domains/chains — which disagreed with triage's P1/P2 view).
   const priorityAssets = useMemo(
-    () => assets.filter((a) => a.needs_action).slice(0, 8),
-    [assets]
+    () => filteredAssets.filter((a) => a.needs_action).slice(0, 8),
+    [filteredAssets]
   )
 
   const neighbors = useMemo(() => {
-    if (!focusId || !graph) return []
+    if (!focusId || !graphView) return []
     const seen = new Set<string>()
     const result: Array<{ node: ExposureNode; label: string }> = []
-    for (const edge of graph.edges) {
+    for (const edge of graphView.edges) {
       let otherId: string | null = null
       if (edge.source === focusId) otherId = edge.target
       else if (edge.target === focusId) otherId = edge.source
@@ -942,12 +990,42 @@ function ExposureView() {
         (b.node.severity ? 1 : 0) - (a.node.severity ? 1 : 0) ||
         (Number(b.node.meta?.active_findings_count || 0) - Number(a.node.meta?.active_findings_count || 0))
     )
-  }, [focusId, graph, byId])
+  }, [focusId, graphView, byId])
 
-  const graphIsEmpty = !loading && (graph?.nodes?.length ?? 0) === 0
-  const renderedNodes = summary?.rendered_node_count ?? graph?.nodes?.length ?? 0
+  const graphIsEmpty = !loading && (graphView?.nodes?.length ?? 0) === 0
+  const renderedNodes = graphView?.nodes?.length ?? 0
   const totalNodes = summary?.node_count ?? renderedNodes
   const lensBusy = lens === 'triage' ? assetsLoading : lens === 'paths' ? pathsLoading : loading || refetching
+  const filterActive = triageKind !== 'all' || triagePosture !== 'all' || Boolean(triageQuery.trim())
+  const displayedMetrics = useMemo<ExposureAssetMetrics | null>(() => {
+    if (!assetMetrics || !filterActive) return assetMetrics
+    const count = (predicate: (asset: ExposureAsset) => boolean) => filteredAssets.filter(predicate).length
+    return {
+      ...assetMetrics,
+      asset_count: filteredAssets.length,
+      active_critical: filteredAssets.reduce((total, asset) => total + asset.active_critical, 0),
+      active_high: filteredAssets.reduce((total, asset) => total + asset.active_high, 0),
+      active_verified: filteredAssets.reduce((total, asset) => total + (asset.active_verified || 0), 0),
+      active_needs_verification: filteredAssets.reduce((total, asset) => total + (asset.active_needs_verification || 0), 0),
+      ai_surfaces: count((asset) => asset.kind === 'ai'),
+      web_targets: count((asset) => asset.kind === 'web'),
+      model_artifacts: count((asset) => asset.kind === 'model'),
+      public_assets: count((asset) => asset.exposure_class === 'public'),
+      internal_assets: count((asset) => asset.exposure_class === 'internal'),
+      unscanned_assets: count((asset) => postureMatches(asset, 'unscanned')),
+      stale_assets: count((asset) => postureMatches(asset, 'stale')),
+      incomplete_scans: count((asset) => postureMatches(asset, 'incomplete')),
+      failed_scans: count((asset) => postureMatches(asset, 'failed')),
+      verified_assets: count((asset) => postureMatches(asset, 'verified')),
+      unverified_high_assets: count((asset) => postureMatches(asset, 'unverified_high')),
+      unowned_assets: count((asset) => postureMatches(asset, 'unowned')),
+      needs_action: count((asset) => Boolean(asset.needs_action)),
+      p1_count: count((asset) => asset.action_priority === 'P1'),
+      p2_count: count((asset) => asset.action_priority === 'P2'),
+      p3_count: count((asset) => asset.action_priority === 'P3'),
+      prod_ai_surfaces: count((asset) => asset.kind === 'ai' && isProductionAIAsset(asset)),
+    }
+  }, [assetMetrics, filterActive, filteredAssets])
 
   return (
     <div className={styles.page}>
@@ -1049,25 +1127,25 @@ function ExposureView() {
       </div>
 
       <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
-        <StatPanel label="Assets" value={assetMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
+        <StatPanel label={filterActive ? 'Matching assets' : 'Assets'} value={displayedMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
         <StatPanel
           label="P1 Priorities"
-          value={assetMetrics?.p1_count ?? '--'}
+          value={displayedMetrics?.p1_count ?? '--'}
           icon={<Radar className="h-5 w-5" />}
-          alert={Boolean(assetMetrics && (assetMetrics.p1_count || 0) > 0)}
+          alert={Boolean(displayedMetrics && (displayedMetrics.p1_count || 0) > 0)}
         />
         <StatPanel
-          label="Active Critical"
-          value={assetMetrics?.active_critical ?? '--'}
+          label="Active critical findings"
+          value={displayedMetrics?.active_critical ?? '--'}
           icon={<AlertTriangle className="h-5 w-5" />}
-          alert={Boolean(assetMetrics && assetMetrics.active_critical > 0)}
+          alert={Boolean(displayedMetrics && displayedMetrics.active_critical > 0)}
         />
-        <StatPanel label="Active High" value={assetMetrics?.active_high ?? '--'} icon={<ShieldAlert className="h-5 w-5" />} />
+        <StatPanel label="Active high findings" value={displayedMetrics?.active_high ?? '--'} icon={<ShieldAlert className="h-5 w-5" />} />
       </div>
 
       <div className={`${styles.rise} ${styles.d2}`}>
         <PostureSummary
-          metrics={assetMetrics}
+          metrics={displayedMetrics}
           kind={triageKind}
           posture={triagePosture}
           onKind={(k) => applyTriage({ kind: k })}
@@ -1230,8 +1308,8 @@ function ExposureView() {
                 <div className={styles.radarRings} aria-hidden="true" />
                 <div className={styles.sweep} aria-hidden="true" />
                 <ExposureGraphCanvas
-                  nodes={graph?.nodes || []}
-                  edges={graph?.edges || []}
+                  nodes={graphView?.nodes || []}
+                  edges={graphView?.edges || []}
                   focusId={focusId}
                   highlightType={highlightType}
                   onNodeClick={handleFocus}

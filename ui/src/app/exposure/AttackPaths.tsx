@@ -238,7 +238,7 @@ export function AttackPaths({
     return (
       <EmptyState
         message="No attack paths correlated yet."
-        hint="Run smart or full scans — ShakerScan chains related findings into exploit paths."
+        hint="Run a Balanced or Thorough scan with the required active-testing and credential permissions. Paths appear only when related evidence can be correlated."
         action={{ label: 'New Scan', href: '/scan/new' }}
       />
     )
