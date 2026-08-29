@@ -6642,7 +6642,10 @@ export interface AIInventoryCandidate {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | string
   confidence: number
   evidence: string[]
-  suggested_target: AITargetPayload
+  qualification: 'corroborated_candidate' | 'speculative_lead'
+  corroboration: string[]
+  contract_observed: boolean
+  suggested_target: AITargetPayload | null
 }
 
 export interface AIInventoryAsset {
@@ -6672,11 +6675,18 @@ export interface AIInventory {
   generated_at: string
   assets: AIInventoryAsset[]
   candidates: AIInventoryCandidate[]
+  leads: AIInventoryCandidate[]
   summary: {
     asset_count: number
     saved_ai_targets: number
     model_artifacts: number
     candidate_count: number
+    total_candidates?: number
+    candidates_truncated?: boolean
+    lead_count: number
+    total_leads?: number
+    leads_truncated?: boolean
+    quarantined_scan_count?: number
     by_type: Record<string, number>
     highest_blast_radius_score: number
     coverage_gaps: string[]

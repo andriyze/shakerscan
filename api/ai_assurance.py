@@ -51,6 +51,9 @@ AI_PROVIDER_HINTS = (
     "ollama",
 )
 
+AI_PROMPT_FIELD_HINTS = {"prompt", "message", "messages"}
+AI_STRUCTURED_DISCOVERY_SOURCES = {"openapi", "browser_network", "har_network_capture"}
+
 HIGH_RISK_SCOPE_HINTS = (
     "admin",
     "write",
@@ -183,23 +186,57 @@ def infer_ai_target_type(
     return best_type, round(best_confidence, 2), evidence
 
 
-def _default_request_template(target_type: str) -> dict[str, Any]:
-    if target_type == "mcp_trace":
+def _observed_request_template(target_type: str, fields: list[Any] | None) -> dict[str, Any] | None:
+    """Build only the portion of a request contract proven by observed field names."""
+    field_names = {str(item).strip().lower() for item in (fields or []) if str(item).strip()}
+    if target_type == "mcp_trace" and "jsonrpc" in field_names:
         return {
             "jsonrpc": "2.0",
-            "method": "tools/list",
-            "params": {"prompt": "{{prompt}}"},
+            "method": "{{prompt}}",
+            "params": {},
             "id": "{{session_id}}",
         }
-    return {"message": "{{prompt}}", "session_id": "{{session_id}}"}
+    if "messages" in field_names:
+        template: dict[str, Any] = {"messages": [{"role": "user", "content": "{{prompt}}"}]}
+    elif "prompt" in field_names:
+        template = {"prompt": "{{prompt}}"}
+    elif "message" in field_names:
+        template = {"message": "{{prompt}}"}
+    else:
+        return None
+    if "model" in field_names:
+        template["model"] = "<observed-model-id>"
+    return template
 
 
-def _default_response_path(target_type: str) -> str:
+def _qualify_ai_surface(
+    target_type: str,
+    *,
+    fields: list[Any] | None,
+    source: str,
+) -> tuple[str, list[str]]:
+    """Require structured request evidence before calling a discovered URL a candidate."""
+    field_names = {str(item).strip().lower() for item in (fields or []) if str(item).strip()}
+    field_hits = field_names & AI_FIELD_HINTS
+    corroboration: list[str] = []
+    if source in AI_STRUCTURED_DISCOVERY_SOURCES:
+        corroboration.append(f"structured_source:{source}")
+    if field_hits:
+        corroboration.append(f"observed_fields:{','.join(sorted(field_hits)[:8])}")
+
+    if source not in AI_STRUCTURED_DISCOVERY_SOURCES:
+        return "speculative_lead", corroboration
     if target_type == "mcp_trace":
-        return "$.result"
-    if target_type == "agent_trace":
-        return "$"
-    return "$.answer"
+        corroborated = "jsonrpc" in field_names and bool({"tool", "tools"} & field_names)
+    elif target_type == "agent_trace":
+        corroborated = bool({"tool", "tools"} & field_names) and bool(AI_PROMPT_FIELD_HINTS & field_names)
+    elif target_type == "rag":
+        corroborated = bool({"retrieval", "vector", "embedding", "embeddings"} & field_names) and bool(
+            AI_PROMPT_FIELD_HINTS & field_names
+        )
+    else:
+        corroborated = bool(AI_PROMPT_FIELD_HINTS & field_names)
+    return ("corroborated_candidate" if corroborated else "speculative_lead"), corroboration
 
 
 def _candidate_from_endpoint(
@@ -225,6 +262,12 @@ def _candidate_from_endpoint(
     )
     if not target_type:
         return None
+    qualification, corroboration = _qualify_ai_surface(
+        target_type,
+        fields=fields,
+        source=source,
+    )
+    request_template = _observed_request_template(target_type, fields)
     headers = {"Content-Type": "application/json"}
     if target_type == "mcp_trace":
         headers["Accept"] = "text/event-stream, application/json"
@@ -234,8 +277,9 @@ def _candidate_from_endpoint(
         "endpoint_url": endpoint_url,
         "method": normalized_method,
         "headers_template": headers,
-        "request_template": _default_request_template(target_type),
-        "response_path": _default_response_path(target_type),
+        "request_template": request_template,
+        # A response extraction path cannot be inferred from a request schema or URL.
+        "response_path": None,
         "streaming_mode": "sse" if target_type == "mcp_trace" else "json",
         "rate_limit_rps": 2,
         "request_budget": 5,
@@ -245,6 +289,9 @@ def _candidate_from_endpoint(
             "discovery_scan_id": str(scan.get("id") or ""),
             "discovery_confidence": confidence,
             "discovery_evidence": evidence,
+            "discovery_qualification": qualification,
+            "discovery_corroboration": corroboration,
+            "response_contract_observed": False,
         },
         "credential": {"auth_kind": "none", "header_name": None, "secret": None, "metadata_json": None},
     }
@@ -258,8 +305,30 @@ def _candidate_from_endpoint(
         "method": method.upper(),
         "confidence": confidence,
         "evidence": evidence,
-        "suggested_target": suggested_target,
+        "qualification": qualification,
+        "corroboration": corroboration,
+        "contract_observed": bool(request_template),
+        "suggested_target": suggested_target if qualification == "corroborated_candidate" and request_template else None,
     }
+
+
+def _is_fixture_scan(scan: dict[str, Any]) -> bool:
+    """Keep explicit calibration/fixture evidence out of operational discovery."""
+    run_kind = str(scan.get("run_kind") or "").lower()
+    discovery_source = str(scan.get("discovery_source") or "").lower()
+    result = _as_dict(scan.get("result"))
+    metadata = _as_dict(result.get("metadata"))
+    options = _as_dict(scan.get("options"))
+    markers = (
+        metadata.get("calibration_run"), metadata.get("safe_fixture"),
+        result.get("calibration_run"), result.get("safe_fixture"),
+        options.get("calibration_run"), options.get("safe_fixture"),
+    )
+    return (
+        any(token in run_kind for token in ("calibration", "fixture", "acceptance"))
+        or any(token in discovery_source for token in ("calibration", "fixture"))
+        or any(value not in (None, False, "") for value in markers)
+    )
 
 
 def _iter_openapi_candidates(scan: dict[str, Any], existing_urls: set[str]) -> list[dict[str, Any]]:
@@ -511,8 +580,13 @@ def build_ai_inventory(
         })
 
     candidates_by_url: dict[str, dict[str, Any]] = {}
+    leads_by_url: dict[str, dict[str, Any]] = {}
+    quarantined_scan_count = 0
     for scan in scans:
         if str(scan.get("run_kind") or "") in {"ai_api", "ai_widget", "ai_rag", "ai_trace", "ai_mcp", "model_intake"}:
+            continue
+        if _is_fixture_scan(scan):
+            quarantined_scan_count += 1
             continue
         for candidate in (
             _iter_openapi_candidates(scan, existing_urls)
@@ -520,9 +594,10 @@ def build_ai_inventory(
             + _iter_recursive_url_candidates(scan, existing_urls)
         ):
             key = str(candidate.get("endpoint_url") or "").rstrip("/")
-            existing = candidates_by_url.get(key)
+            destination = candidates_by_url if candidate.get("qualification") == "corroborated_candidate" else leads_by_url
+            existing = destination.get(key)
             if not existing or float(candidate.get("confidence") or 0) > float(existing.get("confidence") or 0):
-                candidates_by_url[key] = candidate
+                destination[key] = candidate
 
     CANDIDATE_DISPLAY_CAP = 100
     candidates_ranked = sorted(
@@ -533,6 +608,14 @@ def build_ai_inventory(
     total_candidates = len(candidates_ranked)
     candidates = candidates_ranked[:CANDIDATE_DISPLAY_CAP]
     candidates_truncated = total_candidates > len(candidates)
+    leads_ranked = sorted(
+        leads_by_url.values(),
+        key=lambda item: (float(item.get("confidence") or 0), item.get("endpoint_url") or ""),
+        reverse=True,
+    )
+    total_leads = len(leads_ranked)
+    leads = leads_ranked[:CANDIDATE_DISPLAY_CAP]
+    leads_truncated = total_leads > len(leads)
     for candidate in candidates:
         by_type[candidate["target_type"]] = by_type.get(candidate["target_type"], 0) + 1
 
@@ -550,6 +633,7 @@ def build_ai_inventory(
         "generated_at": _utc_iso(),
         "assets": assets,
         "candidates": candidates,
+        "leads": leads,
         "summary": {
             "asset_count": len(assets),
             "saved_ai_targets": len(ai_targets),
@@ -557,6 +641,10 @@ def build_ai_inventory(
             "candidate_count": len(candidates),
             "total_candidates": total_candidates,
             "candidates_truncated": candidates_truncated,
+            "lead_count": len(leads),
+            "total_leads": total_leads,
+            "leads_truncated": leads_truncated,
+            "quarantined_scan_count": quarantined_scan_count,
             "by_type": by_type,
             "highest_blast_radius_score": highest_score,
             "coverage_gaps": coverage_gaps,
