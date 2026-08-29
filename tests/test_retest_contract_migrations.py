@@ -99,6 +99,24 @@ class _EvidenceIdentityMigrationConn(_FakeMigrationConn):
         return None
 
 
+def test_schema_migration_retries_a_transient_postgres_deadlock(monkeypatch):
+    class DeadlockDetectedError(RuntimeError):
+        pass
+
+    calls = 0
+
+    async def migrate_once(_pool):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise DeadlockDetectedError("injected DDL deadlock")
+
+    monkeypatch.setattr(retest_contract, "_run_schema_migrations_once", migrate_once)
+    asyncio.run(retest_contract.run_schema_migrations(object()))
+
+    assert calls == 2
+
+
 def _endpoint_row(**overrides):
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
     row = {

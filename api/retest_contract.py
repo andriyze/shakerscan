@@ -8,6 +8,7 @@ payload semantics, type normalization, and retry classification consistent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import urllib.parse
@@ -1020,6 +1021,24 @@ async def _migrate_evidence_scan_identity(conn) -> None:
 
 
 async def run_schema_migrations(pool) -> None:
+    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock.
+
+    The advisory lock serializes new ShakerScan processes, but during a rolling
+    rebuild an older API can still be using a relation while the first new
+    worker applies idempotent DDL. PostgreSQL may choose the migrator as the
+    deadlock victim. Retry in-process so a healthy worker does not crash-loop.
+    """
+    for attempt in range(3):
+        try:
+            await _run_schema_migrations_once(pool)
+            return
+        except Exception as exc:
+            if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
+                raise
+            await asyncio.sleep(0.2 * (attempt + 1))
+
+
+async def _run_schema_migrations_once(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
     Called from both API and worker startup. Uses pg_advisory_lock so only one
