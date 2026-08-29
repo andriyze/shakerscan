@@ -519,6 +519,14 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
     assert finding["verified"] is True
     assert finding["evidence"]["proof_producer"] == "shakerscan"
     assert finding["evidence"]["sanitized_screenshot_sha256"] == "e" * 64
+    assert finding["evidence"]["browser_proof"] == {
+        "proven": True,
+        "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution",
+        "technique": "headless_xss_dom",
+        "dom_marker_executed": True,
+        "verifier_build": "Chromium test",
+    }
 
 
 def test_finalizer_explains_required_action_degradation():

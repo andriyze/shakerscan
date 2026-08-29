@@ -207,6 +207,31 @@ def _findings_for_action(
                     })
                     findings.append(finding)
         elif kind == "xss_alert" and item.get("proof_state") == "verified":
+            proof_contract = {
+                "schema_version": "proof-contract/v2",
+                "contract_id": "dast.xss_alert_execution",
+                "contract_version": "1.0.0",
+                "family": "xss",
+                "subject": {
+                    "url": item.get("url"),
+                    "method": "GET",
+                    "parameter": item.get("param"),
+                },
+                "reexecution": {
+                    "required": False,
+                    "performed": True,
+                    "verifier_build": result.capability_name,
+                },
+                "predicate": {
+                    "satisfied": True,
+                    "requirements": ["structured_xss_execution_alert"],
+                    "met": ["structured_xss_execution_alert"],
+                    "missing": [],
+                    "refuted_by": [],
+                },
+                "verdict": "verified",
+                "promotable": True,
+            }
             finding = _base_finding(
                 tool="dalfox",
                 title="Verified cross-site scripting",
@@ -221,6 +246,7 @@ def _findings_for_action(
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                     "detail": {"verified": True, "type": "verified"},
+                    "proof_contract_v2": proof_contract,
                 },
             )
             finding.update({
@@ -229,6 +255,7 @@ def _findings_for_action(
                 "needs_verification": False,
                 "proof_state": "verified",
                 "verification_reason": "Deterministic alert execution proof satisfied",
+                "proof_contract_v2": proof_contract,
             })
             findings.append(finding)
         elif (
@@ -259,6 +286,14 @@ def _findings_for_action(
                         "sanitized_screenshot_sha256"
                     ),
                     "browser_build": item.get("browser_build"),
+                    "browser_proof": {
+                        "proven": True,
+                        "proof_producer": "shakerscan",
+                        "evidence_type": item.get("evidence_type"),
+                        "technique": item.get("technique"),
+                        "dom_marker_executed": item.get("dom_marker_executed"),
+                        "verifier_build": item.get("browser_build"),
+                    },
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },

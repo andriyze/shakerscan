@@ -30,6 +30,7 @@ import {
 } from '@/lib/api'
 import { FINDING_STATUSES, RETEST_VERDICT_LABELS, type FindingSourceType } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
+import { canonicalFindingProofVerified } from '@/lib/findingProof'
 import {
   Card,
   ConfirmDialog,
@@ -637,7 +638,7 @@ function FindingDetailContent() {
   const latestRetestStatus = latestRetest?.status || finding?.latest_retest_status
   const latestRetestConfidence = latestRetest?.confidence ?? finding?.latest_retest_confidence
   const latestRetestCompletedAt = latestRetest?.completed_at || finding?.latest_retest_completed_at
-  const canonicalProofVerified = finding?.is_verified === true || finding?.proof_state === 'verified'
+  const canonicalProofVerified = canonicalFindingProofVerified(finding)
   const canonicalProofState = canonicalProofVerified
     ? 'Deterministically verified'
     : finding?.is_suspected === true || finding?.proof_state === 'suspected'

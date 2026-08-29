@@ -108,7 +108,11 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
     poe = finding.get("poe") if isinstance(finding.get("poe"), dict) else {}
     poe_result = finding.get("poe_result") if isinstance(finding.get("poe_result"), dict) else {}
     browser_proof = finding.get("browser_proof") if isinstance(finding.get("browser_proof"), dict) else {}
-    verdict = str(finding.get("verification_verdict") or finding.get("last_verification_verdict") or "").strip().lower()
+    # ``last_verification_verdict`` is persisted retest state and may come from
+    # an advisory AI verifier. It is not fresh scan-time proof and must never
+    # enter this deterministic recognizer. Callers handle deterministic retest
+    # rows separately using their explicit verification_mode.
+    verdict = str(finding.get("verification_verdict") or "").strip().lower()
     result_status = str(finding.get("result_status") or "").strip().lower()
     confidence_tier = str(finding.get("confidence_tier") or "").strip().lower()
     evidence_level = str(validation.get("evidence_level") or "").strip().lower()

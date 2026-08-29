@@ -89,6 +89,14 @@ def test_a_bare_verified_flag_still_does_not_promote():
         assert (fields or {}).get("last_verification_verdict") != "exploited", finding
 
 
+def test_persisted_retest_verdict_is_not_reinterpreted_as_scan_time_proof():
+    fields = scan_time_verification_fields({
+        "severity": "critical",
+        "last_verification_verdict": "exploited",
+    })
+    assert fields is None
+
+
 def test_a_registry_rejected_contract_is_capped_not_promoted():
     # A detector family whose registry contract was judged unmet is capped at likely_vulnerable,
     # and a V2 proof marker must not route around that.

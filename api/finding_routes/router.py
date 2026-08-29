@@ -1971,14 +1971,18 @@ def finding_proof_fields(finding: dict[str, Any]) -> dict[str, Any]:
     deterministic proof in the headline grade.
     """
     fields = _scan_time_verification_fields(finding) or {}
-    verdict = str(
-        fields.get("last_verification_verdict")
-        or finding.get("last_verification_verdict")
-        or ""
-    ).lower()
+    scan_time_verdict = str(fields.get("last_verification_verdict") or "").lower()
+    persisted_verdict = str(finding.get("last_verification_verdict") or "").lower()
+    latest_retest_mode = str(finding.get("latest_retest_mode") or "").lower()
     # DB rows use the persisted verdict; report-sourced rows must carry typed
     # deterministic proof. A generic legacy `verified: true` flag is not enough.
-    is_verified = verdict == "exploited"
+    is_verified = (
+        scan_time_verdict == "exploited"
+        or (
+            persisted_verdict == "exploited"
+            and latest_retest_mode == "deterministic"
+        )
+    )
     severity = str(finding.get("severity") or "").lower()
     is_high_crit = severity in ("high", "critical")
     evidence = _json_object(finding.get("evidence"))

@@ -62,6 +62,19 @@ def _has_browser_execution_proof(finding: dict[str, Any], evidence: dict[str, An
             and technique.startswith("headless_xss_")
         ):
             return True
+    # Compatibility for canonical finalizer output written before browser_proof
+    # became nested. Require the deterministic producer identity, technique, and
+    # the executed DOM marker together; a flat verified flag alone is never proof.
+    for proof in (finding, evidence):
+        evidence_type = str(proof.get("evidence_type") or "").strip().lower()
+        technique = str(proof.get("technique") or "").strip().lower()
+        if (
+            proof.get("proof_producer") == "shakerscan"
+            and evidence_type in {"dom_execution", "browser_execution"}
+            and technique.startswith("headless_xss_")
+            and proof.get("dom_marker_executed") is True
+        ):
+            return True
     return False
 
 

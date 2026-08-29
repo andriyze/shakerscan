@@ -32,9 +32,7 @@ SUSPECTED_CEILING: Mapping[str, int] = {"critical": 70, "high": 85}
 
 
 def has_proof(item: Mapping[str, Any]) -> bool:
-    if has_deterministic_exploit_proof(dict(item)):
-        return True
-    return item.get("verified") is True and str(item.get("proof_state") or "") == "verified"
+    return has_deterministic_exploit_proof(dict(item))
 
 
 def proof_weight(finding: Mapping[str, Any]) -> float:

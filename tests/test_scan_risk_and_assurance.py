@@ -31,6 +31,19 @@ def proven(severity):
     return {
         "severity": severity, "verified": True, "suspected": False,
         "proof_state": "verified",
+        "proof_contract_v2": {
+            "schema_version": "proof-contract/v2",
+            "contract_id": "dast.test",
+            "contract_version": "1.0.0",
+            "reexecution": {
+                "required": True,
+                "performed": True,
+                "verifier_build": "test-verifier",
+            },
+            "predicate": {"satisfied": True, "missing": []},
+            "verdict": "verified",
+            "promotable": True,
+        },
     }
 
 
@@ -117,11 +130,15 @@ def test_a_suspected_finding_still_costs_something():
     assert risk([suspected("critical")])["score"] < 100
 
 
-def test_the_v2_finalizer_proof_shape_counts_as_proven():
-    """verified plus proof_state together are what the finalizer stamps after a proof
-    contract. Reading only the legacy helper graded a browser-proven XSS as suspected."""
+def test_the_v2_finalizer_proof_contract_counts_as_proven():
     assert caps_risk_grade(proven("high")) is True
     assert proof_weight(proven("high")) == 1.0
+
+
+def test_generic_verified_pair_is_not_deterministic_proof():
+    generic = {"severity": "critical", "verified": True, "proof_state": "verified"}
+    assert caps_risk_grade(generic) is False
+    assert proof_weight(generic) < 1.0
 
 
 def test_a_bare_verified_flag_is_not_proof_on_its_own():

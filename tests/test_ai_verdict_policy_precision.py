@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(ROOT, "scanner"))
 from ai_verdict_policy import (  # noqa: E402
     build_dast_proof_contract_v2,
     has_deterministic_exploit_proof,
+    is_trusted_ai_false_positive,
 )
 
 
@@ -73,3 +74,19 @@ def test_legacy_adapter_is_honest_when_no_live_reexecution_occurred():
         "verifier_build": "forced_browsing",
     }
     assert contract["controls"][0]["legacy_adapter"] is True
+
+
+def test_ai_false_positive_cannot_erase_canonical_flat_browser_proof():
+    finding = {
+        "evidence": {
+            "proof_producer": "shakerscan",
+            "evidence_type": "dom_execution",
+            "technique": "headless_xss_dom",
+            "dom_marker_executed": True,
+        },
+        "ai_verdict": "false_positive",
+        "ai_confidence": 0.99,
+        "ai_classification_source": "provider",
+    }
+    assert has_deterministic_exploit_proof(finding) is True
+    assert is_trusted_ai_false_positive(finding) is False
