@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from api.runtime.capability_registry import CAPABILITY_REGISTRY
+from scripts import verify_installed_runtime
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE = ROOT / ".github" / "workflows" / "release-candidate.yml"
@@ -7,6 +10,10 @@ PROMOTION = ROOT / ".github" / "workflows" / "release.yml"
 STABLE = ROOT / ".github" / "workflows" / "promote-stable.yml"
 CODEQL = ROOT / ".github" / "workflows" / "codeql.yml"
 PUBLIC_SMOKE = ROOT / "scripts" / "public_install_smoke.sh"
+
+
+def test_installed_runtime_verifier_matches_the_canonical_capability_schema():
+    verify_installed_runtime._verify_candidate_capability(CAPABILITY_REGISTRY)
 
 
 def test_candidate_build_cannot_publish_release_or_stable_aliases():

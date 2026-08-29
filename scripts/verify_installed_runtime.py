@@ -31,6 +31,15 @@ def _within(path: Path, root: Path) -> bool:
     return True
 
 
+def _verify_candidate_capability(registry: object) -> None:
+    candidate_verify = registry.require("candidate.verify")
+    if (
+        candidate_verify.hunt_executor != "inline"
+        or not candidate_verify.requires_active_approval
+    ):
+        raise SystemExit("candidate.verify is not an approval-bound installed capability")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", type=Path, default=Path("/app"))
@@ -66,9 +75,7 @@ def main() -> int:
         loaded[name] = str(source)
 
     registry = importlib.import_module("runtime.capability_registry").CAPABILITY_REGISTRY
-    candidate_verify = registry.require("candidate.verify")
-    if candidate_verify.executor != "inline" or not candidate_verify.requires_active_approval:
-        raise SystemExit("candidate.verify is not an approval-bound installed capability")
+    _verify_candidate_capability(registry)
     if not compileall.compile_dir(root, quiet=1, force=False):
         raise SystemExit("installed runtime byte-compilation failed")
     print(json.dumps({
