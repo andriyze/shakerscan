@@ -20,6 +20,8 @@ test('risk, examination strength, and release status are kept distinct', () => {
   assert.match(detail, /This is not an overall safety or release score/)
   assert.match(detail, /Examination strength/)
   assert.match(detail, /Overall release decision/)
+  assert.match(detail, /const observedRiskColor = weakAssurance \? 'text-gray-200'/)
+  assert.match(detail, /historical scoring policy may exclude posture deductions/)
 })
 
 test('result scope and deterministic posture weaknesses are visible', () => {

@@ -138,6 +138,8 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
     (!scanFingerprint && scanVersion && buildVersion && scanVersion !== buildVersion)
   )
   const resultPresentation = scanResultPresentation(scan, assurance)
+  const weakAssurance = ['none', 'weak', 'limited'].includes(String(assurance?.band || 'none'))
+  const observedRiskColor = weakAssurance ? 'text-gray-200' : gradeTextColor(scorePresentation.grade)
   const conclusionTone = resultPresentation.tone === 'danger'
     ? 'border-red-500/30 bg-red-500/10'
     : resultPresentation.tone === 'warning'
@@ -179,7 +181,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
           ) : (
             <div className="mt-2 flex items-baseline gap-3">
               {hasGrade && (
-                <span className={`text-4xl font-bold ${gradeTextColor(scorePresentation.grade)}`}>
+                <span className={`text-4xl font-bold ${observedRiskColor}`}>
                   {scorePresentation.grade}
                 </span>
               )}
@@ -187,7 +189,10 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
             </div>
           )}
           <p className="mt-2 text-xs leading-5 text-gray-500">
-            Finding evidence and deterministic posture observed by this run. This is not an overall safety or release score.
+            {resultPresentation.postureIncluded
+              ? 'Finding evidence and deterministic application posture observed by this run.'
+              : 'Finding evidence observed by this run; this historical scoring policy may exclude posture deductions.'}
+            {' '}This is not an overall safety or release score.
           </p>
           {scorePresentation.note && (
             <p className="mt-2 text-xs text-amber-200/80">{scorePresentation.note}</p>
