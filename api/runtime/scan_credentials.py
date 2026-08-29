@@ -69,10 +69,7 @@ def scan_credential_resolution_capability(
         str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
     ))
     if not allowed:
-        return (
-            "auth.session.establish"
-            if auth_kind in _INTERACTIVE_HTTP_KINDS else "http.request"
-        )
+        return None
     if SCAN_CREDENTIAL_CAPABILITY in allowed:
         return SCAN_CREDENTIAL_CAPABILITY
     if auth_kind in _INTERACTIVE_HTTP_KINDS:
@@ -92,8 +89,7 @@ def scan_credential_allows_capability(
         str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
     }
     return (
-        not allowed
-        or SCAN_CREDENTIAL_CAPABILITY in allowed
+        SCAN_CREDENTIAL_CAPABILITY in allowed
         or str(capability_name or "").strip() in allowed
     )
 

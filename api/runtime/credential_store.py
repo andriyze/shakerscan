@@ -717,7 +717,7 @@ class PostgresCredentialProfileStore:
             except json.JSONDecodeError as exc:
                 raise CredentialStoreError("stored capability binding is invalid") from exc
         allowed = tuple(_capabilities(raw_capabilities))
-        if allowed and capability_name not in allowed:
+        if capability_name not in allowed:
             raise CredentialStoreError("credential profile is not allowed for capability")
         return WorkerCredentialCiphertext(
             metadata=CredentialProfileMetadata.from_row(item),

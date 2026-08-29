@@ -11,7 +11,9 @@ import {
 import {
   createCredentialProfile,
   deactivateCredentialProfile,
+  listCredentialCapabilities,
   listCredentialProfiles,
+  type CredentialCapabilityOption,
   rotateCredentialProfile,
   type CredentialAuthKind,
   type CredentialPrincipalSlot,
@@ -19,7 +21,6 @@ import {
   type CredentialSecretPayload,
   type CredentialTargetKind,
 } from '@/lib/credentialApi'
-import { SCAN_PUBLIC_CONTRACT_SNAPSHOT } from '@/lib/scanContract.generated'
 import {
   Button,
   Card,
@@ -69,15 +70,10 @@ type Draft = {
   customHeaders: string
   expiresAt: string
   capabilities: string
+  allowActiveCapabilities: boolean
 }
 
 type DraftErrors = Partial<Record<keyof Draft, string>>
-
-const DEFAULT_WEB_CAPABILITIES = Array.from(new Set([
-  ...SCAN_PUBLIC_CONTRACT_SNAPSHOT.credentials.semantic_capabilities,
-  'auth.session.refresh',
-  'auth.session.revoke',
-])).sort().join(', ')
 
 const EMPTY_DRAFT: Draft = {
   name: '',
@@ -93,7 +89,8 @@ const EMPTY_DRAFT: Draft = {
   scopes: '',
   customHeaders: '',
   expiresAt: '',
-  capabilities: DEFAULT_WEB_CAPABILITIES,
+  capabilities: '',
+  allowActiveCapabilities: false,
 }
 
 function splitValues(value: string): string[] {
@@ -229,6 +226,8 @@ export default function CredentialsPage() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [draftErrors, setDraftErrors] = useState<DraftErrors>({})
   const [editorError, setEditorError] = useState<string | null>(null)
+  const [capabilityOptions, setCapabilityOptions] = useState<CredentialCapabilityOption[]>([])
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -314,6 +313,27 @@ export default function CredentialsPage() {
     setEditorOpen(true)
   }
 
+  useEffect(() => {
+    if (!editorOpen || rotating) return
+    let cancelled = false
+    setCapabilitiesLoading(true)
+    listCredentialCapabilities({ target_kind: targetKind, auth_kind: draft.authKind })
+      .then((result) => {
+        if (cancelled) return
+        setCapabilityOptions(result.capabilities || [])
+        setDraft((current) => ({
+          ...current,
+          capabilities: (result.safe_defaults || []).join(', '),
+          allowActiveCapabilities: false,
+        }))
+      })
+      .catch((cause) => {
+        if (!cancelled) setEditorError(cause instanceof Error ? cause.message : 'Failed to load capability registry')
+      })
+      .finally(() => { if (!cancelled) setCapabilitiesLoading(false) })
+    return () => { cancelled = true }
+  }, [draft.authKind, editorOpen, rotating, targetKind])
+
   function openRotate(profile: CredentialProfile) {
     setRotating(profile)
     setDraft({
@@ -380,6 +400,7 @@ export default function CredentialsPage() {
           principal_label: draft.principalLabel.trim() || undefined,
           principal_slot: draft.principalSlot,
           allowed_capabilities: splitValues(draft.capabilities),
+          allow_active_capabilities: draft.allowActiveCapabilities,
           created_by: 'credentials_ui',
         })
         toast.success('Encrypted credential profile created')
@@ -477,7 +498,7 @@ export default function CredentialsPage() {
                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
                     {profile.allowed_capabilities.length
                       ? profile.allowed_capabilities.map((item) => <span key={item} className="rounded bg-gray-900 px-2 py-1">{item}</span>)
-                      : <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">all capabilities</span>}
+                      : <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
                     {profile.expires_at && <span>expires {new Date(profile.expires_at).toLocaleString()}</span>}
                   </div>
                   <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
@@ -516,7 +537,8 @@ export default function CredentialsPage() {
                 updateDraft({
                   authKind: kind,
                   principalSlot: isSsh(kind) ? 'ssh' : draft.principalSlot === 'ssh' ? 'primary' : draft.principalSlot,
-                  capabilities: kind === 'query_parameter' ? 'request.replay' : draft.capabilities,
+                  capabilities: '',
+                  allowActiveCapabilities: false,
                 })
                 setDraftErrors({})
               }}
@@ -539,7 +561,54 @@ export default function CredentialsPage() {
           {draft.authKind === 'ssh_private_key_with_passphrase' && <Field className="sm:col-span-2" label="Key passphrase" error={draftErrors.secondarySecret} required><Input type="password" autoComplete="new-password" value={draft.secondarySecret} onChange={(event) => updateDraft({ secondarySecret: event.target.value })} /></Field>}
           {draft.authKind === 'custom_headers' && <Field className="sm:col-span-2" label="Headers" hint="One Name: value pair per line. Values are encrypted and will not be shown again." error={draftErrors.customHeaders} required><Textarea rows={6} value={draft.customHeaders} onChange={(event) => updateDraft({ customHeaders: event.target.value })} /></Field>}
           <Field label="Expires at"><Input type="datetime-local" value={draft.expiresAt} onChange={(event) => updateDraft({ expiresAt: event.target.value })} /></Field>
-          {!rotating && <Field label="Allowed capabilities" hint="Comma or space separated; blank permits any worker capability."><Input value={draft.capabilities} onChange={(event) => updateDraft({ capabilities: event.target.value })} /></Field>}
+          {!rotating && (
+            <div className="sm:col-span-2 rounded-lg border border-gray-800 bg-gray-950 p-3">
+              <p className="text-sm font-medium text-gray-200">Allowed capabilities</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Selected from the canonical registry. No selection resolves to the server&apos;s safe defaults, never unrestricted access.
+              </p>
+              {capabilitiesLoading ? (
+                <p className="mt-3 text-xs text-gray-500">Loading canonical capabilities…</p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {capabilityOptions.map((capability) => {
+                    const selected = splitValues(draft.capabilities).includes(capability.name)
+                    return (
+                      <label key={capability.name} className="flex items-start gap-3 rounded border border-gray-800 p-2 text-xs text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => {
+                            const values = new Set(splitValues(draft.capabilities))
+                            if (event.target.checked) values.add(capability.name)
+                            else values.delete(capability.name)
+                            updateDraft({ capabilities: Array.from(values).sort().join(', ') })
+                          }}
+                          className="mt-1"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <code>{capability.name}</code>
+                            <span className={`rounded px-1.5 py-0.5 ${capability.requires_active_approval ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'}`}>
+                              {capability.risk_tier}
+                            </span>
+                            {capability.default && <span className="text-blue-300">safe default</span>}
+                          </span>
+                          <span className="mt-1 block text-gray-500">{capability.description}</span>
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+              {capabilityOptions.some((item) => item.requires_active_approval && splitValues(draft.capabilities).includes(item.name)) && (
+                <label className="mt-3 flex items-start gap-2 rounded border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
+                  <input type="checkbox" checked={draft.allowActiveCapabilities} onChange={(event) => updateDraft({ allowActiveCapabilities: event.target.checked })} className="mt-0.5" />
+                  I explicitly elevate this profile for the selected active capabilities. Runtime policy and target-bound approval are still required.
+                </label>
+              )}
+            </div>
+          )}
         </div>
         <p className="mt-5 text-xs text-gray-500">The secret is sent once over the local API, encrypted before storage, and resolved only inside an authorized worker action.</p>
       </Modal>

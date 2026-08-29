@@ -27,8 +27,13 @@ test('Scan credential selection is disabled for batches and requires explicit au
   assert.match(scan, /selected permissions and identities/)
 })
 
-test('new generic profiles use generated semantic Scan capabilities by default', () => {
-  assert.match(credentials, /SCAN_PUBLIC_CONTRACT_SNAPSHOT\.credentials\.semantic_capabilities/)
+test('new generic profiles use canonical least-privilege capability selections', () => {
+  assert.match(credentials, /listCredentialCapabilities/)
+  assert.match(credentials, /safe_defaults/)
+  assert.match(credentials, /No selection resolves to the server&apos;s safe defaults, never unrestricted access/)
+  assert.match(credentials, /no capabilities · legacy profile is unusable until narrowed explicitly/)
+  assert.match(credentials, /allow_active_capabilities: draft\.allowActiveCapabilities/)
+  assert.doesNotMatch(credentials, /blank permits any worker capability/)
   assert.doesNotMatch(credentials, /scan\.execute/)
   assert.match(credentials, /Client ID \(required for Scan\)/)
 })
