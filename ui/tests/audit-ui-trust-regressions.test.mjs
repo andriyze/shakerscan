@@ -71,3 +71,11 @@ test('scan submission titles follow the live execution status', () => {
   assert.match(timeline, /blocked: 'Scan blocked'/)
   assert.doesNotMatch(timeline, /'Scan\.submit': 'Scan queued'/)
 })
+
+test('scoped dashboard refuses unbound and unscoped historical rows', () => {
+  const dashboard = read('src/app/page.tsx')
+  assert.match(dashboard, /rowMatchesCohort\(scan\.target_id, scan\.target_url/)
+  assert.match(dashboard, /What changed is hidden in scoped mode/)
+  assert.match(dashboard, /Observed posture \{scan\.grade\}/)
+  assert.doesNotMatch(dashboard, /text-lg font-semibold[^\n]+scan\.grade/)
+})

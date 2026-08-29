@@ -251,14 +251,15 @@ export default function Dashboard() {
   const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
   const scopedTargetIds = useMemo(() => new Set(scopedTargets.flatMap((domain) => [domain.root_target, ...domain.subdomains].filter(Boolean).map((target) => target!.id))), [scopedTargets])
+  const scopedUrls = useMemo(() => new Set((scopedExposure?.assets || []).flatMap((asset) => [asset.url, asset.root_domain].filter((value): value is string => Boolean(value)).map(normalizeScopeLocator))), [scopedExposure])
   const coverage = useMemo(() => buildCoverageRollup(scopedTargets), [scopedTargets])
   const meaningfulActivity = useMemo(
-    () => timeline.filter((event) => isMeaningfulActivity(event) && (!event.target_id || cohortView === 'all' || scopedTargetIds.has(event.target_id))).slice(0, 5),
-    [timeline, cohortView, scopedTargetIds],
+    () => timeline.filter((event) => isMeaningfulActivity(event) && rowMatchesCohort(event.target_id, event.target_url, cohortView, scopedTargetIds, scopedUrls)).slice(0, 5),
+    [timeline, cohortView, scopedTargetIds, scopedUrls],
   )
   const recentScans = useMemo(
-    () => (data?.recent_scans || []).filter((scan) => !scan.target_id || cohortView === 'all' || scopedTargetIds.has(scan.target_id)),
-    [data, cohortView, scopedTargetIds],
+    () => (data?.recent_scans || []).filter((scan) => rowMatchesCohort(scan.target_id, scan.target_url, cohortView, scopedTargetIds, scopedUrls)),
+    [data, cohortView, scopedTargetIds, scopedUrls],
   )
   const scopedActions = useMemo(
     () => cohortView === 'all' ? (data?.action_center || []) : buildCohortActions(scopedExposure),
@@ -436,7 +437,14 @@ export default function Dashboard() {
 
       <SecurityPosture exposure={scopedExposure} loading={overviewLoading} />
 
-      <ChangesStrip storageKey="dashboard" />
+      {cohortView === 'all' ? (
+        <ChangesStrip storageKey="dashboard" />
+      ) : (
+        <Card className="p-4 text-sm text-gray-400">
+          <span className="font-medium text-gray-200">What changed is hidden in scoped mode.</span>{' '}
+          Historical change events do not all carry a cohort binding yet. Choose All cohorts to inspect that unscoped stream.
+        </Card>
+      )}
 
       <CoverageOverview exposure={scopedExposure} coverage={coverage} loading={overviewLoading} />
 
@@ -456,6 +464,26 @@ function cohortMatches(cohort: TargetCohort | undefined, view: CohortView): bool
   if (view === 'operational') return ['production', 'staging', 'unclassified'].includes(value)
   if (view === 'non_operational') return ['lab', 'demo', 'calibration', 'internal'].includes(value)
   return value === view
+}
+
+function normalizeScopeLocator(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase()
+  } catch {
+    return value.trim().toLowerCase()
+  }
+}
+
+function rowMatchesCohort(
+  targetId: string | null | undefined,
+  targetUrl: string | null | undefined,
+  view: CohortView,
+  targetIds: Set<string>,
+  locators: Set<string>,
+): boolean {
+  if (view === 'all') return true
+  if (targetId) return targetIds.has(targetId)
+  return Boolean(targetUrl && locators.has(normalizeScopeLocator(targetUrl)))
 }
 
 function countCohorts(assets: ExposureAsset[]): Record<string, number> {
@@ -881,7 +909,7 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
                 <span className="block text-xs text-gray-500">{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
               </span>
               {typeof scan.findings_count === 'number' ? <span className="hidden text-xs tabular-nums text-gray-500 sm:block">{scan.findings_count} findings</span> : null}
-              {scan.grade ? <span className={`text-lg font-semibold ${getGradeColor(scan.grade)}`}>{scan.grade}</span> : null}
+              {scan.grade ? <span className={`text-xs font-medium ${getGradeColor(scan.grade)}`} title="Observed posture grade; * means assurance limitations apply">Observed posture {scan.grade}</span> : null}
               <ScanStatusBadge status={scan.status} />
             </Link>
           )) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
