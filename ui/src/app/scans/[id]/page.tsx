@@ -1412,14 +1412,15 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
     scan?.error ||
     'No specific error was reported.'
   )
-  // Some older timeout rows appended a diagnostic log excerpt to error_message. Logs remain
-  // available below; the failure headline should only state the structured terminal reason.
-  const failureMessage = rawFailureMessage
-    .split(/\s+Last logs:\s*/i, 1)[0]
+  // Some older timeout rows appended the only durable diagnostic excerpt to
+  // error_message. Keep it available without overloading the failure headline.
+  const failureParts = rawFailureMessage.split(/\s+Last logs:\s*/i, 2)
+  const failureMessage = failureParts[0]
     .replace(/^Scan terminated:\s*/i, '')
     .trim() || 'No specific error was reported.'
+  const legacyLogExcerpt = String(failureParts[1] || '').trim().slice(0, 4000)
   const targetUrl = String(scan?.target_url || scan?.target || '').trim()
-  const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(String(failureMessage))
+  const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(rawFailureMessage)
   const isShard = scan?.scan_role === 'shard' && Boolean(scan?.parent_scan_id)
 
   return (
@@ -1436,6 +1437,16 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
               : `This ${isShard ? 'shard' : 'scan'} stopped before it finished.`}
           </p>
           <p className="text-red-200/70 text-sm mt-1">{failureMessage}</p>
+          {legacyLogExcerpt && (
+            <details className="mt-3 rounded-lg border border-red-400/20 bg-black/20 p-3">
+              <summary className="cursor-pointer text-xs font-medium text-red-100/80">
+                Historical failure log excerpt
+              </summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-red-100/70">
+                {legacyLogExcerpt}
+              </pre>
+            </details>
+          )}
           <ul className="mt-3 space-y-1 text-sm text-red-200/80 list-disc list-inside">
             {hasPartialResults ? (
               <li>Partial baseline / discovery data was recovered and is shown below, but the scan is incomplete.</li>

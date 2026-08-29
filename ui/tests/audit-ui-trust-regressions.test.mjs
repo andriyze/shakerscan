@@ -113,6 +113,8 @@ test('scan failure summaries do not contradict terminal result state', () => {
   const detail = read('src/app/scans/[id]/page.tsx')
   const scans = read('src/app/scans/page.tsx')
   assert.match(detail, /split\(\/\\s\+Last logs:/)
+  assert.match(detail, /Historical failure log excerpt/)
+  assert.match(detail, /test\(rawFailureMessage\)/)
   assert.match(detail, /Execution coverage is incomplete/)
   assert.match(detail, /No score or grade was produced/)
   assert.doesNotMatch(detail, />Grade is provisional</)
