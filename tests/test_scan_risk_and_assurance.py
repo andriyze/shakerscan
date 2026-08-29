@@ -300,6 +300,23 @@ def test_assurance_counts_required_capabilities_not_the_separate_finalizer():
     assert "required_actions_complete" not in result["gaps"]
 
 
+def test_required_capability_success_cannot_hide_an_abandoned_plan():
+    coverage = {
+        "planned_action_count": 20,
+        "terminal_action_count": 2,
+        "family_coverage": [],
+        "candidate_coverage": {},
+        "capability_coverage": {
+            "actions": [
+                {"action_id": "baseline", "required": True, "status": "success"},
+            ],
+        },
+    }
+    result = assurance(coverage)
+    assert result["components"]["required_actions_complete"]["value"] == 0.1
+    assert "required_actions_complete" in result["gaps"]
+
+
 def test_a_trivial_complete_plan_cannot_look_like_a_broad_examination():
     coverage = {
         "planned_action_count": 1,

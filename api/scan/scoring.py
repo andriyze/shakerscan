@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # package import layout
     from scanner.score_bands import GRADE_BANDS, grade_for
 
 
-SCORE_POLICY = "risk_and_assurance/v6"
+SCORE_POLICY = "risk_and_assurance/v7"
 
 ASSURANCE_BANDS: tuple[tuple[int, str], ...] = (
     (85, "strong"), (70, "adequate"), (50, "limited"), (1, "weak"), (0, "none"),
@@ -140,6 +140,7 @@ def assurance(
         item for item in required_actions
         if str(item.get("status") or "").lower() in {"success", "succeeded", "completed"}
     ]
+    plan_completion = _ratio(terminal_actions, planned_actions)
 
     # Nothing ran, so nothing was examined. Reporting this as anything but zero is the
     # failure this axis exists to prevent: a scan that never executed would otherwise
@@ -159,9 +160,12 @@ def assurance(
     values = {
         "required_actions_complete": (
             0.0 if "required_action_incomplete" in reasons
-            else _ratio(len(required_completed), len(required_actions))
+            else min(
+                _ratio(len(required_completed), len(required_actions)),
+                plan_completion,
+            )
             if required_actions
-            else _ratio(terminal_actions, planned_actions)
+            else plan_completion
         ),
         "selected_families_complete": _ratio(len(complete), len(selected)),
         "candidates_attempted": _ratio(attempted, planned),
