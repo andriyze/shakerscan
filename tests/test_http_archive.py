@@ -180,3 +180,64 @@ def test_redaction_is_applied_unless_raw_is_asked_for():
 
 def test_archive_modes_are_a_closed_set():
     assert ARCHIVE_MODES == {"full", "metadata", "off"}
+
+
+# --- raw export is a deliberate deployment choice ----------------------------------------
+
+def test_raw_export_is_disabled_unless_the_deployment_enables_it(monkeypatch):
+    """Every other public surface is metadata-only or redacted. A raw export is the one
+    place a single request yields bearer tokens exactly as sent, so it is off by default
+    rather than a query parameter anyone who reaches the API may set."""
+    from api.runtime import http_archive_router as archive_router
+
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", raising=False)
+    assert archive_router.raw_export_enabled() is False
+    for value in ("0", "false", "no", "", "maybe"):
+        monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", value)
+        assert archive_router.raw_export_enabled() is False, value
+    for value in ("1", "true", "yes", "on", "TRUE"):
+        monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", value)
+        assert archive_router.raw_export_enabled() is True, value
+
+
+def test_raw_export_refuses_before_it_reaches_the_database(monkeypatch):
+    """The refusal happens on the redaction argument, so a disabled deployment never even
+    reads the rows it would have to redact."""
+    from fastapi import HTTPException
+
+    from api.runtime import http_archive_router as archive_router
+
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        archive_router._authorize_raw(object())
+    assert exc.value.status_code == 403
+    assert "raw export is disabled" in str(exc.value.detail)
+
+
+def test_enabling_raw_still_requires_the_operator_control(monkeypatch):
+    """The switch permits raw export; it does not make it anonymous. ShakerScan has no
+    users to authorize against, so this is its existing privileged-operator control --
+    a credential plus loopback, HTTPS, or a trusted Tailscale transport."""
+    from api.runtime import http_archive_router as archive_router
+
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", "1")
+    called: list[object] = []
+    monkeypatch.setattr(archive_router, "_require_operator", called.append)
+    archive_router._authorize_raw("request-sentinel")
+    assert called == ["request-sentinel"], "the operator gate must still run"
+
+
+def test_redacted_export_needs_no_operator_credential(monkeypatch):
+    """The default path stays usable, or the archive is unreviewable in practice."""
+    from api.runtime import http_archive_router as archive_router
+
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", raising=False)
+    refused: list[object] = []
+
+    def _fail(request):
+        refused.append(request)
+        raise AssertionError("redacted export must not require the operator gate")
+
+    monkeypatch.setattr(archive_router, "_require_operator", _fail)
+    # Nothing to call: _authorize_raw is only reached for redaction="raw".
+    assert refused == []

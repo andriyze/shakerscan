@@ -23,6 +23,12 @@ ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
 - Results can contain sensitive request, response, authentication, payload, model, and evidence
   data. Public credential and collection responses are metadata-only; comprehensive rewriting of
   arbitrary historical evidence is not promised.
+- The HTTP transaction archive stores request and response bodies as sent, including any
+  credential the scanner was given. Export is redacted by default. Verbatim export requires
+  both `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` and the operator credential over loopback, HTTPS,
+  or a trusted Tailscale transport, and is off unless an operator turns it on. Set
+  `SHAKERSCAN_HTTP_ARCHIVE=metadata` to keep the call ledger without storing bodies, or
+  `off` to record nothing.
 - Active DAST, Hunt, and connected-device testing require ownership or explicit authorization for
   the exact target. Silence, missing telemetry, and blocked work remain inconclusive.
 - Model Intake is release-gated for deterministic static review, artifacts/reports, and the opt-in
