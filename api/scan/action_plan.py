@@ -1095,7 +1095,15 @@ class ScanActionPlanCompiler:
                     if isinstance(raw_slice, Mapping) else batch_size
                 )
                 wall_floor = {
-                    "templates.passive_batch": 10,
+                    # A root Scan executes the reviewed fixed seven-request
+                    # passive pack through ``templates.passive_scan``.  Its
+                    # smallest process profile is 30 seconds; scaling a
+                    # one-target manifest down to 10 seconds made ordinary
+                    # public targets deterministically report partial coverage.
+                    # Parallel children must keep the same floor: admitting a
+                    # smaller shard with a predictably incomplete required
+                    # baseline is worse than rejecting that partition budget.
+                    "templates.passive_batch": 30,
                     "templates.active_batch": 30,
                     "xss.verify_batch": 10,
                     "sqli.verify_batch": 20,
