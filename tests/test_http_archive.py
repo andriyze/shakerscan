@@ -23,7 +23,12 @@ from api.runtime.http_archive import (
     normalized_headers,
     transaction_rows,
 )
-from api.runtime.http_archive_reader import export_document, project
+from api.runtime.http_archive_reader import (
+    count_transactions,
+    export_document,
+    project,
+    read_transactions,
+)
 
 
 def test_a_truncated_body_still_reports_the_whole_body_truthfully():
@@ -376,6 +381,51 @@ def test_adapter_limited_capture_cannot_be_labelled_complete():
     )
     assert document["fidelity"] == "partial"
     assert "adapter-limited" in document["fidelity_detail"]
+
+
+class _ArchiveQueryConnection:
+    def __init__(self):
+        self.calls = []
+
+    async def fetchval(self, query, *params):
+        self.calls.append(("fetchval", query, params))
+        return 7
+
+    async def fetch(self, query, *params):
+        self.calls.append(("fetch", query, params))
+        return []
+
+
+@pytest.mark.asyncio
+async def test_archive_browser_filters_count_and_rows_with_the_same_search():
+    conn = _ArchiveQueryConnection()
+    total = await count_transactions(
+        conn, scan_id="scan-1", hunt_run_id=None, method="post",
+        status_code=401, search="/login",
+    )
+    rows = await read_transactions(
+        conn, scan_id="scan-1", hunt_run_id=None, method="post",
+        status_code=401, search="/login", limit=25, offset=50,
+    )
+
+    assert total == 7 and rows == []
+    count_query, count_params = conn.calls[0][1:]
+    row_query, row_params = conn.calls[1][1:]
+    for query in (count_query, row_query):
+        assert "url ILIKE" in query
+        assert "capability_name" in query
+        assert "adapter" in query
+    assert count_params == ("scan-1", "POST", 401, "%/login%")
+    assert row_params == ("scan-1", "POST", 401, "%/login%", 25, 50)
+
+
+def test_filtered_export_reports_matches_and_whole_archive_count_separately():
+    document = export_document(
+        [], export_format="transactions", redaction="redacted", owner={},
+        total=3, archive_total=418,
+    )
+    assert document["total"] == 3
+    assert document["archive_total"] == 418
 
 
 def test_the_deterministic_scan_plane_records_its_calls():

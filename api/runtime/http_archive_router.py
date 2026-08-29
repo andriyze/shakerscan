@@ -93,6 +93,7 @@ async def _export(
     redaction: str,
     method: str | None,
     status_code: int | None,
+    search: str | None,
     limit: int,
     offset: int,
 ):
@@ -103,17 +104,24 @@ async def _export(
     if redaction == "raw":
         _authorize_raw(request)
     async with _pool().acquire() as conn:
-        total = await count_transactions(conn, scan_id=scan_id, hunt_run_id=hunt_run_id)
+        archive_total = await count_transactions(
+            conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+        )
+        total = await count_transactions(
+            conn, scan_id=scan_id, hunt_run_id=hunt_run_id, method=method,
+            status_code=status_code, search=search,
+        )
         stats = await read_archive_stats(
             conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
         )
         rows = await read_transactions(
             conn, scan_id=scan_id, hunt_run_id=hunt_run_id, method=method,
-            status_code=status_code, limit=limit, offset=offset,
+            status_code=status_code, search=search, limit=limit, offset=offset,
         )
     document = export_document(
         rows, export_format=export_format, redaction=redaction,
-        owner={"scan_id": scan_id, "hunt_id": hunt_run_id}, total=total, stats=stats,
+        owner={"scan_id": scan_id, "hunt_id": hunt_run_id}, total=total,
+        archive_total=archive_total, stats=stats,
     )
     name = scan_id or hunt_run_id or "export"
     suffix = "har" if export_format == "har" else "json"
@@ -135,6 +143,7 @@ async def export_scan_transactions(
     redaction: str = Query("redacted"),
     method: str | None = Query(None),
     status_code: int | None = Query(None),
+    search: str | None = Query(None, max_length=200),
     limit: int = Query(1_000, ge=1, le=MAX_EXPORT_ROWS),
     offset: int = Query(0, ge=0),
 ):
@@ -146,7 +155,7 @@ async def export_scan_transactions(
     """
     return await _export(
         request=request, scan_id=scan_id, hunt_run_id=None, export_format=format, redaction=redaction,
-        method=method, status_code=status_code, limit=limit, offset=offset,
+        method=method, status_code=status_code, search=search, limit=limit, offset=offset,
     )
 
 
@@ -158,6 +167,7 @@ async def export_hunt_transactions(
     redaction: str = Query("redacted"),
     method: str | None = Query(None),
     status_code: int | None = Query(None),
+    search: str | None = Query(None, max_length=200),
     limit: int = Query(1_000, ge=1, le=MAX_EXPORT_ROWS),
     offset: int = Query(0, ge=0),
 ):
@@ -169,7 +179,7 @@ async def export_hunt_transactions(
     """
     return await _export(
         request=request, scan_id=None, hunt_run_id=hunt_id, export_format=format, redaction=redaction,
-        method=method, status_code=status_code, limit=limit, offset=offset,
+        method=method, status_code=status_code, search=search, limit=limit, offset=offset,
     )
 
 

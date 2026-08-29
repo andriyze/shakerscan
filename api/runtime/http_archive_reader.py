@@ -75,6 +75,7 @@ async def read_transactions(
     hunt_run_id: str | None = None,
     method: str | None = None,
     status_code: int | None = None,
+    search: str | None = None,
     limit: int = 1_000,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -92,6 +93,13 @@ async def read_transactions(
     if status_code is not None:
         params.append(int(status_code))
         clauses.append(f"t.status_code=${len(params)}")
+    if search:
+        params.append(f"%{str(search).strip()}%")
+        clauses.append(
+            f"(t.url ILIKE ${len(params)}"
+            f" OR COALESCE(t.capability_name,'') ILIKE ${len(params)}"
+            f" OR COALESCE(t.adapter,'') ILIKE ${len(params)})"
+        )
     if not clauses:
         raise ValueError("an export must name a scan or a hunt")
     where = " WHERE " + " AND ".join(clauses)
@@ -104,13 +112,42 @@ async def read_transactions(
     return [dict(row) for row in rows]
 
 
-async def count_transactions(conn, *, scan_id: str | None, hunt_run_id: str | None) -> int:
+async def count_transactions(
+    conn,
+    *,
+    scan_id: str | None,
+    hunt_run_id: str | None,
+    method: str | None = None,
+    status_code: int | None = None,
+    search: str | None = None,
+) -> int:
+    """Count one archive, optionally using the same filters as ``read_transactions``."""
+    clauses: list[str] = []
+    params: list[Any] = []
     if scan_id:
-        return int(await conn.fetchval(
-            "SELECT COUNT(*) FROM http_transactions WHERE scan_id=$1", scan_id,
-        ) or 0)
+        params.append(scan_id)
+        clauses.append(f"scan_id=${len(params)}")
+    elif hunt_run_id:
+        params.append(hunt_run_id)
+        clauses.append(f"hunt_run_id=${len(params)}")
+    else:
+        raise ValueError("an export must name a scan or a hunt")
+    if method:
+        params.append(str(method).upper())
+        clauses.append(f"method=${len(params)}")
+    if status_code is not None:
+        params.append(int(status_code))
+        clauses.append(f"status_code=${len(params)}")
+    if search:
+        params.append(f"%{str(search).strip()}%")
+        clauses.append(
+            f"(url ILIKE ${len(params)}"
+            f" OR COALESCE(capability_name,'') ILIKE ${len(params)}"
+            f" OR COALESCE(adapter,'') ILIKE ${len(params)})"
+        )
     return int(await conn.fetchval(
-        "SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1", hunt_run_id,
+        "SELECT COUNT(*) FROM http_transactions WHERE " + " AND ".join(clauses),
+        *params,
     ) or 0)
 
 
@@ -234,6 +271,7 @@ def export_document(
     redaction: str,
     owner: Mapping[str, Any],
     total: int,
+    archive_total: int | None = None,
     stats: Mapping[str, int] | None = None,
     creator_version: str = "2.0.0",
 ) -> dict[str, Any]:
@@ -257,6 +295,7 @@ def export_document(
             "redaction": redaction,
             "exported": len(entries),
             "total": total,
+            "archive_total": archive_total if archive_total is not None else total,
             "fidelity": fidelity,
             "fidelity_detail": fidelity_detail,
         })
@@ -274,6 +313,9 @@ def export_document(
         "capture_stats": dict(stats or {}),
         "exported": len(projected),
         "total": total,
+        # ``total`` is the number matching the current filters. This second count lets an
+        # in-app browser say "3 matches in 418 calls" without downloading the archive.
+        "archive_total": archive_total if archive_total is not None else total,
         "truncated_export": len(projected) < total,
         "transactions": projected,
     }
