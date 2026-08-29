@@ -61,19 +61,10 @@ def caps_risk_grade(finding: Mapping[str, Any]) -> bool:
     item = dict(finding)
     if is_trusted_ai_false_positive(item):
         return False
-    if has_proof(item):
-        return True
-    if item.get("suspected") or item.get("needs_verification"):
-        return False
-    validation = item.get("validation")
-    validation = validation if isinstance(validation, Mapping) else {}
-    try:
-        confidence = float(item.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    return confidence >= 0.80 or str(
-        validation.get("evidence_level") or ""
-    ).lower() == "strong_indicator"
+    # Only deterministic proof earns the proven ceiling and proven_* reason.
+    # Confidence and strong indicators remain risk signals, but do not turn an
+    # unverified candidate into a confirmed vulnerability.
+    return has_proof(item)
 
 
 def severity(finding: Mapping[str, Any]) -> str:

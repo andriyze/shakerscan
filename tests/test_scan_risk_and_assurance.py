@@ -146,6 +146,13 @@ def test_a_bare_verified_flag_is_not_proof_on_its_own():
     assert caps_risk_grade({"severity": "critical", "verified": True}) is False
 
 
+def test_high_confidence_without_proof_is_labeled_suspected():
+    result = risk([{"severity": "critical", "confidence": 0.85}])
+    assert result["score"] == 70
+    assert result["reasons"] == ["suspected_critical:1"]
+    assert result["proven_counts"] == {}
+
+
 def test_a_trusted_ai_false_positive_neither_scores_nor_caps():
     finding = {
         "severity": "critical",
