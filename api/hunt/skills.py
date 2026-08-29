@@ -475,6 +475,18 @@ def bind_skills_to_hunt(
     if not specs:
         return BoundSkills((), allowed_capabilities, budget, {})
 
+    # Every capability a skill lists as required must survive the policy filter. Checking
+    # only that *something* survived let a session-testing skill bind to a passive,
+    # credential-free hunt with two of its five requirements, so the planner would follow a
+    # methodology it could not carry out and report the gap as a result.
+    available = set(allowed_capabilities)
+    for spec in specs:
+        withheld = [name for name in spec.capabilities if name not in available]
+        if withheld:
+            raise HuntSkillError(
+                f"skill {spec.skill_id} requires {', '.join(withheld)}, which this Hunt "
+                "policy withholds; grant the matching authority or choose another skill"
+            )
     wanted = set(HuntSkillLibrary.capability_allowlist(specs))
     narrowed = tuple(name for name in allowed_capabilities if name in wanted)
     if not narrowed:

@@ -1,5 +1,6 @@
 import base64
 import json
+import pathlib
 
 import pytest
 
@@ -295,3 +296,64 @@ def test_public_configuration_reports_which_half_is_present():
     assert (username_only["username_configured"], username_only["secret_configured"]) == (True, False)
     assert "opaque-password" not in json.dumps(secret_only)
     assert "analyst" not in json.dumps(username_only)
+
+
+def test_a_one_sided_profile_can_still_find_its_login_form():
+    """Storage accepting one half is useless if form discovery demands both.
+
+    The discovery step required a password input *and* a username-like input, so a profile
+    holding only one half saved successfully and then failed at login with "target login
+    form was not identified".
+    """
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "api"))
+    from capabilities.auth import _form_fields  # noqa: E402
+
+    username_only = "<form method=post action=/login><input name=username></form>"
+    password_only = (
+        "<form method=post action=/login><input type=password name=password></form>"
+    )
+    both = (
+        "<form method=post action=/login>"
+        "<input name=username><input type=password name=password></form>"
+    )
+
+    _, user, fields = _form_fields(
+        username_only, "http://t/login", need_username=True, need_password=False,
+    )
+    assert user == "username" and "__password_field__" not in fields
+
+    _, user, fields = _form_fields(
+        password_only, "http://t/login", need_username=False, need_password=True,
+    )
+    assert fields["__password_field__"] == "password"
+
+    # A credential holding both halves still requires a form offering both.
+    _, user, fields = _form_fields(both, "http://t/login")
+    assert user == "username" and fields["__password_field__"] == "password"
+    from capabilities.auth import SessionCredentialContractError  # noqa: E402
+
+    with pytest.raises(SessionCredentialContractError):
+        _form_fields(username_only, "http://t/login")
+
+
+def test_legacy_profiles_report_the_secret_they_were_required_to_have():
+    """Rows written before secret_configured existed must not read as absent.
+
+    Every kind except custom_headers required a secret then, so its presence follows from
+    the kind. Left undefined, a complete pair rendered as "username only".
+    """
+    from api.runtime.credential_store import _with_secret_configured
+
+    legacy = {"auth_kind": "basic_auth", "username_configured": True}
+    assert _with_secret_configured(legacy, auth_kind="basic_auth")["secret_configured"] is True
+
+    legacy_headers = {"auth_kind": "custom_headers", "username_configured": False}
+    assert _with_secret_configured(
+        legacy_headers, auth_kind="custom_headers",
+    )["secret_configured"] is False
+
+    # A row that already carries the flag is returned untouched.
+    current = {"auth_kind": "basic_auth", "secret_configured": False}
+    assert _with_secret_configured(current, auth_kind="basic_auth")["secret_configured"] is False

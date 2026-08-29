@@ -173,3 +173,30 @@ def test_the_target_address_is_still_used_when_no_address_is_named():
     result = _run(direct_origin_addresses=("203.0.113.10",))
     assert not str(result.get("error", "")).startswith("scope:")
     assert result.get("request", {}).get("direct_origin") is not True
+
+
+# --- forged identity headers are metered like the active action they are ------------------
+
+def test_forging_identity_is_classified_as_an_active_call():
+    """It was classified by the capability's static risk tier, so anonymous forged-header
+    requests never consumed active_actions and ran to the HTTP ceiling instead."""
+    from tests.api_sources import api_tree_source
+
+    source = api_tree_source()
+    assert "forges_identity" in source
+    assert "or forges_identity" in source, "it must widen requires_call_approval"
+    assert 'else "active" if forges_identity' in source, "and elevate the approved risk tier"
+
+
+def test_the_identity_header_vocabulary_has_one_owner():
+    """The router classifies calls from the same set the request filter enforces, so a
+    header cannot be strippable but unmetered, or metered but never stripped."""
+    import api.agent_tools as agent_tools
+
+    assert "cf-connecting-ip" in agent_tools.IDENTITY_HEADERS
+    assert "true-client-ip" in agent_tools.IDENTITY_HEADERS
+    assert "x-forwarded-for" in agent_tools.IDENTITY_HEADERS
+    # Credential and transport headers are refused for reasons the operator cannot waive,
+    # so they are deliberately not part of this set.
+    assert "authorization" not in agent_tools.IDENTITY_HEADERS
+    assert "transfer-encoding" not in agent_tools.IDENTITY_HEADERS

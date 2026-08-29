@@ -59,6 +59,7 @@ techniques:
 - path-normalization-differential
 - preflight-and-verb-surface
 - cache-identity-confusion
+- client-ip-header-trust
 promotion_gate: direct_origin_response_matches_application_without_edge_headers_or_edge_origin_disagreement
 requires_skills:
 - skill.web.http-baselining-replay-and-differential-analysis
@@ -75,10 +76,6 @@ deferred_techniques:
   requires: a synchronized concurrent-batch capability
 - technique: websocket-and-grpc-frame-inspection
   requires: a realtime exchange capability
-- technique: client-ip-header-trust-probe
-  requires: an operator-authorized identity-header tier; the request filter drops X-Forwarded-For,
-    X-Real-IP and Forwarded while currently letting CF-Connecting-IP and True-Client-IP through,
-    and this skill will not build on that asymmetry
 source: authored for ShakerScan from operator-supplied Cloudflare validation methodology
 ---
 
@@ -242,24 +239,25 @@ The highest-severity edge finding is one user's authenticated response served to
 An authenticated route that looks like a static file is the common cause. Never treat a single
 `HIT` as proof — confirm the response body actually crosses identities.
 
-### 8. Client-IP header trust — deferred, and why
+### 8. Client-IP header trust
 
 The edge supplies a connecting-IP header so the origin can identify the visitor. It is trustworthy
 only when the connection is known to have come from the edge. Where it is trusted unconditionally,
-an attacker who reaches the origin directly can assert any client address and defeat application
+anyone who reaches the origin directly can assert any client address and defeat application
 allowlists, internal-user checks, origin rate limits, and audit attribution.
 
-This runtime drops `X-Forwarded-For`, `X-Real-IP`, `Forwarded` and `Host` from planner-supplied
-headers, because a planner must not forge identity. `CF-Connecting-IP` and `True-Client-IP` are
-not currently dropped even though they serve that same purpose behind the major edges. This skill
-does not use that gap: a probe that works only because the header filter is inconsistent would stop
-working the moment the filter is corrected, and building on it would argue for leaving it open.
-The technique belongs behind an explicit operator-authorized identity-header permission, where the
-operator states that forging a connecting address against this target is in scope.
+Planner-supplied identity headers are refused by default — `X-Forwarded-For`, `X-Real-IP`,
+`Forwarded`, and the `CF-Connecting-IP` and `True-Client-IP` names the major edges actually read.
+With `policy.allow_identity_headers` the operator states that forging a connecting address against
+this target is in scope, and they become available. Credential and transport headers stay refused
+regardless: those are not the operator's to waive.
 
-Report the exposure instead. If step 2 or 3 proved a direct path to the origin exists, then origin
-trust in any client-suppliable address header is exploitable, and the remediation below applies
-whether or not this runtime could send the header.
+Send the same request twice, differing only in the header, against a route with apparently
+internal-only or rate-limited behaviour. A behavioural difference means the origin trusts a
+client-suppliable address. Combine it with step 4: origin trust plus a reachable origin is
+exploitable, while origin trust behind an unreachable origin is a defence-in-depth finding.
+
+These calls are metered as active actions and re-approved per call, so keep the matrix small.
 
 ## Evidence required for a finding
 
@@ -268,6 +266,7 @@ whether or not this runtime could send the header.
   baseline.
 - **Demonstrated bypass:** the paired requests, the confirmed address used, the application content
   returned over it, and the edge headers present on one and absent on the other.
+- **Header trust:** the paired requests differing only in the header, and the behavioural delta.
 - **Normalization disagreement:** both representations, both responses, the shared application
   route, and an interleaved repeat.
 - **Cache confusion:** both principals' requests and responses, the marker that crossed, and the

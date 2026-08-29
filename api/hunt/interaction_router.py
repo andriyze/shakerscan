@@ -1442,10 +1442,22 @@ async def _execute_hunt_capability_lifecycle(
                     and request.input.get("secondary_session_ref")
                 )
             )
+            # Forging a client address is a distinct authority the operator granted, so a
+            # call that uses it is metered and re-approved like any other active action.
+            # Classifying it by the capability's static risk tier alone let anonymous
+            # forged-header requests run to the HTTP ceiling without ever touching
+            # max_active_actions, which breaks the multidimensional budget invariant.
+            forges_identity = bool(
+                agent_tools.IDENTITY_HEADERS & {
+                    str(header).strip().lower()
+                    for header in (request.input.get("headers") or {})
+                }
+            ) if isinstance(request.input.get("headers"), Mapping) else False
             requires_call_approval = (
                 spec.requires_active_approval
                 or principal_slot != "anonymous"
                 or uses_session
+                or forges_identity
             )
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -1454,7 +1466,11 @@ async def _execute_hunt_capability_lifecycle(
                 call_approval_context = await _validate_approval_receipt_for_action(
                     conn, policy.get("approval_receipt_id"), target_url=target_url,
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
-                    command=name, risk_tier="credential" if principal_slot != "anonymous" or uses_session else str(spec.risk_tier), always_require_receipt=True,
+                    command=name, risk_tier=(
+                        "credential" if principal_slot != "anonymous" or uses_session
+                        else "active" if forges_identity
+                        else str(spec.risk_tier)
+                    ), always_require_receipt=True,
                     require_target_binding=True,
                     require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
                 )

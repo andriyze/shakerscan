@@ -243,7 +243,19 @@ def _endpoint_args(
     return origin, path, public_path
 
 
-def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
+def _form_fields(
+    html: str,
+    page_url: str,
+    *,
+    need_username: bool = True,
+    need_password: bool = True,
+) -> tuple[str, str, dict[str, str]]:
+    """Find the login form, requiring only the fields the credential can actually fill.
+
+    Demanding both a password input and a username-like input meant a profile holding one
+    half of the pair -- which the credential contract accepts -- could be stored and then
+    never used, failing at login with "target login form was not identified".
+    """
     parser = _LoginFormParser()
     parser.feed(html)
     for form in parser.forms[:20]:
@@ -252,7 +264,7 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
             str(item.get("name") or "") for item in inputs
             if item.get("type") == "password" and item.get("name")
         ), "")
-        if not password:
+        if need_password and not password:
             continue
         if any(
             item.get("type") != "hidden"
@@ -270,7 +282,7 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
                 or _USERNAME_FIELD.search(str(item.get("name") or ""))
             )
         ), "")
-        if not username:
+        if need_username and not username:
             continue
         fields: dict[str, str] = {}
         for item in inputs:
@@ -289,9 +301,15 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
             raise SessionCredentialContractError(
                 "login form must submit credentials with POST"
             )
-        if not _FIELD_NAME.fullmatch(username) or not _FIELD_NAME.fullmatch(password):
-            raise SessionCredentialContractError("login form fields are invalid")
-        return action, username, {**fields, "__password_field__": password}
+        # Only the fields this credential will fill have to be well formed. A form may
+        # legitimately carry the other half; it simply goes unfilled.
+        for present, name in ((need_username, username), (need_password, password)):
+            if present and not _FIELD_NAME.fullmatch(name):
+                raise SessionCredentialContractError("login form fields are invalid")
+        resolved = dict(fields)
+        if need_password:
+            resolved["__password_field__"] = password
+        return action, username, resolved
     raise SessionCredentialContractError("target login form was not identified")
 
 
@@ -461,14 +479,16 @@ async def establish_target_bound_http_session(
             page_url = urllib.parse.urljoin(origin + "/", endpoint_path.lstrip("/"))
             action, username_field, form = _form_fields(
                 page.body().decode("utf-8", errors="replace"), page_url,
+                need_username=bool(credential.username),
+                need_password=bool(credential.secret),
             )
-            password_field = form.pop("__password_field__")
+            password_field = form.pop("__password_field__", "")
             # A one-sided profile submits only the half it holds. Assigning unconditionally
             # posted the literal string "None" as the username, which the target reads as a
             # real account name and which no operator would ever see in the redacted receipt.
-            if credential.username:
+            if credential.username and username_field:
                 form[username_field] = credential.username
-            if credential.secret:
+            if credential.secret and password_field:
                 form[password_field] = credential.secret
             _bounded_form_size(form)
             action_origin, action_path, _public_action = _endpoint_args(

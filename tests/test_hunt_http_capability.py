@@ -78,10 +78,14 @@ def test_authz_session_use_requires_fresh_credential_approval():
     assert 'name == "authz.verify"' in handler
     assert 'request.input.get("primary_session_ref")' in handler
     assert 'request.input.get("secondary_session_ref")' in handler
+    # The risk tier is now a three-way expression, since a forged identity header elevates
+    # an otherwise anonymous call. Session and principal use still select the credential
+    # tier, which is what this guards.
     assert (
-        'risk_tier="credential" if principal_slot != "anonymous" or uses_session'
+        '"credential" if principal_slot != "anonymous" or uses_session'
         in handler
     )
+    assert 'else "active" if forges_identity' in handler
 
 
 def test_worker_reloads_every_authority_before_session_or_http_execution():

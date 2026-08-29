@@ -7,6 +7,7 @@ from api.hunt.skills import (
     SKILL_BUDGET_DIMENSIONS,
     HuntSkillError,
     HuntSkillLibrary,
+    bind_skills_to_hunt,
     build_skill_spec,
     load_skill_library,
 )
@@ -294,3 +295,49 @@ def test_the_privileged_rule_has_one_owner():
     ):
         policy = HuntStartPolicy(**{field: True})
         assert policy.is_privileged(credentials_requested=False) is True, field
+
+
+# --- binding must deliver the whole methodology, not part of it --------------------------
+
+def test_binding_is_refused_when_any_required_capability_is_withheld(library):
+    """A skill bound with part of its requirements would have the planner follow a
+    methodology it cannot carry out, then report the shortfall as a result."""
+    session_skill = library.require("skill.web.session-cookie-token-and-jwt-testing")
+    passive_only = (
+        "browser.interact", "browser.navigate", "http.request", "web.crawl", "web.probe",
+    )
+    with pytest.raises(HuntSkillError, match="withholds"):
+        bind_skills_to_hunt(
+            [session_skill.skill_id], target_kind="web",
+            allowed_capabilities=passive_only, budget=None, library=library,
+        )
+
+
+def test_a_skill_whose_requirements_are_all_passive_still_binds_passively(library):
+    passive_only = (
+        "browser.interact", "browser.navigate", "http.request", "web.crawl", "web.probe",
+    )
+    bound = bind_skills_to_hunt(
+        ["skill.web.stateful-crawling-content-and-parameter-discovery"],
+        target_kind="web", allowed_capabilities=passive_only, budget=None, library=library,
+    )
+    assert bound.specs and set(bound.allowed_capabilities) <= set(passive_only)
+
+
+def test_optional_capabilities_may_be_withheld_without_refusing_the_skill(library):
+    """Only required capabilities gate the binding; optional ones simply drop."""
+    skill = library.require("skill.web.stateful-crawling-content-and-parameter-discovery")
+    available = tuple(skill.capabilities)
+    bound = bind_skills_to_hunt(
+        [skill.skill_id], target_kind="web",
+        allowed_capabilities=available, budget=None, library=library,
+    )
+    assert set(skill.capabilities) <= set(bound.allowed_capabilities)
+
+
+def test_the_edge_skill_no_longer_defers_the_client_ip_probe(library):
+    """It was deferred pending an operator-authorized tier, which now exists."""
+    spec = library.require("skill.web.edge-waf-and-origin-exposure-validation")
+    deferred = {item["technique"] for item in spec.deferred_techniques}
+    assert "client-ip-header-trust-probe" not in deferred
+    assert "client-ip-header-trust" in spec.techniques
