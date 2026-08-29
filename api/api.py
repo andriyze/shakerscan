@@ -2312,6 +2312,7 @@ def synthesize_degraded_result(
         "scan_type": scan_type,
         "findings": findings,
         "result": {
+            "score_policy": "degraded_terminal/v1",
             "score": score,
             "grade": grade,
             "grade_reliable": False,

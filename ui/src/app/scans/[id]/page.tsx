@@ -138,6 +138,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
     (!scanFingerprint && scanVersion && buildVersion && scanVersion !== buildVersion)
   )
   const resultPresentation = scanResultPresentation(scan, assurance)
+  const scoreProjection = scan?.result?.result?.score_projection
   const weakAssurance = ['none', 'weak', 'limited'].includes(String(assurance?.band || 'none'))
   const observedRiskColor = weakAssurance ? 'text-gray-200' : gradeTextColor(scorePresentation.grade)
   const conclusionTone = resultPresentation.tone === 'danger'
@@ -194,6 +195,12 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
               : 'Finding evidence observed by this run; this historical scoring policy may exclude posture deductions.'}
             {' '}This is not an overall safety or release score.
           </p>
+          {resultPresentation.scorePolicy && (
+            <p className="mt-2 text-xs text-gray-600">
+              Scored by <span className="font-mono text-gray-500">{resultPresentation.scorePolicy}</span>.
+              {scoreProjection?.reason === 'historical_policy_preserved' && ' Historical output is preserved; it was not silently rescored.'}
+            </p>
+          )}
           {scorePresentation.note && (
             <p className="mt-2 text-xs text-amber-200/80">{scorePresentation.note}</p>
           )}

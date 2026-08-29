@@ -340,12 +340,12 @@ def score_scan(
 
 
 def project_current_score_policy(report: dict[str, Any]) -> dict[str, Any]:
-    """Project stored legacy reports through the current scorer for API/UI reads.
+    """Preserve the score produced by the run and label its policy provenance.
 
-    Historical result blobs are immutable evidence, but continuing to display a legacy
-    100 after the current policy would deduct deterministic posture weaknesses is equally
-    misleading.  Keep the stored values in an explicit provenance block and replace only
-    the read projection.  Current-policy reports are returned untouched.
+    A historical report cannot be rescored faithfully when its findings predate explicit
+    proof typing or when its producer was not deterministic DAST. API reads therefore never
+    replace the stored grade. A future comparison can be exposed as a separate advisory
+    artifact with an explicit subject contract; it must not masquerade as measured output.
     """
     result = report.get("result")
     if not isinstance(result, dict):
@@ -354,17 +354,6 @@ def project_current_score_policy(report: dict[str, Any]) -> dict[str, Any]:
     if stored_policy == SCORE_POLICY:
         return report
 
-    computed = score_scan(
-        [item for item in (report.get("findings") or ()) if isinstance(item, Mapping)],
-        report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {},
-        smart_coverage=(
-            report.get("smart_coverage")
-            if isinstance(report.get("smart_coverage"), Mapping)
-            else {}
-        ),
-        posture=report,
-        grade_reliable=result.get("grade_reliable") is not False,
-    )
     stored = {
         "score_policy": stored_policy,
         "score": result.get("score"),
@@ -374,11 +363,11 @@ def project_current_score_policy(report: dict[str, Any]) -> dict[str, Any]:
         "assurance_score": result.get("assurance_score"),
         "assurance_band": result.get("assurance_band"),
     }
-    result.update(computed)
     result["score_projection"] = {
-        "recomputed_for_display": True,
-        "display_policy": SCORE_POLICY,
+        "recomputed_for_display": False,
+        "display_policy": stored_policy,
         "stored": stored,
+        "reason": "historical_policy_preserved",
     }
     return report
 

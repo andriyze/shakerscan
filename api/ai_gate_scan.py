@@ -6444,6 +6444,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
 
     return {
         "result": {
+            "score_policy": "ai_gate/risk_v1",
             "score": score,
             "grade": grade,
         },

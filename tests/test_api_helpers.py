@@ -2523,7 +2523,7 @@ def test_normalize_parallel_result_replaces_stale_backbone_coverage():
     }
 
 
-def test_normalize_scan_result_projects_legacy_score_without_losing_provenance():
+def test_normalize_scan_result_preserves_legacy_score_with_visible_provenance():
     report = {
         "http": {
             "missing_security_headers": [
@@ -2551,13 +2551,13 @@ def test_normalize_scan_result_projects_legacy_score_without_losing_provenance()
 
     normalized = api_module._normalize_scan_result_for_api(report)
 
-    assert normalized["result"]["score_policy"] == "risk_and_assurance/v5"
-    assert normalized["result"]["risk_score"] == 86
-    assert normalized["result"]["score"] == 86
-    assert normalized["result"]["assurance_score"] < 100
+    assert normalized["result"]["score_policy"] == "risk_and_assurance/v3"
+    assert normalized["result"]["risk_score"] == 100
+    assert normalized["result"]["score"] == 100
+    assert normalized["result"]["assurance_score"] == 100
     assert normalized["result"]["score_projection"] == {
-        "recomputed_for_display": True,
-        "display_policy": "risk_and_assurance/v5",
+        "recomputed_for_display": False,
+        "display_policy": "risk_and_assurance/v3",
         "stored": {
             "score_policy": "risk_and_assurance/v3",
             "score": 100,
@@ -2567,6 +2567,7 @@ def test_normalize_scan_result_projects_legacy_score_without_losing_provenance()
             "assurance_score": 100,
             "assurance_band": "strong",
         },
+        "reason": "historical_policy_preserved",
     }
 
 
