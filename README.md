@@ -459,7 +459,9 @@ API or worker fleet:
 
 Worker freshness is derived from scanner/API runtime content, not UI source. Immutable published
 releases still use one exact source revision and complete image set; scoped rebuilds are a local
-source-development convenience.
+source-development convenience. The UI bakes the scanner source fingerprint it expects, so a
+UI-only commit does not produce a false stale-build warning when the running API/worker source is
+unchanged; real scanner-source drift still does.
 
 The source build downloads version-pinned Go scanner modules. It retries transient module-proxy or
 DNS failures four times and preserves the Go module/build cache between attempts. A repeated error

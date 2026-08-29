@@ -1356,6 +1356,7 @@ set_build_env() {
     local local_commit
     local release_version
     local image_tag
+    local api_source_fingerprint=""
     local requested_scanner_version="${SCANNER_VERSION:-}"
     local requested_git_commit="${GIT_COMMIT:-}"
     local requested_ui_version="${NEXT_PUBLIC_APP_VERSION:-}"
@@ -1388,10 +1389,15 @@ set_build_env() {
         export SCANNER_VERSION="$image_tag"
         export GIT_COMMIT="${SCANNER_IMAGE_COMMIT:-image:${image_tag}}"
         export NEXT_PUBLIC_APP_VERSION="$image_tag"
+        export SHAKERSCAN_EXPECTED_API_FINGERPRINT="unknown"
     else
+        api_source_fingerprint="$(
+            python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/scanner"); from scanner_tools.build_fingerprint import hash_source_files, source_file_map; print(hash_source_files(source_file_map(sys.argv[1]), require_all=True) or "")' "$SCRIPT_DIR" 2>/dev/null || true
+        )"
         export SCANNER_VERSION="${requested_scanner_version:-$local_commit}"
         export GIT_COMMIT="${requested_git_commit:-$local_commit}"
         export NEXT_PUBLIC_APP_VERSION="${requested_ui_version:-$SCANNER_VERSION}"
+        export SHAKERSCAN_EXPECTED_API_FINGERPRINT="${api_source_fingerprint:-unknown}"
     fi
 }
 
@@ -1819,15 +1825,19 @@ verify_running_ui_identity() {
     local expected_revision="${GIT_COMMIT:-}"
     # docker-compose.yml deliberately bakes SCANNER_VERSION into UI_BUILD_VERSION.
     local expected_version="${SCANNER_VERSION:-}"
-    local ui_json ui_version ui_revision
+    local expected_api_fingerprint="${SHAKERSCAN_EXPECTED_API_FINGERPRINT:-unknown}"
+    local ui_json ui_version ui_revision ui_api_fingerprint
     local elapsed=0 timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
 
     while [ "$elapsed" -lt "$timeout" ]; do
         ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
         ui_version="$(printf '%s' "$ui_json" | jq -r '.ui_version // empty' 2>/dev/null || true)"
         ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
+        ui_api_fingerprint="$(printf '%s' "$ui_json" | jq -r '.expected_api_build_fingerprint // empty' 2>/dev/null || true)"
         if build_versions_match "$expected_version" "$ui_version" \
-            && build_versions_match "$expected_revision" "$ui_revision"; then
+            && build_versions_match "$expected_revision" "$ui_revision" \
+            && { [ "$expected_api_fingerprint" = "unknown" ] \
+                || [ "$expected_api_fingerprint" = "$ui_api_fingerprint" ]; }; then
             echo -e "${GREEN}UI build identity verified: ${ui_version} (${ui_revision})${NC}"
             return 0
         fi
@@ -1840,6 +1850,8 @@ verify_running_ui_identity() {
     echo "  running version:   ${ui_version:-unavailable}" >&2
     echo "  expected revision: ${expected_revision:-unknown}" >&2
     echo "  running revision:  ${ui_revision:-unavailable}" >&2
+    echo "  expected API source: ${expected_api_fingerprint:-unknown}" >&2
+    echo "  UI expects API source: ${ui_api_fingerprint:-unavailable}" >&2
     return 1
 }
 

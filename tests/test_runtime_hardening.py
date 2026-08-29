@@ -1443,7 +1443,10 @@ def test_ui_only_rebuild_recreates_and_verifies_only_the_ui_artifact():
     )[1].split("fi", 1)[0]
     assert "/api/build-identity" in verifier
     assert ".source_revision // empty" in verifier
+    assert ".expected_api_build_fingerprint // empty" in verifier
     assert 'build_versions_match "$expected_revision" "$ui_revision"' in verifier
+    assert 'SHAKERSCAN_EXPECTED_API_FINGERPRINT' in script
+    assert 'source_file_map(sys.argv[1])' in script
 
 
 def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networks():

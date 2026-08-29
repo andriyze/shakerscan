@@ -23,9 +23,21 @@ function bakedSourceRevision(): string {
   }
 }
 
+function bakedExpectedApiFingerprint(): string {
+  try {
+    return readFileSync(join(process.cwd(), 'UI_EXPECTED_API_BUILD_FINGERPRINT'), 'utf8').trim() || 'unknown'
+  } catch {
+    return process.env.NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT || 'unknown'
+  }
+}
+
 export async function GET() {
   return NextResponse.json(
-    { ui_version: bakedUiVersion(), source_revision: bakedSourceRevision() },
+    {
+      ui_version: bakedUiVersion(),
+      source_revision: bakedSourceRevision(),
+      expected_api_build_fingerprint: bakedExpectedApiFingerprint(),
+    },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }

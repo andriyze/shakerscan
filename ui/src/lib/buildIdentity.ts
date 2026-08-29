@@ -1,5 +1,6 @@
 export type HealthBuildIdentity = {
   scanner_version?: string
+  build_fingerprint?: string
   fleet?: {
     enabled?: boolean
     configured?: boolean
@@ -50,6 +51,7 @@ export function buildVersionsMatch(left?: string | null, right?: string | null):
 export function deriveBuildIdentity(
   bakedVersion: string | undefined,
   health: HealthBuildIdentity | null,
+  bakedExpectedApiFingerprint?: string,
 ): BuildIdentity {
   const apiVersion = typeof health?.scanner_version === 'string' ? health.scanner_version : undefined
   const workerBuild = health?.worker_build
@@ -75,12 +77,20 @@ export function deriveBuildIdentity(
   // unknown UI label, not evidence of a stale image. scanner.sh and release installs bake a real
   // commit/tag, so they retain exact UI-vs-API mismatch detection.
   const displayedUiVersion = bakedVersion === 'dev' && apiVersion ? apiVersion : bakedVersion
-  const uiApiSkew = Boolean(
-    bakedVersion
-      && bakedVersion !== 'dev'
-      && apiVersion
-      && !buildVersionsMatch(bakedVersion, apiVersion),
+  const apiFingerprint = health?.build_fingerprint
+  const hasComparableFingerprint = Boolean(
+    bakedExpectedApiFingerprint
+      && bakedExpectedApiFingerprint !== 'unknown'
+      && apiFingerprint,
   )
+  const uiApiSkew = hasComparableFingerprint
+    ? bakedExpectedApiFingerprint !== apiFingerprint
+    : Boolean(
+        bakedVersion
+          && bakedVersion !== 'dev'
+          && apiVersion
+          && !buildVersionsMatch(bakedVersion, apiVersion),
+      )
   const workerSkew = Boolean(
     (workerBuild?.available && !workerBuild.fleet_uniform) || auxiliaryMismatchCount > 0,
   )

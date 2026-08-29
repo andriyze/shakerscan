@@ -345,6 +345,7 @@ export default function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
   const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
+  const bakedExpectedApiFingerprint = process.env.NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT
   const [buildIdentity, setBuildIdentity] = useState<BuildIdentity>({ ui: bakedVersion, skew: false })
   const [fleetEnabled, setFleetEnabled] = useState(false)
   const openerRef = useRef<HTMLButtonElement>(null)
@@ -357,7 +358,7 @@ export default function Sidebar() {
     const refresh = (force = false) => {
       loadHealthBuildIdentity(force).then((health) => {
         if (cancelled) return
-        setBuildIdentity(deriveBuildIdentity(bakedVersion, health))
+        setBuildIdentity(deriveBuildIdentity(bakedVersion, health, bakedExpectedApiFingerprint))
         setFleetEnabled(health?.fleet?.enabled === true)
       })
     }
@@ -367,7 +368,7 @@ export default function Sidebar() {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [bakedVersion])
+  }, [bakedExpectedApiFingerprint, bakedVersion])
 
   // Persist the "show all sections" preference across reloads (default off).
   useEffect(() => {
