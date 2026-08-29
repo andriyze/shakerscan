@@ -9,7 +9,7 @@ import {
   getMissionTimeline, getQueueStats, getTargetsGrouped, getWorkers, scaleWorkers, startGungnir,
   stopGungnir, type DashboardActionItem, type DashboardResponse, type ExposureAssetsResponse,
   type GroupedDomain, type GungnirStatus, type QueueStats, type Scan, type TimelineEvent,
-  type WorkerStats,
+  type WorkerStats, type ExposureAsset, type ExposureAssetMetrics, type TargetCohort,
 } from '@/lib/api'
 import {
   Badge,
@@ -31,6 +31,7 @@ const GUNGNIR_REFRESH_MS = 30000
 const OVERVIEW_REFRESH_MS = 60000
 
 const FOCUS_RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+type CohortView = 'operational' | 'production' | 'staging' | 'non_operational' | 'all'
 
 export default function Dashboard() {
   const toast = useToast()
@@ -53,6 +54,7 @@ export default function Dashboard() {
   const [workersError, setWorkersError] = useState<string | null>(null)
   const [scaling, setScaling] = useState(false)
   const [gungnirActionLoading, setGungnirActionLoading] = useState(false)
+  const [cohortView, setCohortView] = useState<CohortView>('operational')
 
   const dashboardInFlight = useRef(false)
   const dashboardLoadedOnce = useRef(false)
@@ -245,10 +247,22 @@ export default function Dashboard() {
   const totalAvailable = fleetEnabled ? (executionCapacity?.total_available ?? localAvailable) : localAvailable
   const maxWorkers = workers?.max_allowed && workers.max_allowed > 0 ? workers.max_allowed : 20
   const staleCount = workers?.stale_workers?.length ?? 0
-  const coverage = useMemo(() => buildCoverageRollup(groupedTargets), [groupedTargets])
+  const cohortCounts = useMemo(() => countCohorts(exposure?.assets || []), [exposure])
+  const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
+  const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
+  const scopedTargetIds = useMemo(() => new Set(scopedTargets.flatMap((domain) => [domain.root_target, ...domain.subdomains].filter(Boolean).map((target) => target!.id))), [scopedTargets])
+  const coverage = useMemo(() => buildCoverageRollup(scopedTargets), [scopedTargets])
   const meaningfulActivity = useMemo(
-    () => timeline.filter(isMeaningfulActivity).slice(0, 5),
-    [timeline],
+    () => timeline.filter((event) => isMeaningfulActivity(event) && (!event.target_id || cohortView === 'all' || scopedTargetIds.has(event.target_id))).slice(0, 5),
+    [timeline, cohortView, scopedTargetIds],
+  )
+  const recentScans = useMemo(
+    () => (data?.recent_scans || []).filter((scan) => !scan.target_id || cohortView === 'all' || scopedTargetIds.has(scan.target_id)),
+    [data, cohortView, scopedTargetIds],
+  )
+  const scopedActions = useMemo(
+    () => cohortView === 'all' ? (data?.action_center || []) : buildCohortActions(scopedExposure),
+    [cohortView, data, scopedExposure],
   )
 
   return (
@@ -418,19 +432,120 @@ export default function Dashboard() {
         <ErrorState message={dashboardError} onRetry={() => fetchDashboard(true)} />
       )}
 
-      <SecurityPosture exposure={exposure} loading={overviewLoading} />
+      <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
+
+      <SecurityPosture exposure={scopedExposure} loading={overviewLoading} />
 
       <ChangesStrip storageKey="dashboard" />
 
-      <CoverageOverview exposure={exposure} coverage={coverage} loading={overviewLoading} />
+      <CoverageOverview exposure={scopedExposure} coverage={coverage} loading={overviewLoading} />
 
-      <ActionCenter items={data?.action_center || []} loading={dashboardLoading && !data} />
+      <ActionCenter items={scopedActions} loading={dashboardLoading && !data} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <LatestResults scans={data?.recent_scans || []} loading={dashboardLoading && !data} />
+        <LatestResults scans={recentScans} loading={dashboardLoading && !data} />
         <RecentActivity events={meaningfulActivity} loading={overviewLoading} />
       </div>
     </div>
+  )
+}
+
+function cohortMatches(cohort: TargetCohort | undefined, view: CohortView): boolean {
+  const value = cohort || 'unclassified'
+  if (view === 'all') return true
+  if (view === 'operational') return ['production', 'staging', 'unclassified'].includes(value)
+  if (view === 'non_operational') return ['lab', 'demo', 'calibration', 'internal'].includes(value)
+  return value === view
+}
+
+function countCohorts(assets: ExposureAsset[]): Record<string, number> {
+  return assets.reduce<Record<string, number>>((counts, asset) => {
+    const cohort = asset.cohort || 'unclassified'
+    counts[cohort] = (counts[cohort] || 0) + 1
+    return counts
+  }, {})
+}
+
+function metricsFromAssets(assets: ExposureAsset[]): ExposureAssetMetrics {
+  const count = (predicate: (asset: ExposureAsset) => boolean) => assets.filter(predicate).length
+  return {
+    asset_count: assets.length,
+    active_critical: assets.reduce((sum, asset) => sum + asset.active_critical, 0),
+    active_high: assets.reduce((sum, asset) => sum + asset.active_high, 0),
+    active_verified: assets.reduce((sum, asset) => sum + (asset.active_verified || 0), 0),
+    active_needs_verification: assets.reduce((sum, asset) => sum + (asset.active_needs_verification || 0), 0),
+    ai_surfaces: count((asset) => asset.kind === 'ai'),
+    web_targets: count((asset) => asset.kind === 'web'),
+    model_artifacts: count((asset) => asset.kind === 'model'),
+    public_assets: count((asset) => asset.exposure_class === 'public'),
+    internal_assets: count((asset) => asset.exposure_class === 'internal'),
+    unscanned_assets: count((asset) => asset.coverage_posture === 'unscanned'),
+    stale_assets: count((asset) => asset.coverage_posture === 'stale'),
+    incomplete_scans: count((asset) => asset.coverage_posture === 'limited'),
+    failed_scans: count((asset) => asset.coverage_posture === 'failed'),
+    fresh_scans: count((asset) => asset.coverage_posture === 'fresh'),
+    verified_assets: count((asset) => (asset.active_verified || 0) > 0),
+    unverified_high_assets: count((asset) => (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0),
+    unowned_assets: count((asset) => !asset.owner),
+    needs_action: count((asset) => Boolean(asset.needs_action)),
+    p1_count: count((asset) => asset.action_priority === 'P1'),
+    p2_count: count((asset) => asset.action_priority === 'P2'),
+    p3_count: count((asset) => asset.action_priority === 'P3'),
+    prod_ai_surfaces: count((asset) => asset.kind === 'ai' && (asset.production_mode || asset.environment === 'production')),
+  }
+}
+
+function scopeExposure(exposure: ExposureAssetsResponse | null, view: CohortView): ExposureAssetsResponse | null {
+  if (!exposure || view === 'all') return exposure
+  const assets = exposure.assets.filter((asset) => cohortMatches(asset.cohort, view))
+  return {
+    ...exposure,
+    assets,
+    count: assets.length,
+    total: assets.length,
+    new_count: assets.filter((asset) => asset.is_new).length,
+    metrics: metricsFromAssets(assets),
+  }
+}
+
+function scopeTargetGroups(groups: GroupedDomain[], view: CohortView): GroupedDomain[] {
+  if (view === 'all') return groups
+  return groups.flatMap((group) => {
+    const root = group.root_target && cohortMatches(group.root_target.cohort, view) ? group.root_target : null
+    const subdomains = group.subdomains.filter((target) => cohortMatches(target.cohort, view))
+    if (!root && subdomains.length === 0) return []
+    return [{ ...group, root_target: root, subdomains, subdomain_count: subdomains.length, total_count: subdomains.length + (root ? 1 : 0) }]
+  })
+}
+
+function buildCohortActions(exposure: ExposureAssetsResponse | null): DashboardActionItem[] {
+  const metrics = exposure?.metrics
+  if (!metrics) return []
+  const items: DashboardActionItem[] = []
+  if ((metrics.failed_scans || 0) > 0) items.push({ id: 'cohort-failures', priority: 'high', category: 'Reliability', title: 'Review failed assessments', detail: `${metrics.failed_scans} scoped asset${metrics.failed_scans === 1 ? '' : 's'} have a failed latest assessment.`, href: '/scans?status=failed', action_label: 'Review failures', count: metrics.failed_scans })
+  if ((metrics.active_needs_verification || 0) > 0) items.push({ id: 'cohort-unverified', priority: 'high', category: 'Evidence', title: 'Reduce unverified risk noise', detail: `${metrics.active_needs_verification} active scoped finding${metrics.active_needs_verification === 1 ? '' : 's'} still need deterministic verification.`, href: '/exposure?posture=needs_verification', action_label: 'Review evidence', count: metrics.active_needs_verification })
+  if ((metrics.stale_assets || 0) > 0) items.push({ id: 'cohort-stale', priority: 'medium', category: 'Freshness', title: 'Refresh stale assets', detail: `${metrics.stale_assets} scoped asset${metrics.stale_assets === 1 ? '' : 's'} have stale evidence.`, href: '/exposure?posture=stale', action_label: 'Review stale assets', count: metrics.stale_assets })
+  return items
+}
+
+function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChange: (value: CohortView) => void; counts: Record<string, number> }) {
+  const nonOperational = ['lab', 'demo', 'calibration', 'internal'].reduce((sum, key) => sum + (counts[key] || 0), 0)
+  const unclassified = counts.unclassified || 0
+  return (
+    <Card className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <h2 className="text-sm font-medium text-white">Executive cohort scope</h2>
+        <p className="mt-1 text-xs text-gray-400">Operational includes production, staging, and clearly labeled unclassified assets. Lab data is never silently mixed into it.</p>
+        <p className="mt-1 text-xs text-gray-500">{nonOperational} non-operational · {unclassified} unclassified</p>
+      </div>
+      <select value={value} onChange={(event) => onChange(event.target.value as CohortView)} aria-label="Dashboard cohort scope" className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
+        <option value="operational">Operational + unclassified</option>
+        <option value="production">Production only</option>
+        <option value="staging">Staging only</option>
+        <option value="non_operational">Lab / demo / calibration / internal</option>
+        <option value="all">All cohorts</option>
+      </select>
+    </Card>
   )
 }
 

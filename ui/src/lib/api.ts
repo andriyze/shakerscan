@@ -2015,7 +2015,11 @@ export interface Target {
   created_at: string
   asm_coverage?: AsmCoverageRollup | null
   origins?: string[]
+  cohort?: TargetCohort
+  metadata_json?: Record<string, unknown>
 }
+
+export type TargetCohort = 'production' | 'staging' | 'lab' | 'demo' | 'calibration' | 'internal' | 'unclassified'
 
 export interface GroupedDomain {
   root_domain: string
@@ -2912,6 +2916,7 @@ export interface ExposureAsset {
   root_domain?: string | null
   origin?: string | null
   exposure_class?: 'public' | 'internal' | 'supply_chain' | 'unknown' | string | null
+  cohort?: TargetCohort
   owner?: string | null
   environment?: string | null
   target_type?: string | null
@@ -4086,10 +4091,11 @@ export async function updateTargetMetadata(
   targetId: string,
   metadata: Record<string, string>
 ): Promise<{ id: string; status: string }> {
+  const { cohort, ...metadataJson } = metadata
   const res = await fetch(`${API_URL}/targets/${targetId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ metadata_json: metadata }),
+    body: JSON.stringify({ metadata_json: metadataJson, ...(cohort ? { cohort } : {}) }),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update target metadata'))
   return res.json()
@@ -5652,11 +5658,11 @@ export async function getAsmActivity(
   return res.json()
 }
 
-export async function createTarget(url: string, name?: string) {
+export async function createTarget(url: string, name?: string, cohort?: Exclude<TargetCohort, 'unclassified'>) {
   const res = await fetch(`${API_URL}/targets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, name })
+    body: JSON.stringify({ url, name, cohort })
   })
   if (!res.ok) throw new Error('Failed to create target')
   return res.json()

@@ -53,3 +53,14 @@ test('docs and mobile operations expose truthful accessible labels', () => {
   assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer\)/)
   assert.doesNotMatch(sidebar, /Interactive Testing, Leads/)
 })
+
+test('executive posture defaults to an explicit operational cohort scope', () => {
+  const dashboard = read('src/app/page.tsx')
+  const targets = read('src/app/targets/page.tsx')
+  const triage = read('src/app/exposure/TriageTable.tsx')
+  assert.match(dashboard, /useState<CohortView>\('operational'\)/)
+  assert.match(dashboard, /Lab data is never silently mixed into it/)
+  assert.match(dashboard, /buildCohortActions\(scopedExposure\)/)
+  assert.match(targets, /<option value="calibration">Calibration<\/option>/)
+  assert.match(triage, /Executive cohort/)
+})

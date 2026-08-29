@@ -63,6 +63,7 @@ try:
         bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
     from action_scope import scope_origin_matches_target
+    from asset_cohorts import TARGET_COHORTS, normalize_target_cohort, target_cohort
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -89,6 +90,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
     )
+    from ..asset_cohorts import TARGET_COHORTS, normalize_target_cohort, target_cohort
     from ..runtime.credential_store import CredentialStoreError
     from ..runtime.models import TargetBinding
     from ..scan.action_plan import ScanActionPlanError
@@ -263,7 +265,7 @@ async def list_targets(
                    LEFT(t.url, 2049) AS url,
                    LEFT(t.name, 512) AS name,
                    LEFT(t.root_domain, 253) AS root_domain,
-                   t.is_root, t.discovery_source, t.is_active,
+                   t.is_root, t.discovery_source, t.is_active, t.metadata_json,
                    t.last_scanned_at, t.last_score, t.last_grade,
                    t.total_scans, t.active_findings_count, t.created_at,
                    fs.total_active as active_findings,
@@ -377,7 +379,7 @@ async def list_targets_grouped(
                 LEFT(t.name, 512) AS name,
                 LEFT(t.root_domain, 253) AS root_domain,
                 t.is_root,
-                t.discovery_source, t.is_active,
+                t.discovery_source, t.is_active, t.metadata_json,
                 t.last_scanned_at, t.last_score, t.last_grade,
                 t.total_scans, t.active_findings_count,
                 t.created_at
@@ -534,7 +536,7 @@ async def list_targets_grouped(
                 'subdomains': []
             }
 
-        target_data = _attach_asm(row_to_dict(row))
+        target_data = _attach_asm(_public_target_row(row))
         if row['is_root']:
             grouped[rd]['root_target'] = target_data
         else:
@@ -633,6 +635,7 @@ async def create_target(request: TargetCreate):
         raise HTTPException(status_code=400, detail="Invalid target URL")
     root_domain = extract_root_domain(normalized_target)
     is_root = is_root_domain(normalized_target)
+    requested_cohort = getattr(request, "cohort", None)
 
     async with _pool().acquire() as conn:
         try:
@@ -640,12 +643,13 @@ async def create_target(request: TargetCreate):
             # origin reuses that target instead of creating a duplicate. xmax = 0 is
             # true only for a freshly INSERTed row, so we can report created vs reused.
             row = await conn.fetchrow("""
-                INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled, asm_config)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id, url, root_domain, is_root, (xmax = 0) AS created
             """, normalized_target, request.name, root_domain, is_root,
                  json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                 json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
                  _default_asm_enabled_for_new_web_target("manual"),
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
@@ -657,6 +661,7 @@ async def create_target(request: TargetCreate):
                 # from the just-submitted origin.
                 'root_domain': row['root_domain'],
                 'is_root': row['is_root'],
+                'cohort': requested_cohort or 'unclassified',
                 'status': 'created' if row['created'] else 'already_exists'
             }
             # Surface warning if path/query was stripped
@@ -747,6 +752,11 @@ async def update_target(target_id: str, request: TargetUpdate):
         if request.metadata_json is not None:
             updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
             params.append(json.dumps(request.metadata_json))
+            param_idx += 1
+
+        if request.cohort is not None:
+            updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
+            params.append(json.dumps({"cohort": request.cohort}))
             param_idx += 1
 
         if not updates:
@@ -2810,6 +2820,16 @@ def _public_target_row(row: Any) -> dict[str, Any]:
             target[key] = value[:limit]
     if "scan_options" in target:
         target["scan_options"] = _sanitize_scan_options(target.get("scan_options"))
+    metadata = _decode_json_value(target.get("metadata_json")) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    target["metadata_json"] = metadata
+    target["cohort"] = target_cohort(
+        url=target.get("url"),
+        name=target.get("name"),
+        discovery_source=target.get("discovery_source"),
+        metadata=metadata,
+    )
     if str(target.get("discovery_source") or "").lower() != "model-intake":
         values = _decode_json_value(target.get("origins")) or []
         if not isinstance(values, list):
@@ -2852,6 +2872,7 @@ class TargetCreate(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     name: Optional[str] = Field(default=None, max_length=512)
     scan_options: Optional[dict] = None
+    cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal"]] = None
 
 
 class TargetUpdate(BaseModel):
@@ -2861,6 +2882,14 @@ class TargetUpdate(BaseModel):
     # Merged into the existing metadata (JSONB ||), so partial ownership
     # updates don't clobber unrelated keys. Set a key to "" to clear it.
     metadata_json: Optional[dict] = None
+    cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal"]] = None
+
+    @field_validator("metadata_json")
+    @classmethod
+    def metadata_cannot_bypass_cohort_validation(cls, value: Optional[dict]) -> Optional[dict]:
+        if value and "cohort" in value:
+            raise ValueError("set cohort through the validated cohort field")
+        return value
 
 
 class TargetPrincipalAutoProvisionRequest(BaseModel):

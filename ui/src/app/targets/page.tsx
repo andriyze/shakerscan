@@ -92,6 +92,7 @@ function TargetsContent() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [newTargetUrl, setNewTargetUrl] = useState('')
   const [newTargetName, setNewTargetName] = useState('')
+  const [newTargetCohort, setNewTargetCohort] = useState<'production' | 'staging' | 'lab' | 'demo' | 'calibration' | 'internal' | ''>('')
   const [urlError, setUrlError] = useState('')
   const [adding, setAdding] = useState(false)
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
@@ -216,9 +217,10 @@ function TargetsContent() {
 
     setAdding(true)
     try {
-      await createTarget(url, newTargetName.trim() || undefined)
+      await createTarget(url, newTargetName.trim() || undefined, newTargetCohort || undefined)
       setNewTargetUrl('')
       setNewTargetName('')
+      setNewTargetCohort('')
       setUrlError('')
       setShowAddModal(false)
       toast.success('Target added')
@@ -590,6 +592,7 @@ function TargetsContent() {
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
                     identity.internal ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-800 text-gray-400'
                   }`}>{identity.label}</span>
+                  <span className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-300">{domain.root_target?.cohort || domain.subdomains[0]?.cohort || 'unclassified'}</span>
                   {domain.subdomain_count > 0 && (
                     <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
                       +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
@@ -994,6 +997,17 @@ function TargetsContent() {
               onChange={(e) => setNewTargetName(e.target.value)}
               placeholder="My Website"
             />
+          </Field>
+          <Field label="Cohort">
+            <Select value={newTargetCohort} onChange={(event) => setNewTargetCohort(event.target.value as typeof newTargetCohort)}>
+              <option value="">Unclassified</option>
+              <option value="production">Production</option>
+              <option value="staging">Staging</option>
+              <option value="lab">Lab</option>
+              <option value="demo">Demo</option>
+              <option value="calibration">Calibration</option>
+              <option value="internal">Internal</option>
+            </Select>
           </Field>
           <div className="flex gap-3">
             <Button type="button" variant="secondary" onClick={closeAddModal} className="flex-1">

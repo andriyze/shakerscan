@@ -351,10 +351,11 @@ function AssetDetailDrawer({
   // Ownership is editable for web/model targets (AI surfaces manage it in AI
   // Gate settings). Local copy keeps the drawer current after a save without
   // waiting for the asset list to refetch.
-  const [ownership, setOwnership] = useState<{ owner: string; environment: string }>({ owner: '', environment: '' })
+  const [ownership, setOwnership] = useState<{ owner: string; environment: string; cohort: string }>({ owner: '', environment: '', cohort: '' })
   const [editingOwnership, setEditingOwnership] = useState(false)
   const [ownerInput, setOwnerInput] = useState('')
   const [envInput, setEnvInput] = useState('')
+  const [cohortInput, setCohortInput] = useState('')
   const [savingOwnership, setSavingOwnership] = useState(false)
   const [autonomousLoading, setAutonomousLoading] = useState(false)
 
@@ -362,7 +363,7 @@ function AssetDetailDrawer({
     if (!asset) return
     setFindings(null)
     setError(false)
-    setOwnership({ owner: asset.owner || '', environment: asset.environment || '' })
+    setOwnership({ owner: asset.owner || '', environment: asset.environment || '', cohort: asset.cohort || 'unclassified' })
     setEditingOwnership(false)
     setSavingOwnership(false)
     setAutonomousLoading(false)
@@ -398,8 +399,9 @@ function AssetDetailDrawer({
     try {
       const owner = ownerInput.trim()
       const environment = envInput.trim()
-      await updateTargetMetadata(asset.id, { owner, environment })
-      setOwnership({ owner, environment })
+      const cohort = cohortInput.trim()
+      await updateTargetMetadata(asset.id, { owner, environment, cohort })
+      setOwnership({ owner, environment, cohort })
       setEditingOwnership(false)
       toast.success('Ownership updated')
       onUpdated()
@@ -562,6 +564,7 @@ function AssetDetailDrawer({
                   onClick={() => {
                     setOwnerInput(ownership.owner)
                     setEnvInput(ownership.environment)
+                    setCohortInput(ownership.cohort)
                     setEditingOwnership((v) => !v)
                   }}
                   className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-blue-300 hover:text-blue-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
@@ -599,6 +602,22 @@ function AssetDetailDrawer({
                     <option value="development">development</option>
                   </select>
                 </label>
+                <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-gray-500">
+                  Executive cohort
+                  <select
+                    value={cohortInput}
+                    onChange={(e) => setCohortInput(e.target.value)}
+                    className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs normal-case text-white"
+                  >
+                    <option value="unclassified">unclassified</option>
+                    <option value="production">production</option>
+                    <option value="staging">staging</option>
+                    <option value="lab">lab</option>
+                    <option value="demo">demo</option>
+                    <option value="calibration">calibration</option>
+                    <option value="internal">internal</option>
+                  </select>
+                </label>
                 <button
                   type="button"
                   onClick={() => void saveOwnership()}
@@ -613,6 +632,7 @@ function AssetDetailDrawer({
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2 p-3 text-xs">
               <div><dt className="text-gray-600">Owner</dt><dd className={`truncate ${ownership.owner ? 'text-gray-200' : 'text-amber-200/80'}`}>{ownership.owner || 'Unassigned'}</dd></div>
               <div><dt className="text-gray-600">Environment</dt><dd className="truncate text-gray-200">{ownership.environment || 'n/a'}</dd></div>
+              <div><dt className="text-gray-600">Cohort</dt><dd className="truncate text-violet-200">{ownership.cohort || 'unclassified'}</dd></div>
               <div><dt className="text-gray-600">Domain</dt><dd className="truncate text-gray-200">{asset.root_domain || asset.origin || 'n/a'}</dd></div>
               <div><dt className="text-gray-600">Kind</dt><dd className="text-gray-200">{KIND_META[asset.kind].label}</dd></div>
               <div><dt className="text-gray-600">Scans</dt><dd className="text-gray-200">{asset.total_scans ?? 0}</dd></div>

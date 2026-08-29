@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 try:
     from ai_assurance import build_agent_blast_radius
+    from asset_cohorts import target_cohort
     from api_utils import (
         SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _int_or_none, _iso_or_none, _optional_uuid,
         _parse_graph_json, _row_value, _scan_completion_flags, _severity_sort_value,
@@ -34,6 +35,7 @@ try:
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
+    from ..asset_cohorts import target_cohort
     from ..api_utils import (
         SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _int_or_none, _iso_or_none, _optional_uuid,
         _parse_graph_json, _row_value, _scan_completion_flags, _severity_sort_value,
@@ -1189,6 +1191,11 @@ async def exposure_assets(
             "root_domain": None if is_model else row.get("root_domain"),
             "origin": row.get("root_domain") if is_model else None,
             "exposure_class": exposure_class,
+            "cohort": target_cohort(
+                url=row.get("url"), name=row.get("name"),
+                discovery_source=row.get("discovery_source"), metadata=meta,
+                exposure_class=exposure_class,
+            ),
             "owner": str(meta.get("owner") or meta.get("asset_owner") or "").strip() or None,
             "environment": str(meta.get("environment") or "").strip().lower() or None,
             "risk_tier": str(meta.get("risk_tier") or "").strip() or None,
@@ -1293,6 +1300,11 @@ async def exposure_assets(
             "target_type": row.get("target_type"),
             "production_mode": bool(row.get("production_mode")),
             "exposure_class": exposure_class,
+            "cohort": target_cohort(
+                url=row.get("endpoint_url"), name=row.get("name"),
+                discovery_source="ai_gate", metadata=ai_meta,
+                exposure_class=exposure_class,
+            ),
             "owner": ai_owner,
             "environment": ai_environment,
             "blast_radius_score": blast_radius.get("score"),
