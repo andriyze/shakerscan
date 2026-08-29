@@ -9803,7 +9803,9 @@ async def _execute_scan_auth_session_capability(
     execution = build_native_scan_execution(admission.plan, options)
     if execution.discovery_manifest_only:
         return _skipped_scan_auth_session_summary("discovery_manifest_only")
-    credential = resolve_scan_interactive_credential(options, lane=lane)
+    credential = resolve_scan_interactive_credential(
+        options, lane=lane, capability_name="auth.session.establish",
+    )
     if credential is None:
         return _skipped_scan_auth_session_summary(f"no_interactive_{lane}")
     if not admission.plan.policy.approval_receipt_id:
@@ -10222,7 +10224,9 @@ async def _execute_scan_http_baseline_capability(
         "path": path,
         "follow_redirects": True,
     }
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="http.request",
+    )
     capability_args.update(principal.capability_args())
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -10712,7 +10716,9 @@ async def _execute_scan_web_probe_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="web.probe",
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10847,7 +10853,9 @@ async def _execute_scan_web_crawl_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="web.crawl",
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10984,7 +10992,9 @@ async def _execute_scan_content_discovery_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="web.content_discover",
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -11138,7 +11148,9 @@ async def _execute_scan_xss_verification_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="xss.verify",
+    )
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -11310,8 +11322,12 @@ async def _execute_scan_authz_verification_capability(
         return _skipped_scan_authz_verification_summary(
             "active_approval_missing"
         )
-    primary = resolve_scan_http_principal(options, lane="primary")
-    secondary = resolve_scan_http_principal(options, lane="secondary")
+    primary = resolve_scan_http_principal(
+        options, lane="primary", capability_name="authz.verify",
+    )
+    secondary = resolve_scan_http_principal(
+        options, lane="secondary", capability_name="authz.verify",
+    )
     if not primary.authenticated or not secondary.authenticated:
         return _skipped_scan_authz_verification_summary(
             "two_authenticated_principals_required"
@@ -11547,7 +11563,9 @@ async def _execute_scan_sqli_verification_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="sqli.verify",
+    )
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -11650,7 +11668,9 @@ async def _execute_scan_template_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name=capability_name,
+    )
     template_options = dict(canonical_template_options or {})
     if canonical_action is not None and not template_options:
         raise ScanCapabilityContractError(

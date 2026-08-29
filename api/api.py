@@ -4002,10 +4002,10 @@ app = FastAPI(
 )
 
 try:
-    from credential_api import router as credential_router
+    from credential_api import configure_credential_api, router as credential_router
     from credential_api import public_credential_validation_errors
 except ModuleNotFoundError:
-    from api.credential_api import router as credential_router
+    from api.credential_api import configure_credential_api, router as credential_router
     from api.credential_api import public_credential_validation_errors
 
 try:
@@ -15408,6 +15408,9 @@ async def _validate_approval_receipt_for_action(
         "risk_tier": approval.get("risk_tier"),
         "runtime_scope_guard": _runtime_scope_guard_from_scope(scope),
     }
+
+
+configure_credential_api(approval_validator=_validate_approval_receipt_for_action)
 
 
 

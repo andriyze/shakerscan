@@ -301,7 +301,7 @@ def resolve_scan_http_principal(
         if not lane_matches:
             continue
         lane_refs.append(item)
-        if capability_name and not scan_credential_allows_capability(
+        if not capability_name or not scan_credential_allows_capability(
             item.get("allowed_capabilities") or (), capability_name,
         ):
             continue
@@ -317,7 +317,7 @@ def resolve_scan_http_principal(
                 if str(value)
             ),
         })
-    capability_denied = bool(capability_name and lane_refs and not refs)
+    capability_denied = bool(lane_refs and not refs)
     if capability_denied:
         safe_headers = {}
     binding = {
@@ -457,7 +457,7 @@ def resolve_scan_interactive_credential(
         if not lane_matches:
             continue
         lane_refs.append(item)
-        if capability_name and not scan_credential_allows_capability(
+        if not capability_name or not scan_credential_allows_capability(
             item.get("allowed_capabilities") or (), capability_name,
         ):
             continue
@@ -473,7 +473,7 @@ def resolve_scan_interactive_credential(
                 if str(value)
             ),
         })
-    if capability_name and lane_refs and not refs:
+    if lane_refs and not refs:
         return None
     if len(refs) > 1:
         raise ScanCredentialError(

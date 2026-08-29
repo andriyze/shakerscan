@@ -56,8 +56,9 @@ def test_canary_never_crosses_public_scan_storage_or_transport_surfaces(tmp_path
             "auth_kind": "bearer_token",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": ["http.request"],
         }],
-    })
+    }, capability_name="http.request")
     simple_plan = _plan()
     action_results = {
         action.action_id: _result(

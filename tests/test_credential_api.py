@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -100,6 +100,13 @@ def client(monkeypatch):
         credential_api, "encrypt_secret", lambda _value: "enc:fernet:opaque-ciphertext"
     )
     monkeypatch.setattr(credential_api, "encryption_enabled", lambda: True)
+    async def validate_approval(_conn, receipt_id, **kwargs):
+        if receipt_id != "11111111-1111-4111-8111-111111111111":
+            raise HTTPException(status_code=400, detail="Approval receipt is required")
+        assert kwargs["require_target_binding"] is True
+        assert kwargs["risk_tier"] == "credential"
+
+    credential_api.configure_credential_api(approval_validator=validate_approval)
     app = FastAPI()
     app.state.db_pool = ApiCredentialPool()
     app.include_router(credential_api.router)
@@ -232,12 +239,24 @@ def test_capability_registry_defaults_validate_names_and_require_active_elevatio
     assert active.status_code == 422
     assert "explicit active-capability elevation" in active.text
 
+    self_asserted = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            name="Self asserted",
+            allowed_capabilities=["authz.verify"],
+            allow_active_capabilities=True,
+        ),
+    )
+    assert self_asserted.status_code == 400
+    assert "Approval receipt is required" in self_asserted.text
+
     elevated = http.post(
         "/credential-profiles",
         json=_create_payload(
             name="Elevated",
             allowed_capabilities=["authz.verify"],
             allow_active_capabilities=True,
+            approval_receipt_id="11111111-1111-4111-8111-111111111111",
         ),
     )
     assert elevated.status_code == 201, elevated.text

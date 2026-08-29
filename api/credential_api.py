@@ -49,6 +49,33 @@ except ModuleNotFoundError:
 
 router = APIRouter(prefix="/credential-profiles", tags=["credentials"])
 _store = PostgresCredentialProfileStore()
+_approval_validator: Any = None
+
+
+def configure_credential_api(*, approval_validator: Any) -> None:
+    global _approval_validator
+    _approval_validator = approval_validator
+
+
+async def _require_active_capability_approval(
+    conn: Any,
+    *,
+    approval_receipt_id: str | None,
+    target_id: uuid.UUID,
+) -> None:
+    if _approval_validator is None:
+        raise HTTPException(status_code=503, detail="credential approval validation is unavailable")
+    await _approval_validator(
+        conn,
+        approval_receipt_id,
+        target_id=target_id,
+        action_name="credential_profile.active_capabilities",
+        command="credential_profile.active_capabilities",
+        risk_tier="credential",
+        always_require_receipt=True,
+        require_target_binding=True,
+        require_expiry=True,
+    )
 
 
 def public_credential_validation_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -101,6 +128,7 @@ class CredentialProfileCreate(BaseModel):
     expires_at: datetime | None = None
     allowed_capabilities: list[str] = Field(default_factory=list, max_length=128)
     allow_active_capabilities: bool = False
+    approval_receipt_id: str | None = None
     created_by: str = Field(default="api", max_length=120)
 
 
@@ -116,6 +144,7 @@ class CredentialProfilePatch(BaseModel):
     is_active: bool | None = None
     allowed_capabilities: list[str] | None = Field(default=None, max_length=128)
     allow_active_capabilities: bool = False
+    approval_receipt_id: str | None = None
 
 
 class CredentialProfileRotate(BaseModel):
@@ -521,6 +550,12 @@ async def create_credential_profile(request: Request, payload: CredentialProfile
                 await _require_target(
                     conn, target_kind=payload.target_kind, target_id=payload.target_id
                 )
+                if payload.allow_active_capabilities:
+                    await _require_active_capability_approval(
+                        conn,
+                        approval_receipt_id=payload.approval_receipt_id,
+                        target_id=payload.target_id,
+                    )
                 profile = await _store.create_profile(
                     conn,
                     target_kind=payload.target_kind,
@@ -591,6 +626,12 @@ async def patch_credential_profile(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 existing = await _store.get_profile(conn, profile_id=profile_id)
+                if payload.allowed_capabilities is not None and payload.allow_active_capabilities:
+                    await _require_active_capability_approval(
+                        conn,
+                        approval_receipt_id=payload.approval_receipt_id,
+                        target_id=uuid.UUID(existing.target_id),
+                    )
                 allowed_capabilities = (
                     _credential_capabilities(
                         payload.allowed_capabilities,

@@ -558,9 +558,14 @@ def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
             "auth_kind": "form_login",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": [
+                "auth.session.establish", "http.request",
+            ],
         }],
     }
-    credential = resolve_scan_interactive_credential(options, lane="primary")
+    credential = resolve_scan_interactive_credential(
+        options, lane="primary", capability_name="auth.session.establish",
+    )
     assert credential is not None
     checkpoint = seal_scan_auth_session_state(
         key,
@@ -602,7 +607,7 @@ def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
         dispatcher.restore_terminal_state(action, None)
     ) is True
     principal = resolve_scan_http_principal(
-        dispatcher.options, lane="primary",
+        dispatcher.options, lane="primary", capability_name="http.request",
     )
     assert principal.authenticated is True
     assert principal.headers() == {"Cookie": "session=worker-private-session"}

@@ -55,6 +55,7 @@ export type CredentialSecretPayload = Omit<
 
 export type CredentialProfileCreatePayload = GeneratedCredentialProfileCreate & {
   allow_active_capabilities?: boolean
+  approval_receipt_id?: string
 }
 
 export interface CredentialCapabilityOption {

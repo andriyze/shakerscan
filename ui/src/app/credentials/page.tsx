@@ -5,6 +5,7 @@ import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide
 import {
   getDevices,
   getTargets,
+  createTargetPolicyApprovalReceipt,
   type DeviceTarget,
   type Target,
 } from '@/lib/api'
@@ -391,6 +392,15 @@ export default function CredentialsPage() {
         })
         toast.success('Credential rotated. Existing jobs remain bound to their admitted version.')
       } else {
+        const selectedTarget = choices.find((item) => item.id === targetId)
+        const activeApproval = draft.allowActiveCapabilities && selectedTarget
+          ? await createTargetPolicyApprovalReceipt({
+              targetId,
+              targetUrl: selectedTarget.detail,
+              riskTier: 'credential',
+              environment: targetKind === 'device' || targetKind === 'network' ? 'lab' : 'production',
+            })
+          : null
         await createCredentialProfile({
           ...material,
           target_kind: targetKind,
@@ -401,6 +411,7 @@ export default function CredentialsPage() {
           principal_slot: draft.principalSlot,
           allowed_capabilities: splitValues(draft.capabilities),
           allow_active_capabilities: draft.allowActiveCapabilities,
+          approval_receipt_id: activeApproval?.approvalReceiptId,
           created_by: 'credentials_ui',
         })
         toast.success('Encrypted credential profile created')
