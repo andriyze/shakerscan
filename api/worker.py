@@ -13890,7 +13890,8 @@ async def process_scan_job(job_data: dict):
                 if current['status'] == 'cancelling':
                     await conn.execute(
                         """UPDATE scans SET status='cancelled', completed_at=$2, progress=100,
-                                  current_phase='cancelled', error_message='Cancelled by user'
+                                  current_phase='cancelled', error_message='Cancelled by user',
+                                  assurance_score=COALESCE(assurance_score, 0)
                            WHERE id=$1 AND status='cancelling'""",
                         uuid.UUID(scan_id), completed_at,
                     )
@@ -13980,6 +13981,9 @@ async def process_scan_job(job_data: dict):
                         metadata["runtime_scope_command_result_id"] = command_result_id
                         result["scan_metadata"] = metadata
                 failure_result = _failure_result_for_scan_error(result, error, diag)
+                failure_assurance = _stamp_terminal_assurance(
+                    failure_result, status="failed",
+                )
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'failed',
@@ -13989,11 +13993,11 @@ async def process_scan_job(job_data: dict):
                         duration_seconds = $4,
                         progress = 100,
                         current_phase = 'failed', coverage_status=$5, coverage_json=$6,
-                        budget_used_json=$7
+                        budget_used_json=$7, assurance_score=$9
                     WHERE id = $8
                 """, error_detail[:2000], json.dumps(failure_result), completed_at, duration,
                      coverage_status, json.dumps(result_coverage), json.dumps(budget_used),
-                     uuid.UUID(scan_id))
+                     uuid.UUID(scan_id), failure_assurance)
                 candidate_id = str((options or {}).get("candidate_id") or "")
                 if candidate_id:
                     try:
@@ -14767,6 +14771,30 @@ def _recompute_parallel_parent_assurance(
         "assurance_gaps": sorted(gaps),
     })
     return score
+
+
+def _stamp_terminal_assurance(report: dict[str, Any], *, status: str) -> int:
+    """Persist an explicit assurance value on every deterministic terminal report."""
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
+    coverage = {**coverage, "status": status}
+    computed = scan_scoring.assurance(
+        coverage,
+        smart_coverage=(
+            report.get("smart_coverage")
+            if isinstance(report.get("smart_coverage"), dict) else {}
+        ),
+    )
+    result = report.setdefault("result", {})
+    if not isinstance(result, dict):
+        result = {}
+        report["result"] = result
+    result.update({
+        "assurance_score": int(computed["score"]),
+        "assurance_band": computed["band"],
+        "assurance_components": computed["components"],
+        "assurance_gaps": computed["gaps"],
+    })
+    return int(computed["score"])
 
 
 async def _record_endpoint_telemetry_attempts(
@@ -15725,7 +15753,7 @@ async def process_scan_plan_job(job_data: dict):
                     """
                     UPDATE scans SET status='failed', progress=100,
                         current_phase='queue_handoff_failed', completed_at=NOW(),
-                        error_message=$2
+                        error_message=$2, assurance_score=0
                     WHERE id=$1
                     """,
                     uuid.UUID(discovery_id),
@@ -16668,6 +16696,9 @@ async def process_scan_shard_job(job_data: dict):
         partial = bool(
             not error and not parallel_discovery and _parallel_result_is_partial(result)
         )
+        shard_assurance = _stamp_terminal_assurance(
+            result, status="failed" if error else "partial" if partial else "completed",
+        )
         filepath = await persist_result_artifact(
             result,
             job_id,
@@ -16688,19 +16719,21 @@ async def process_scan_shard_job(job_data: dict):
                 await conn.execute("""
                     UPDATE scans SET status = 'failed', error_message = $1, result = $2,
                         score = $3, grade = $4, findings_count = $5, completed_at = $6,
-                        duration_seconds = $7, progress = 100, current_phase = 'failed'
+                        duration_seconds = $7, progress = 100, current_phase = 'failed',
+                        assurance_score = $9
                     WHERE id = $8
                 """, error, json.dumps(result), score, grade, len(findings),
-                     completed_at, duration, uuid.UUID(scan_id))
+                     completed_at, duration, uuid.UUID(scan_id), shard_assurance)
             else:
                 await conn.execute("""
                     UPDATE scans SET status = 'completed', result = $1, score = $2,
                         grade = $3, findings_count = $4, completed_at = $5,
-                        duration_seconds = $6, progress = 100, current_phase = $7
+                        duration_seconds = $6, progress = 100, current_phase = $7,
+                        assurance_score = $9
                     WHERE id = $8
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, 'partial' if partial else 'completed',
-                     uuid.UUID(scan_id))
+                     uuid.UUID(scan_id), shard_assurance)
 
         final_status = 'failed' if error else 'completed'
         final_phase = 'failed' if error else ('partial' if partial else 'completed')
@@ -16836,7 +16869,7 @@ async def process_scan_merge_job(job_data: dict):
                 UPDATE scans SET status='failed', progress=100,
                     current_phase='parallel_partition_failed',
                     completed_at=NOW(), error_message=$2,
-                    result=$3::jsonb
+                    result=$3::jsonb, assurance_score=0
                 WHERE id=$1 AND status <> 'cancelled'
                 """,
                 uuid.UUID(parent_id),
@@ -16896,7 +16929,7 @@ async def process_scan_merge_job(job_data: dict):
                     UPDATE scans SET status='failed', progress=100,
                         current_phase='parallel_partition_failed',
                         completed_at=NOW(), error_message=$2,
-                        result=$3::jsonb
+                        result=$3::jsonb, assurance_score=0
                     WHERE id=$1 AND status <> 'cancelled'
                     """,
                     uuid.UUID(parent_id),
@@ -18758,7 +18791,8 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
         try:
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE scans SET status='failed', error_message=$2, completed_at=NOW() "
+                    "UPDATE scans SET status='failed', error_message=$2, completed_at=NOW(), "
+                    "assurance_score=0 "
                     "WHERE id=$1 AND status NOT IN ('completed','cancelled')",
                     uuid.UUID(scan_id), msg[:500])
         except Exception as e:

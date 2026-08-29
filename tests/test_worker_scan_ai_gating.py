@@ -6041,6 +6041,13 @@ def test_parallel_parent_assurance_clears_a_copied_score_without_coverage():
     assert merged["result"]["assurance_band"] == "none"
 
 
+def test_terminal_failure_stamps_zero_assurance_in_report():
+    report = {"error": "worker failed", "result": {"assurance_score": 99}}
+    assert worker._stamp_terminal_assurance(report, status="failed") == 0
+    assert report["result"]["assurance_score"] == 0
+    assert report["result"]["assurance_band"] == "none"
+
+
 def test_parent_duplicate_merge_preserves_stronger_proof_and_instances():
     union = {}
     weak = {
