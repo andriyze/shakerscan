@@ -1399,11 +1399,18 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
   )
     .replace(/_/g, ' ')
     .trim()
-  const failureMessage =
+  const rawFailureMessage = String(
     scan?.result?.scan_metadata?.terminated_reason ||
     scan?.error_message ||
     scan?.error ||
     'No specific error was reported.'
+  )
+  // Some older timeout rows appended a diagnostic log excerpt to error_message. Logs remain
+  // available below; the failure headline should only state the structured terminal reason.
+  const failureMessage = rawFailureMessage
+    .split(/\s+Last logs:\s*/i, 1)[0]
+    .replace(/^Scan terminated:\s*/i, '')
+    .trim() || 'No specific error was reported.'
   const targetUrl = String(scan?.target_url || scan?.target || '').trim()
   const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(String(failureMessage))
   const isShard = scan?.scan_role === 'shard' && Boolean(scan?.parent_scan_id)
@@ -1504,6 +1511,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const completed = Number(matrix.completed || 0)
   const total = Number(matrix.total || Math.max(0, actions.length - 1))
   const scanTerminal = ['completed', 'failed', 'cancelled'].includes(String(scan?.status || ''))
+  const hasFinalGrade = scan?.status === 'completed' && Boolean(scan?.grade || scan?.result?.grade)
   const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) + Number(matrix.pending || 0) > 0
   const apiRecordUrl = `${API_URL}/scans/${scan.id}/actions`
 
@@ -1552,9 +1560,13 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
 
       {reliability.reliable === false && (
         <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/10 p-3">
-          <div className="text-sm font-medium text-amber-200">Grade is provisional</div>
+          <div className="text-sm font-medium text-amber-200">
+            {hasFinalGrade ? 'Observed posture is provisional' : 'Execution coverage is incomplete'}
+          </div>
           <p className="mt-1 text-xs text-amber-100/80">
-            {String(reliability.warning || 'Required coverage did not complete cleanly.')}
+            {hasFinalGrade
+              ? String(reliability.warning || 'Required coverage did not complete cleanly.')
+              : 'No score or grade was produced. The coverage record below explains what ran and what remained unresolved.'}
           </p>
           {Array.isArray(reliability.reason_labels) && reliability.reason_labels.length > 0 && (
             <p className="mt-1 text-xs text-amber-200/70">{reliability.reason_labels.join(' · ')}</p>

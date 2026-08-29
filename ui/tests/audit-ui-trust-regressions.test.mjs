@@ -84,3 +84,13 @@ test('scoped dashboard refuses unbound and unscoped historical rows', () => {
   assert.match(scans, /asterisk marks assurance limitations/)
   assert.doesNotMatch(dashboard, /text-lg font-semibold[^\n]+scan\.grade/)
 })
+
+test('scan failure summaries do not contradict terminal result state', () => {
+  const detail = read('src/app/scans/[id]/page.tsx')
+  const scans = read('src/app/scans/page.tsx')
+  assert.match(detail, /split\(\/\\s\+Last logs:/)
+  assert.match(detail, /Execution coverage is incomplete/)
+  assert.match(detail, /No score or grade was produced/)
+  assert.doesNotMatch(detail, />Grade is provisional</)
+  assert.match(scans, /Examination strength unavailable/)
+})

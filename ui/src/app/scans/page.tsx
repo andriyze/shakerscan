@@ -30,7 +30,13 @@ const AUTH_OPTION_KEYS = [
 // together.
 function AssuranceChip({ scan }: { scan: Scan }) {
   const assurance = scanAssurance(scan)
-  if (!assurance) return null
+  if (!assurance) {
+    return (
+      <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-200">
+        Examination strength unavailable
+      </span>
+    )
+  }
   return (
     <span
       className={`rounded bg-gray-900 px-1.5 py-0.5 text-xs ${assuranceClass(assurance.band)}`}
