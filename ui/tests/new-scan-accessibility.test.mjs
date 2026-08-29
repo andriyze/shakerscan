@@ -26,3 +26,12 @@ test('New Scan clears stale validation when the operator edits the form', () => 
   assert.match(page, /onChange=\{\(\) => \{ if \(error\) setError\(null\) \}\}/)
   assert.match(page, /setBudgetProfile\(budget\.value\); setError\(null\)/)
 })
+
+test('active scans use fingerprint-authoritative current worker readiness', () => {
+  assert.match(page, /workerStats\.fleet_uniform === true/)
+  assert.match(page, /require_current_workers: activeTesting/)
+  assert.match(page, /placementPreviewLabel\(topology, currentWorkerCount\)/)
+  assert.match(page, /Expected build:/)
+  assert.match(page, /Reported running builds:/)
+  assert.match(page, /disabled=\{activeTesting && !currentFleetReady\}/)
+})

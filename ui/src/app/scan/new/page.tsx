@@ -84,7 +84,7 @@ export default function NewScanPage() {
   const [customEndpoints, setCustomEndpoints] = useState('')
   const [limits, setLimits] = useState<Record<string, string>>({})
   const [workerStats, setWorkerStats] = useState<Awaited<ReturnType<typeof getWorkers>> | null>(null)
-  const [staleWorkers, setStaleWorkers] = useState(0)
+  const [workerReadinessError, setWorkerReadinessError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -110,8 +110,15 @@ export default function NewScanPage() {
       })
       .catch(() => undefined)
     getWorkers()
-      .then((workers) => { if (!cancelled) { setWorkerStats(workers); setStaleWorkers(workers.stale_workers?.length ?? 0) } })
-      .catch(() => undefined)
+      .then((workers) => {
+        if (!cancelled) {
+          setWorkerStats(workers)
+          setWorkerReadinessError(null)
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) setWorkerReadinessError(cause instanceof Error ? cause.message : 'Worker readiness is unavailable')
+      })
     getScanPublicContract()
       .then((contract) => {
         if (cancelled) return
@@ -136,7 +143,19 @@ export default function NewScanPage() {
   const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
   const credentialUse = selectedCredentialIds.length > 0
   const approvalRequired = networkDiscovery || credentialUse || allowStateChanging
-  const active_worker_count = workerStats?.execution_capacity?.total_available ?? workerStats?.current_count ?? workerStats?.count ?? 0
+  const currentWorkerCount = workerStats?.current_count ?? 0
+  const staleWorkers = workerStats?.stale_count ?? workerStats?.stale_workers?.length ?? 0
+  const pendingWorkers = workerStats?.pending_count ?? 0
+  const currentFleetReady = Boolean(
+    workerStats
+    && workerStats.fleet_uniform === true
+    && currentWorkerCount > 0
+    && staleWorkers === 0
+    && pendingWorkers === 0,
+  )
+  const reportedFingerprints = workerStats?.distinct_fingerprints?.length
+    ? workerStats.distinct_fingerprints
+    : Array.from(new Set((workerStats?.workers || []).map((worker) => worker.build_fingerprint).filter((value): value is string => Boolean(value))))
   const customDuration = Number(limits.max_duration_seconds)
   const approvalTtlMinutes = Math.ceil((
     Number.isSafeInteger(customDuration) && customDuration > 0
@@ -267,6 +286,10 @@ export default function NewScanPage() {
       setError('Confirm that you own or are authorized to test every target with the selected permissions and identities.')
       return
     }
+    if (activeTesting && !currentFleetReady) {
+      setError('Active testing requires at least one worker and a uniform fleet on the expected build. Refresh after rebuilding or restarting stale workers.')
+      return
+    }
     if (networkDiscovery && (!activeTesting || !approvalReceipt.trim())) {
       setError('Network discovery requires active testing, authorization confirmation, and a target-bound approval receipt ID.')
       return
@@ -357,7 +380,7 @@ export default function NewScanPage() {
       options: {
         ...(endpointList.length ? { custom_endpoints: endpointList } : {}),
         parallel: topology === 'parallel',
-        require_current_workers: false,
+        require_current_workers: activeTesting,
       },
     }
 
@@ -543,11 +566,16 @@ export default function NewScanPage() {
               </div>
             </div>
           )}
-          {activeTesting && staleWorkers > 0 && (
-            <p className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200">
-              {staleWorkers} worker{staleWorkers === 1 ? '' : 's'} are not on the current build. The scan will be placed only on a compatible current worker.
-              {workerStats?.fleet?.enabled && <> <Link href="/fleet" className="font-medium underline">Open Fleet</Link>.</>}
-            </p>
+          {activeTesting && !currentFleetReady && (
+            <div className="rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-200" role="alert">
+              <p className="font-medium">Active testing is paused until the worker fleet is uniformly current.</p>
+              <p className="mt-1 text-xs text-amber-100/80">
+                {workerReadinessError
+                  ? workerReadinessError
+                  : `${currentWorkerCount} current · ${staleWorkers} stale · ${pendingWorkers} awaiting build identity.`}
+                {workerStats?.fleet?.enabled && <> <Link href="/fleet" className="font-medium underline">Open Fleet</Link>.</>}
+              </p>
+            </div>
           )}
         </Card>
 
@@ -568,7 +596,12 @@ export default function NewScanPage() {
               </span>
             </label>
           </div>
-          <p className="mt-3 text-xs text-gray-500">Placement preview: {placementPreviewLabel(topology, active_worker_count)}.</p>
+          <div className="mt-3 rounded border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
+            <p>Placement preview: {workerStats ? placementPreviewLabel(topology, currentWorkerCount) : 'checking compatible current workers…'}.</p>
+            <p className="mt-1">Compatible current workers: <strong className="font-medium text-gray-300">{workerStats ? currentWorkerCount : '—'}</strong>{workerStats && <> · stale {staleWorkers} · identity pending {pendingWorkers}</>}</p>
+            <p className="mt-1 break-all">Expected build: <span className="font-mono text-gray-300">{workerStats?.expected_build_fingerprint || 'unavailable'}</span></p>
+            <p className="mt-1 break-all">Reported running builds: <span className="font-mono text-gray-300">{reportedFingerprints.length ? reportedFingerprints.join(', ') : 'none reported'}</span></p>
+          </div>
         </Card>
 
         <Card className="overflow-hidden">
@@ -657,7 +690,7 @@ export default function NewScanPage() {
         {error && <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</p>}
         <div className="flex items-center justify-end gap-3">
           <Button type="button" variant="secondary" onClick={() => router.back()}>Cancel</Button>
-          <Button type="submit" loading={loading}>Run Scan</Button>
+          <Button type="submit" loading={loading} disabled={activeTesting && !currentFleetReady}>Run Scan</Button>
         </div>
       </form>
     </div>

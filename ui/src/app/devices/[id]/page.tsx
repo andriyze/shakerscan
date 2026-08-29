@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
-import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
+import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 import { deviceReachabilityServiceSummary, deviceScorePresentation, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
@@ -67,6 +67,8 @@ function DeviceDetailContent() {
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
+  const [workerReady, setWorkerReady] = useState(false)
+  const [readinessReason, setReadinessReason] = useState<string | null>('checking_device_worker')
   const [scanOpen, setScanOpen] = useState(false)
   const [credentialOpen, setCredentialOpen] = useState(false)
   const [requestImportOpen, setRequestImportOpen] = useState(false)
@@ -95,8 +97,8 @@ function DeviceDetailContent() {
 
   const load = useCallback(async () => {
     try {
-      const [device, credentialData, collectionData, huntData] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 })])
-      setData(device); setCredentials(credentialData.profiles || []); setRequestCollections(collectionData.collections || []); setDeviceHunts(huntData.runs || []); setFailed(false)
+      const [device, credentialData, collectionData, huntData, readiness] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
+      setData(device); setCredentials(credentialData.profiles || []); setRequestCollections(collectionData.collections || []); setDeviceHunts(huntData.runs || []); setWorkerReady(readiness.enabled && readiness.status === 'ready'); setReadinessReason(readiness.reason || null); setFailed(false)
     } catch { setFailed(true) } finally { setLoading(false) }
   }, [deviceId])
 
@@ -189,6 +191,10 @@ function DeviceDetailContent() {
   }, [selectedScanId])
 
   async function queueScan() {
+    if (!workerReady) {
+      toast.error('Device scans are paused until a current, tool-capable device worker is ready')
+      return
+    }
     setScanning(true)
     try {
       const queued = await scanDevice(deviceId, {
@@ -375,7 +381,9 @@ function DeviceDetailContent() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan device' : 'A current device worker is required'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+
+      {!workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200" role="alert">Device inventory remains available, but scans are paused until a current device worker with Nmap and Naabu is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.</Card>}
 
       {deviceHunts.length > 0 && <Card className="mb-4 border-violet-500/20 bg-violet-500/[0.04] p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-violet-100">Legacy device-agent history</p><p className="mt-1 text-xs text-gray-500">Read-only investigations created before canonical Hunt · {deviceHunts.length} shown</p></div><div className="flex flex-wrap gap-2">{deviceHunts.slice(0, 3).map((run) => <Link key={run.id} href={`/hunt?target=${encodeURIComponent(device.id)}&legacy_run=${encodeURIComponent(run.id)}`} className="rounded border border-violet-500/25 bg-gray-950/50 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-500/10">{run.status.replace(/_/g, ' ')} · {run.actions_used} actions · {run.scans_queued} scans</Link>)}<Link href={`/hunt?target=${encodeURIComponent(device.id)}`} className="rounded px-3 py-1.5 text-xs text-blue-400 hover:text-blue-300">Open current Hunt</Link></div></div></Card>}
 
@@ -532,7 +540,7 @@ function DeviceDetailContent() {
         <section><h2 className="mb-3 text-lg font-semibold text-white">Recent device scans</h2><Card className="p-4">{scans.length ? <div className="space-y-3">{scans.slice(0, 8).map((item) => <div key={item.id} className="flex items-center justify-between gap-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0"><Link href={`/devices/${device.id}?scan=${item.id}`} className="min-w-0 flex-1 hover:text-blue-300"><p className="truncate text-sm text-white">{item.current_phase?.replace(/_/g, ' ') || item.scan_type}</p><p className="text-xs text-gray-500">{formatDate(item.created_at)} · show open ports</p></Link><div className="flex items-center gap-2"><ScanStatusBadge status={item.status} /><Link href={`/scans/${item.id}`} aria-label="Open full scan report" title="Open full scan report" className="rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-blue-300"><ExternalLink className="h-4 w-4" /></Link></div></div>)}</div> : <p className="text-sm text-gray-500">No scans yet.</p>}</Card></section>
       </div>
 
-      <Modal open={scanOpen} title={`Scan ${device.name}`} onClose={() => setScanOpen(false)} footer={<><Button variant="secondary" onClick={() => setScanOpen(false)}>Cancel</Button><Button loading={scanning} disabled={!scan.confirm_authorized || (scan.request_collection_ids.length > 0 && !scan.confirm_request_replay)} onClick={queueScan}>Queue scan</Button></>}>
+      <Modal open={scanOpen} title={`Scan ${device.name}`} onClose={() => setScanOpen(false)} footer={<><Button variant="secondary" onClick={() => setScanOpen(false)}>Cancel</Button><Button loading={scanning} disabled={!workerReady || !scan.confirm_authorized || (scan.request_collection_ids.length > 0 && !scan.confirm_request_replay)} onClick={queueScan}>Queue scan</Button></>}>
         <div className="space-y-4">
           <Field label="Coverage"><Select value={scan.profile} onChange={(event) => setScan({ ...scan, profile: event.target.value })}><option value="inventory">Inventory — top 100 TCP ports + curated UDP, lightest</option><option value="posture">Posture — all 65,535 TCP ports + curated UDP, slower</option><option value="thorough">Thorough — all 65,535 TCP ports + deeper fingerprints, heaviest</option></Select></Field>
           {scan.profile !== 'inventory' && <p className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">This profile checks every TCP port and can take hours on slow or filtered devices. Start with Inventory unless complete port coverage is required.</p>}

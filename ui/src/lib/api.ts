@@ -2354,6 +2354,7 @@ export interface WorkerInfo {
   status: string
   health?: string
   build_current?: boolean | null
+  build_fingerprint?: string | null
   scanner_version?: string | null
 }
 
@@ -2375,6 +2376,8 @@ export interface WorkerStats {
   fleet_uniform?: boolean
   stale_count?: number
   pending_count?: number
+  distinct_fingerprints?: string[]
+  expected_build_fingerprint?: string | null
   expected_scanner_version?: string
   execution_capacity?: {
     local_running: number
