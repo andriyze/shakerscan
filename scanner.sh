@@ -1812,6 +1812,37 @@ verify_running_build_identity() {
     return 1
 }
 
+# A scoped UI rebuild deliberately does not change the API/worker release identity. Verify the
+# immutable UI artifact against the revision and version passed to its Docker build without
+# imposing the full-stack identity invariant used by start and full rebuild.
+verify_running_ui_identity() {
+    local expected_revision="${GIT_COMMIT:-}"
+    # docker-compose.yml deliberately bakes SCANNER_VERSION into UI_BUILD_VERSION.
+    local expected_version="${SCANNER_VERSION:-}"
+    local ui_json ui_version ui_revision
+    local elapsed=0 timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+        ui_version="$(printf '%s' "$ui_json" | jq -r '.ui_version // empty' 2>/dev/null || true)"
+        ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
+        if build_versions_match "$expected_version" "$ui_version" \
+            && build_versions_match "$expected_revision" "$ui_revision"; then
+            echo -e "${GREEN}UI build identity verified: ${ui_version} (${ui_revision})${NC}"
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    echo -e "${RED}Error: the rebuilt UI is not serving the requested artifact.${NC}" >&2
+    echo "  expected version:  ${expected_version:-unknown}" >&2
+    echo "  running version:   ${ui_version:-unavailable}" >&2
+    echo "  expected revision: ${expected_revision:-unknown}" >&2
+    echo "  running revision:  ${ui_revision:-unavailable}" >&2
+    return 1
+}
+
 verify_specialized_worker_identity() {
     local expect_agent="${1:-0}"
     local expect_device="${2:-0}"
@@ -1903,7 +1934,7 @@ print_help() {
     echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
     echo "                       scanner     Rebuild scanner/worker only"
-    echo "                       ui          Rebuild UI only"
+    echo "                       ui          Rebuild + recreate UI only; leaves API/workers untouched"
     echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
@@ -1938,6 +1969,7 @@ print_help() {
     echo "  ./scanner.sh fleet join-token --ttl 24h"
     echo "  ./scanner.sh fleet join-token --ttl 1h --max-uses 5 --transport broker"
     echo "  ./scanner.sh start --local            # Build locally and start"
+    echo "  ./scanner.sh rebuild ui               # Apply UI-only changes without touching the fleet"
     echo "  ./scanner.sh start -w 10              # Start with 10 workers"
     echo "  ./scanner.sh start --image-tag $(get_release_version)  # Use this release's published tag"
     echo "  ./scanner.sh scale 10                 # Scale to 10 workers"
@@ -2611,6 +2643,11 @@ rebuild_images() {
         refresh_running_service_after_rebuild model-intake-signer "$existing_model_intake_signer"
     fi
 
+    if [ "$SERVICES" = "ui" ] && [ "${existing_ui:-0}" -gt 0 ]; then
+        wait_for_url "UI" "$(ui_probe_url)" 120
+        verify_running_ui_identity
+    fi
+
     # A full rebuild is an atomic deployment operation when the main stack was already running.
     # Do not report success while any primary execution component still serves the old image.
     if [ -z "$SERVICES" ] \
@@ -2632,6 +2669,9 @@ rebuild_images() {
     else
         echo -e "${BLUE}Local-build mode recorded. Any running rebuilt services were recreated; stopped services remain stopped.${NC}"
         echo -e "${BLUE}Use scanner.sh rather than raw 'docker compose up' so remote-access trust is re-derived.${NC}"
+    fi
+    if [ "$SERVICES" = "ui" ]; then
+        echo -e "${BLUE}API and workers were not rebuilt or restarted; scanner fleet freshness is unchanged.${NC}"
     fi
     if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_device_workers:-0}" -gt 0 ]; then
         echo -e "${BLUE}The running connected-device worker was also recreated from the rebuilt image.${NC}"

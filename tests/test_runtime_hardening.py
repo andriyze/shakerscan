@@ -1424,6 +1424,28 @@ def test_full_rebuild_verifies_the_recreated_running_stack_before_success():
     assert rebuild.index("verify_running_build_identity") < rebuild.index("Rebuild complete")
 
 
+def test_ui_only_rebuild_recreates_and_verifies_only_the_ui_artifact():
+    script = (ROOT / "scanner.sh").read_text()
+    rebuild = script.split("rebuild_images() {", 1)[1].split(
+        "\n}\n\nrefresh_workers_after_rebuild", 1,
+    )[0]
+    verifier = script.split("verify_running_ui_identity() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'if [ "$SERVICES" = "ui" ]' in rebuild
+    assert 'refresh_running_service_after_rebuild ui "$existing_ui"' in rebuild
+    assert 'verify_running_ui_identity' in rebuild
+    assert rebuild.index('refresh_running_service_after_rebuild ui "$existing_ui"') < rebuild.index(
+        "verify_running_ui_identity"
+    )
+    assert "API and workers were not rebuilt or restarted" in rebuild
+    assert "verify_running_build_identity" not in rebuild.split(
+        'if [ "$SERVICES" = "ui" ] &&', 1,
+    )[1].split("fi", 1)[0]
+    assert "/api/build-identity" in verifier
+    assert ".source_revision // empty" in verifier
+    assert 'build_versions_match "$expected_revision" "$ui_revision"' in verifier
+
+
 def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networks():
     script = (ROOT / "scanner.sh").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()

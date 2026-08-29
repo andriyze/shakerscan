@@ -447,6 +447,20 @@ for this source-build contract. Local-build mode is remembered for later starts.
 `./scanner.sh start --prebuilt` to switch explicitly to the published images. Curl installations do
 not contain Dockerfiles and continue to default to the versioned published images.
 
+For source-checkout iteration, rebuild only the component that changed. A UI-only rebuild also
+recreates a running UI container and verifies the baked artifact; it does not rebuild or restart the
+API or worker fleet:
+
+```bash
+./scanner.sh rebuild ui       # Next.js UI only
+./scanner.sh rebuild scanner  # shared scanner runtime, API, and workers
+./scanner.sh rebuild          # complete local application image set
+```
+
+Worker freshness is derived from scanner/API runtime content, not UI source. Immutable published
+releases still use one exact source revision and complete image set; scoped rebuilds are a local
+source-development convenience.
+
 The source build downloads version-pinned Go scanner modules. It retries transient module-proxy or
 DNS failures four times and preserves the Go module/build cache between attempts. A repeated error
 such as `lookup proxy.golang.org ... i/o timeout` is a host/Docker DNS or internet-connectivity
