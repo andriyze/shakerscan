@@ -13,6 +13,7 @@ import { Button, Fieldset, Tabs, ToggleVisual, fieldClasses, useToast } from '@/
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 
 const SEVERITY_OPTIONS: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
+const SEVERITY_RANK: Record<Severity, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 }
 // Point the panel's local field class at the shared field styling so every
 // input/select here matches the rest of the app and gets a real focus ring.
 const INPUT_CLASS = `mt-1 w-full ${fieldClasses()}`
@@ -93,6 +94,8 @@ export default function AISettingsPanel() {
   const [verifyProbeMessage, setVerifyProbeMessage] = useState<string | null>(null)
 
   const applyAISettingsToForm = (settings: AISettings) => {
+    const verificationSeverity = settings.verification_min_severity || settings.auto_retest_min_severity || 'medium'
+    const aiEscalationSeverity = settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high'
     setAIURLInput(settings.ai_url || '')
     setAIModelInput(settings.ai_model || '')
     setAIModelFallbackInput(settings.ai_model_fallback || '')
@@ -100,12 +103,12 @@ export default function AISettingsPanel() {
     setAIScanClassificationEnabledInput(Boolean(settings.ai_scan_classification_enabled))
     setAIClassifyMinSeverityInput(settings.ai_classify_min_severity || settings.ai_verify_min_severity || 'high')
     setAIVerifyEnabledInput(Boolean(settings.ai_verify_enabled))
-    setAIVerifyMinSeverityInput(settings.ai_verify_min_severity || 'high')
+    setAIVerifyMinSeverityInput(aiEscalationSeverity)
     setAutoRetestEnabledInput(Boolean(settings.auto_retest_on_scan_complete))
-    setAutoRetestMinSeverityInput(settings.auto_retest_min_severity || 'medium')
+    setAutoRetestMinSeverityInput(verificationSeverity)
     setAutoRetestMaxPerScanInput(String(settings.auto_retest_max_per_scan ?? 25))
-    setVerificationMinSeverityInput(settings.verification_min_severity || settings.auto_retest_min_severity || 'medium')
-    setAIEscalationMinSeverityInput(settings.ai_escalation_min_severity || settings.ai_verify_min_severity || 'high')
+    setVerificationMinSeverityInput(verificationSeverity)
+    setAIEscalationMinSeverityInput(aiEscalationSeverity)
     setProofRequiredForSmartInput(Boolean(settings.proof_required_for_smart))
     setAutoFpOnRetestInput(Boolean(settings.auto_fp_on_retest))
     setAutoFpMinConfidenceInput(String(settings.auto_fp_min_confidence ?? 0.9))
@@ -142,6 +145,12 @@ export default function AISettingsPanel() {
     if (aiSaving) return
     setAISettingsError(null)
     setAISettingsMessage(null)
+    if (SEVERITY_RANK[aiEscalationMinSeverityInput] < SEVERITY_RANK[verificationMinSeverityInput]) {
+      const message = 'AI escalation cannot include severities excluded by the verification baseline.'
+      setAISettingsError(message)
+      toast.error(message)
+      return
+    }
     setAISaving(true)
 
     try {
@@ -153,9 +162,7 @@ export default function AISettingsPanel() {
         ai_scan_classification_enabled: aiScanClassificationEnabledInput,
         ai_classify_min_severity: aiClassifyMinSeverityInput,
         ai_verify_enabled: aiVerifyEnabledInput,
-        ai_verify_min_severity: aiVerifyMinSeverityInput,
         auto_retest_on_scan_complete: autoRetestEnabledInput,
-        auto_retest_min_severity: autoRetestMinSeverityInput,
         auto_retest_max_per_scan: Math.max(0, Number.parseInt(autoRetestMaxPerScanInput || '0', 10) || 0),
         verification_min_severity: verificationMinSeverityInput,
         ai_escalation_min_severity: aiEscalationMinSeverityInput,
@@ -250,6 +257,16 @@ export default function AISettingsPanel() {
     setAutoRetestMinSeverityInput(severity)
   }
 
+  const updateVerificationSeverity = (severity: Severity) => {
+    setVerificationMinSeverityInput(severity)
+    setAutoRetestMinSeverityInput(severity)
+  }
+
+  const updateAIEscalationSeverity = (severity: Severity) => {
+    setAIEscalationMinSeverityInput(severity)
+    setAIVerifyMinSeverityInput(severity)
+  }
+
   const selectDemoHoneyMode = (mode: DemoHoneyMode) => {
     setDemoHoneyModeInput(mode)
     if (mode === 'hosted') {
@@ -274,6 +291,9 @@ export default function AISettingsPanel() {
     }
   }
 
+  const thresholdContradiction = SEVERITY_RANK[aiEscalationMinSeverityInput]
+    < SEVERITY_RANK[verificationMinSeverityInput]
+
   if (loading && !aiSettings) {
     return (
       <div className="bg-gray-900 rounded-lg border border-gray-800 p-4 text-sm text-gray-400">
@@ -295,7 +315,7 @@ export default function AISettingsPanel() {
           <Button variant="secondary" size="sm" onClick={fetchAISettings} disabled={loading || aiSaving}>
             Refresh
           </Button>
-          <Button size="sm" onClick={handleSaveAISettings} loading={aiSaving} disabled={loading}>
+          <Button size="sm" onClick={handleSaveAISettings} loading={aiSaving} disabled={loading || thresholdContradiction}>
             {aiSaving ? 'Saving…' : 'Save'}
           </Button>
         </div>
@@ -616,22 +636,10 @@ export default function AISettingsPanel() {
           <p className="text-xs text-gray-500">
             Retest AI uses the shared provider settings from <span className="text-gray-300">Shared Provider</span>.
           </p>
-          <Field
-            label="Verification Min Severity"
-            hint="Only retest findings at or above this severity can be escalated to AI."
-          >
-            <select
-              value={aiVerifyMinSeverityInput}
-              onChange={(e) => setAIVerifyMinSeverityInput(e.target.value as Severity)}
-              className={INPUT_CLASS}
-            >
-              {SEVERITY_OPTIONS.map((sev) => (
-                <option key={sev} value={sev}>
-                  {sev}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <div className="rounded border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs text-gray-400">
+            Effective AI threshold: <span className="font-medium text-gray-200">{aiEscalationMinSeverityInput}</span>.
+            Change it once under Verification Policy below.
+          </div>
           <div className="flex items-center gap-2 pt-1">
             <Button
               variant="secondary"
@@ -690,7 +698,7 @@ export default function AISettingsPanel() {
           >
             <select
               value={verificationMinSeverityInput}
-              onChange={(e) => setVerificationMinSeverityInput(e.target.value as Severity)}
+              onChange={(e) => updateVerificationSeverity(e.target.value as Severity)}
               className={INPUT_CLASS}
             >
               {SEVERITY_OPTIONS.map((sev) => (
@@ -706,7 +714,7 @@ export default function AISettingsPanel() {
           >
             <select
               value={aiEscalationMinSeverityInput}
-              onChange={(e) => setAIEscalationMinSeverityInput(e.target.value as Severity)}
+              onChange={(e) => updateAIEscalationSeverity(e.target.value as Severity)}
               className={INPUT_CLASS}
             >
               {SEVERITY_OPTIONS.map((sev) => (
@@ -716,6 +724,35 @@ export default function AISettingsPanel() {
               ))}
             </select>
           </Field>
+          <div className="rounded border border-blue-500/20 bg-blue-500/10 p-3">
+            <div className="text-xs font-medium text-blue-200">Effective policy preview</div>
+            {thresholdContradiction && (
+              <p role="alert" className="mt-1 text-xs text-red-300">
+                AI escalation cannot include severities excluded by the verification baseline.
+              </p>
+            )}
+            <div className="mt-2 grid gap-1">
+              {SEVERITY_OPTIONS.map((severity) => {
+                const verificationAllowed = SEVERITY_RANK[severity] >= SEVERITY_RANK[verificationMinSeverityInput]
+                const aiAllowed = verificationAllowed && aiVerifyEnabledInput
+                  && SEVERITY_RANK[severity] >= SEVERITY_RANK[aiEscalationMinSeverityInput]
+                const autoQueued = verificationAllowed && autoRetestEnabledInput
+                return (
+                  <div key={severity} className="grid grid-cols-[5rem_1fr] gap-2 text-xs">
+                    <span className="capitalize text-gray-300">{severity}</span>
+                    <span className={verificationAllowed ? 'text-blue-100' : 'text-gray-500'}>
+                      {verificationAllowed
+                        ? `deterministic verification${autoQueued ? ' · auto-retest' : ''}${aiAllowed ? ' · AI escalation allowed' : ''}`
+                        : 'excluded by verification baseline'}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            <p className="mt-2 text-[11px] text-blue-100/80">
+              Precedence: verification baseline → optional automatic queue → deterministic proof → AI escalation threshold.
+            </p>
+          </div>
           <p className="text-xs text-yellow-400/90 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1.5">
             If proof-required is enabled, Scan reports can look quieter because unverified findings are filtered out of
             the primary report.
@@ -733,22 +770,10 @@ export default function AISettingsPanel() {
             checked={autoRetestEnabledInput}
             onChange={setAutoRetestEnabledInput}
           />
-          <Field
-            label="Auto Retest Min Severity"
-            hint="Only findings at or above this severity are auto-queued for retest."
-          >
-            <select
-              value={autoRetestMinSeverityInput}
-              onChange={(e) => setAutoRetestMinSeverityInput(e.target.value as Severity)}
-              className={INPUT_CLASS}
-            >
-              {SEVERITY_OPTIONS.map((sev) => (
-                <option key={sev} value={sev}>
-                  {sev}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <div className="rounded border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs text-gray-400">
+            Automatic queue threshold follows the canonical verification baseline:
+            {' '}<span className="font-medium text-gray-200">{autoRetestMinSeverityInput}</span>.
+          </div>
           <Field
             label="Auto Retest Max Findings Per Scan"
             hint="Hard cap on number of findings auto-queued for retest from one scan."

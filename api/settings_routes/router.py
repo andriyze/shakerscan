@@ -1535,6 +1535,26 @@ class AISettingsUpdate(BaseModel):
     demo_honey_scanner_url: Optional[str] = None
     persist_to_env: bool = False
 
+    @model_validator(mode="after")
+    def validate_verification_threshold_hierarchy(self):
+        aliases = (
+            ("verification_min_severity", self.verification_min_severity,
+             "auto_retest_min_severity", self.auto_retest_min_severity),
+            ("ai_escalation_min_severity", self.ai_escalation_min_severity,
+             "ai_verify_min_severity", self.ai_verify_min_severity),
+        )
+        for canonical_name, canonical, legacy_name, legacy in aliases:
+            if canonical is not None and legacy is not None and canonical != legacy:
+                raise ValueError(f"{legacy_name} must match canonical {canonical_name}")
+        verification = self.verification_min_severity or self.auto_retest_min_severity
+        ai_escalation = self.ai_escalation_min_severity or self.ai_verify_min_severity
+        severity_order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        if verification and ai_escalation and severity_order[ai_escalation] < severity_order[verification]:
+            raise ValueError(
+                "ai_escalation_min_severity cannot be broader than verification_min_severity"
+            )
+        return self
+
 
 class ScanExecutionSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
