@@ -41,6 +41,14 @@ _ADDITIONAL_FACTOR_FIELD = re.compile(
     r"(?:^|[-_.])(?:mfa|otp|totp|one[-_.]?time|verification[-_.]?code)(?:$|[-_.])",
     re.IGNORECASE,
 )
+_LOGIN_FORM_CUE = re.compile(
+    r"(?:^|[-_/.])(?:login|log-in|signin|sign-in|authenticate|authentication|session)(?:$|[-_/.])",
+    re.IGNORECASE,
+)
+_LOGIN_USERNAME_FIELD = re.compile(
+    r"(?:^|[-_.])(?:user(?:name)?|login|identifier|j_username)(?:$|[-_.])",
+    re.IGNORECASE,
+)
 _SUCCESS_REDIRECTS = frozenset({301, 302, 303, 307, 308})
 
 
@@ -141,6 +149,9 @@ class _LoginFormParser(HTMLParser):
             self._current = {
                 "action": values.get("action", ""),
                 "method": values.get("method", "POST").upper(),
+                "id": values.get("id", ""),
+                "name": values.get("name", ""),
+                "class": values.get("class", ""),
                 "inputs": [],
             }
         elif tag.lower() == "input" and self._current is not None:
@@ -284,6 +295,20 @@ def _form_fields(
         ), "")
         if need_username and not username:
             continue
+        if need_username and not need_password and not password:
+            username_input = next((
+                item for item in inputs if str(item.get("name") or "") == username
+            ), {})
+            form_cues = " ".join(str(form.get(key) or "") for key in (
+                "action", "id", "name", "class",
+            ))
+            is_login_form = bool(
+                _LOGIN_FORM_CUE.search(form_cues)
+                or username_input.get("autocomplete") == "username"
+                or _LOGIN_USERNAME_FIELD.search(username)
+            )
+            if not is_login_form:
+                continue
         fields: dict[str, str] = {}
         for item in inputs:
             name = str(item.get("name") or "")

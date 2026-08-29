@@ -338,6 +338,31 @@ def test_a_one_sided_profile_can_still_find_its_login_form():
         _form_fields(username_only, "http://t/login")
 
 
+def test_username_only_auth_does_not_submit_to_a_newsletter_form():
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "api"))
+    from capabilities.auth import _form_fields, SessionCredentialContractError  # noqa: E402
+
+    newsletter = (
+        '<form method="post" action="/newsletter">'
+        '<input type="email" name="email" autocomplete="email"></form>'
+    )
+    with pytest.raises(SessionCredentialContractError, match="not identified"):
+        _form_fields(
+            newsletter, "http://t/", need_username=True, need_password=False,
+        )
+
+    explicit_username_login = (
+        '<form method="post" action="/continue">'
+        '<input name="email" autocomplete="username"></form>'
+    )
+    _, username, _ = _form_fields(
+        explicit_username_login, "http://t/", need_username=True, need_password=False,
+    )
+    assert username == "email"
+
+
 def test_legacy_profiles_report_the_secret_they_were_required_to_have():
     """Rows written before secret_configured existed must not read as absent.
 
