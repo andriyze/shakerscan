@@ -21219,6 +21219,65 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
     assert redis.jobs["job:stale-job"]["status"] == "orphaned"
 
 
+def test_queue_stats_treats_worker_leased_pending_handoff_as_consistent(monkeypatch):
+    class Conn:
+        async def fetch(self, _query, *_args):
+            return [{
+                "job_id": "leased-planning-job",
+                "status": "pending",
+                "scan_role": "parent",
+            }]
+
+    class Redis:
+        def __init__(self):
+            self.jobs = {
+                "job:leased-planning-job": {"status": "queued"},
+            }
+
+        def get(self, _key):
+            return None
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def scan_iter(self, pattern):
+            return list(self.jobs) if pattern == "job:*" else []
+
+        def hgetall(self, key):
+            return dict(self.jobs.get(key) or {})
+
+        def hset(self, key, field=None, value=None, mapping=None):
+            self.jobs.setdefault(key, {})
+            if mapping:
+                self.jobs[key].update(mapping)
+            elif field is not None:
+                self.jobs[key][field] = value
+
+        def expire(self, *_args):
+            return True
+
+    redis = Redis()
+    payload = json.dumps({"job_id": "leased-planning-job"})
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    monkeypatch.setattr(ops_router_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        ops_router_module,
+        "queue_payloads",
+        lambda *_args, include_leased=True, **_kwargs: (
+            [payload] if include_leased else []
+        ),
+    )
+    monkeypatch.setattr(ops_router_module, "pending_depth", lambda *_args, **_kwargs: 0)
+
+    result = asyncio.run(ops_router_module.queue_stats())
+
+    assert result["pending"] == 1
+    assert result["queued"] == 0
+    assert result["queue_consistency"]["reconciled"] is True
+    assert result["queue_consistency"]["active_scan_without_queue_entry"] == 0
+    assert redis.jobs["job:leased-planning-job"] == {"status": "queued"}
+
+
 def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypatch):
     scan_id = uuid.UUID("56565656-5656-4656-8656-565656565656")
 

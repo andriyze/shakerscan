@@ -705,17 +705,29 @@ async def queue_stats():
     retest_failed = 0
 
     queue_entries = queue_payloads(r, QUEUE_NAME, include_leased=False)
-    queued_job_ids: set[str] = set()
-    malformed_queue_entries = 0
-    for raw in queue_entries:
-        try:
-            job_id = str((json.loads(raw) if isinstance(raw, str) else {}).get("job_id") or "").strip()
-        except (TypeError, ValueError, json.JSONDecodeError):
-            job_id = ""
-        if job_id:
-            queued_job_ids.add(job_id)
-        else:
-            malformed_queue_entries += 1
+    # Consistency must include work already leased by a worker.  Excluding
+    # leased Stream messages is correct for the waiting-work headline, but it
+    # made the short pending/queued -> running handoff look orphaned and wrote a
+    # false error into an otherwise healthy job hash.
+    queue_handoffs = queue_payloads(r, QUEUE_NAME, include_leased=True)
+
+    def queue_job_ids(payloads):
+        job_ids: set[str] = set()
+        malformed = 0
+        for raw in payloads:
+            try:
+                job_id = str((json.loads(raw) if isinstance(raw, str) else {}).get("job_id") or "").strip()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                job_id = ""
+            if job_id:
+                job_ids.add(job_id)
+            else:
+                malformed += 1
+        return job_ids, malformed
+
+    queued_job_ids, malformed_queue_entries = queue_job_ids(queue_entries)
+    handoff_job_ids, malformed_handoffs = queue_job_ids(queue_handoffs)
+    malformed_queue_entries += malformed_handoffs
     async with _pool().acquire() as conn:
         active_rows = await conn.fetch(
             """
@@ -748,6 +760,7 @@ async def queue_stats():
         if row["status"] == "running" and str(row.get("scan_role") or "") not in hidden_roles
     )
     reconciled_queued_job_ids = queued_job_ids & active_scan_job_ids
+    valid_handoff_job_ids = handoff_job_ids & active_scan_job_ids
     stale_queued_job_hashes = 0
     stale_running_job_hashes = 0
 
@@ -785,8 +798,11 @@ async def queue_stats():
             completed += 1
         elif status_str == 'queued':
             job_id = str(key).split("job:", 1)[-1]
-            if job_id in reconciled_queued_job_ids:
-                queued += 1
+            if job_id in valid_handoff_job_ids:
+                # A leased message is valid work but no longer waiting. Keep
+                # the queued headline limited to unleased handoffs.
+                if job_id in reconciled_queued_job_ids:
+                    queued += 1
             else:
                 stale_queued_job_hashes += 1
                 r.hset(key, mapping={
@@ -844,10 +860,10 @@ async def queue_stats():
         'retest_completed': retest_completed,
         'retest_failed': retest_failed,
         'queue_consistency': {
-            'reconciled': not malformed_queue_entries and not (queued_job_ids - active_scan_job_ids) and not (active_scan_job_ids - queued_job_ids) and not stale_queued_job_hashes and not stale_running_job_hashes,
+            'reconciled': not malformed_queue_entries and not (handoff_job_ids - active_scan_job_ids) and not (active_scan_job_ids - handoff_job_ids) and not stale_queued_job_hashes and not stale_running_job_hashes,
             'malformed_entries': malformed_queue_entries,
-            'queue_without_active_scan': len(queued_job_ids - active_scan_job_ids),
-            'active_scan_without_queue_entry': len(active_scan_job_ids - queued_job_ids),
+            'queue_without_active_scan': len(handoff_job_ids - active_scan_job_ids),
+            'active_scan_without_queue_entry': len(active_scan_job_ids - handoff_job_ids),
             'stale_queued_job_hashes': stale_queued_job_hashes,
             'stale_running_job_hashes': stale_running_job_hashes,
         },
