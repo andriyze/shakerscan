@@ -93,6 +93,10 @@ class HttpTransaction:
     request_body: bytes | None = None
     response_headers: Mapping[str, str] | None = None
     response_body: bytes | None = None
+    # When the executor retained only a prefix, these still describe the complete decoded
+    # body. If absent, the archive computes them from response_body as before.
+    response_body_sha256: str | None = None
+    response_body_bytes: int | None = None
     # True when the executor stopped reading before the body ended. Without it the archive
     # measures the prefix it was handed and reports a cut response as complete.
     response_body_truncated: bool = False
@@ -167,6 +171,14 @@ def transaction_rows(
     for item in transactions:
         request_body = capped_body(item.request_body if keep_bodies else None)
         response_body = capped_body(item.response_body if keep_bodies else None)
+        if item.response_body_sha256 is not None:
+            response_body["sha256"] = item.response_body_sha256
+        if item.response_body_bytes is not None:
+            response_body["bytes"] = int(item.response_body_bytes)
+            response_body["truncated"] = bool(
+                item.response_body_truncated
+                or int(item.response_body_bytes) > len(item.response_body or b"")
+            )
         rows.append({
             "schema_version": ARCHIVE_SCHEMA,
             "plane": item.plane,
@@ -411,21 +423,30 @@ async def archive_http_transactions(
         for item in transactions:
             body = capped_body(item.request_body if stores_bodies() else None)
             response = capped_body(item.response_body if stores_bodies() else None)
+            if item.response_body_sha256 is not None:
+                response["sha256"] = item.response_body_sha256
+            if item.response_body_bytes is not None:
+                response["bytes"] = int(item.response_body_bytes)
+                response["truncated"] = bool(
+                    item.response_body_truncated
+                    or int(item.response_body_bytes) > len(item.response_body or b"")
+                )
+            owner_scan_id = item.scan_id or scan_id
             pending.append({
                 "item": item,
                 "request_headers": await store_archive_blob(
                     conn, normalized_headers(item.request_headers),
-                    scan_id=scan_id, store=store,
+                    scan_id=owner_scan_id, store=store,
                 ) if item.request_headers else None,
                 "request_body": await store_archive_blob(
-                    conn, body["content"], scan_id=scan_id, store=store,
+                    conn, body["content"], scan_id=owner_scan_id, store=store,
                 ) if body["content"] else None,
                 "response_headers": await store_archive_blob(
                     conn, normalized_headers(item.response_headers),
-                    scan_id=scan_id, store=store,
+                    scan_id=owner_scan_id, store=store,
                 ) if item.response_headers else None,
                 "response_body": await store_archive_blob(
-                    conn, response["content"], scan_id=scan_id, store=store,
+                    conn, response["content"], scan_id=owner_scan_id, store=store,
                 ) if response["content"] else None,
                 "request_meta": body,
                 "response_meta": response,
@@ -507,15 +528,39 @@ def hunt_call_recorder(
             request_body=captured.get("request_body"),
             response_headers=captured.get("response_headers"),
             response_body=captured.get("response_body"),
+            response_body_sha256=captured.get("response_body_sha256"),
+            response_body_bytes=captured.get("response_body_bytes"),
             remote_ip=captured.get("remote_ip"),
             direct_origin=bool(captured.get("direct_origin")),
             elapsed_ms=captured.get("elapsed_ms"),
             error=captured.get("error"),
             response_body_truncated=bool(captured.get("response_body_truncated")),
-            started_at=clock(),
+            started_at=captured.get("started_at") or clock(),
         ))
 
     return collected, record
+
+
+def hunt_run_call_recorder(
+    run: Mapping[str, Any],
+    *,
+    action_id: Any,
+    capability_name: str,
+    adapter: str,
+    target_url: str,
+) -> tuple[list[HttpTransaction], Any]:
+    """Build a recorder from the canonical Hunt row without duplicating owner wiring."""
+    return hunt_call_recorder(
+        hunt_run_id=str(run["id"]),
+        hunt_action_id=str(action_id),
+        capability_name=capability_name,
+        adapter=adapter,
+        target_url=target_url,
+        target_id=str(run["target_id"]) if run.get("target_id") else None,
+        device_target_id=(
+            str(run["device_target_id"]) if run.get("device_target_id") else None
+        ),
+    )
 
 
 def _default_store(results_dir):
@@ -546,6 +591,43 @@ async def archive_scan_capture(
         owner_id=scan_id,
         dropped=int(captured.get("dropped") or 0),
     )
+
+
+async def drain_and_archive_scan_capture(
+    pool,
+    capture,
+    *,
+    scan_id: str,
+    target_id: Any,
+    results_dir,
+) -> None:
+    """Drain process-local scanner traffic and persist it without deciding scan success."""
+    captured = capture.drain_capture()
+    try:
+        async with pool.acquire() as conn:
+            await archive_scan_capture(
+                conn, captured, scan_id=scan_id, target_id=target_id,
+                results_dir=results_dir,
+            )
+    except Exception as exc:  # archive never decides scan success
+        print(
+            f"[http-archive] scan {scan_id}: capture not archived: {type(exc).__name__}",
+            flush=True,
+        )
+
+
+def start_scan_capture(capture, broker_result: Any) -> bool:
+    """Start process-local capture only for work executing in this process."""
+    if broker_result:
+        return False
+    capture.start_capture()
+    return True
+
+
+def reset_scan_capture(capture, active: bool) -> None:
+    """Clear an interrupted ContextVar capture before this process accepts more work."""
+    if active:
+        capture.drain_capture()
 
 
 async def record_archive_stats(
@@ -618,6 +700,14 @@ async def archive_recorded_calls(
             attempted=attempted, stored=stored,
             failed=max(0, attempted - stored), dropped=dropped,
         )
+
+
+async def archive_hunt_capture(conn, collected, hunt_id, run_id, results_dir) -> None:
+    """Persist one Hunt action's traffic outside its budget-settlement transaction."""
+    await archive_recorded_calls(
+        conn, collected, label=f"hunt {hunt_id}", results_dir=results_dir,
+        owner_kind="hunt", owner_id=str(run_id),
+    )
 
 
 def _as_bytes(value: Any) -> bytes | None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
 
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
@@ -137,6 +137,7 @@ async def verify_target_bound_object_authorization(
     target: TargetBinding,
     primary_headers: Mapping[str, str],
     secondary_headers: Mapping[str, str],
+    transaction_recorder: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run the existing ownership differential through the canonical HTTP path."""
     primary = dict(primary_headers)
@@ -230,6 +231,7 @@ async def verify_target_bound_object_authorization(
             selected_headers=["content-type"],
             timeout_seconds=max(1, min(15, int(timeout))),
             private_response_sink=retain,
+            transaction_recorder=transaction_recorder,
         )
         if isinstance(result.get("request"), Mapping):
             request_count += 1

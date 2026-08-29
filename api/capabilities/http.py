@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
 import json
 import sys
 import time
@@ -113,10 +115,13 @@ def _emit_transaction(
     response: Any,
     body: bytes,
     body_truncated: bool,
+    response_body_sha256: str,
+    response_body_bytes: int,
     pinned_address: str | None,
     direct_origin: bool,
     principal_slot: str,
     started: float,
+    started_at: datetime,
     fallback_method: str,
     fallback_url: str,
 ) -> None:
@@ -168,12 +173,15 @@ def _emit_transaction(
             for name, value in response.headers.items()
         },
         "response_body": body,
+        "response_body_sha256": response_body_sha256,
+        "response_body_bytes": response_body_bytes,
         # The executor stops reading at its own ceiling, so the archive is told the body is
         # a prefix rather than measuring it and concluding it is whole.
         "response_body_truncated": bool(body_truncated),
         "remote_ip": pinned_address,
         "direct_origin": direct_origin,
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "started_at": started_at,
         "principal_slot": str(principal_slot or "anonymous"),
         "fidelity": "wire_request",
     })
@@ -349,6 +357,7 @@ async def execute_bound_http_request(
     }
     timeout = max(1, min(60, int(timeout_seconds)))
     started = time.perf_counter()
+    request_started_at = datetime.now(timezone.utc)
     redirect_chain: list[dict[str, Any]] = []
     body_truncated = False
     hops_followed = 0
@@ -369,6 +378,9 @@ async def execute_bound_http_request(
             current_json_body = json_body
             current_form_body = form_body
             while True:
+                final_url = current_url
+                hop_started = time.perf_counter()
+                hop_started_at = datetime.now(timezone.utc)
                 response = None
                 for candidate_address in socket_factory.connection_addresses:
                     pinned_url, sni_hostname, host_header = (
@@ -408,25 +420,44 @@ async def execute_bound_http_request(
                         "all frozen target addresses failed before connect"
                     )
                 request_view["pinned_address"] = pinned_address
-                chunks: list[bytes] = []
-                received = 0
+                retained = bytearray()
+                response_bytes = 0
+                response_hasher = hashlib.sha256()
                 try:
                     async for chunk in response.aiter_bytes():
-                        remaining = MAX_BODY_BYTES + 1 - received
-                        if remaining <= 0:
-                            break
-                        chunks.append(chunk[:remaining])
-                        received += min(len(chunk), remaining)
-                        if received > MAX_BODY_BYTES:
-                            break
+                        response_hasher.update(chunk)
+                        response_bytes += len(chunk)
+                        remaining = MAX_BODY_BYTES - len(retained)
+                        if remaining > 0:
+                            retained.extend(chunk[:remaining])
                 finally:
                     await response.aclose()
-                body = b"".join(chunks)
-                # The loop reads one byte past the ceiling precisely so it can tell a body
-                # that fits from one that was cut. The archive is told which, rather than
-                # measuring the prefix and reporting it as the whole response.
-                body_truncated = received > MAX_BODY_BYTES
+                body = bytes(retained)
+                body_truncated = response_bytes > MAX_BODY_BYTES
                 final_url = current_url
+                if transaction_recorder is not None:
+                    try:
+                        _emit_transaction(
+                            transaction_recorder,
+                            request=getattr(response, "request", None),
+                            response=response,
+                            body=body,
+                            body_truncated=body_truncated,
+                            response_body_sha256=response_hasher.hexdigest(),
+                            response_body_bytes=response_bytes,
+                            pinned_address=pinned_address,
+                            direct_origin=bool(via_address),
+                            principal_slot=principal_slot,
+                            started=hop_started,
+                            started_at=hop_started_at,
+                            fallback_method=current_method,
+                            fallback_url=current_url,
+                        )
+                    except Exception as exc:  # pragma: no cover - archive is best effort
+                        print(
+                            f"[http-archive] transaction not recorded: {type(exc).__name__}",
+                            file=sys.stderr, flush=True,
+                        )
                 if (
                     not follow_redirects
                     or response.status_code not in REDIRECT_STATUSES
@@ -493,6 +524,7 @@ async def execute_bound_http_request(
                     "remote_ip": pinned_address,
                     "direct_origin": bool(via_address),
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "started_at": request_started_at,
                     "principal_slot": str(principal_slot or "anonymous"),
                     "error": f"request_error:{type(exc).__name__}",
                     "fidelity": "attempted_no_response",
@@ -510,33 +542,6 @@ async def execute_bound_http_request(
             "error": "request_error:MissingResponse",
             "request": request_view,
         }
-    if transaction_recorder is not None:
-        # Recorded from the request httpx actually built and the response it actually
-        # returned, not from the arguments the caller passed in. The inputs lack the query
-        # string, the injected cookies, the Host header, and the content headers httpx
-        # generates -- and after a redirect they describe the first hop rather than the one
-        # that produced this response. An archive built from them cannot be replayed.
-        try:
-            _emit_transaction(
-                transaction_recorder,
-                request=getattr(response, "request", None),
-                response=response,
-                body=body,
-                body_truncated=body_truncated,
-                pinned_address=pinned_address,
-                direct_origin=bool(via_address),
-                principal_slot=principal_slot,
-                started=started,
-                fallback_method=method,
-                fallback_url=final_url,
-            )
-        except Exception as exc:  # pragma: no cover - recording must never fail a probe
-            # A scan that dies because its own archive failed is worse than one whose
-            # archive has a hole, so this is reported and swallowed rather than raised.
-            print(
-                f"[http-archive] transaction not recorded: {type(exc).__name__}",
-                file=sys.stderr, flush=True,
-            )
     if private_response_sink is not None:
         private_response_sink(WorkerPrivateHTTPResponse(
             status_code=int(response.status_code),

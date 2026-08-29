@@ -193,6 +193,19 @@ def test_a_truncated_response_is_marked_even_when_the_prefix_fits():
     assert rows[0]["truncated"] is True
 
 
+def test_a_retained_prefix_uses_the_executor_full_body_digest_and_length():
+    full = b"complete body that was streamed"
+    rows = transaction_rows([HttpTransaction(
+        plane="hunt", method="GET", url="https://t/big", hunt_run_id="h1",
+        response_body=full[:8], response_body_truncated=True,
+        response_body_sha256=hashlib.sha256(full).hexdigest(),
+        response_body_bytes=len(full),
+    )], store_blob=lambda content: "blob")
+    assert rows[0]["response_body_sha256"] == hashlib.sha256(full).hexdigest()
+    assert rows[0]["response_body_bytes"] == len(full)
+    assert rows[0]["truncated"] is True
+
+
 def test_a_partial_export_says_so():
     rows = [{"id": "1", "method": "GET", "url": "https://t/", "sequence": 0, "plane": "scan"}]
     document = export_document(
@@ -318,6 +331,51 @@ def test_the_archive_records_the_request_that_was_built():
     assert 'getattr(response, "request", None)' in source
     assert 'getattr(built, "query", b"")' in source, "the query string must come from the built URL"
     assert "body_truncated=body_truncated" in source, "truncation is passed, not recomputed"
+    assert "response_hasher.update(chunk)" in source
+    assert "response_body_bytes=response_bytes" in source
+
+
+def test_redirect_hops_are_recorded_inside_the_execution_loop():
+    """Recording only after the redirect loop silently dropped every intermediate call."""
+    from tests.api_sources import definition_source
+
+    source = definition_source("execute_bound_http_request")
+    loop = source[source.index("while True:"):source.index("except (httpx.InvalidURL")]
+    assert loop.index("_emit_transaction(") < loop.index("if (\n                    not follow_redirects")
+    tail = source[source.index("if response is None:", source.index("except (httpx.InvalidURL")):]
+    assert "_emit_transaction(" not in tail
+
+
+def test_scan_capture_is_archived_before_success_or_failure_branching():
+    from tests.api_sources import definition_source
+
+    source = definition_source("process_scan_job")
+    archive_at = source.index("await http_archive.drain_and_archive_scan_capture(")
+    assert archive_at < source.index("if error:")
+    assert "reset_scan_capture(scanner_http_capture, capture_started)" in source[source.index("finally:"):]
+
+
+def test_hunt_http_collection_exists_for_every_capability_branch():
+    from tests.api_sources import definition_source
+
+    source = definition_source("process_canonical_http_capability_job")
+    initialized = source.index("archived_calls, _record_call = http_archive.hunt_run_call_recorder(")
+    assert initialized < source.index('if capability_name == "auth.session.establish"')
+    authz = source[source.index('elif capability_name == "authz.verify"'):]
+    assert "transaction_recorder=_record_call" in authz
+
+
+def test_adapter_limited_capture_cannot_be_labelled_complete():
+    rows = [{"id": "1", "method": "GET", "url": "https://t/", "sequence": 0, "plane": "scan"}]
+    document = export_document(
+        rows, export_format="transactions", redaction="redacted", owner={}, total=1,
+        stats={
+            "attempted": 1, "stored": 1, "failed": 0, "dropped": 0,
+            "capture_limited": 1,
+        },
+    )
+    assert document["fidelity"] == "partial"
+    assert "adapter-limited" in document["fidelity_detail"]
 
 
 def test_the_deterministic_scan_plane_records_its_calls():

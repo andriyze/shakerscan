@@ -2151,7 +2151,7 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     elapsed_ms INTEGER,
     error TEXT,
     truncated BOOLEAN NOT NULL DEFAULT false,
-    retention_class TEXT NOT NULL DEFAULT 'http_archive',
+    retention_class TEXT NOT NULL DEFAULT 'sensitive',
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT http_transactions_owner_check CHECK (

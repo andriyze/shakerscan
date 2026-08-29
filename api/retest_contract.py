@@ -3148,7 +3148,7 @@ async def run_schema_migrations(pool) -> None:
                     elapsed_ms INTEGER,
                     error TEXT,
                     truncated BOOLEAN NOT NULL DEFAULT false,
-                    retention_class TEXT NOT NULL DEFAULT 'http_archive',
+                    retention_class TEXT NOT NULL DEFAULT 'sensitive',
                     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT http_transactions_owner_check CHECK (
@@ -3187,6 +3187,14 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 UPDATE evidence_objects SET retention_class='sensitive'
                 WHERE retention_class='http_archive'
+            """)
+            await conn.execute("""
+                UPDATE http_transactions SET retention_class='sensitive'
+                WHERE retention_class='http_archive'
+            """)
+            await conn.execute("""
+                ALTER TABLE http_transactions
+                ALTER COLUMN retention_class SET DEFAULT 'sensitive'
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_cancellable_jobs (

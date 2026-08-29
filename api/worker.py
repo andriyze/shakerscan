@@ -13715,8 +13715,7 @@ async def process_scan_job(job_data: dict):
 
     # Scanner tools run in this process, so their calls are collected here and archived
     # when the scan finishes. A broker result came from another node with its own record.
-    if not job_data.get("_broker_result_id"):
-        scanner_http_capture.start_capture()
+    capture_started = http_archive.start_scan_capture(scanner_http_capture, job_data.get("_broker_result_id"))
 
     try:
         try:
@@ -13800,6 +13799,14 @@ async def process_scan_job(job_data: dict):
         except Exception as e:
             result = _unexpected_scan_exception_result(str(target or ""), e)
             print(f"[{job_id[:8]}] Unexpected scan failure: {result['error']}", flush=True)
+
+        # Drain before any result post-processing can fail, and archive independently of
+        # the scan's terminal status. Failed and cancelled work is often the traffic an
+        # operator most needs to inspect. Draining here also prevents a ContextVar capture
+        # from leaking into the next job handled by this worker process.
+        if capture_started:
+            capture_started = False
+            await http_archive.drain_and_archive_scan_capture(db_pool, scanner_http_capture, scan_id=scan_id, target_id=target_id, results_dir=RESULTS_DIR)
 
         result['job_id'] = job_id
         result['scan_id'] = scan_id
@@ -14024,10 +14031,6 @@ async def process_scan_job(job_data: dict):
                 # Stored beside the score so a list view can show that a clean grade came
                 # from a shallow scan without opening the report.
                 assurance_score = (result.get("result") or {}).get("assurance_score")
-                await http_archive.archive_scan_capture(  # reports, never raises
-                    conn, scanner_http_capture.drain_capture(),
-                    scan_id=scan_id, target_id=target_id, results_dir=RESULTS_DIR,
-                )
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'completed',
@@ -14308,6 +14311,9 @@ async def process_scan_job(job_data: dict):
             flush=True,
         )
     finally:
+        # Cancellation can interrupt before the normal drain. Reset the process-local
+        # capture even when no database work is safe during cancellation.
+        http_archive.reset_scan_capture(scanner_http_capture, capture_started)
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
 
@@ -22213,6 +22219,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         session_context_ref = None
         trusted_headers: dict[str, str] = {}
         principal_slot = "anonymous"
+        # Not every Hunt capability performs HTTP. Keep an empty collection for those
+        # branches so settlement never depends on a variable created only by http.request.
+        archived_calls, _record_call = http_archive.hunt_run_call_recorder(
+            run, action_id=action_id, capability_name=capability_name,
+            adapter=str(spec.adapter), target_url=target_url,
+        )
 
         if capability_name == "auth.session.establish":
             principal_slot = str(capability_input["as_principal"])
@@ -22408,7 +22420,6 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             primary_headers = worker_session.headers()
             secondary_headers = secondary_worker_session.headers()
             routes = [str(item) for item in capability_input["routes"]]
-
             async def execute_authz() -> dict[str, Any]:
                 return await verify_target_bound_object_authorization(
                     target_url,
@@ -22416,6 +22427,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target=target,
                     primary_headers=primary_headers,
                     secondary_headers=secondary_headers,
+                    transaction_recorder=_record_call,
                 )
 
             operation = execute_authz
@@ -22502,16 +22514,6 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             public_input.pop("session_ref", None)
             public_input.pop("as_principal", None)
 
-            archived_calls, _record_call = http_archive.hunt_call_recorder(
-                hunt_run_id=str(run["id"]), hunt_action_id=str(action_id),
-                capability_name=capability_name, adapter=str(spec.adapter),
-                target_url=target_url,
-                target_id=str(run["target_id"]) if run["target_id"] else None,
-                device_target_id=(
-                    str(run["device_target_id"]) if run["device_target_id"] else None
-                ),
-            )
-
             async def execute_http() -> dict[str, Any]:
                 return await execute_bound_http_request(
                     target_url,
@@ -22596,9 +22598,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         async with db_pool.acquire() as conn:
             # Outside the settlement transaction: an archive failure must not poison the
             # transaction that reconciles the action's budget.
-            await http_archive.archive_recorded_calls(
-                conn, archived_calls, label=f"hunt {hunt_id}", results_dir=RESULTS_DIR,
-                owner_kind="hunt", owner_id=str(run["id"]))
+            await http_archive.archive_hunt_capture(conn, archived_calls, hunt_id, run["id"], RESULTS_DIR)
             async with conn.transaction():
                 locked = await conn.fetchrow(
                     "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,

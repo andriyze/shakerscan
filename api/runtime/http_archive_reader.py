@@ -127,7 +127,28 @@ async def read_archive_stats(
     )
     if row is None:
         return {}
-    return {key: int(row[key] or 0) for key in ("attempted", "stored", "failed", "dropped")}
+    stats = {
+        key: int(row[key] or 0)
+        for key in ("attempted", "stored", "failed", "dropped")
+    }
+    if scan_id:
+        capture_limited = await conn.fetchval(
+            """SELECT COUNT(*) FROM http_transactions
+               WHERE scan_id=$1
+                 AND COALESCE(metadata_json->>'fidelity','')
+                     NOT IN ('wire_request','attempted_no_response')""",
+            scan_id,
+        )
+    else:
+        capture_limited = await conn.fetchval(
+            """SELECT COUNT(*) FROM http_transactions
+               WHERE hunt_run_id=$1
+                 AND COALESCE(metadata_json->>'fidelity','')
+                     NOT IN ('wire_request','attempted_no_response')""",
+            hunt_run_id,
+        )
+    stats["capture_limited"] = int(capture_limited or 0)
+    return stats
 
 
 def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]:
@@ -148,12 +169,17 @@ def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]
     stored = int(stats.get("stored") or 0)
     failed = int(stats.get("failed") or 0)
     dropped = int(stats.get("dropped") or 0)
+    capture_limited = int(stats.get("capture_limited") or 0)
     if attempted == 0 and total == 0:
         return "unavailable", "no calls were recorded for this run"
-    if failed or dropped or stored < attempted:
+    if failed or dropped or stored < attempted or capture_limited:
         return "partial", (
             f"{stored} of {attempted} recorded calls were stored"
             + (f"; {dropped} were dropped at the capture ceiling" if dropped else "")
+            + (
+                f"; {capture_limited} calls have adapter-limited wire detail"
+                if capture_limited else ""
+            )
         )
     return "complete", f"all {stored} recorded calls were stored"
 
