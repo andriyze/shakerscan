@@ -1424,6 +1424,20 @@ def finalize_scan_report(
             "reason_code": row["reason_code"],
         } for row in action_rows],
     }
+    principal_contexts = sorted({
+        str(item.get("lane"))
+        for rows in observations.values()
+        for item in rows
+        if isinstance(item, Mapping)
+        and item.get("kind") == "principal_context"
+        and item.get("authenticated") is True
+        and item.get("source") == "server_runtime"
+        and str(item.get("lane")) in {"primary", "secondary"}
+    })
+    auth_states_tested = [
+        {"primary": "user1", "secondary": "user2"}[lane]
+        for lane in principal_contexts
+    ]
     batch_families = {
         "xss.verify_batch": "xss",
         "sqli.verify_batch": "sqli",
@@ -1524,6 +1538,13 @@ def finalize_scan_report(
             "verified": verified,
             "suspected": suspected,
             "unproven_critical_high": unproven_critical_high,
+        },
+        "smart_coverage": {
+            "auth_states_tested": auth_states_tested,
+            "principal_contexts_exercised": principal_contexts,
+            "principal_context_semantics": (
+                "server_observed_authenticated_target_traffic"
+            ),
         },
         "canonical_action_execution": {
             "schema_version": "canonical-scan-action-execution/v1",

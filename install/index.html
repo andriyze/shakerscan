@@ -414,6 +414,15 @@ mkdir -p "$INSTALL_STAGE/.claude/agents" "$INSTALL_STAGE/.claude/commands" "$INS
 touch "$INSTALL_STAGE/.env"
 : > "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
 
+# Docker created this path as a directory on affected 0.8.x installs when the
+# bind-mounted signer-role script was absent. Repair the copied candidate before
+# downloading the replacement: downloading first would move the file *inside*
+# the directory and make the legacy path non-empty and impossible to remove.
+if [ -d "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" ]; then
+    rmdir "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" || \
+        fail "cannot replace non-empty signer role script directory from an earlier broken install"
+fi
+
 say "Downloading ShakerScan runtime files..."
 download "$REPO_RAW_BASE/scanner.sh" "$INSTALL_DIR/scanner.sh"
 download "$REPO_RAW_BASE/docker-compose.release.yml" "$INSTALL_DIR/docker-compose.release.yml"
@@ -564,16 +573,15 @@ download "$REPO_RAW_BASE/.claude/commands/subdomains.md" "$INSTALL_DIR/.claude/c
 download "$REPO_RAW_BASE/.claude/commands/workers.md" "$INSTALL_DIR/.claude/commands/workers.md"
 download "$REPO_RAW_BASE/.claude/hooks/session-start.sh" "$INSTALL_DIR/.claude/hooks/session-start.sh"
 download "$REPO_RAW_BASE/.claude/settings.json" "$INSTALL_DIR/.claude/settings.json"
-if [ -d "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" ]; then
-    rmdir "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" || \
-        fail "cannot replace non-empty signer role script directory from an earlier broken install"
-fi
+
+# Permissions are part of the candidate tree. Set them before activation so the
+# one directory rename never exposes a release whose launcher is not executable.
+chmod +x "$INSTALL_STAGE/scanner.sh"
+chmod +x "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh"
+chmod +x "$INSTALL_STAGE/scripts/build-model-intake-guest-rootfs.sh"
+chmod +x "$INSTALL_STAGE/scripts/provision-model-intake-firecracker.sh"
+chmod +x "$INSTALL_STAGE/.claude/hooks/session-start.sh"
 commit_staged_downloads
-chmod +x "$INSTALL_DIR/scanner.sh"
-chmod +x "$INSTALL_DIR/db/configure-model-intake-signer-role.sh"
-chmod +x "$INSTALL_DIR/scripts/build-model-intake-guest-rootfs.sh"
-chmod +x "$INSTALL_DIR/scripts/provision-model-intake-firecracker.sh"
-chmod +x "$INSTALL_DIR/.claude/hooks/session-start.sh"
 
 install_command
 

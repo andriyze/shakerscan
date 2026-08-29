@@ -1974,6 +1974,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--area", default="all", choices=["all", *AREAS.keys()])
     ap.add_argument(
+        "--exclude-area", action="append", default=[], choices=sorted(AREAS),
+        help="omit an optional product area from an all-area acceptance run",
+    )
+    ap.add_argument(
         "--scorecard",
         default=os.environ.get("SHAKERSCAN_E2E_SCORECARD"),
         help="write the complete machine-readable scorecard to this path",
@@ -1985,7 +1989,11 @@ def main() -> int:
     # worker reaches it at host.docker.internal:FIXTURES_PORT.
     FX.start(FIXTURES_PORT)
     print(f"fixtures server on :{FIXTURES_PORT} (worker URL {FIXTURES_BASE})", flush=True)
-    areas = list(AREAS.values()) if args.area == "all" else [AREAS[args.area]]
+    selected_names = list(AREAS) if args.area == "all" else [args.area]
+    selected_names = [name for name in selected_names if name not in set(args.exclude_area)]
+    if not selected_names:
+        ap.error("the E2E selection is empty after exclusions")
+    areas = [AREAS[name] for name in selected_names]
     cards = [fn() for fn in areas]
 
     print("\n== Scorecard ==", flush=True)

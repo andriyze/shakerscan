@@ -181,8 +181,13 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     user2_token = _jwt(email="user2@example.test")
     tokens = iter([user1_token, user2_token])
     calls = []
+    mint_urls = []
 
-    monkeypatch.setattr(b, "mint_token", lambda *args, **kwargs: next(tokens))
+    def mint(url, *_args, **_kwargs):
+        mint_urls.append(url)
+        return next(tokens)
+
+    monkeypatch.setattr(b, "mint_token", mint)
     monkeypatch.setattr(b, "_get", lambda *args, **kwargs: {"profiles": []})
 
     def fake_post(url, body, timeout=30):
@@ -200,12 +205,17 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
 
     monkeypatch.setattr(b, "_post", fake_post)
 
-    receipt = b.submit_target("crapi", "http://scanner.test", True)
+    receipt = b.submit_target(
+        "crapi", "http://scanner.test", True,
+        target_url_override="http://crapi:8888",
+        auth_target_url_override="http://127.0.0.1:8888",
+    )
 
     scan_url, scan_body = calls[-1]
     options = scan_body["options"]
     assert scan_url == "http://scanner.test/scans"
     assert options["require_current_workers"] is True
+    assert mint_urls == ["http://127.0.0.1:8888", "http://127.0.0.1:8888"]
     assert "benchmark_principal_validation" not in options
     assert scan_body["budget_profile"] == "thorough"
     # Explicit canonical family set (§17): authz_surface is included because a

@@ -124,6 +124,31 @@ def test_finalizer_digest_binds_complete_plan_revision_chain():
     )
 
 
+def test_finalizer_projects_server_observed_principal_contexts():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "principal_context", "lane": "primary", "authenticated": True,
+        "binding_digest": "d" * 64, "source": "server_runtime",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    assert report["smart_coverage"] == {
+        "auth_states_tested": ["user1"],
+        "principal_contexts_exercised": ["primary"],
+        "principal_context_semantics": "server_observed_authenticated_target_traffic",
+    }
+
+
 def test_finalizer_projects_content_free_runtime_destinations_from_observations():
     baseline = _action("baseline.http", 0, capability_name="http.request")
     final = _action("finalize.report", 1, dependencies=(baseline.action_id,))

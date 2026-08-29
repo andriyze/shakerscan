@@ -198,37 +198,22 @@ def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     assert "if args.worker_container is None:" in wire_runner
 
 
-def test_v2_candidate_acceptance_is_exact_sha_nonpublishing_and_complete():
-    path = ROOT / ".github" / "workflows" / "v2-candidate-acceptance.yml"
-    text = path.read_text(encoding="utf-8")
-    workflow = yaml.safe_load(text)
-
-    assert workflow["name"] == "V2 candidate acceptance (non-publishing)"
-    assert workflow["permissions"] == {"contents": "read"}
-    assert set(workflow["jobs"]) == {"accept"}
-    assert "refs/heads/v2:refs/remotes/origin/v2" in text
-    assert '[[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]' in text
-    assert "git merge-base --is-ancestor" in text
-    assert text.count("./scanner.sh build") == 1
-    assert "SHAKERSCAN_API_OVERLAY_PREBUILT=1" in text
-    assert "docker compose up -d --no-build" in text
-    assert "run_complete_python_suite.py" in text
-    assert "run_external_wire_acceptance.py" in text
-    assert "run_scan_cancellation_race.py" in text
-    assert "run_scan_reservation_identity.py" in text
-    assert "run_scan_action_resume.py" in text
-    assert "INSTALLED_STACK_SMOKE_E2E" in text
-    assert "run_scan_parity.py" in text
-    assert "scripts/upgrade_smoke.sh" in text
-    assert "scripts/release_preservation.py" in text
-    assert "scripts/write_v2_candidate_acceptance.py" in text
-    assert "github.workflow_sha" in text
-    assert 'test "$(jq -r \'.publication\'' in text
-    assert "docker/login-action" not in text
-    assert "docker push" not in text
-    assert "build-push-action" not in text
-    assert "contents: write" not in text
-    assert "packages: write" not in text
+def test_fault_acceptance_is_absorbed_into_the_final_manifest_stack():
+    assert not (
+        ROOT / ".github" / "workflows" / "v2-candidate-acceptance.yml"
+    ).exists()
+    release = (
+        ROOT / ".github" / "workflows" / "release-candidate.yml"
+    ).read_text(encoding="utf-8")
+    installed = (ROOT / "scripts" / "installed_stack_smoke.sh").read_text(
+        encoding="utf-8",
+    )
+    assert "INSTALLED_STACK_SMOKE_FAULT_DIR" in release
+    assert "run_scan_cancellation_race.py" in installed
+    assert "run_scan_reservation_identity.py" in installed
+    assert "run_scan_action_resume.py" in installed
+    assert release.count("make installed-stack-smoke") == 1
+    assert release.count("scripts/upgrade_smoke.sh") == 1
 
 
 def test_package_native_and_installed_runtime_scan_contracts_run_in_isolated_steps():

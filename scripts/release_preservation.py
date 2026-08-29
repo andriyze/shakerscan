@@ -152,6 +152,7 @@ def build_receipt(
     playwright_path: Path | None,
     source_sha: str,
     images: Mapping[str, str],
+    excluded_programs: set[str] | None = None,
 ) -> dict[str, Any]:
     if matrix.get("schema_version") != "release-preservation-matrix/v1":
         raise PreservationError("unsupported preservation matrix schema")
@@ -173,9 +174,17 @@ def build_receipt(
         raise PreservationError("full E2E scorecard did not pass")
     playwright = _read_json(playwright_path) if playwright_path is not None else None
 
+    excluded = set(excluded_programs or ())
+    unknown_exclusions = excluded - set(matrix.get("programs") or {})
+    if unknown_exclusions:
+        raise PreservationError(
+            f"unknown excluded preservation programs: {sorted(unknown_exclusions)}"
+        )
     programs: list[dict[str, Any]] = []
     failed: list[str] = []
     for program_id, program in (matrix.get("programs") or {}).items():
+        if str(program_id) in excluded:
+            continue
         if not isinstance(program, Mapping):
             raise PreservationError(f"invalid preservation program: {program_id}")
         controls = []
@@ -234,6 +243,7 @@ def build_receipt(
         },
         "status": "pass" if not failed else "fail",
         "failed_controls": failed,
+        "scope_exclusions": sorted(excluded),
         "programs": programs,
     }
     receipt["receipt_sha256"] = hashlib.sha256(
@@ -260,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--playwright-json", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--image", action="append", default=[])
+    parser.add_argument("--exclude-program", action="append", default=[])
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -270,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             playwright_path=args.playwright_json,
             source_sha=args.source_sha,
             images=_images(args.image),
+            excluded_programs=set(args.exclude_program),
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

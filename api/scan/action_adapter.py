@@ -187,6 +187,22 @@ from .work_manifests import (
 )
 
 
+# These adapters actually bind resolved principal headers into target traffic. A
+# content-free observation is added only after the action consumes HTTP budget, so
+# reports can distinguish "credential configured" from "principal context exercised".
+_PRIMARY_PRINCIPAL_CAPABILITIES = frozenset({
+    "http.request", "collections.replay_safe", "collections.replay_active",
+    "collections.replay_authentication",
+    "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
+    "templates.scan", "templates.passive_scan", "templates.active_batch",
+    "templates.passive_batch", "xss.verify", "xss.verify_batch",
+    "xss.request_verify", "xss.request_verify_batch", "xss.browser_prove_batch",
+    "sqli.verify", "sqli.verify_batch", "sqli.request_verify",
+    "sqli.request_verify_batch", "sqli.prove_batch", "exposure.verify_batch",
+    "nosqli.verify_batch", "authz_surface.verify_batch", "authz.verify",
+})
+
+
 ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
 Cancelled = Callable[[], bool]
 PrivateReplayPlanLoader = Callable[
@@ -452,6 +468,36 @@ class DatabaseNeutralScanActionDispatcher:
         timed_out: bool = False,
         redacted_execution: Mapping[str, Any] | None = None,
     ) -> CapabilityReceipt:
+        recorded_observations = list(observations)
+        consumed_budget = dict(consumed or {
+            name: 0 for name in action.requested_budget
+        })
+        exercised_http = int(consumed_budget.get("http_requests") or 0) > 0
+        uses_primary = (
+            action.capability_name in _PRIMARY_PRINCIPAL_CAPABILITIES
+            and not (
+                action.capability_name == "http.request"
+                and action.action_id != "baseline.http"
+            )
+        )
+        lanes = (
+            ("primary", "secondary")
+            if action.capability_name == "authz.verify" else ("primary",)
+        ) if uses_primary else ()
+        if exercised_http and status != "skipped":
+            for lane in lanes:
+                principal = resolve_scan_http_principal(
+                    self.options, lane=lane,
+                    capability_name=action.capability_name,
+                )
+                if principal.authenticated and principal.binding_digest:
+                    recorded_observations.append({
+                        "kind": "principal_context",
+                        "lane": lane,
+                        "authenticated": True,
+                        "binding_digest": str(principal.binding_digest),
+                        "source": "server_runtime",
+                    })
         return CapabilityReceipt(
             capability_name=action.capability_name,
             adapter_name=str(action.placement.get("adapter_name") or ""),
@@ -472,10 +518,8 @@ class DatabaseNeutralScanActionDispatcher:
                 "action_id": action.action_id,
             }),
             budget_reserved=action.requested_budget,
-            budget_consumed=dict(consumed or {
-                name: 0 for name in action.requested_budget
-            }),
-            observations=observations,
+            budget_consumed=consumed_budget,
+            observations=tuple(recorded_observations),
             errors=errors,
         )
 

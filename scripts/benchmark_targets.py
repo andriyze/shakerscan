@@ -900,6 +900,48 @@ def apply_quality_bar(card, fixture):
     enforced = [item for item in results if item["gate"] in enforced_names]
     card["quality_enforced_gates"] = [item["gate"] for item in enforced]
     card["quality_enforced_passed"] = all(item["pass"] for item in enforced)
+
+    # A release must never turn an empty enforced list into a vacuous pass.  When a
+    # version intentionally ships below the complete quality bar, the fixture has to
+    # name every failed check it accepts. A newly failing check is therefore blocking,
+    # while a fixed check can disappear from the observed debt without weakening the
+    # contract.
+    failed_names = sorted(item["gate"] for item in results if not item["pass"])
+    disposition = bar.get("release_disposition")
+    contract = {
+        "status": "full_bar" if not failed_names else "unaccepted_shortfall",
+        "accepted_failed_gates": [],
+        "observed_failed_gates": failed_names,
+        "valid": not failed_names,
+    }
+    if failed_names and isinstance(disposition, dict):
+        accepted = sorted({
+            str(name) for name in disposition.get("accepted_failed_gates") or ()
+        })
+        unknown_accepted = set(accepted) - {item["gate"] for item in results}
+        if unknown_accepted:
+            raise SystemExit(
+                "quality_bar.release_disposition accepts checks that do not exist: "
+                f"{sorted(unknown_accepted)}"
+            )
+        valid = (
+            disposition.get("status") == "accepted_shortfall"
+            and str(disposition.get("release") or "").strip()
+            == open(os.path.join(REPO, "VERSION"), encoding="utf-8").read().strip()
+            and bool(str(disposition.get("rationale") or "").strip())
+            and bool(accepted)
+            and set(failed_names).issubset(set(accepted))
+        )
+        contract = {
+            "status": "accepted_shortfall" if valid else "invalid_shortfall",
+            "release": str(disposition.get("release") or ""),
+            "rationale": str(disposition.get("rationale") or ""),
+            "accepted_failed_gates": accepted,
+            "observed_failed_gates": failed_names,
+            "valid": valid,
+        }
+    card["quality_release_contract"] = contract
+    card["quality_release_contract_passed"] = contract["valid"]
     return results
 
 
@@ -941,6 +983,13 @@ def apply_gates(card, fixture):
         else "zero-attempt families: " + ", ".join(str(f) for f in family_gaps))
     chk("report_not_degraded", not bool(card.get("report_degraded")),
         f"report_degraded={bool(card.get('report_degraded'))}")
+    if gates.get("require_auth_workflow_ready"):
+        auth = card.get("auth_workflow") or {}
+        chk(
+            "auth_workflow_ready",
+            auth.get("status") == "ready",
+            f"status={auth.get('status')}, missing={auth.get('missing_auth_states') or []}",
+        )
     if "retest_settled" in card:
         chk("retest_settled", card.get("retest_settled") is True,
             f"retest_settled={card.get('retest_settled')}")
@@ -1021,7 +1070,9 @@ def artifact_metadata(passed: bool) -> dict:
     }
 
 
-def submit_target(name, api, do_auth, *, target_url_override=None):
+def submit_target(
+    name, api, do_auth, *, target_url_override=None, auth_target_url_override=None,
+):
     """Submit one benchmark scan and return a content-free queue receipt."""
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     if target_url_override:
@@ -1048,7 +1099,9 @@ def submit_target(name, api, do_auth, *, target_url_override=None):
     minted_tokens = []
     if do_auth and auth_cfg:
         principal_nonce = secrets.token_hex(6)
-        auth_target_url = credential_bootstrap_url(fx["target_url"])
+        auth_target_url = credential_bootstrap_url(
+            auth_target_url_override or fx["target_url"]
+        )
         t1 = mint_token(
             auth_target_url,
             auth_cfg.get("user1_login", {}),
@@ -1144,7 +1197,7 @@ def submit_target(name, api, do_auth, *, target_url_override=None):
 
 def run_target(
     name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False,
-    retest_wait=600, *, target_url_override=None,
+    retest_wait=600, *, target_url_override=None, auth_target_url_override=None,
 ):
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     if target_url_override:
@@ -1154,7 +1207,10 @@ def run_target(
     two_user = False
     principal_validation = None
     if not scan_id:
-        receipt = submit_target(name, api, do_auth, target_url_override=target_url_override)
+        receipt = submit_target(
+            name, api, do_auth, target_url_override=target_url_override,
+            auth_target_url_override=auth_target_url_override,
+        )
         scan_id = receipt["scan_id"]
         two_user = receipt["two_user"]
         principal_validation = receipt.get("principal_validation")
@@ -1248,6 +1304,10 @@ def main():
         "--target-url", action="append", default=[], metavar="NAME=URL",
         help="override a fixture target with the exact network URL used by this stack",
     )
+    ap.add_argument(
+        "--auth-target-url", action="append", default=[], metavar="NAME=URL",
+        help="host-reachable URL used only to mint benchmark credentials",
+    )
     ap.add_argument("--timeout", type=int, default=2400)
     ap.add_argument("--auth", action="store_true", help="mint bearer tokens from fixture auth config")
     ap.add_argument("--scan-id", default=None, help="score an existing scan id instead of submitting")
@@ -1276,6 +1336,14 @@ def main():
             print(f"ABORT: invalid --target-url binding: {binding!r}", file=sys.stderr)
             return 2
         target_url_overrides[name] = url
+    auth_target_url_overrides = {}
+    for binding in args.auth_target_url:
+        name, separator, url = binding.partition("=")
+        parsed = urllib.parse.urlsplit(url)
+        if not separator or not name or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            print(f"ABORT: invalid --auth-target-url binding: {binding!r}", file=sys.stderr)
+            return 2
+        auth_target_url_overrides[name] = url
     try:
         hypothesis_target_ids = parse_target_id_overrides(args.hypothesis_target_id)
     except ValueError as e:
@@ -1320,6 +1388,7 @@ def main():
             receipt = submit_target(
                 args.targets[0], args.api, args.auth,
                 target_url_override=target_url_overrides.get(args.targets[0]),
+                auth_target_url_override=auth_target_url_overrides.get(args.targets[0]),
             )
         except Exception as e:
             print(f"ABORT: {e}", file=sys.stderr)
@@ -1336,6 +1405,7 @@ def main():
                 name, args.api, args.timeout, args.auth, args.scan_id,
                 rescore_after_retest=args.rescore_after_retest, retest_wait=args.retest_wait,
                 target_url_override=target_url_overrides.get(name),
+                auth_target_url_override=auth_target_url_overrides.get(name),
             )
         except Exception as e:
             card = {"target": name, "error": str(e), "passed": False}
@@ -1411,8 +1481,12 @@ def main():
     # aspirational target and stop before any downstream receipt is produced, which
     # certifies nothing. The full bar stays reported either way, so the shortfall is
     # declared rather than hidden.
+    enforced_subset_ok = all(
+        card.get("quality_enforced_passed", False)
+        for card in cards if card.get("quality_gates")
+    )
     quality_ok = all(
-        card.get("quality_enforced_passed", True)
+        card.get("quality_release_contract_passed", False)
         for card in cards if card.get("quality_gates")
     )
     release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
@@ -1425,7 +1499,12 @@ def main():
         "passed": release_ok,
         "regression_gates_passed": bool(overall_ok),
         "quality_bar_passed": full_bar_ok,
-        "quality_bar_enforced_subset_passed": quality_ok,
+        "quality_bar_enforced_subset_passed": enforced_subset_ok,
+        "release_quality_contract_passed": quality_ok,
+        "quality_release_dispositions": [
+            card.get("quality_release_contract")
+            for card in cards if card.get("quality_gates")
+        ],
         "quality_bar_enforced": bool(args.enforce_quality),
     }
     if not full_bar_ok:

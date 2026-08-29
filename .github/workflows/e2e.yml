@@ -1,8 +1,8 @@
-name: E2E (full release gate)
+name: E2E (manual full validation)
 
 # The full suite performs bounded active SQLi/XSS testing against the pinned
-# Juice Shop service. It is intentionally manual: run it for an approved release
-# candidate before creating the release tag. PRs use e2e-pr.yml instead.
+# Juice Shop service. It is intentionally manual and diagnostic. Publication runs
+# one final-manifest acceptance and does not require this separate workflow.
 
 on:
   workflow_dispatch:
@@ -92,7 +92,7 @@ jobs:
         run: |
           docker compose exec -T worker python3 -c 'import urllib.request; response = urllib.request.urlopen("http://juice-shop:3000/rest/products/search?q=apple", timeout=10); assert response.status == 200'
 
-      - name: Run full E2E release gate
+      - name: Run full E2E validation
         run: |
           mkdir -p artifacts
           python3 tests/e2e/run_e2e.py --area all \
@@ -104,13 +104,13 @@ jobs:
       # remembered to run the benchmark by hand, so release qualification never saw it.
       # The stack and target are already up here, so the measurement costs one step.
       #
-      # `--enforce-quality` makes the fixture's `quality_bar.enforced` subset decide the
-      # exit status. The advisory half (recall, browser-proven XSS, the declared-gap
-      # debt) is still reported in full and still fails visibly without failing the run.
+      # `--enforce-quality` requires either the complete bar or the explicit bounded
+      # release disposition. An empty incremental gate list cannot pass by itself.
       - name: Measure DAST recall against the Juice Shop answer key
         run: |
           python3 scripts/benchmark_targets.py juice_shop --auth --enforce-quality \
-            --target-url juice_shop=http://juice-shop:3000
+            --target-url juice_shop=http://juice-shop:3000 \
+            --auth-target-url juice_shop=http://127.0.0.1:3001
           cp results/benchmark-runs/benchmark-juice_shop.json artifacts/dast-recall.json
 
       - name: Run exact-candidate UI unit and browser acceptance

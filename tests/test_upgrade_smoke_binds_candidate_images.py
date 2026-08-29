@@ -42,25 +42,23 @@ def test_the_smoke_refuses_to_run_without_the_candidate_images():
 def test_the_release_workflow_names_every_candidate_image():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     invocation = re.search(
-        r"- name: Verify clean and dirty schema upgrades\n(?:.*\n)*?(?=\n      - name: )",
+        r"- name: Prove previous-stable upgrade, restart, and rollback\n(?:.*\n)*?(?=\n      - name: )",
         workflow,
     )
     assert invocation, "the upgrade smoke step was renamed or removed"
     step = invocation.group(0)
     for name in CANDIDATE_VARS:
         assert f"{name}=" in step, f"the smoke step does not bind {name}"
-        assert "release-candidate" in step
-    assert "shakerscan-ui:release-candidate" in step
+    assert '${SCANNER_IMAGE}@${scanner_digest}' in step
+    assert '${API_IMAGE}@${api_digest}' in step
+    assert '${UI_IMAGE}@${ui_digest}' in step
 
 
-def test_the_candidate_ui_image_is_built_before_the_smoke_runs():
+def test_the_final_manifests_are_pulled_before_the_smoke_runs():
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    built = workflow.index("-t shakerscan-ui:release-candidate")
-    smoked = workflow.index("- name: Verify clean and dirty schema upgrades")
-    assert built < smoked, (
-        "the smoke runs before the candidate UI image exists, so it can only test "
-        "some other image or fail on a clean runner"
-    )
+    pulled = workflow.index("- name: Pull and identify exact final manifests")
+    smoked = workflow.index("- name: Prove previous-stable upgrade, restart, and rollback")
+    assert pulled < smoked
 
 
 def test_the_candidate_boots_on_the_upgraded_database_before_the_baseline_is_restored():
@@ -97,7 +95,6 @@ def test_the_upgraded_database_is_verified_before_the_candidate_boots():
 SMOKE_CALLERS = (
     "Makefile",
     ".github/workflows/v2-contracts.yml",
-    ".github/workflows/v2-candidate-acceptance.yml",
     ".github/workflows/e2e.yml",
     ".github/workflows/release-candidate.yml",
 )

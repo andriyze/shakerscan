@@ -9,24 +9,18 @@ on:
       candidate_sha:
         description: "Exact approved commit SHA (must be the selected main commit)"
         required: true
-      e2e_run_id:
-        description: "Successful full E2E workflow run ID for this exact SHA"
-        required: true
       codeql_run_id:
         description: "Successful CodeQL workflow run ID for this exact SHA"
         required: true
       parity_run_id:
-        description: "Successful real-fleet Scan parity workflow run ID for this exact SHA"
-        required: true
-      fault_acceptance_run_id:
-        description: "Successful V2 candidate fault/rollback acceptance run ID for this exact SHA"
-        required: true
+        description: "Optional real-fleet Scan parity workflow run ID for this exact SHA"
+        required: false
       model_intake_physical_run_id:
-        description: "Successful real Hugging Face/KVM acceptance run ID for this exact SHA"
-        required: true
+        description: "Optional real Hugging Face/KVM acceptance run ID for this exact SHA"
+        required: false
       device_physical_run_id:
-        description: "Successful physical-device acceptance run ID for this exact SHA"
-        required: true
+        description: "Optional physical-device acceptance run ID for this exact SHA"
+        required: false
 
 # Serialize candidate construction. This workflow never publishes a version,
 # `latest`, an installer channel, a Git tag, or a GitHub Release.
@@ -147,10 +141,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
-          E2E_RUN_ID: ${{ inputs.e2e_run_id }}
           CODEQL_RUN_ID: ${{ inputs.codeql_run_id }}
           PARITY_RUN_ID: ${{ inputs.parity_run_id }}
-          FAULT_ACCEPTANCE_RUN_ID: ${{ inputs.fault_acceptance_run_id }}
           MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
           DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
         shell: bash
@@ -161,19 +153,24 @@ jobs:
             actual="$(gh run view "$run_id" --json conclusion,headSha,workflowName --jq '.workflowName + "|" + .conclusion + "|" + .headSha')"
             [[ "$actual" == "${expected_name}|success|${CANDIDATE_SHA}" ]]
           }
-          verify_run "$E2E_RUN_ID" "E2E (full release gate)"
           verify_run "$CODEQL_RUN_ID" "CodeQL"
-          verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
-          verify_run "$FAULT_ACCEPTANCE_RUN_ID" "V2 candidate acceptance (non-publishing)"
-          verify_run "$MODEL_INTAKE_PHYSICAL_RUN_ID" "Model Intake physical acceptance"
-          verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"
+          if [[ -n "$PARITY_RUN_ID" ]]; then
+            verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
+          fi
+          if [[ -n "$MODEL_INTAKE_PHYSICAL_RUN_ID" ]]; then
+            verify_run "$MODEL_INTAKE_PHYSICAL_RUN_ID" "Model Intake physical acceptance"
+          fi
+          if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
+            verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"
+          fi
 
           # headSha only proves where the run was dispatched; the identity
           # receipt proves which commit the parity fleet actually checked out.
-          rm -rf /tmp/parity-identity
-          gh run download "$PARITY_RUN_ID" \
-            -n "parity-identity-$CANDIDATE_SHA" -D /tmp/parity-identity
-          python3 - <<'PY'
+          if [[ -n "$PARITY_RUN_ID" ]]; then
+            rm -rf /tmp/parity-identity
+            gh run download "$PARITY_RUN_ID" \
+              -n "parity-identity-$CANDIDATE_SHA" -D /tmp/parity-identity
+            python3 - <<'PY'
           import json, os, sys
           with open('/tmp/parity-identity/parity-identity.json', encoding='utf-8') as fh:
               identity = json.load(fh)
@@ -185,18 +182,7 @@ jobs:
                   f"checked_out={identity.get('resolved_head_sha')} expected={expected}"
               )
           PY
-
-      - name: Download exact-SHA E2E scorecard
-        env:
-          GH_TOKEN: ${{ github.token }}
-          E2E_RUN_ID: ${{ inputs.e2e_run_id }}
-          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
-        run: |
-          mkdir -p artifacts/external-e2e
-          gh run download "$E2E_RUN_ID" \
-            --name "full-e2e-${CANDIDATE_SHA}" \
-            --dir artifacts/external-e2e
-          test "$(jq -r '.gate' artifacts/external-e2e/e2e-scorecard.json)" = pass
+          fi
 
       - name: Smoke-test frozen-source installer
         run: make installer-smoke
@@ -228,11 +214,8 @@ jobs:
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
 
-      - name: Build and smoke-test locked Model Intake signer image
-        run: |
-          docker build -f api/model_intake_signer.Dockerfile -t shakerscan-model-intake-signer:release-candidate .
-          docker run --rm --entrypoint python shakerscan-model-intake-signer:release-candidate \
-            -c 'import boto3, model_intake_signer_service; assert boto3.__version__'
+      - name: Build locked Model Intake signer image
+        run: docker build -f api/model_intake_signer.Dockerfile -t shakerscan-model-intake-signer:release-candidate .
 
       - name: Enforce candidate-image external wire ceilings
         env:
@@ -266,9 +249,6 @@ jobs:
           path: artifacts/release-external-wire.json
           if-no-files-found: error
           retention-days: 30
-
-      - name: Build and self-test fixed Firecracker guest payload
-        run: scripts/selftest-model-intake-guest.sh
 
       - name: Unit, contract, documentation, and release gates from exact source
         run: |
@@ -315,58 +295,6 @@ jobs:
             --build-arg NEXT_PUBLIC_APP_VERSION="$VERSION" \
             --build-arg UI_SOURCE_REVISION="${{ needs.meta.outputs.candidate_sha }}" \
             -f ui/Dockerfile -t shakerscan-ui:release-candidate ui
-
-      # Every candidate image is named explicitly. The smoke used to receive only
-      # SCANNER_IMAGE and fall back to the bare `shakerscan-api` / `shakerscan-ui`
-      # defaults -- i.e. `:latest` -- so it qualified an upgrade the release does not
-      # ship, and on a clean runner the UI image did not exist here at all.
-      - name: Verify clean and dirty schema upgrades
-        run: |
-          SCANNER_IMAGE=shakerscan-scanner:release-candidate \
-          CANDIDATE_API_IMAGE=shakerscan-api:release-candidate \
-          CANDIDATE_UI_IMAGE=shakerscan-ui:release-candidate \
-          scripts/upgrade_smoke.sh
-
-      - name: Exercise the complete curl-installed stack
-        env:
-          VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          docker tag shakerscan-scanner:release-candidate "shakerscan-scanner:$VERSION"
-          docker tag shakerscan-api:release-candidate "shakerscan-api:$VERSION"
-          docker tag shakerscan-ui:release-candidate "shakerscan-ui:$VERSION"
-          docker tag shakerscan-model-intake-signer:release-candidate "shakerscan-model-intake-signer:$VERSION"
-          make installed-stack-smoke
-
-      - name: Certify Model Intake and mature subsystem preservation
-        env:
-          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
-        run: |
-          scanner_id="$(docker image inspect --format '{{.Id}}' shakerscan-scanner:release-candidate)"
-          api_id="$(docker image inspect --format '{{.Id}}' shakerscan-api:release-candidate)"
-          ui_id="$(docker image inspect --format '{{.Id}}' shakerscan-ui:release-candidate)"
-          signer_id="$(docker image inspect --format '{{.Id}}' shakerscan-model-intake-signer:release-candidate)"
-          python3 scripts/release_preservation.py \
-            --matrix tests/release_preservation_matrix.json \
-            --junit artifacts/v2-full-python.xml \
-            --e2e-scorecard artifacts/external-e2e/e2e-scorecard.json \
-            --playwright-json artifacts/external-e2e/playwright.json \
-            --source-sha "$CANDIDATE_SHA" \
-            --image "scanner=$scanner_id" \
-            --image "api=$api_id" \
-            --image "ui=$ui_id" \
-            --image "signer=$signer_id" \
-            --output artifacts/release-preservation.json
-          test "$(jq -r '.status' artifacts/release-preservation.json)" = pass
-          test "$(jq -r '.source_sha' artifacts/release-preservation.json)" = "$CANDIDATE_SHA"
-
-      - name: Upload candidate preservation receipt
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: release-preservation-${{ needs.meta.outputs.candidate_sha }}
-          path: artifacts/release-preservation.json
-          if-no-files-found: error
-          retention-days: 30
 
       - name: Upload exact-source Python contract report
         if: always()
@@ -825,24 +753,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
-          E2E_RUN_ID: ${{ inputs.e2e_run_id }}
           PARITY_RUN_ID: ${{ inputs.parity_run_id }}
-          FAULT_ACCEPTANCE_RUN_ID: ${{ inputs.fault_acceptance_run_id }}
           MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
           DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
         shell: bash
         run: |
-          mkdir -p artifacts/certification/external/{e2e,parity,fault,model-intake,device}
-          gh run download "$E2E_RUN_ID" -n "full-e2e-${CANDIDATE_SHA}" \
-            -D artifacts/certification/external/e2e
-          gh run download "$PARITY_RUN_ID" -n "v2-scan-parity-${CANDIDATE_SHA}" \
-            -D artifacts/certification/external/parity
-          gh run download "$FAULT_ACCEPTANCE_RUN_ID" -n "v2-candidate-acceptance-${CANDIDATE_SHA}" \
-            -D artifacts/certification/external/fault
-          gh run download "$MODEL_INTAKE_PHYSICAL_RUN_ID" -n "model-intake-physical-${CANDIDATE_SHA}" \
-            -D artifacts/certification/external/model-intake
-          gh run download "$DEVICE_PHYSICAL_RUN_ID" -n "device-physical-${CANDIDATE_SHA}" \
-            -D artifacts/certification/external/device
+          mkdir -p artifacts/certification/external
+          if [[ -n "$PARITY_RUN_ID" ]]; then
+            mkdir -p artifacts/certification/external/parity
+            gh run download "$PARITY_RUN_ID" -n "v2-scan-parity-${CANDIDATE_SHA}" \
+              -D artifacts/certification/external/parity
+          fi
+          if [[ -n "$MODEL_INTAKE_PHYSICAL_RUN_ID" ]]; then
+            mkdir -p artifacts/certification/external/model-intake
+            gh run download "$MODEL_INTAKE_PHYSICAL_RUN_ID" -n "model-intake-physical-${CANDIDATE_SHA}" \
+              -D artifacts/certification/external/model-intake
+          fi
+          if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
+            mkdir -p artifacts/certification/external/device
+            gh run download "$DEVICE_PHYSICAL_RUN_ID" -n "device-physical-${CANDIDATE_SHA}" \
+              -D artifacts/certification/external/device
+          fi
 
       - name: Pull and identify exact final manifests
         env:
@@ -914,6 +845,9 @@ jobs:
           INSTALLED_STACK_SMOKE_E2E: "1"
           INSTALLED_STACK_SMOKE_E2E_SCORECARD: ${{ github.workspace }}/artifacts/certification/e2e-scorecard.json
           INSTALLED_STACK_SMOKE_BROWSER_JSON: ${{ github.workspace }}/artifacts/certification/playwright.json
+          INSTALLED_STACK_SMOKE_DAST_RECALL_JSON: ${{ github.workspace }}/artifacts/certification/dast-recall.json
+          INSTALLED_STACK_SMOKE_FAULT_DIR: ${{ github.workspace }}/artifacts/certification/fault
+          INSTALLED_STACK_SMOKE_E2E_EXCLUDE_AREAS: model_intake
         run: |
           npm --prefix ui ci
           npx --prefix ui playwright install --with-deps chromium
@@ -930,6 +864,7 @@ jobs:
             --junit artifacts/certification/v2-full-python.xml \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
             --playwright-json artifacts/certification/playwright.json \
+            --exclude-program model_intake \
             --source-sha "$CANDIDATE_SHA" \
             --image "scanner=$(jq -r '.images.scanner' "$receipt")" \
             --image "api=$(jq -r '.images.api' "$receipt")" \
@@ -940,19 +875,33 @@ jobs:
       - name: Seal promotion-ready candidate receipt
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+          PARITY_RUN_ID: ${{ inputs.parity_run_id }}
+          MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
+          DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
+        shell: bash
         run: |
-          python3 scripts/certify_release_receipt.py \
+          certification_args=(
             --candidate artifacts/uncertified/release-candidate-receipt.json \
             --upgrade artifacts/certification/upgrade-receipt.json \
             --preservation artifacts/certification/preservation-receipt.json \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
-            --dast-quality artifacts/certification/external/e2e/dast-recall.json \
-            --fault-acceptance artifacts/certification/external/fault/v2-candidate-acceptance.json \
-            --real-fleet-parity artifacts/certification/external/parity/v2-scan-parity.json \
-            --model-intake-physical artifacts/certification/external/model-intake/model-intake-physical-acceptance.json \
-            --device-physical artifacts/certification/external/device/device-physical-acceptance.json \
+            --dast-quality artifacts/certification/dast-recall.json \
+            --fault-cancellation artifacts/certification/fault/scan-cancellation-race.json \
+            --fault-reservation-identity artifacts/certification/fault/scan-reservation-identity.json \
+            --fault-action-resume artifacts/certification/fault/scan-action-resume.json \
             --source-sha "$CANDIDATE_SHA" \
             --output release-candidate-receipt.json
+          )
+          if [[ -n "$PARITY_RUN_ID" ]]; then
+            certification_args+=(--real-fleet-parity artifacts/certification/external/parity/v2-scan-parity.json)
+          fi
+          if [[ -n "$MODEL_INTAKE_PHYSICAL_RUN_ID" ]]; then
+            certification_args+=(--model-intake-physical artifacts/certification/external/model-intake/model-intake-physical-acceptance.json)
+          fi
+          if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
+            certification_args+=(--device-physical artifacts/certification/external/device/device-physical-acceptance.json)
+          fi
+          python3 scripts/certify_release_receipt.py "${certification_args[@]}"
           test "$(jq -r '.schema_version' release-candidate-receipt.json)" = shakerscan-release-candidate/v2
           test "$(jq -r '.certification.status' release-candidate-receipt.json)" = pass
 

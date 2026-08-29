@@ -45,17 +45,19 @@ def test_the_artifact_separates_the_verdicts():
         "regression_gates_passed",
         "quality_bar_passed",
         "quality_bar_enforced_subset_passed",
+        "release_quality_contract_passed",
+        "quality_release_dispositions",
         "quality_bar_enforced",
     ):
         assert f'"{field}"' in SOURCE, f"the scorecard does not record {field}"
 
 
-def test_enforce_quality_binds_the_named_subset_not_the_whole_bar():
+def test_enforce_quality_binds_an_explicit_non_vacuous_release_contract():
     """Binding the whole bar makes release qualification fail on an aspirational target
     and stop before any downstream receipt is produced, which certifies nothing."""
     decision = SOURCE[SOURCE.index("quality_ok = "):]
-    assert "quality_enforced_passed" in decision[:400], (
-        "the release decision reads the full bar again rather than the named subset"
+    assert "quality_release_contract_passed" in decision[:500], (
+        "the release decision does not require the explicit shortfall contract"
     )
     assert "release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))" in SOURCE
     # The full bar must still be computed and reported either way.
@@ -86,6 +88,10 @@ def test_the_declared_standard_survives_whatever_is_bound():
     assert bar["require_reliable_grade"] is True
     assert bar["max_known_expectation_gaps"] == 0
     assert isinstance(bar["enforced"], list)
+    disposition = bar["release_disposition"]
+    assert disposition["status"] == "accepted_shortfall"
+    assert disposition["release"] == "2.0.0"
+    assert disposition["accepted_failed_gates"]
 
 
 def _release_ok(overall_ok, quality_ok, enforce):

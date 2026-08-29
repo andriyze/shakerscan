@@ -119,6 +119,32 @@ def test_the_complete_tree_is_activated_by_rename():
     assert 'mv -- "$INSTALL_STAGE" "$INSTALL_DIR"' in source
 
 
+def test_legacy_directory_is_removed_before_its_replacement_is_downloaded():
+    """A download into a directory moves the file inside it and makes repair impossible."""
+    source = INSTALLER.read_text(encoding="utf-8")
+    repair = source.index(
+        'rmdir "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh"'
+    )
+    download = source.index(
+        'download "$REPO_RAW_BASE/db/configure-model-intake-signer-role.sh"'
+    )
+    assert repair < download
+
+
+def test_executable_permissions_are_set_before_atomic_activation():
+    source = INSTALLER.read_text(encoding="utf-8")
+    activation = source.index("commit_staged_downloads\n", source.index("Downloading ShakerScan"))
+    for relative in (
+        "scanner.sh",
+        "db/configure-model-intake-signer-role.sh",
+        "scripts/build-model-intake-guest-rootfs.sh",
+        "scripts/provision-model-intake-firecracker.sh",
+        ".claude/hooks/session-start.sh",
+    ):
+        chmod = source.index(f'chmod +x "$INSTALL_STAGE/{relative}"')
+        assert chmod < activation
+
+
 def test_the_stage_shares_a_filesystem_with_the_installation():
     # A rename is atomic only within one filesystem, and $TMPDIR is frequently a different one.
     source = INSTALLER.read_text(encoding="utf-8")

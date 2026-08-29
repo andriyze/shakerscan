@@ -173,6 +173,32 @@ def _lease(plan, action):
     )
 
 
+def test_receipt_records_only_server_exercised_principal_context(monkeypatch):
+    action = _action("baseline.http", "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name: _principal(lane),
+    )
+    receipt = _dispatcher(plan, Backend())._receipt(
+        action, status="success", parser_version="test/v1",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        consumed={"http_requests": 1, "tool_wall_seconds": 1},
+    )
+    context = next(item for item in receipt.observations if item["kind"] == "principal_context")
+    assert context == {
+        "kind": "principal_context",
+        "lane": "primary",
+        "authenticated": True,
+        "binding_digest": "1" * 64,
+        "source": "server_runtime",
+    }
+    assert "Authorization" not in json.dumps(receipt.observations)
+
+
 def test_database_neutral_dispatcher_never_treats_profile_reference_as_secret():
     action = _action("inputs.auth_primary", "auth.session.establish", 0)
     plan = ScanActionPlan(

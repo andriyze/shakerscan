@@ -1888,7 +1888,10 @@ def test_agent_tool_readiness_requires_current_build_and_complete_arsenal(monkey
             }).encode()}
 
     monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
-    monkeypatch.setattr(devices_router_module, "expected_build_fingerprint", lambda: "expected")
+    # Agent readiness receives this collaborator from the API composition root. Patching
+    # the Devices router happened to work only under one import layout and made the
+    # installed-runtime suite report a false stale-build failure.
+    monkeypatch.setattr(api_module, "expected_build_fingerprint", lambda: "expected")
     monkeypatch.setattr(api_module, "current_scanner_version", lambda: "build")
 
     readiness = api_module._agent_tool_worker_readiness()

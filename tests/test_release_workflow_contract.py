@@ -18,18 +18,23 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert 'imagetools create -t "${SCANNER_IMAGE}:latest"' not in text
     assert "shakerscan-release-candidate/v1" in text
     assert "shakerscan-release-candidate/v2" in text
-    assert "e2e_run_id:" in text
+    assert "e2e_run_id:" not in text
     assert "codeql_run_id:" in text
     assert "parity_run_id:" in text
-    assert 'verify_run "$E2E_RUN_ID" "E2E (full release gate)"' in text
     assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
+    assert 'if [[ -n "$PARITY_RUN_ID" ]]; then' in text
     assert 'verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"' in text
+    assert '"not_run_optional_boundary"' not in text  # recorded by the certifier, not forged here
     assert "Verify signed candidate provenance" in text
     assert "final-multiarch-image-digests" in text
     assert "release-candidate-uncertified-" in text
     assert "Certify final manifest digests" in text
     assert "scripts/certify_release_receipt.py" in text
     assert "INSTALLED_STACK_SMOKE_E2E" in text
+    assert "INSTALLED_STACK_SMOKE_DAST_RECALL_JSON" in text
+    assert "INSTALLED_STACK_SMOKE_FAULT_DIR" in text
+    assert text.count("make installed-stack-smoke") == 1
+    assert text.count("scripts/upgrade_smoke.sh") == 1
     assert "CANDIDATE_IMAGE_DIGEST" in text
 
 

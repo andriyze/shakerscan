@@ -50,6 +50,7 @@ def _evidence(tmp_path: Path):
         "status": "pass",
         "source_sha": SOURCE,
         "images": dict(sorted(IMAGES.items())),
+        "scope_exclusions": ["model_intake"],
     }
     e2e = {
         "schema_version": "shakerscan-e2e-scorecard/v1",
@@ -63,13 +64,31 @@ def _evidence(tmp_path: Path):
         },
         "areas": [
             {"area": area, "gate": "pass", "rows": []}
-            for area in ("platform", "model_intake", "ai_gate", "dast", "hunt")
+            for area in ("platform", "ai_gate", "dast", "hunt")
         ],
     }
     external_values = {
-        "dast_quality": {"passed": True, "quality_bar_passed": True},
-        "fault_acceptance": {
-            "candidate_sha": SOURCE, "promotion_authorized": False,
+        "dast_quality": {
+            "passed": True,
+            "regression_gates_passed": True,
+            "quality_bar_passed": False,
+            "quality_bar_enforced": True,
+            "release_quality_contract_passed": True,
+            "quality_release_dispositions": [{
+                "status": "accepted_shortfall",
+                "valid": True,
+                "accepted_failed_gates": ["quality:min_expected_recall"],
+                "observed_failed_gates": ["quality:min_expected_recall"],
+            }],
+        },
+        "fault_cancellation": {
+            "schema_version": "scan-cancellation-race-receipt/v1", "passed": True,
+        },
+        "fault_reservation_identity": {
+            "schema_version": "scan-reservation-identity-receipt/v1", "passed": True,
+        },
+        "fault_action_resume": {
+            "schema_version": "scan-action-resume-receipt/v1", "passed": True,
         },
         "real_fleet_parity": {
             "source_revision": SOURCE, "consistent": True,
@@ -113,6 +132,49 @@ def test_certification_binds_exact_manifests_and_all_acceptance_evidence(tmp_pat
         "exact_manifest_e2e_scorecard",
         *paths["external_evidence"].keys(),
     }
+    assert receipt["certification"]["checks"]["complete_dast_quality_bar"] == (
+        "accepted_shortfall"
+    )
+
+
+def test_optional_physical_boundaries_are_recorded_as_not_run(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    paths["external_evidence"].pop("real_fleet_parity")
+    paths["external_evidence"].pop("model_intake_physical")
+    paths["external_evidence"].pop("device_physical")
+    receipt = certify_receipt(
+        candidate=candidate,
+        upgrade=upgrade,
+        preservation=preservation,
+        e2e=e2e,
+        source_sha=SOURCE,
+        **paths,
+    )
+    assert receipt["certification"]["scope_exclusions"] == [
+        "model_intake_e2e_and_preservation", "real_fleet_parity",
+        "model_intake_physical", "device_physical",
+    ]
+    assert receipt["certification"]["checks"]["real_fleet_parity"] == (
+        "not_run_optional_boundary"
+    )
+
+
+def test_a_vacuous_dast_shortfall_cannot_certify(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    dast, dast_path = paths["external_evidence"]["dast_quality"]
+    dast["quality_release_dispositions"][0]["accepted_failed_gates"] = []
+    paths["external_evidence"]["dast_quality"] = (
+        dast, _write(tmp_path, dast_path.name, dast),
+    )
+    with pytest.raises(CertificationError, match="absent, vacuous, or unbounded"):
+        certify_receipt(
+            candidate=candidate,
+            upgrade=upgrade,
+            preservation=preservation,
+            e2e=e2e,
+            source_sha=SOURCE,
+            **paths,
+        )
 
 
 @pytest.mark.parametrize("defect", ("scanner_digest", "source", "e2e", "preservation"))

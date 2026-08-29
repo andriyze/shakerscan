@@ -14,6 +14,7 @@ API_PORT=$((38000 + ($$ % 500)))
 UI_PORT=$((39000 + ($$ % 500)))
 POSTGRES_PORT=$((42000 + ($$ % 500)))
 REDIS_PORT=$((43000 + ($$ % 500)))
+JUICE_PORT=$((44000 + ($$ % 500)))
 
 check_equal() {
     local label="$1" actual="$2" expected="$3"
@@ -94,6 +95,7 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
     scorecard_path="${INSTALLED_STACK_SMOKE_E2E_SCORECARD:?INSTALLED_STACK_SMOKE_E2E_SCORECARD is required}"
     network_name="${PROJECT}_default"
     docker run --detach --name "$JUICE_CONTAINER" \
+        --publish "127.0.0.1:$JUICE_PORT:3000" \
         --network "$network_name" --network-alias juice-shop \
     bkimminich/juice-shop@sha256:e68144772ebaaca0ec117b38d44903af92416793230288ef7c5437fc4f26850a \
         >/dev/null
@@ -115,14 +117,57 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
         fixture_host="$(docker network inspect "$network_name" \
             --format '{{(index .IPAM.Config 0).Gateway}}')"
     fi
+    e2e_args=(--area all --scorecard "$scorecard_path")
+    if [ -n "${INSTALLED_STACK_SMOKE_E2E_EXCLUDE_AREAS:-}" ]; then
+        IFS=',' read -r -a excluded_areas <<<"$INSTALLED_STACK_SMOKE_E2E_EXCLUDE_AREAS"
+        for excluded_area in "${excluded_areas[@]}"; do
+            e2e_args+=(--exclude-area "$excluded_area")
+        done
+    fi
     SHAKERSCAN_API="http://127.0.0.1:$API_PORT" \
         SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan" \
         SHAKERSCAN_E2E_CLI_HOME="$SMOKE_HOME" \
         SHAKERSCAN_E2E_HONEY_HOST="$fixture_host" \
         SHAKERSCAN_E2E_DAST_TARGET="http://juice-shop:3000" \
         SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN="$token" \
-        python3 "$ROOT_DIR/tests/e2e/run_e2e.py" --area all --scorecard "$scorecard_path"
+        python3 "$ROOT_DIR/tests/e2e/run_e2e.py" "${e2e_args[@]}"
     check_equal "exact-image E2E gate" "$(jq -r '.gate' "$scorecard_path")" "pass"
+    if [ -n "${INSTALLED_STACK_SMOKE_DAST_RECALL_JSON:-}" ]; then
+        recall_path="$INSTALLED_STACK_SMOKE_DAST_RECALL_JSON"
+        mkdir -p "$(dirname "$recall_path")"
+        python3 "$ROOT_DIR/scripts/benchmark_targets.py" juice_shop \
+            --api "http://127.0.0.1:$API_PORT" --auth --enforce-quality \
+            --target-url "juice_shop=http://juice-shop:3000" \
+            --auth-target-url "juice_shop=http://127.0.0.1:$JUICE_PORT"
+        cp "$ROOT_DIR/results/benchmark-runs/benchmark-juice_shop.json" "$recall_path"
+    fi
+    if [ -n "${INSTALLED_STACK_SMOKE_FAULT_DIR:-}" ]; then
+        fault_dir="$INSTALLED_STACK_SMOKE_FAULT_DIR"
+        mkdir -p "$fault_dir"
+        for script in \
+            run_scan_cancellation_race.py \
+            run_scan_reservation_identity.py \
+            run_scan_action_resume.py; do
+            docker compose --project-name "$PROJECT" --project-directory "$RUNTIME" \
+                --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
+                cp "$ROOT_DIR/tests/e2e/$script" "api:/tmp/$script"
+        done
+        docker compose --project-name "$PROJECT" --project-directory "$RUNTIME" \
+            --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
+            exec -T -w /app api python /tmp/run_scan_cancellation_race.py --json \
+            > "$fault_dir/scan-cancellation-race.json"
+        docker compose --project-name "$PROJECT" --project-directory "$RUNTIME" \
+            --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
+            exec -T -w /app api python /tmp/run_scan_reservation_identity.py --json \
+            > "$fault_dir/scan-reservation-identity.json"
+        docker compose --project-name "$PROJECT" --project-directory "$RUNTIME" \
+            --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
+            exec -T -w /app api python /tmp/run_scan_action_resume.py --json \
+            > "$fault_dir/scan-action-resume.json"
+        check_equal "cancellation race" "$(jq -r '.passed' "$fault_dir/scan-cancellation-race.json")" "true"
+        check_equal "reservation identity" "$(jq -r '.passed' "$fault_dir/scan-reservation-identity.json")" "true"
+        check_equal "action resume" "$(jq -r '.passed' "$fault_dir/scan-action-resume.json")" "true"
+    fi
     if [ -n "${INSTALLED_STACK_SMOKE_BROWSER_JSON:-}" ]; then
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:$UI_PORT" \
             CI=1 \

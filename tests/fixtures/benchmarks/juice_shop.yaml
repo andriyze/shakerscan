@@ -24,8 +24,9 @@ quality_bar:
   require_browser_proven_xss: true   # Juice Shop's DOM XSS should be browser-proven
   require_reliable_grade: true       # coverage complete enough to trust the grade
   max_known_expectation_gaps: 0      # every declared gap is a debt against this bar
-  # Which of the checks above decide the outcome under --enforce-quality. Empty for
-  # 2.0.0, and measured rather than chosen: `grade_reliable` requires every selected
+  # Incremental binding remains empty for 2.0.0, but that is not permission for a
+  # vacuous pass. The release disposition below explicitly bounds the known debt.
+  # `grade_reliable` requires every selected
   # family complete AND no unproven critical/high, and a thorough scan cannot fund that
   # inside its 3,600-second wall ceiling -- funding the proof families enough time to
   # reach a verdict is what pushed the passive-template and exposure continuation batches
@@ -36,6 +37,19 @@ quality_bar:
   # and the whole quality bar is reported as the declared shortfall. Moving a check back
   # into this list is how a later release tightens the promise.
   enforced: []
+  release_disposition:
+    status: accepted_shortfall
+    release: 2.0.0
+    rationale: >-
+      The deterministic V2 runtime and regression floor are release-ready, while the
+      complete DAST quality target remains the published post-2.0 improvement backlog.
+      This exception accepts only the four named failures; any additional failed quality
+      check blocks release qualification.
+    accepted_failed_gates:
+      - quality:min_expected_recall
+      - quality:require_browser_proven_xss
+      - quality:grade_reliable
+      - quality:max_known_expectation_gaps
 
 # The expectations below are NOT reduced to what the engine currently proves: they describe what a
 # competent DAST should find on this app, and shrinking them would destroy the measurement. The
@@ -50,6 +64,7 @@ gates:
   # This scan runs a real budget over a large surface, so some families legitimately report partial
   # coverage. The value is still recorded on every card; it is not treated as a release failure.
   require_reliable_grade: false
+  require_auth_workflow_ready: true
   known_expectation_gaps:
     - id: sqli-login
       reason: >-

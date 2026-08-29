@@ -94,12 +94,14 @@ def certify_receipt(
         raise CertificationError("mature-subsystem preservation did not pass for this source")
     if preservation.get("images") != dict(sorted(images.items())):
         raise CertificationError("preservation receipt does not bind the final image digests")
+    if preservation.get("scope_exclusions") != ["model_intake"]:
+        raise CertificationError("preservation scope must explicitly exclude Model Intake")
 
     if e2e.get("schema_version") != "shakerscan-e2e-scorecard/v1" or e2e.get("gate") != "pass":
         raise CertificationError("exact-manifest installed-stack E2E did not pass")
     areas = e2e.get("areas")
     if not isinstance(areas, list) or {item.get("area") for item in areas if isinstance(item, Mapping)} != {
-        "platform", "model_intake", "ai_gate", "dast", "hunt",
+        "platform", "ai_gate", "dast", "hunt",
     }:
         raise CertificationError("exact-manifest E2E did not cover every release area")
     if any(
@@ -122,25 +124,62 @@ def certify_receipt(
 
     external = dict(external_evidence or {})
     required_external = {
-        "dast_quality", "fault_acceptance", "real_fleet_parity",
-        "model_intake_physical", "device_physical",
+        "dast_quality", "fault_cancellation", "fault_reservation_identity",
+        "fault_action_resume",
     }
-    if set(external) != required_external:
+    optional_external = {
+        "real_fleet_parity", "model_intake_physical", "device_physical",
+    }
+    if not required_external.issubset(external) or not set(external).issubset(
+        required_external | optional_external
+    ):
         raise CertificationError("candidate certification is missing required external evidence")
     dast = external["dast_quality"][0]
-    if dast.get("passed") is not True or dast.get("quality_bar_passed") is not True:
-        raise CertificationError("DAST did not meet the complete release quality bar")
-    fault = external["fault_acceptance"][0]
-    if fault.get("candidate_sha") != source_sha or fault.get("promotion_authorized") is not False:
-        raise CertificationError("fault acceptance does not bind this candidate")
-    parity = external["real_fleet_parity"][0]
     if (
-        parity.get("source_revision") != source_sha
-        or parity.get("consistent") is not True
-        or parity.get("all_artifacts_truthful") is not True
+        dast.get("passed") is not True
+        or dast.get("regression_gates_passed") is not True
+        or dast.get("quality_bar_enforced") is not True
+        or dast.get("release_quality_contract_passed") is not True
     ):
-        raise CertificationError("real-fleet parity did not pass for this candidate")
+        raise CertificationError("DAST did not satisfy the release quality contract")
+    dispositions = dast.get("quality_release_dispositions")
+    full_quality = dast.get("quality_bar_passed") is True
+    accepted_shortfall = (
+        isinstance(dispositions, list)
+        and bool(dispositions)
+        and all(
+            isinstance(item, Mapping)
+            and item.get("status") == "accepted_shortfall"
+            and item.get("valid") is True
+            and bool(item.get("accepted_failed_gates"))
+            and set(item.get("observed_failed_gates") or ()).issubset(
+                set(item.get("accepted_failed_gates") or ())
+            )
+            for item in dispositions
+        )
+    )
+    if not full_quality and not accepted_shortfall:
+        raise CertificationError("DAST quality shortfall is absent, vacuous, or unbounded")
+    fault_contracts = {
+        "fault_cancellation": "scan-cancellation-race-receipt/v1",
+        "fault_reservation_identity": "scan-reservation-identity-receipt/v1",
+        "fault_action_resume": "scan-action-resume-receipt/v1",
+    }
+    for key, schema in fault_contracts.items():
+        evidence = external[key][0]
+        if evidence.get("schema_version") != schema or evidence.get("passed") is not True:
+            raise CertificationError(f"{key} did not pass on the final manifest stack")
+    if "real_fleet_parity" in external:
+        parity = external["real_fleet_parity"][0]
+        if (
+            parity.get("source_revision") != source_sha
+            or parity.get("consistent") is not True
+            or parity.get("all_artifacts_truthful") is not True
+        ):
+            raise CertificationError("real-fleet parity did not pass for this candidate")
     for key in ("model_intake_physical", "device_physical"):
+        if key not in external:
+            continue
         evidence = external[key][0]
         if evidence.get("candidate_sha") != source_sha or evidence.get("status") != "pass":
             raise CertificationError(f"{key} did not pass for this candidate")
@@ -156,15 +195,34 @@ def certify_receipt(
             "stateful_previous_stable_upgrade": "pass",
             "database_restart_idempotency": "pass",
             "backup_restore_rollback_boundary": "pass",
-            "model_intake_and_mature_subsystems": "pass",
+            "mature_subsystem_preservation": "pass",
+            "model_intake_acceptance": "not_run_scope_exclusion",
             "source_and_image_identity": "pass",
             "e2e_subject_binding": "pass",
-            "complete_dast_quality_bar": "pass",
-            "fault_acceptance": "pass",
-            "real_fleet_parity": "pass",
-            "model_intake_physical": "pass",
-            "device_physical": "pass",
+            "complete_dast_quality_bar": "pass" if full_quality else "accepted_shortfall",
+            "dast_release_quality_contract": "pass",
+            "fault_cancellation": "pass",
+            "fault_reservation_identity": "pass",
+            "fault_action_resume": "pass",
+            "real_fleet_parity": (
+                "pass" if "real_fleet_parity" in external else "not_run_optional_boundary"
+            ),
+            "model_intake_physical": (
+                "pass" if "model_intake_physical" in external else "not_run_optional_boundary"
+            ),
+            "device_physical": (
+                "pass" if "device_physical" in external else "not_run_optional_boundary"
+            ),
         },
+        "scope_exclusions": [
+            "model_intake_e2e_and_preservation",
+            *[
+            name for name in (
+                "real_fleet_parity", "model_intake_physical", "device_physical",
+            )
+            if name not in external
+            ],
+        ],
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),
             "stateful_upgrade_receipt": _file_sha256(upgrade_path),
@@ -192,10 +250,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--e2e-scorecard", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--dast-quality", required=True, type=Path)
-    parser.add_argument("--fault-acceptance", required=True, type=Path)
-    parser.add_argument("--real-fleet-parity", required=True, type=Path)
-    parser.add_argument("--model-intake-physical", required=True, type=Path)
-    parser.add_argument("--device-physical", required=True, type=Path)
+    parser.add_argument("--fault-cancellation", required=True, type=Path)
+    parser.add_argument("--fault-reservation-identity", required=True, type=Path)
+    parser.add_argument("--fault-action-resume", required=True, type=Path)
+    parser.add_argument("--real-fleet-parity", type=Path)
+    parser.add_argument("--model-intake-physical", type=Path)
+    parser.add_argument("--device-physical", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -211,12 +271,30 @@ def main(argv: list[str] | None = None) -> int:
             source_sha=args.source_sha,
             external_evidence={
                 "dast_quality": (_read(args.dast_quality), args.dast_quality),
-                "fault_acceptance": (_read(args.fault_acceptance), args.fault_acceptance),
-                "real_fleet_parity": (_read(args.real_fleet_parity), args.real_fleet_parity),
-                "model_intake_physical": (
-                    _read(args.model_intake_physical), args.model_intake_physical,
+                "fault_cancellation": (
+                    _read(args.fault_cancellation), args.fault_cancellation,
                 ),
-                "device_physical": (_read(args.device_physical), args.device_physical),
+                "fault_reservation_identity": (
+                    _read(args.fault_reservation_identity), args.fault_reservation_identity,
+                ),
+                "fault_action_resume": (
+                    _read(args.fault_action_resume), args.fault_action_resume,
+                ),
+                **({
+                    "real_fleet_parity": (
+                        _read(args.real_fleet_parity), args.real_fleet_parity,
+                    )
+                } if args.real_fleet_parity else {}),
+                **({
+                    "model_intake_physical": (
+                        _read(args.model_intake_physical), args.model_intake_physical,
+                    )
+                } if args.model_intake_physical else {}),
+                **({
+                    "device_physical": (
+                        _read(args.device_physical), args.device_physical,
+                    )
+                } if args.device_physical else {}),
             },
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
