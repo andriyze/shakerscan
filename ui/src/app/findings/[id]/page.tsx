@@ -441,8 +441,14 @@ function FindingDetailContent() {
     if (!finding || exceptionSaving) return
     const owner = exceptionForm.owner.trim()
     const approver = exceptionForm.approver.trim()
-    if (!owner && !approver) {
-      toast.error('Owner or approver is required')
+    const reason = exceptionForm.reason.trim()
+    const controls = exceptionForm.compensating_controls.trim()
+    if (!exceptionForm.policy_id) {
+      toast.error('Select the exact policy this exception applies to')
+      return
+    }
+    if (!owner || !approver || !reason || !controls) {
+      toast.error('Owner, approver, reason, and compensating controls are all required')
       return
     }
     const days = Number(exceptionForm.expires_days || 30)
@@ -461,8 +467,8 @@ function FindingDetailContent() {
         scope: finding.title,
         owner: owner || null,
         approver: approver || null,
-        reason: exceptionForm.reason.trim() || null,
-        compensating_controls: exceptionForm.compensating_controls.trim() || null,
+        reason,
+        compensating_controls: controls,
         status: 'active',
         expires_at: expiresAt,
       })
@@ -996,6 +1002,7 @@ function FindingDetailContent() {
                   onChange={(e) => setExceptionForm((prev) => ({ ...prev, owner: e.target.value }))}
                   className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
                   placeholder="team or person"
+                  required
                 />
               </label>
               <label className="grid gap-1 text-sm text-gray-300">
@@ -1005,6 +1012,7 @@ function FindingDetailContent() {
                   onChange={(e) => setExceptionForm((prev) => ({ ...prev, approver: e.target.value }))}
                   className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
                   placeholder="security approver"
+                  required
                 />
               </label>
               <label className="grid gap-1 text-sm text-gray-300">
@@ -1013,9 +1021,10 @@ function FindingDetailContent() {
                   value={exceptionForm.policy_id}
                   onChange={(e) => setExceptionForm((prev) => ({ ...prev, policy_id: e.target.value }))}
                   className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+                  required
                 >
-                  <option value="">Any policy</option>
-                  {policyProfiles.map((profile) => (
+                  <option value="">Select an exact policy…</option>
+                  {policyProfiles.filter((profile) => profile.is_active).map((profile) => (
                     <option key={profile.id} value={profile.id}>{profile.name} ({profile.environment})</option>
                   ))}
                 </select>
@@ -1027,6 +1036,8 @@ function FindingDetailContent() {
                   onChange={(e) => setExceptionForm((prev) => ({ ...prev, expires_days: e.target.value }))}
                   className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
                   inputMode="numeric"
+                  min="1"
+                  required
                 />
               </label>
             </div>
@@ -1038,6 +1049,7 @@ function FindingDetailContent() {
                   onChange={(e) => setExceptionForm((prev) => ({ ...prev, reason: e.target.value }))}
                   className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
                   placeholder="Risk acceptance rationale"
+                  required
                 />
               </label>
               <label className="grid gap-1 text-sm text-gray-300">
@@ -1047,13 +1059,14 @@ function FindingDetailContent() {
                   onChange={(e) => setExceptionForm((prev) => ({ ...prev, compensating_controls: e.target.value }))}
                   className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
                   placeholder="Controls, monitoring, or rollout constraints"
+                  required
                 />
               </label>
             </div>
             <div className="mt-3 flex justify-end">
               <button
                 type="submit"
-                disabled={exceptionSaving}
+                disabled={exceptionSaving || !exceptionForm.policy_id}
                 className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
               >
                 {exceptionSaving ? 'Creating...' : 'Create Exception'}

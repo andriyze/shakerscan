@@ -13533,10 +13533,10 @@ class _FindingExceptionEditConn:
             self.update_args = args
             updated = dict(self.current_row)
             updated.update({
-                "scope": args[1], "owner": args[2], "approver": args[3],
-                "reason": args[4], "compensating_controls": args[5],
-                "status": args[6], "expires_at": args[7],
-                "edit_history": args[8],
+                "policy_id": args[1], "scope": args[2], "owner": args[3], "approver": args[4],
+                "reason": args[5], "compensating_controls": args[6],
+                "status": args[7], "expires_at": args[8],
+                "edit_history": args[9],
             })
             return updated
         return None
@@ -13579,7 +13579,7 @@ def test_update_finding_exception_appends_edit_history(monkeypatch):
 
     assert result["owner"] == "carol"
     assert conn.update_query is not None and "edit_history" in conn.update_query
-    snapshot = json.loads(conn.update_args[8])[0]
+    snapshot = json.loads(conn.update_args[9])[0]
     assert snapshot["owner"] == "alice"
     assert snapshot["approver"] == "bob"
     assert snapshot["status"] == "active"

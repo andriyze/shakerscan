@@ -91,6 +91,48 @@ class FindingExceptionLifecycleSweepRequest(BaseModel):
     approval_receipt_id: Optional[str] = None
 
 
+EFFECTIVE_EXCEPTION_STATUSES = {"active", "approved", "accepted_risk"}
+
+
+def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> datetime | None:
+    if req.status not in EFFECTIVE_EXCEPTION_STATUSES:
+        return _parse_iso_datetime(req.expires_at) if req.expires_at else None
+    missing = [
+        label for label, value in (
+            ("policy_id", req.policy_id),
+            ("owner", req.owner),
+            ("approver", req.approver),
+            ("reason", req.reason),
+            ("compensating_controls", req.compensating_controls),
+            ("expires_at", req.expires_at),
+        ) if not str(value or "").strip()
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"effective exceptions require: {', '.join(missing)}",
+        )
+    try:
+        uuid.UUID(str(req.policy_id))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="policy_id must be a valid UUID")
+    expires_at = _parse_iso_datetime(req.expires_at)
+    if expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=422, detail="expires_at must be in the future")
+    return expires_at
+
+
+async def _require_active_policy_profile(conn: Any, policy_id: str | None) -> None:
+    if not policy_id:
+        return
+    row = await conn.fetchrow(
+        "SELECT id FROM policy_profiles WHERE id=$1 AND is_active=true",
+        uuid.UUID(policy_id),
+    )
+    if not row:
+        raise HTTPException(status_code=422, detail="policy_id must reference an active policy profile")
+
+
 @router.get("/finding-exceptions")
 async def list_finding_exceptions(
     target_id: Optional[str] = None,
@@ -244,10 +286,9 @@ async def _finding_exception_lifecycle_sweep(
 async def create_finding_exception(req: FindingExceptionRequest):
     if not (req.finding_id or req.fingerprint):
         raise HTTPException(status_code=422, detail="finding_id or fingerprint is required")
-    if not (req.approver or req.owner):
-        raise HTTPException(status_code=422, detail="approver or owner is required for an auditable exception")
-    expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
+    expires_at = _validate_finding_exception_accountability(req)
     async with _pool().acquire() as conn:
+        await _require_active_policy_profile(conn, req.policy_id)
         row = await conn.fetchrow(
             """
             INSERT INTO finding_exceptions
@@ -267,14 +308,14 @@ async def create_finding_exception(req: FindingExceptionRequest):
 
 @router.patch("/finding-exceptions/{exception_id}")
 async def update_finding_exception(exception_id: str, req: FindingExceptionRequest):
-    expires_at = _parse_iso_datetime(req.expires_at) if req.expires_at else None
-    if not (req.approver or req.owner):
-        raise HTTPException(status_code=422, detail="approver or owner is required for an auditable exception")
+    expires_at = _validate_finding_exception_accountability(req)
     async with _pool().acquire() as conn:
+        await _require_active_policy_profile(conn, req.policy_id)
         current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
         if not current:
             raise HTTPException(status_code=404, detail="Finding exception not found")
         prior_snapshot = {
+            "policy_id": str(current["policy_id"]) if current["policy_id"] else None,
             "owner": current["owner"],
             "approver": current["approver"],
             "reason": current["reason"],
@@ -286,12 +327,13 @@ async def update_finding_exception(exception_id: str, req: FindingExceptionReque
         row = await conn.fetchrow(
             """
             UPDATE finding_exceptions SET
-                scope=$2, owner=$3, approver=$4, reason=$5, compensating_controls=$6,
-                status=$7, expires_at=$8, updated_at=NOW(),
-                edit_history = edit_history || $9::jsonb
+                policy_id=$2, scope=$3, owner=$4, approver=$5, reason=$6, compensating_controls=$7,
+                status=$8, expires_at=$9, updated_at=NOW(),
+                edit_history = edit_history || $10::jsonb
             WHERE id=$1 RETURNING *
             """,
-            uuid.UUID(exception_id), req.scope, req.owner, req.approver, req.reason,
+            uuid.UUID(exception_id), uuid.UUID(req.policy_id) if req.policy_id else None,
+            req.scope, req.owner, req.approver, req.reason,
             req.compensating_controls, req.status, expires_at,
             json.dumps([prior_snapshot], default=str),
         )
