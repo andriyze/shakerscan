@@ -61,6 +61,15 @@ export interface HuntV2 {
     budget_cost: Record<string, number>
   }>
   actions?: HuntActionV2[]
+  outcome_summary?: {
+    schema_version: 'hunt-outcome-summary/v1'
+    capability_calls: number
+    action_statuses: Record<string, number>
+    observation_count: number
+    finding_ids: string[]
+    candidate_ids: string[]
+    evidence_ids: string[]
+  }
   final_debrief?: { summary?: string; next_actions?: string[] }
   stop_reason?: string | null
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }

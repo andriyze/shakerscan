@@ -17,3 +17,11 @@ test('Hunt detail shows persisted completion time and elapsed duration', () => {
   assert.match(source, /Completed \{new Date\(hunt\.completed_at\)\.toLocaleString\(\)\}/)
   assert.match(source, /formatHuntDuration\(hunt\.created_at, hunt\.completed_at\)/)
 })
+
+test('Hunt debrief leads with immutable action and evidence facts', () => {
+  assert.match(source, /Factual run record/)
+  assert.match(source, /hunt\.outcome_summary\.observation_count/)
+  assert.match(source, /hunt\.outcome_summary\.finding_ids\.length/)
+  assert.match(source, /hunt\.outcome_summary\.evidence_ids\.length/)
+  assert.match(source, /Analyst summary:/)
+})

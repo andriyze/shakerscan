@@ -216,6 +216,15 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
+    assert result["outcome_summary"] == {
+        "schema_version": "hunt-outcome-summary/v1",
+        "capability_calls": 1,
+        "action_statuses": {"completed": 1},
+        "observation_count": 0,
+        "finding_ids": [],
+        "candidate_ids": [],
+        "evidence_ids": [],
+    }
 
 
 def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive():

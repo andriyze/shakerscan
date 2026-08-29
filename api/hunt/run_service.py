@@ -223,6 +223,34 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     }
 
 
+def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Derive a factual Hunt outcome from the immutable action ledger."""
+    statuses: dict[str, int] = {}
+    references = {
+        "finding_ids": set(), "candidate_ids": set(), "evidence_ids": set(),
+    }
+    observations = 0
+    for action in actions:
+        status = str(action.get("status") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+        result = action.get("result") if isinstance(action.get("result"), Mapping) else {}
+        observations += max(0, int(result.get("observation_count") or 0))
+        typed = result.get("reference_ids") if isinstance(result.get("reference_ids"), Mapping) else {}
+        for key in references:
+            for reference in typed.get(key) or []:
+                if _uuid_reference(reference):
+                    references[key].add(str(reference))
+    return {
+        "schema_version": "hunt-outcome-summary/v1",
+        "capability_calls": len(actions),
+        "action_statuses": statuses,
+        "observation_count": observations,
+        "finding_ids": sorted(references["finding_ids"]),
+        "candidate_ids": sorted(references["candidate_ids"]),
+        "evidence_ids": sorted(references["evidence_ids"]),
+    }
+
+
 def public_hunt_action_trace(row: Any) -> dict[str, Any]:
     """One explicit, redacted planner decision and its persisted outcome.
 
@@ -358,6 +386,7 @@ class HuntRunService:
             )
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
+        result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
         return result
 
     async def export_record(self, hunt_id: str) -> dict[str, Any]:
