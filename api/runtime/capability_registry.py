@@ -1129,7 +1129,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "dns.inspect", "Inspect bounded DNS and mail-policy records for the frozen host.",
             "internal", "passive", _HTTP_TARGETS, "scanner.dns", "1", None,
-            {"hosts_attempted": 4, "tool_wall_seconds": 15},
+            {"hosts_attempted": 5, "tool_wall_seconds": 15},
             {
                 "network_reachability": True,
                 "runtime_target_binding": True,
@@ -1138,6 +1138,23 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema(),
             "dns-posture-observation/v1",
             ("dns_posture_observation", "tool_receipt"),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
+            "infrastructure.inspect",
+            "Collect informational domain registration and bound-address ownership context.",
+            "internal", "passive", _HTTP_TARGETS, "scanner.infrastructure", "1", None,
+            {"hosts_attempted": 40, "tool_wall_seconds": 30},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "authoritative_external_lookup": True,
+                "informational_only": True,
+                "scoring_effect": "none",
+            },
+            _schema(),
+            "infrastructure-intelligence/v1",
+            ("infrastructure_observation", "tool_receipt"),
             planner_visible=False,
         ),
         CapabilitySpec(

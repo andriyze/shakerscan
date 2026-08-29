@@ -11,7 +11,12 @@ from runtime.models import TargetBinding
 
 
 _QUERY_PLAN = (
+    ("host_a", "host", "A"),
+    ("host_aaaa", "host", "AAAA"),
     ("host_cname", "host", "CNAME"),
+    ("root_ns", "root", "NS"),
+    ("root_soa", "root", "SOA"),
+    ("root_ds", "root", "DS"),
     ("host_mx", "host", "MX"),
     ("host_txt", "host", "TXT"),
     ("host_caa", "host", "CAA"),
@@ -42,7 +47,17 @@ def _bound_name(target: TargetBinding, prefix: str) -> str:
         or not any(host == root or host.endswith("." + root) for root in roots)
     ):
         raise ValueError("scope: DNS host is outside the frozen root binding")
-    name = host if prefix == "host" else f"{prefix}.{host}"
+    if prefix == "root":
+        candidates = sorted(
+            (root for root in roots if host == root or host.endswith("." + root)),
+            key=len,
+            reverse=True,
+        )
+        if not candidates:
+            raise ValueError("scope: DNS root is outside the frozen root binding")
+        name = candidates[0]
+    else:
+        name = host if prefix == "host" else f"{prefix}.{host}"
     if not any(name == root or name.endswith("." + root) for root in roots):
         raise ValueError("scope: DNS query name is outside the frozen root binding")
     return name
@@ -89,6 +104,23 @@ def _record_value(query_type: str, record: Any) -> Any:
             "protocol": int(getattr(record, "protocol", 0)),
             "algorithm": int(getattr(record, "algorithm", 0)),
         }
+    if query_type == "DS":
+        return {
+            "key_tag": int(getattr(record, "key_tag", 0)),
+            "algorithm": int(getattr(record, "algorithm", 0)),
+            "digest_type": int(getattr(record, "digest_type", 0)),
+            "digest": _safe_text(str(getattr(record, "digest", "")), 1_000),
+        }
+    if query_type == "SOA":
+        return {
+            "primary_nameserver": _safe_text(str(getattr(record, "mname", "")).rstrip("."), 253),
+            "responsible_mailbox": _safe_text(str(getattr(record, "rname", "")).rstrip("."), 253),
+            "serial": int(getattr(record, "serial", 0)),
+            "refresh": int(getattr(record, "refresh", 0)),
+            "retry": int(getattr(record, "retry", 0)),
+            "expire": int(getattr(record, "expire", 0)),
+            "minimum": int(getattr(record, "minimum", 0)),
+        }
     return _safe_text(str(record).rstrip("."), 1_000)
 
 
@@ -119,6 +151,8 @@ async def inspect_dns_posture(
     authenticated: list[str] = []
     errors: list[str] = []
 
+    metadata: dict[str, dict[str, Any]] = {}
+
     async def query(label: str, name: str, query_type: str) -> tuple[str, list[Any]]:
         try:
             answer = await resolver.resolve(
@@ -139,9 +173,17 @@ async def inspect_dns_posture(
             response = getattr(answer, "response", None)
             if response is not None and int(response.flags) & int(dns.flags.AD):
                 authenticated.append(label)
-        except (AttributeError, TypeError, ValueError):
+        except (AttributeError, ModuleNotFoundError, TypeError, ValueError):
             pass
         values = [_record_value(query_type, record) for record in list(answer)[:50]]
+        rrset = getattr(answer, "rrset", None)
+        ttl = getattr(rrset, "ttl", None)
+        metadata[label] = {
+            "name": name,
+            "type": query_type,
+            "ttl": int(ttl) if isinstance(ttl, int) and ttl >= 0 else None,
+            "answer_count": len(values),
+        }
         return label, values
 
     try:
@@ -174,6 +216,7 @@ async def inspect_dns_posture(
             label: name for label, name, _query_type in query_plan
         },
         "records": records,
+        "record_metadata": metadata,
         "authenticated_queries": sorted(set(authenticated)),
         "query_count": len(query_plan),
         "errors": errors[:20],

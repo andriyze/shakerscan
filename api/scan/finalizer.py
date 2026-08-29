@@ -40,6 +40,9 @@ _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
 })
+# Context collection is retained in the action ledger but cannot improve or
+# weaken vulnerability coverage, assurance, score, or grade.
+_INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
 # Every selected-family capability collapsed to the canonical family it serves,
 # so coverage and grade reliability are reported per resolved family.
 # Proof escalation runs over the candidates a verifier already attempted, so it
@@ -845,6 +848,7 @@ def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
 
     section: dict[str, Any] = {
         "records": dict(records),
+        "record_metadata": dict(row.get("record_metadata") or {}),
         "bound_addresses": dict(addresses),
         "query_count": row.get("query_count"),
         "errors": list(row.get("errors") or ()),
@@ -853,6 +857,14 @@ def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
         section["a"] = list(addresses["A"])
     if addresses.get("AAAA"):
         section["aaaa"] = list(addresses["AAAA"])
+    if answered("host_cname"):
+        section["cname"] = answered("host_cname")
+    if answered("root_ns"):
+        section["ns"] = answered("root_ns")
+    if answered("root_soa"):
+        section["soa"] = answered("root_soa")[0]
+    if answered("root_ds"):
+        section["ds"] = answered("root_ds")
     if answered("host_mx"):
         section["mx"] = answered("host_mx")
     if answered("host_caa"):
@@ -895,6 +907,7 @@ def _posture_sections(
     technologies: list[dict[str, Any]] = []
     server_versions: dict[str, Any] = {}
     seen_tech: set[str] = set()
+    infrastructure_observation: dict[str, Any] = {}
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -957,6 +970,8 @@ def _posture_sections(
                     tls_section = candidate
             elif kind == "dns_posture":
                 dns_section = _dns_section(row)
+            elif kind == "infrastructure_intelligence":
+                infrastructure_observation = dict(row)
             elif kind == "http_fingerprint":
                 for item in row.get("technologies") or ():
                     name = str((item or {}).get("name") if isinstance(item, Mapping) else item)
@@ -986,6 +1001,66 @@ def _posture_sections(
         sections["tls"] = tls_section
     if dns_section:
         sections["dns"] = dns_section
+    if infrastructure_observation or dns_section or tls_section.get("certificate"):
+        registration_domain = str(
+            infrastructure_observation.get("registration_domain") or ""
+        ).lower().rstrip(".")
+        related: list[dict[str, Any]] = [
+            dict(item) for item in infrastructure_observation.get("related_names") or ()
+            if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+        ]
+        certificate = (
+            dict(tls_section.get("certificate") or {})
+            if isinstance(tls_section.get("certificate"), Mapping) else {}
+        )
+        for raw_name in certificate.get("sans") or ():
+            name = str(raw_name or "").lower().rstrip(".")
+            comparison = name.removeprefix("*.")
+            if not name:
+                continue
+            related.append({
+                "name": name,
+                "source": "tls_certificate_san",
+                "scope": (
+                    "likely_related"
+                    if registration_domain and (
+                        comparison == registration_domain
+                        or comparison.endswith("." + registration_domain)
+                    )
+                    else "external_unverified"
+                ),
+            })
+        deduped_related: list[dict[str, Any]] = []
+        seen_related: set[tuple[str, str]] = set()
+        for item in related:
+            key = (str(item.get("name") or ""), str(item.get("source") or ""))
+            if key in seen_related:
+                continue
+            seen_related.add(key)
+            deduped_related.append(item)
+        sections["infrastructure"] = {
+            "informational_only": True,
+            "scoring_effect": "none",
+            "canonical_host": infrastructure_observation.get("canonical_host"),
+            "registration_domain": infrastructure_observation.get("registration_domain"),
+            "observed_at": infrastructure_observation.get("observed_at"),
+            "registration": infrastructure_observation.get("registration"),
+            "addresses": list(infrastructure_observation.get("addresses") or ()),
+            "dns": {
+                "addresses": {
+                    "A": list(dns_section.get("a") or ()),
+                    "AAAA": list(dns_section.get("aaaa") or ()),
+                },
+                "cname": list(dns_section.get("cname") or ()),
+                "nameservers": list(dns_section.get("ns") or ()),
+                "soa": dns_section.get("soa"),
+                "record_metadata": dict(dns_section.get("record_metadata") or {}),
+            },
+            "certificate": certificate or None,
+            "related_names": deduped_related[:200],
+            "limitations": list(infrastructure_observation.get("limitations") or ()),
+            "errors": list(infrastructure_observation.get("errors") or ()),
+        }
     if technologies or server_versions:
         discovery: dict[str, Any] = {}
         if technologies:
@@ -1276,9 +1351,13 @@ def finalize_scan_report(
             row["reason"] = None
     selected_family_gaps.sort()
 
+    coverage_actions = [
+        action for action in expected_actions
+        if action.capability_name not in _INFORMATIONAL_CAPABILITIES
+    ]
     required_rows = [
         (action, action_results[action.action_id])
-        for action in expected_actions if action.required
+        for action in coverage_actions if action.required
     ]
     statuses = {result.status for _action, result in required_rows}
     cancelled = CapabilityResultStatus.CANCELLED in statuses
@@ -1303,7 +1382,7 @@ def finalize_scan_report(
     )
     zero_attempt_actions = [
         action.action_id
-        for action in expected_actions
+        for action in coverage_actions
         if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES
         and candidate_count > 0
         and action_results[action.action_id].status in {
@@ -1317,7 +1396,7 @@ def finalize_scan_report(
     ]
     placement_gaps = [
         action.action_id
-        for action in expected_actions
+        for action in coverage_actions
         if (
             action_results[action.action_id].reason_code is not None
             and action_results[action.action_id].reason_code.value
@@ -1351,7 +1430,11 @@ def finalize_scan_report(
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"placement_unavailable"} if placement_gaps else set())
     )
-    action_status_counts = Counter(row["status"] for row in action_rows)
+    coverage_action_rows = [
+        row for row in action_rows
+        if row["capability_name"] not in _INFORMATIONAL_CAPABILITIES
+    ]
+    action_status_counts = Counter(row["status"] for row in coverage_action_rows)
     optional_gaps = [
         {
             "action_id": action.action_id,
@@ -1363,12 +1446,12 @@ def finalize_scan_report(
                 else None
             ),
         }
-        for action in expected_actions
+        for action in coverage_actions
         if not action.required
         and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
     ]
     capability_coverage = {
-        "total": len(expected_actions),
+        "total": len(coverage_actions),
         "required": len(required_rows),
         "completed": action_status_counts.get("success", 0),
         "partial": (
@@ -1385,7 +1468,7 @@ def finalize_scan_report(
             "required": row["required"],
             "status": row["status"],
             "reason_code": row["reason_code"],
-        } for row in action_rows],
+        } for row in coverage_action_rows],
     }
     principal_contexts = sorted({
         str(item.get("lane"))
@@ -1466,10 +1549,10 @@ def finalize_scan_report(
     coverage_block = {
         "status": coverage_status,
         "reasons": coverage_reasons,
-        "planned_action_count": len(expected_actions),
-        "terminal_action_count": len(action_rows),
+        "planned_action_count": len(coverage_actions),
+        "terminal_action_count": len(coverage_action_rows),
         "finalization_action_id": finalization_action.action_id,
-        "placement_executed": bool(action_rows) and not placement_gaps,
+        "placement_executed": bool(coverage_action_rows) and not placement_gaps,
         "capability_coverage": capability_coverage,
         "grade_reliability": {
             "reliable": grade_reliable,
@@ -1494,10 +1577,14 @@ def finalize_scan_report(
     # scorer ran ~350 lines earlier and every one of these signals was computed and then
     # used for nothing but appending a star to the letter.
     posture_sections = _posture_sections(observations)
+    scored_posture_sections = {
+        name: value for name, value in posture_sections.items()
+        if name != "infrastructure"
+    }
     result_block = scoring.score_scan(
         findings, coverage_block,
         smart_coverage=smart_coverage_block,
-        posture=posture_sections,
+        posture=scored_posture_sections,
         grade_reliable=grade_reliable,
     )
     report = {

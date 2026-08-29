@@ -312,6 +312,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "baseline_capabilities": [
       "http.request",
       "dns.inspect",
+      "infrastructure.inspect",
       "tls.inspect"
     ],
     "default_families": [

@@ -111,7 +111,7 @@ def scan_family_capabilities(family: str) -> tuple[str, ...]:
 
 
 _SCAN_V2_BASELINE_CAPABILITIES = (
-    "http.request", "dns.inspect", "tls.inspect",
+    "http.request", "dns.inspect", "infrastructure.inspect", "tls.inspect",
 )
 SCAN_V2_ZEROABLE_LIMITS = frozenset({"max_state_changing_requests"})
 SCAN_V2_INTERACTIVE_AUTH_KINDS = frozenset({

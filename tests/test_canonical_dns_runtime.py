@@ -10,9 +10,10 @@ from api.runtime.models import TargetBinding
 
 
 class _Answer(list):
-    def __init__(self, values, *, flags=0):
+    def __init__(self, values, *, flags=0, ttl=300):
         super().__init__(values)
         self.response = SimpleNamespace(flags=flags)
+        self.rrset = SimpleNamespace(ttl=ttl)
 
 
 class _Resolver:
@@ -33,6 +34,22 @@ class _Resolver:
             return _Answer([
                 SimpleNamespace(flags=257, protocol=3, algorithm=13),
             ])
+        if query_type == "DS":
+            return _Answer([
+                SimpleNamespace(key_tag=12345, algorithm=13, digest_type=2, digest="abcdef"),
+            ])
+        if query_type == "SOA":
+            return _Answer([
+                SimpleNamespace(
+                    mname="ns1.example.test.", rname="hostmaster.example.test.",
+                    serial=2026082901, refresh=3600, retry=600, expire=1209600,
+                    minimum=300,
+                ),
+            ])
+        if query_type == "NS":
+            return _Answer(["ns1.example.test.", "ns2.example.test."])
+        if query_type in {"A", "AAAA"}:
+            return _Answer([])
         if query_type == "CNAME":
             return _Answer([])
         if name.startswith("_dmarc."):
@@ -75,7 +92,7 @@ def test_dns_inspection_queries_only_binding_derived_names():
     assert result["ok"] is True
     assert result["status"] == "success"
     assert result["budget_consumed"] == {
-        "hosts_attempted": 4,
+        "hosts_attempted": 5,
         "tool_wall_seconds": 1,
     }
     observation = result["observation"]
@@ -92,10 +109,17 @@ def test_dns_inspection_queries_only_binding_derived_names():
         "tag": "issue",
         "value": "ca.test",
     }]
+    assert observation["records"]["root_ns"] == [
+        "ns1.example.test", "ns2.example.test",
+    ]
+    assert observation["records"]["root_soa"][0]["serial"] == 2026082901
+    assert observation["records"]["root_ds"][0]["key_tag"] == 12345
+    assert observation["record_metadata"]["root_ns"]["ttl"] == 300
     assert observation["records"]["dmarc"] == ["v=DMARC1; p=reject"]
-    assert len(resolver.calls) == 8
+    assert len(resolver.calls) == 13
     assert {name for name, _query_type, _kwargs in resolver.calls} == {
         "app.example.test",
+        "example.test",
         "_dmarc.app.example.test",
         "_smtp._tls.app.example.test",
         "_mta-sts.app.example.test",
@@ -130,7 +154,7 @@ def test_dns_adapter_marks_host_budget_as_started():
             "status": "success",
             "observation": {"kind": "dns_posture"},
             "budget_consumed": {
-                "hosts_attempted": 4,
+                "hosts_attempted": 5,
                 "tool_wall_seconds": 1,
             },
         }
@@ -138,7 +162,7 @@ def test_dns_adapter_marks_host_budget_as_started():
     adapter = DnsInspectionExecutionAdapter(
         specification=CAPABILITY_REGISTRY.require("dns.inspect"),
         operation=operation,
-        requested_budget={"hosts_attempted": 4, "tool_wall_seconds": 15},
+        requested_budget={"hosts_attempted": 5, "tool_wall_seconds": 15},
         redacted_execution={"input": {}},
     )
     result = asyncio.run(adapter.execute(heartbeat=None, cancelled=None))
@@ -146,7 +170,7 @@ def test_dns_adapter_marks_host_budget_as_started():
     assert result.status == "success"
     assert result.execution_started is True
     assert result.actual_budget == {
-        "hosts_attempted": 4,
+        "hosts_attempted": 5,
         "tool_wall_seconds": 1,
     }
     assert result.observations == ({"kind": "dns_posture"},)

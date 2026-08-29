@@ -81,6 +81,7 @@ from capabilities.inline import (
     AuthzVerificationExecutionAdapter,
     DnsInspectionExecutionAdapter,
     HttpRequestExecutionAdapter,
+    InfrastructureInspectionExecutionAdapter,
     TlsInspectionExecutionAdapter,
 )
 from capabilities.scanner import ScannerExecutionAdapter
@@ -9102,7 +9103,7 @@ async def _execute_reserved_scan_capability(
         )
     if internal_inline and capability_name not in {
         "auth.session.establish", "authz.verify", "dns.inspect", "http.request",
-        "tls.inspect",
+        "infrastructure.inspect", "tls.inspect",
     }:
         raise ScanCapabilityContractError(
             "unsupported inline Scan capability adapter"
@@ -9527,6 +9528,8 @@ async def _execute_reserved_scan_capability(
             if capability_name == "http.request"
             else DnsInspectionExecutionAdapter
             if capability_name == "dns.inspect"
+            else InfrastructureInspectionExecutionAdapter
+            if capability_name == "infrastructure.inspect"
             else TlsInspectionExecutionAdapter
         )
         executable_adapter = inline_adapter(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import uuid
@@ -12,6 +13,7 @@ from api.scan.capability_result import (
     CapabilityResultStatus,
 )
 from api.scan.finalizer import finalize_scan_report
+from api.scan import finalizer as finalizer_module
 from api.scan.continuation import ScanPlanRevision
 from tests.test_scan_orchestrator import SCAN_ID, _action, _plan, _result
 
@@ -572,6 +574,72 @@ def test_finalizer_explains_required_action_degradation():
     row = report["canonical_action_execution"]["actions"][0]
     assert row["status"] == "failed"
     assert row["reason_code"] == "adapter_failed"
+
+
+def test_infrastructure_observations_never_affect_score_grade_or_coverage(monkeypatch):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    infrastructure = replace(
+        _action("baseline.infrastructure", 1, capability_name="infrastructure.inspect"),
+        capability_args={},
+        requested_budget={"hosts_attempted": 40, "tool_wall_seconds": 30},
+        required=False,
+        output_schema="infrastructure-intelligence/v1",
+        action_digest=None,
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(baseline.action_id, infrastructure.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, infrastructure, final),
+    )
+    results = _results(plan)
+    results[infrastructure.action_id] = _result_with_observation_count(infrastructure, 1)
+    observations = {
+        baseline.action_id: (),
+        infrastructure.action_id: ({
+            "kind": "infrastructure_intelligence",
+            "informational_only": True,
+            "scoring_effect": "none",
+            "canonical_host": "app.example.test",
+            "registration_domain": "example.test",
+            "registration": {"registrar": {"name": "Example Registrar"}},
+            "addresses": [{"address": "192.0.2.10"}],
+            "related_names": [],
+            "limitations": [],
+            "errors": [],
+        },),
+    }
+    captured = {}
+
+    def score_scan(findings, coverage, *, smart_coverage, posture, grade_reliable):
+        captured["posture"] = posture
+        return {"score": 100, "grade": "A", "grade_reliable": grade_reliable}
+
+    monkeypatch.setattr(finalizer_module.scoring, "score_scan", score_scan)
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert "infrastructure" in report
+    assert "infrastructure" not in captured["posture"]
+    assert report["coverage"]["planned_action_count"] == 1
+    assert report["coverage"]["terminal_action_count"] == 1
+    assert report["coverage"]["capability_coverage"]["total"] == 1
+    assert report["coverage"]["optional_gaps"] == []
+    assert report["coverage"]["grade_reliability"] == {
+        "reliable": True, "reasons": [],
+    }
+    assert any(
+        row["capability_name"] == "infrastructure.inspect"
+        for row in report["canonical_action_execution"]["actions"]
+    )
 
 
 def test_finalizer_promotes_only_typed_pinned_tls_posture_issues():

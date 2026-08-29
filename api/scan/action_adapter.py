@@ -21,12 +21,14 @@ try:
         verify_target_bound_object_authorization,
     )
     from capabilities.dns import inspect_dns_posture
+    from capabilities.infrastructure import inspect_infrastructure_intelligence
     from capabilities.http import execute_bound_http_request
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
+        InfrastructureInspectionExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -78,12 +80,14 @@ except (ImportError, ModuleNotFoundError):
         verify_target_bound_object_authorization,
     )
     from ..capabilities.dns import inspect_dns_posture
+    from ..capabilities.infrastructure import inspect_infrastructure_intelligence
     from ..capabilities.http import execute_bound_http_request
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
+        InfrastructureInspectionExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -834,6 +838,18 @@ class DatabaseNeutralScanActionDispatcher:
 
         adapter = self._prepared_inline(
             action, {}, operation, DnsInspectionExecutionAdapter,
+        )
+        return await self._execute_adapter(action, adapter, heartbeat)
+
+    async def _infrastructure(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        async def operation() -> Mapping[str, Any]:
+            return await inspect_infrastructure_intelligence(
+                self.target,
+                timeout_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
+            )
+
+        adapter = self._prepared_inline(
+            action, {}, operation, InfrastructureInspectionExecutionAdapter,
         )
         return await self._execute_adapter(action, adapter, heartbeat)
 
@@ -2830,6 +2846,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._http(action, heartbeat)
         if action.capability_name == "dns.inspect":
             return await self._dns(action, heartbeat)
+        if action.capability_name == "infrastructure.inspect":
+            return await self._infrastructure(action, heartbeat)
         if action.capability_name == "tls.inspect":
             return await self._tls(action, heartbeat)
         if action.capability_name in {

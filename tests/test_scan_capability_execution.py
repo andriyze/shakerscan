@@ -381,7 +381,7 @@ def test_http_baseline_has_bounded_redirect_hold_and_redacted_path():
 
 def test_dns_posture_has_fixed_host_and_wall_hold():
     assert scan_dns_posture_capability_allocation(_budget()) == {
-        "hosts_attempted": 4,
+        "hosts_attempted": 5,
         "tool_wall_seconds": 15,
     }
     prepared = prepare_scan_inline_capability(

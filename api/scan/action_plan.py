@@ -922,6 +922,12 @@ class ScanActionPlanCompiler:
                     "dns.inspect",
                     {"canonical_host": target_binding.canonical_host},
                 )
+                add(
+                    "baseline.infrastructure",
+                    "deterministic_baseline",
+                    "infrastructure.inspect",
+                    {},
+                )
             https_origin_count = sum(
                 1 for origin in target_binding.allowed_origins
                 if origin.startswith("https://")

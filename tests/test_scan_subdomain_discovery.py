@@ -2196,7 +2196,7 @@ def test_dns_posture_stage_uses_registered_inline_capability(monkeypatch):
     assert call["action_id"] == "deterministic_baseline.dns.inspect"
     assert call["target_binding"] == target
     assert call["reservation_limits"] == {
-        "hosts_attempted": 4,
+        "hosts_attempted": 5,
         "tool_wall_seconds": 15,
     }
     assert callable(call["inline_operation"])

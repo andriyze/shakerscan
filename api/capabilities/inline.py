@@ -179,6 +179,10 @@ class DnsInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize one fixed-plan, target-name-bound DNS inspection."""
 
 
+class InfrastructureInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize bounded registration and network context observations."""
+
+
 class AuthSessionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize a worker-private credential exchange to content-free evidence."""
 
