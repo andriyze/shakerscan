@@ -3759,14 +3759,44 @@ async def run_schema_migrations(pool) -> None:
                     content JSONB,
                     retention_delete_preview_id UUID,
                     retention_delete_pending_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+                    created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             await conn.execute("""
                 ALTER TABLE evidence_objects
                 ADD COLUMN IF NOT EXISTS retention_delete_preview_id UUID,
                 ADD COLUMN IF NOT EXISTS retention_delete_pending_at TIMESTAMPTZ
+            """)
+            # The original identity collapsed every observation of a finding into
+            # one mutable row. Its content was replaced by the newest scan while
+            # its scan_id stayed attached to the first scan, corrupting provenance.
+            # Existing rows contain the most recently upserted content, so repair
+            # that legacy link to the finding's current observation once, then make
+            # every future scan observation independently addressable.
+            await conn.execute("""
+                UPDATE evidence_objects evidence
+                SET scan_id=findings.scan_id
+                FROM findings
+                WHERE evidence.finding_id=findings.id
+                  AND evidence.scan_id IS NOT NULL
+                  AND findings.scan_id IS NOT NULL
+                  AND evidence.scan_id IS DISTINCT FROM findings.scan_id
+                  AND evidence.object_type ~ '(^finding_evidence$|_evidence$)'
+                  AND evidence.retention_delete_pending_at IS NULL
+            """)
+            await conn.execute("""
+                ALTER TABLE evidence_objects
+                DROP CONSTRAINT IF EXISTS evidence_objects_finding_type_unique
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_scan_unique
+                ON evidence_objects(finding_id, object_type, scan_id)
+                WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_unscoped_unique
+                ON evidence_objects(finding_id, object_type)
+                WHERE finding_id IS NOT NULL AND scan_id IS NULL
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")

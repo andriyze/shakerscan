@@ -583,11 +583,13 @@ async def _release_evidence_blob_lock(conn, content_sha256: str | None) -> None:
         pass
 
 
-async def _acquire_evidence_identity_lock(conn, finding_id: Any, object_type: str) -> str | None:
+async def _acquire_evidence_identity_lock(
+    conn, finding_id: Any, object_type: str, scan_id: Any = None,
+) -> str | None:
     """Serialize a finding/object upsert with retention intent for that exact row."""
     if not finding_id or not object_type:
         return None
-    key = f"evidence-row:{finding_id}:{object_type}"
+    key = f"evidence-row:{finding_id}:{object_type}:{scan_id or 'unscoped'}"
     await conn.fetchval("SELECT pg_advisory_lock(hashtextextended($1, 0))", key)
     return key
 
@@ -3003,16 +3005,19 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
         # retention intent can land between the check and a different-content
         # upsert, making the conditional UPSERT a silent no-op after a new blob
         # was already written.
-        identity_lock = await _acquire_evidence_identity_lock(conn, finding_id, object_type)
+        identity_lock = await _acquire_evidence_identity_lock(
+            conn, finding_id, object_type, scan_uuid,
+        )
         pending_preview = await conn.fetchval(
             """
             SELECT retention_delete_preview_id
             FROM evidence_objects
-            WHERE finding_id=$1 AND object_type=$2
+            WHERE finding_id=$1 AND object_type=$2 AND scan_id=$3
               AND retention_delete_pending_at IS NOT NULL
             """,
             finding_id,
             object_type,
+            scan_uuid,
         )
         if pending_preview:
             return
@@ -3027,7 +3032,9 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
                 (scan_id, finding_id, object_type, content_sha256, size_bytes,
                  storage_uri, redaction_profile, retention_class, content)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (finding_id, object_type) DO UPDATE SET
+            ON CONFLICT (finding_id, object_type, scan_id)
+                WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
+            DO UPDATE SET
                 content_sha256=EXCLUDED.content_sha256, size_bytes=EXCLUDED.size_bytes,
                 storage_uri=EXCLUDED.storage_uri, content=EXCLUDED.content,
                 retention_class=EXCLUDED.retention_class, created_at=NOW()

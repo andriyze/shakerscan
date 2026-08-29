@@ -1086,11 +1086,16 @@ CREATE TABLE evidence_objects (
     content JSONB,
     retention_delete_preview_id UUID,
     retention_delete_pending_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX idx_evidence_objects_finding ON evidence_objects(finding_id);
 CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
+CREATE UNIQUE INDEX idx_evidence_objects_finding_type_scan_unique
+    ON evidence_objects(finding_id, object_type, scan_id)
+    WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_evidence_objects_finding_type_unscoped_unique
+    ON evidence_objects(finding_id, object_type)
+    WHERE finding_id IS NOT NULL AND scan_id IS NULL;
 CREATE INDEX idx_evidence_objects_retention_pending ON evidence_objects(retention_delete_pending_at)
     WHERE retention_delete_pending_at IS NOT NULL;
 

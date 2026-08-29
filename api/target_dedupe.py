@@ -179,11 +179,11 @@ async def _merge_findings(conn, survivor_id, dupe_ids: list) -> None:
         return
     all_ids = [survivor_id, *dupe_ids]
     if await _table_exists(conn, "evidence_objects"):
-        # A finding owns at most one durable evidence object of each type. Two
-        # canonical-target variants can nevertheless have produced the same finding
-        # independently, so moving both objects directly to the surviving finding
-        # violates evidence_objects_finding_type_unique and blocks startup. Collapse
-        # only those exact (surviving finding, object type) collisions before the
+        # A finding owns at most one durable evidence object of each type *per scan*.
+        # Two canonical-target variants can nevertheless have produced the same finding
+        # in the same scan, so moving both objects directly to the surviving finding
+        # violates the scan-scoped evidence identity and blocks startup. Collapse
+        # only those exact (surviving finding, object type, scan) collisions before the
         # generic child re-parenting below. Prefer evidence already attached to the
         # finding we keep, then the newest object. The surrounding target-merge
         # transaction and retention-preview guard make this atomic and fail closed.
@@ -199,7 +199,8 @@ async def _merge_findings(conn, survivor_id, dupe_ids: list) -> None:
             ), ranked_objects AS (
                 SELECT evidence.id,
                        ROW_NUMBER() OVER (
-                           PARTITION BY ranked.keep_id, evidence.object_type
+                           PARTITION BY ranked.keep_id, evidence.object_type,
+                                        COALESCE(evidence.scan_id, '00000000-0000-0000-0000-000000000000'::uuid)
                            ORDER BY (evidence.finding_id=ranked.keep_id) DESC,
                                     evidence.created_at DESC,
                                     evidence.id DESC
