@@ -85,6 +85,25 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
     assert (ROOT / "api" / "hunt" / "capability_executor.py").is_file()
 
 
+def test_v2_workflow_executes_foundation_regressions_on_every_backend_change():
+    text = _workflow_text()
+
+    for test_file in (
+        "tests/test_http_archive.py",
+        "tests/test_hunt_authority_integrity.py",
+        "tests/test_hunt_direct_origin.py",
+        "tests/test_hunt_http_capability.py",
+        "tests/test_hunt_run_router.py",
+        "tests/test_hunt_skills.py",
+        "tests/test_runtime_credentials.py",
+        "tests/test_runtime_hardening.py",
+        "tests/test_scan_credentials.py",
+        "tests/test_scan_finalizer.py",
+        "tests/test_scan_risk_and_assurance.py",
+    ):
+        assert test_file in text, test_file
+
+
 def test_v2_workflow_is_valid_yaml_with_focused_contract_and_manual_stack_jobs():
     workflow = yaml.safe_load(_workflow_text())
 

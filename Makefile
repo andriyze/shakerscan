@@ -84,16 +84,20 @@ fleet-acceptance:
 UNIT_TESTS = tests/test_deployment_gate.py tests/test_canonical_dedupe.py \
 	tests/test_api_id_validation.py \
 	tests/test_evidence_objects.py tests/test_worker_freshness.py \
-	tests/test_agent_receipt_verification.py tests/test_application_graph.py
+	tests/test_agent_receipt_verification.py tests/test_application_graph.py \
+	tests/test_runtime_hardening.py
+FOUNDATION_PACKAGE_TESTS = tests/test_http_archive.py \
+	tests/test_hunt_authority_integrity.py tests/test_hunt_direct_origin.py \
+	tests/test_hunt_http_capability.py tests/test_hunt_run_router.py \
+	tests/test_hunt_skills.py tests/test_runtime_credentials.py \
+	tests/test_scan_credentials.py tests/test_scan_finalizer.py \
+	tests/test_scan_risk_and_assurance.py
 test:
-	@docker compose exec -T api sh -lc 'rm -rf /tmp/tests /tmp/db /tmp/api; mkdir -p /tmp/api' >/dev/null
-	@docker compose cp tests api:/tmp/tests >/dev/null
-	@docker compose cp db api:/tmp/db >/dev/null
-	@docker compose cp api/retest_contract.py api:/tmp/api/retest_contract.py >/dev/null
 	@docker compose exec -T api sh -lc '\
 		command -v pytest >/dev/null 2>&1 || pip install -q pytest >/dev/null 2>&1; \
-		rm -rf /tmp/scanner; cd /tmp; \
-		PYTHONPATH=/app/_src/api:/app/_src python -m pytest -q -p no:cacheprovider $(UNIT_TESTS)'
+		cd /workspace; \
+		PYTHONPATH=/workspace/api:/workspace/scanner:/workspace python -m pytest -q -p no:cacheprovider $(UNIT_TESTS); \
+		PYTHONPATH=/workspace:/workspace/api:/workspace/scanner python -m pytest -q -p no:cacheprovider $(FOUNDATION_PACKAGE_TESTS)'
 
 ## Run the named roadmap release gates. Use GATES='test:planner-no-shell ...'
 ## to run a subset.
