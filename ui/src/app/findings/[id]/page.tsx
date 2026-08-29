@@ -272,27 +272,35 @@ function evidenceObjectContentText(content: unknown): string {
 
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const toast = useToast()
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(text)
+      setFailed(false)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch (err) {
       console.error('Failed to copy:', err)
+      setFailed(true)
+      toast.error('Clipboard access failed. Select and copy the adjacent text instead.')
     }
   }
 
   return (
-    <button
-      onClick={handleCopy}
-      className="p-1 rounded hover:bg-gray-800 transition-colors"
-      title={label || 'Copy'}
-      aria-label={label || 'Copy'}
-      type="button"
-    >
-      {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5 text-gray-400" />}
-    </button>
+    <span className="inline-flex items-center gap-1">
+      <button
+        onClick={handleCopy}
+        className="p-1 rounded hover:bg-gray-800 transition-colors"
+        title={label || 'Copy'}
+        aria-label={label || 'Copy'}
+        type="button"
+      >
+        {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className={`w-3.5 h-3.5 ${failed ? 'text-red-400' : 'text-gray-400'}`} />}
+      </button>
+      {failed && <span role="status" className="text-[10px] text-red-300">select text</span>}
+    </span>
   )
 }
 
@@ -805,7 +813,7 @@ function FindingDetailContent() {
                 <SeverityBadge severity={finding.severity} />
                 <FindingStatusBadge status={finding.status} />
                 <SourceTypeBadge type={getFindingSourceType(finding)} />
-                {finding.cvss_score !== undefined && (
+                {finding.cvss_score !== undefined && finding.cvss_score !== null && (
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-200 text-xs">
                     CVSS {finding.cvss_score}
                   </span>
@@ -835,7 +843,9 @@ function FindingDetailContent() {
               </div>
 
               {/* Status change controls */}
-              <div className="flex flex-wrap gap-2 mt-4">
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-medium text-gray-300">Canonical lifecycle</p>
+                <div className="flex flex-wrap gap-2">
                 {FINDING_STATUSES.map((status) => (
                   <button
                     key={status}
@@ -850,6 +860,7 @@ function FindingDetailContent() {
                     {status.replace('_', ' ')}
                   </button>
                 ))}
+                </div>
               </div>
 
               <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
