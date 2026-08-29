@@ -5455,6 +5455,10 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
     result["verdict_reason"] = ai_result.get("reasoning", "")
     result["confidence"] = ai_confidence
     result["result_status"] = _result_status_for_verdict(ai_verdict)
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    artifacts = dict(artifacts)
+    artifacts["ai_step_results"] = list(ai_result.get("step_results") or [])
+    result["artifacts"] = artifacts
     return _enforce_verdict_invariants(result)
 
 

@@ -72,29 +72,24 @@ def _tested_endpoint(value: Any, base_url: Any) -> str | None:
 
 
 def _tested_scope(result: dict[str, Any]) -> tuple[str | None, list[str]]:
-    """Derive the actual replay scope from immutable public artifacts and plan steps."""
+    """Derive replay scope only from durable records of requests that executed."""
     base_url = result.get("target_url")
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
-    plan = result.get("ai_plan") if isinstance(result.get("ai_plan"), dict) else {}
     raw_candidates: list[Any] = [
         artifacts.get("attempted_url"),
-        artifacts.get("target_url"),
-        result.get("original_url"),
     ]
-    steps = plan.get("steps")
-    if isinstance(steps, list):
+    step_results = artifacts.get("ai_step_results")
+    if isinstance(step_results, list):
         raw_candidates.extend(
-            step.get("url") for step in steps if isinstance(step, dict)
+            row.get("step", {}).get("url")
+            for row in step_results
+            if isinstance(row, dict) and isinstance(row.get("step"), dict)
         )
 
     endpoints: list[str] = []
     for value in raw_candidates:
         endpoint = _tested_endpoint(value, base_url)
         if endpoint and endpoint not in endpoints:
-            endpoints.append(endpoint)
-    if not endpoints:
-        endpoint = _tested_endpoint(base_url, None)
-        if endpoint:
             endpoints.append(endpoint)
     return (endpoints[0] if endpoints else None, endpoints)
 
@@ -129,7 +124,11 @@ def public_retest_row(row: Any) -> dict[str, Any]:
     primary_endpoint, tested_endpoints = _tested_scope(result)
     result["primary_tested_endpoint"] = primary_endpoint
     result["tested_endpoints"] = tested_endpoints
-    result["tested_scope"] = "multiple_endpoints" if len(tested_endpoints) > 1 else "single_endpoint"
+    result["tested_scope"] = (
+        "multiple_endpoints" if len(tested_endpoints) > 1
+        else "single_endpoint" if tested_endpoints
+        else None
+    )
     return result
 
 

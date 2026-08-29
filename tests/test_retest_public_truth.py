@@ -37,7 +37,13 @@ def test_retest_exposes_exact_tested_scope_without_conflating_base_target():
     row = public_retest_row({
         "target_url": "http://host.docker.internal:3001",
         "original_url": "/rest/products/search",
-        "artifacts": {"target_url": "/rest/products/search?q=test"},
+        "artifacts": {
+            "attempted_url": "/rest/products/search?q=test",
+            "ai_step_results": [
+                {"step": {"url": "http://host.docker.internal:3001/"}, "result": {"status": 200}},
+                {"step": {"url": "/rest/products/search?q=probe"}, "result": {"status": 200}},
+            ],
+        },
         "ai_plan": {
             "steps": [
                 {"url": "http://host.docker.internal:3001/"},
@@ -49,8 +55,20 @@ def test_retest_exposes_exact_tested_scope_without_conflating_base_target():
     assert row["primary_tested_endpoint"] == "http://host.docker.internal:3001/rest/products/search?q=test"
     assert row["tested_endpoints"] == [
         "http://host.docker.internal:3001/rest/products/search?q=test",
-        "http://host.docker.internal:3001/rest/products/search",
         "http://host.docker.internal:3001/",
         "http://host.docker.internal:3001/rest/products/search?q=probe",
     ]
     assert row["tested_scope"] == "multiple_endpoints"
+
+
+def test_retest_with_no_executed_steps_does_not_claim_tested_scope():
+    row = public_retest_row({
+        "target_url": "https://example.test",
+        "original_url": "/planned-only",
+        "artifacts": {"ai_step_results": []},
+        "ai_plan": {"steps": [{"url": "/never-executed"}]},
+    })
+
+    assert row["primary_tested_endpoint"] is None
+    assert row["tested_endpoints"] == []
+    assert row["tested_scope"] is None
