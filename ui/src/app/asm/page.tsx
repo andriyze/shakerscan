@@ -42,7 +42,6 @@ import {
   type AsmCheckFamily,
   type AsmConfig,
   type AsmCoverage,
-  type AsmCoverageRollup,
   type AsmEndpoint,
   type AsmGaps,
   type AsmPolicy,
@@ -55,6 +54,11 @@ import {
 import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { normalizeFamilyCoverage, safeRemediationHref } from '@/lib/deferredWorkContracts'
+import {
+  asmCoverageDenominator,
+  currentCompletedVariantCount,
+  resolvedCoverage,
+} from '@/lib/asmCoverage'
 import {
   Badge,
   Button,
@@ -101,27 +105,6 @@ const METHOD_BADGE: Record<string, string> = {
 
 function pct(coverage: number): string {
   return `${(coverage * 100).toFixed(1)}%`
-}
-
-type CoverageSummary = AsmCoverage | AsmCoverageRollup
-
-function asmCoverageDenominator(coverage: CoverageSummary | null | undefined): { value: number; label: string } {
-  if (!coverage) return { value: 0, label: 'testable' }
-  if (coverage.metric_contract) return { value: coverage.metric_contract.inventory.route_variants, label: 'testable route variants' }
-  const value = coverage.denominator ?? coverage.testable ?? Math.max(coverage.total - ('gone' in coverage ? coverage.gone : 0), 0)
-  const label = coverage.denominator_label || (coverage.denominator !== undefined || coverage.testable !== undefined ? 'testable' : 'total - gone')
-  return { value, label }
-}
-
-function resolvedCoverage(coverage: CoverageSummary | null | undefined): number {
-  if (!coverage) return 0
-  const denominator = asmCoverageDenominator(coverage).value
-  const completed = coverage.metric_contract?.examination.variants_ever_completed ?? coverage.tested
-  return denominator > 0 ? Math.max(0, Math.min(1, completed / denominator)) : 0
-}
-
-function completedVariantCount(coverage: CoverageSummary): number {
-  return coverage.metric_contract?.examination.variants_ever_completed ?? coverage.tested
 }
 
 // The ASM scheduling window is stored/evaluated in UTC; these helpers surface
@@ -261,7 +244,7 @@ function RollupView({
                 const cov = target.asm_coverage!
                 const denominator = asmCoverageDenominator(cov)
                 const currentCoverage = resolvedCoverage(cov)
-                const completed = completedVariantCount(cov)
+                const completed = currentCompletedVariantCount(cov)
                 const remaining = Math.max(denominator.value - completed, 0)
                 return (
                   <tr key={target.id} className="border-b border-gray-800/60 hover:bg-gray-800/30">
@@ -800,7 +783,7 @@ function CoverageAdvisorCard({
   const currentCoverage = resolvedCoverage(coverage)
   const coveragePct = coverage ? pct(currentCoverage) : '—'
   const coverageDenominatorText = coverage
-    ? `${completedVariantCount(coverage)} of ${denominator.value} route variant${denominator.value === 1 ? '' : 's'} completed`
+    ? `${currentCompletedVariantCount(coverage)} of ${denominator.value} route variant${denominator.value === 1 ? '' : 's'} currently completed`
     : 'No coverage data'
   const recommendationReason = (rec?.reason || 'Load a target inventory to see the next coverage action.')
     .replace(/^1 endpoint\(s\)/, '1 endpoint')
@@ -1510,10 +1493,10 @@ function TargetView({ targetId }: { targetId: string }) {
             <span className="text-sm font-medium text-gray-400">Coverage</span>
             <div className="text-right">
               <div className="text-sm text-gray-300">
-                {pct(resolvedCoverage(coverage))} · {completedVariantCount(coverage)} of {coverageDenominator.value} route variants completed
+                {pct(resolvedCoverage(coverage))} · {currentCompletedVariantCount(coverage)} of {coverageDenominator.value} route variants currently completed
               </div>
               <div className="text-xs text-gray-500">
-                Historical examination coverage · snapshot {coverage.metric_contract?.snapshot_at ? formatDate(coverage.metric_contract.snapshot_at) : 'time unavailable'}
+                Current examination coverage · snapshot {coverage.metric_contract?.snapshot_at ? formatDate(coverage.metric_contract.snapshot_at) : 'time unavailable'}
               </div>
             </div>
           </div>
@@ -1521,7 +1504,7 @@ function TargetView({ targetId }: { targetId: string }) {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
             <CoverageStat label="Canonical routes" value={coverage.metric_contract?.inventory.canonical_routes ?? coverageDenominator.value} />
             <CoverageStat label="Route variants" value={coverageDenominator.value} />
-            <CoverageStat label="Ever completed" value={completedVariantCount(coverage)} accent="text-green-400" />
+            <CoverageStat label="Ever completed" value={coverage.metric_contract?.examination.variants_ever_completed ?? coverage.tested} accent="text-green-400" />
             <CoverageStat label="Fresh now" value={coverage.metric_contract?.examination.current_fresh_variants ?? coverage.tested} accent="text-blue-400" />
             <CoverageStat label="In progress" value={coverage.in_progress} accent="text-blue-400" />
             <CoverageStat label="Stale" value={coverage.stale} accent="text-yellow-400" />
