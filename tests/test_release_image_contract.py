@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -84,12 +86,16 @@ def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
         assert f"- name: {image}" in workflow
     assert "severity: HIGH,CRITICAL" in workflow
     assert "ignore-unfixed: true" in workflow
-    assert "skip-dirs: ${{ matrix.skip_dirs }}" in workflow
-    assert "skip-files: ${{ matrix.skip_files }}" in workflow
+    assert "skip-dirs: ${{ matrix.target.skip_dirs }}" in workflow
+    assert "skip-files: ${{ matrix.target.skip_files }}" in workflow
     assert "skip_dirs: /opt/model-intake-tools" in workflow
     assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner" in workflow
     assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker" in workflow
     assert "exit-code: 1" in workflow
+    assert "scanners: vuln" in workflow
+    assert "TRIVY_PLATFORM: ${{ matrix.platform.value }}" in workflow
+    assert "value: linux/amd64" in workflow
+    assert "value: linux/arm64" in workflow
     assert "validate_vulnerability_waivers.py" in workflow
 
 
@@ -107,12 +113,65 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     ):
         assert dependency in scanner
     assert "pip uninstall -y --break-system-packages msgpack setuptools" in scanner
+    assert "pip uninstall -y --break-system-packages pip" in scanner
+    assert 'find_spec("pip") is None' in scanner
+    assert "nikto masscan python3-pip" not in scanner
+    for build_only_package in (
+        "python3-venv", "python3.12-venv", "python3-pip-whl", "python3-setuptools-whl",
+    ):
+        assert build_only_package in scanner.split("apt-get purge -y --auto-remove", 1)[1]
+    assert scanner.index("COPY scanner/Dockerfile /opt/build-inputs/scanner.Dockerfile") > (
+        scanner.index("pip uninstall -y --break-system-packages pip")
+    )
     assert "rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth" in scanner
     assert "test -z \"$(python -c 'pass' 2>&1)\"" in scanner
 
     assert "node:24-alpine@sha256:" in ui
-    assert ui.count("apk upgrade --no-cache") == 2
+    assert ui.count("apk add --no-cache --upgrade") == 2
+    assert ui.count("APK_TOOLS_VERSION=3.0.7-r0") == 2
+    assert ui.count("OPENSSL_VERSION=3.5.8-r0") == 2
+    assert ui.count("Pinned Alpine security update failed after 4 attempts") == 2
     assert "rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx" in ui
+
+
+def test_release_component_builds_have_independent_retry_domains():
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
+    )
+    jobs = workflow["jobs"]
+
+    assert {"build-runtime", "build-ui", "build-signer"} <= set(jobs)
+    assert jobs["merge"]["needs"] == [
+        "meta", "build-runtime", "build-ui", "build-signer",
+    ]
+    runtime_steps = "\n".join(step.get("name", "") for step in jobs["build-runtime"]["steps"])
+    ui_steps = "\n".join(step.get("name", "") for step in jobs["build-ui"]["steps"])
+    signer_steps = "\n".join(step.get("name", "") for step in jobs["build-signer"]["steps"])
+    assert "Build and push scanner by digest" in runtime_steps
+    assert "Build and push API control plane by digest" in runtime_steps
+    assert "Build and push UI by digest" not in runtime_steps
+    assert "Build and push signer by digest" not in runtime_steps
+    assert "Build and push UI by digest" in ui_steps
+    assert "Build and push signer by digest" in signer_steps
+
+    expected_cache_scopes = {
+        "build-runtime": ("scanner", "api"),
+        "build-ui": ("ui",),
+        "build-signer": ("signer",),
+    }
+    for job_name, scopes in expected_cache_scopes.items():
+        build_steps = [
+            step for step in jobs[job_name]["steps"]
+            if step.get("uses", "").startswith("docker/build-push-action@")
+        ]
+        assert len(build_steps) == len(scopes)
+        for step, scope in zip(build_steps, scopes, strict=True):
+            assert step["with"]["cache-from"] == (
+                f"type=gha,scope={scope}-${{{{ env.PLATFORM_PAIR }}}}"
+            )
+            assert step["with"]["cache-to"] == (
+                f"type=gha,mode=max,scope={scope}-${{{{ env.PLATFORM_PAIR }}}}"
+            )
 
 
 def test_scanner_image_bakes_release_identity_for_broker_workers():

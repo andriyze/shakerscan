@@ -85,17 +85,14 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
     assert (ROOT / "api" / "hunt" / "capability_executor.py").is_file()
 
 
-def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_jobs():
+def test_v2_workflow_is_valid_yaml_with_focused_contract_and_manual_stack_jobs():
     workflow = yaml.safe_load(_workflow_text())
 
     assert workflow["name"] == "V2 migration contracts"
     assert set(workflow["jobs"]) == {
-        "changes", "contracts", "complete-python", "ui-contract", "images-api-ui",
+        "changes", "contracts", "ui-contract", "images-api-ui",
     }
     assert workflow["jobs"]["contracts"]["if"] == (
-        "needs.changes.outputs.backend == 'true'"
-    )
-    assert workflow["jobs"]["complete-python"]["if"] == (
         "needs.changes.outputs.backend == 'true'"
     )
     assert workflow["jobs"]["ui-contract"]["if"] == (
@@ -113,17 +110,15 @@ def test_v2_workflow_is_valid_yaml_with_required_contract_build_and_full_suite_j
     assert len(image_checkout["uses"].split("@", 1)[1]) == 40
     assert image_checkout["with"]["fetch-depth"] == 0
     text = _workflow_text()
-    assert "scripts/run_complete_python_suite.py --collect-only" in text
-    assert "scripts/run_complete_python_suite.py" in text
+    assert "scripts/run_complete_python_suite.py" not in text
+    release_candidate = (
+        ROOT / ".github" / "workflows" / "release-candidate.yml"
+    ).read_text(encoding="utf-8")
+    assert release_candidate.count("scripts/run_complete_python_suite.py") == 1
     assert "PYTHONPATH=.:api:scanner python -m pytest" in text
     assert "requests==2.34.2" in text
-    assert "--coverage --artifacts-dir artifacts" in text
-    runner = (ROOT / "scripts" / "run_complete_python_suite.py").read_text()
-    assert 'artifacts / "v2-full-python.xml"' in runner
-    assert 'artifacts / "v2-coverage.xml"' in runner
-    assert "partition_test_files(repo_root)" in runner
     assert "./scanner.sh build" in text
-    assert "python -m playwright install --with-deps chromium" in text
+    assert "npx --prefix ui playwright install --with-deps chromium" in text
     assert "scripts/docker_api_overlay_smoke.sh" in text
     assert "npm --prefix ui run build" in text
     assert "npm --prefix ui run test:unit" in text
@@ -155,6 +150,9 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
     assert "npm --prefix ui run test:unit" in smoke
     assert "npm --prefix ui run test:browser" in smoke
     assert "python3 tests/e2e/run_e2e.py --area hunt" in smoke
+    assert "--area model_intake" not in smoke
+    assert "test_model_intake_signature_crypto.py" not in smoke
+    assert "scripts/run_complete_python_suite.py" not in smoke
     assert "node-version: 24" in smoke
     assert "npm --prefix ui run test:unit" in release
     assert "npm --prefix ui run test:unit" in full_e2e

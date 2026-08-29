@@ -3,9 +3,25 @@ FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a
 
 WORKDIR /app
 
-# Apply current Alpine security updates even when the immutable Node manifest
-# predates a repository package fix by a few days.
-RUN apk upgrade --no-cache
+# The immutable Node image can lag Alpine's security repository by a few days.
+# Pin the small security delta so a candidate cannot silently resolve different
+# package revisions, and retry only this network-bound repository operation.
+ARG APK_TOOLS_VERSION=3.0.7-r0
+ARG OPENSSL_VERSION=3.5.8-r0
+RUN set -eu; \
+    attempt=1; \
+    until apk add --no-cache --upgrade \
+      "apk-tools=${APK_TOOLS_VERSION}" \
+      "libapk=${APK_TOOLS_VERSION}" \
+      "libcrypto3=${OPENSSL_VERSION}" \
+      "libssl3=${OPENSSL_VERSION}"; do \
+      if [ "$attempt" -ge 4 ]; then \
+        echo "Pinned Alpine security update failed after 4 attempts" >&2; \
+        exit 1; \
+      fi; \
+      sleep $((attempt * 3)); \
+      attempt=$((attempt + 1)); \
+    done
 
 # Install pinned dependencies from the lockfile
 COPY package.json package-lock.json ./
@@ -31,7 +47,22 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-RUN apk upgrade --no-cache && \
+ARG APK_TOOLS_VERSION=3.0.7-r0
+ARG OPENSSL_VERSION=3.5.8-r0
+RUN set -eu; \
+    attempt=1; \
+    until apk add --no-cache --upgrade \
+      "apk-tools=${APK_TOOLS_VERSION}" \
+      "libapk=${APK_TOOLS_VERSION}" \
+      "libcrypto3=${OPENSSL_VERSION}" \
+      "libssl3=${OPENSSL_VERSION}"; do \
+      if [ "$attempt" -ge 4 ]; then \
+        echo "Pinned Alpine security update failed after 4 attempts" >&2; \
+        exit 1; \
+      fi; \
+      sleep $((attempt * 3)); \
+      attempt=$((attempt + 1)); \
+    done; \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Copy built assets

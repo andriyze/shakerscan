@@ -20,10 +20,6 @@ jobs:
     env:
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
-      MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
-      MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
-      MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
-      SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -77,31 +73,12 @@ jobs:
           done
           curl -sf http://localhost:8080/health
 
-      - name: Run deterministic platform, Model Intake, and AI Gate smoke tests
+      - name: Run deterministic platform, AI Gate, and Hunt smoke tests
         if: steps.changes.outputs.backend == 'true'
         run: |
           python3 tests/e2e/run_e2e.py --area platform
-          python3 tests/e2e/run_e2e.py --area model_intake
           python3 tests/e2e/run_e2e.py --area ai_gate
           python3 tests/e2e/run_e2e.py --area hunt
-
-      - name: Run Model Intake cryptographic trust contracts
-        if: steps.changes.outputs.backend == 'true'
-        run: |
-          docker compose cp tests api:/tmp/model-intake-tests
-          docker compose exec -T api sh -lc '
-            cd /tmp &&
-            PYTHONPATH=/app/_src/api:/app/_src python -m pytest -q -p no:cacheprovider \
-              model-intake-tests/test_model_intake_admission.py \
-              model-intake-tests/test_model_intake_attestation.py \
-              model-intake-tests/test_model_intake_signature_crypto.py'
-
-      - name: Run complete Python unit and contract suite
-        if: steps.changes.outputs.backend == 'true'
-        run: |
-          docker compose exec -T api sh -lc '
-            cd /workspace &&
-            python scripts/run_complete_python_suite.py'
 
       - name: Set up supported Node runtime
         if: steps.changes.outputs.ui == 'true'

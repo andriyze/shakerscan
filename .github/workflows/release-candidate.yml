@@ -220,9 +220,6 @@ jobs:
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
 
-      - name: Build locked Model Intake signer image
-        run: docker build -f api/model_intake_signer.Dockerfile -t shakerscan-model-intake-signer:release-candidate .
-
       - name: Enforce candidate-image external wire ceilings
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
@@ -293,15 +290,6 @@ jobs:
           npm --prefix ui run test:unit
           npm --prefix ui run build
 
-      - name: Build the candidate UI image
-        env:
-          VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          docker build \
-            --build-arg NEXT_PUBLIC_APP_VERSION="$VERSION" \
-            --build-arg UI_SOURCE_REVISION="${{ needs.meta.outputs.candidate_sha }}" \
-            -f ui/Dockerfile -t shakerscan-ui:release-candidate ui
-
       - name: Upload exact-source Python contract report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -319,8 +307,8 @@ jobs:
   # Build each architecture on a NATIVE runner (no QEMU emulation — that is what
   # blew past the 6h job limit, and katana's CGO dep cannot cross-compile). Each
   # job pushes by digest; the manifest lists are assembled in the merge job.
-  build:
-    name: Build ${{ matrix.platform }}
+  build-runtime:
+    name: Build scanner/API ${{ matrix.platform }}
     needs: [meta, validate]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -379,6 +367,8 @@ jobs:
             org.opencontainers.image.vendor=ShakerScan
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=scanner-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=scanner-${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=${{ env.SCANNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push API control plane by digest
@@ -404,56 +394,9 @@ jobs:
             org.opencontainers.image.vendor=ShakerScan
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=api-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=api-${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=${{ env.API_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Build and push UI by digest
-        id: ui
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
-        with:
-          context: ./ui
-          file: ui/Dockerfile
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            NEXT_PUBLIC_APP_VERSION=${{ needs.meta.outputs.version }}
-            UI_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}
-          labels: |
-            org.opencontainers.image.title=ShakerScan UI
-            org.opencontainers.image.description=Open-source ShakerScan web dashboard
-            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
-            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
-            org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
-            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
-            org.opencontainers.image.source=${{ env.SOURCE_URL }}
-            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-ui
-            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.vendor=ShakerScan
-          provenance: mode=max
-          sbom: true
-          outputs: type=image,name=${{ env.UI_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Build and push Model Intake signer by digest
-        id: signer
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
-        with:
-          context: .
-          file: api/model_intake_signer.Dockerfile
-          platforms: ${{ matrix.platform }}
-          labels: |
-            org.opencontainers.image.title=ShakerScan Model Intake Signer
-            org.opencontainers.image.description=Narrow Model Intake admission signer trust service
-            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
-            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
-            org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
-            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
-            org.opencontainers.image.source=${{ env.SOURCE_URL }}
-            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-model-intake-signer
-            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.vendor=ShakerScan
-          provenance: mode=max
-          sbom: true
-          outputs: type=image,name=${{ env.SIGNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Verify baked scanner release identity
         shell: bash
@@ -485,20 +428,176 @@ jobs:
       - name: Export digests
         shell: bash
         run: |
-          mkdir -p /tmp/digests/scanner /tmp/digests/api /tmp/digests/ui /tmp/digests/signer
+          mkdir -p /tmp/digests/scanner /tmp/digests/api
           scanner_digest="${{ steps.scanner.outputs.digest }}"
           api_digest="${{ steps.api.outputs.digest }}"
-          ui_digest="${{ steps.ui.outputs.digest }}"
-          signer_digest="${{ steps.signer.outputs.digest }}"
           touch "/tmp/digests/scanner/${scanner_digest#sha256:}"
           touch "/tmp/digests/api/${api_digest#sha256:}"
-          touch "/tmp/digests/ui/${ui_digest#sha256:}"
-          touch "/tmp/digests/signer/${signer_digest#sha256:}"
 
       - name: Upload digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: digests-${{ env.PLATFORM_PAIR }}
+          name: runtime-digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # UI has no dependency on the scanner/API image chain. Keep it in a separate
+  # retry domain so a transient package-registry failure cannot rebuild the
+  # multi-gigabyte scanner runtime.
+  build-ui:
+    name: Build UI ${{ matrix.platform }}
+    needs: [meta, validate]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+
+      - name: Prepare platform pair
+        shell: bash
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push UI by digest
+        id: ui
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: ./ui
+          file: ui/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            NEXT_PUBLIC_APP_VERSION=${{ needs.meta.outputs.version }}
+            UI_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}
+          labels: |
+            org.opencontainers.image.title=ShakerScan UI
+            org.opencontainers.image.description=Open-source ShakerScan web dashboard
+            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-ui
+            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=ShakerScan
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ui-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=ui-${{ env.PLATFORM_PAIR }}
+          outputs: type=image,name=${{ env.UI_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export UI digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests/ui
+          digest="${{ steps.ui.outputs.digest }}"
+          touch "/tmp/digests/ui/${digest#sha256:}"
+
+      - name: Upload UI digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ui-digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # The narrow signer image is independent of both the product UI and the
+  # scanner/API dependency chain, so it gets its own retry boundary as well.
+  build-signer:
+    name: Build signer ${{ matrix.platform }}
+    needs: [meta, validate]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+
+      - name: Prepare platform pair
+        shell: bash
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push signer by digest
+        id: signer
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: api/model_intake_signer.Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=ShakerScan Model Intake Signer
+            org.opencontainers.image.description=Narrow Model Intake admission signer trust service
+            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-model-intake-signer
+            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=ShakerScan
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=signer-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=signer-${{ env.PLATFORM_PAIR }}
+          outputs: type=image,name=${{ env.SIGNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export signer digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests/signer
+          digest="${{ steps.signer.outputs.digest }}"
+          touch "/tmp/digests/signer/${digest#sha256:}"
+
+      - name: Upload signer digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signer-digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 14
@@ -506,7 +605,7 @@ jobs:
   # Combine the per-arch digests into one multi-arch manifest list per image.
   merge:
     name: Create multi-arch manifests
-    needs: [meta, build]
+    needs: [meta, build-runtime, build-ui, build-signer]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -528,7 +627,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: "*-digests-*"
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -670,7 +769,7 @@ jobs:
           retention-days: 30
 
   vulnerability-scan:
-    name: Scan exact ${{ matrix.name }} manifest
+    name: Scan exact ${{ matrix.target.name }} ${{ matrix.platform.name }} runtime
     needs: [meta, merge]
     runs-on: ubuntu-latest
     permissions:
@@ -678,7 +777,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
+          - name: amd64
+            value: linux/amd64
+          - name: arm64
+            value: linux/arm64
+        target:
           - name: scanner
             image: shakerscan/shakerscan-scanner
             digest: ${{ needs.merge.outputs.scanner_digest }}
@@ -709,16 +813,21 @@ jobs:
         run: |
           python3 scripts/validate_vulnerability_waivers.py \
             --file security/image-vulnerability-waivers.json \
-            --image "${{ matrix.name }}" \
+            --image "${{ matrix.target.name }}" \
             --output .trivyignore
 
       - name: Reject high or critical image vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        env:
+          # A multi-architecture manifest must be checked on both supported
+          # runtime platforms; otherwise the runner silently selects amd64.
+          TRIVY_PLATFORM: ${{ matrix.platform.value }}
         with:
-          image-ref: docker.io/${{ matrix.image }}@${{ matrix.digest }}
+          image-ref: docker.io/${{ matrix.target.image }}@${{ matrix.target.digest }}
           format: json
-          output: trivy-${{ matrix.name }}.json
+          output: trivy-${{ matrix.target.name }}-${{ matrix.platform.name }}.json
           severity: HIGH,CRITICAL
+          scanners: vuln
           # A release gate can require remediation only when an upstream fix
           # exists. Unfixed advisories remain in the uploaded report instead
           # of making every new distro advisory an impossible release block.
@@ -728,15 +837,15 @@ jobs:
           # Model Intake is an explicit 2.0 scope exclusion. Its isolated tool
           # environments and API-only Docker staging client do not qualify the
           # stable Scan/Hunt runtime and cannot hold that runtime's release.
-          skip-dirs: ${{ matrix.skip_dirs }}
-          skip-files: ${{ matrix.skip_files }}
+          skip-dirs: ${{ matrix.target.skip_dirs }}
+          skip-files: ${{ matrix.target.skip_files }}
 
       - name: Upload vulnerability report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: vulnerability-${{ matrix.name }}-${{ needs.meta.outputs.candidate_sha }}
-          path: trivy-${{ matrix.name }}.json
+          name: vulnerability-${{ matrix.target.name }}-${{ matrix.platform.name }}-${{ needs.meta.outputs.candidate_sha }}
+          path: trivy-${{ matrix.target.name }}-${{ matrix.platform.name }}.json
           if-no-files-found: error
           retention-days: 30
 

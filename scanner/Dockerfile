@@ -89,7 +89,7 @@ FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378b
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc libpcap0.8 \
     iputils-ping dnsutils procps coreutils \
-    nikto masscan python3-pip \
+    nikto masscan \
     whois netcat-openbsd traceroute \
     dirb gobuster hydra medusa \
     dnsrecon \
@@ -202,7 +202,6 @@ COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.
 COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
 COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
 COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
-COPY scanner/Dockerfile /opt/build-inputs/scanner.Dockerfile
 RUN set -eu; \
     for tool in modelscan fickling semgrep safetensors pip-audit; do \
       python3 -m venv "/opt/model-intake-tools/${tool}"; \
@@ -224,7 +223,8 @@ RUN set -eu; \
 # enlarges the release image and exposes kernel-header packages that no scan
 # path executes.
 RUN apt-get purge -y --auto-remove \
-      make gcc libcurl4-openssl-dev libssl-dev python3-dev && \
+      make gcc libcurl4-openssl-dev libssl-dev python3-dev \
+      python3-venv python3.12-venv python3-pip-whl python3-setuptools-whl && \
     rm -rf /var/lib/apt/lists/*
 
 # Trivy is a checksum-pinned native adapter. The vulnerability database is
@@ -396,6 +396,18 @@ RUN set -e && \
     python3 /app/scanner_tools/model_intake_adapter_self_test.py \
       --output /opt/model-intake-tools/self-test.json && \
     echo "ALL TOOLS VERIFIED OK"
+
+# pip is a build tool, not a scanner runtime capability. Keeping it would also
+# ship pip's vendor SBOM, which describes packages such as msgpack and
+# setuptools that are not installed as runtime modules. Image scanners then
+# report those build-only components as deployed vulnerabilities.
+RUN python3 -m pip uninstall -y --break-system-packages pip && \
+    rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None'
+
+# Keep the exact Dockerfile in the runtime fingerprint without placing this
+# self-referential copy ahead of expensive, otherwise cacheable tool layers.
+COPY scanner/Dockerfile /opt/build-inputs/scanner.Dockerfile
 
 # Create config directories
 RUN mkdir -p /tmp/.config/subfinder && \
