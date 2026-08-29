@@ -813,6 +813,10 @@ try:
     from capabilities.tls import inspect_tls_origin
     from hunt.contracts import allowed_capability_names
     from hunt import skills as _hunt_skills
+    from runtime.http_archive_router import (
+        configure_http_archive_router as _configure_http_archive_router,
+        router as _http_archive_router,
+    )
     from hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
@@ -868,6 +872,10 @@ except ModuleNotFoundError:
     from api.capabilities.tls import inspect_tls_origin
     from api.hunt.contracts import allowed_capability_names
     from api.hunt import skills as _hunt_skills
+    from api.runtime.http_archive_router import (
+        configure_http_archive_router as _configure_http_archive_router,
+        router as _http_archive_router,
+    )
     from api.hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
@@ -13505,6 +13513,9 @@ configure_hunt_run_router(
     metrics_provider=lambda: HUNT_ACTION_SERVICE.metrics.snapshot(),
 )
 app.include_router(hunt_run_router)
+
+_configure_http_archive_router(lambda: db_pool)
+app.include_router(_http_archive_router)
 
 
 # =============================================================================

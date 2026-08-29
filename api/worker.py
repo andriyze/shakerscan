@@ -243,6 +243,7 @@ from scan.execution_backend import (
     ActionLease,
     PostgresScanExecutionBackend,
 )
+from runtime import http_archive
 from scan import scoring as scan_scoring
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
@@ -14600,35 +14601,13 @@ def _recompute_focused_parent_result(
         f for f in union_findings
         if isinstance(f, dict) and _merge_finding_matches_family(f, family)
     ]
-    severity_counts = {
-        "critical": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "critical"),
-        "high": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "high"),
-        "medium": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "medium"),
-        "low": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "low"),
-    }
     # One scorer, one band table. This path used to carry a third weight table and its own
     # D>=55 bands, so the same findings rendered a different letter depending on whether a
     # focused-family parent or the canonical finalizer produced the row.
     focused_risk = scan_scoring.risk(focused_findings)
     score, grade = focused_risk["score"], focused_risk["grade"]
 
-    notes: list[str] = []
-    if severity_counts["critical"]:
-        max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_findings] or [0])
-        notes.append(
-            f"{severity_counts['critical']} critical vulnerability(ies) found "
-            f"(max CVSS: {max_cvss:g}, penalty: -{min(severity_counts['critical'] * 15, 45)})."
-        )
-    if severity_counts["high"]:
-        notes.append(
-            f"{severity_counts['high']} high severity issue(s) found "
-            f"(penalty: -{min(severity_counts['high'] * 10, 30)})."
-        )
-    if severity_counts["medium"]:
-        notes.append(
-            f"{severity_counts['medium']} medium severity issue(s) found "
-            f"(penalty: -{min(severity_counts['medium'] * 4, 20)})."
-        )
+    notes = scan_scoring.severity_notes(focused_findings)
 
     result.update({
         "score": score,
@@ -22513,12 +22492,23 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             public_input.pop("session_ref", None)
             public_input.pop("as_principal", None)
 
+            archived_calls, _record_call = http_archive.hunt_call_recorder(
+                hunt_run_id=str(run["id"]), hunt_action_id=str(action_id),
+                capability_name=capability_name, adapter=str(spec.adapter),
+                target_url=target_url,
+                target_id=str(run["target_id"]) if run["target_id"] else None,
+                device_target_id=(
+                    str(run["device_target_id"]) if run["device_target_id"] else None
+                ),
+            )
+
             async def execute_http() -> dict[str, Any]:
                 return await execute_bound_http_request(
                     target_url,
                     public_input,
                     target=target,
                     allow_write=False,
+                    transaction_recorder=_record_call,
                     trusted_headers=trusted_headers,
                     # Read from the persisted hunt policy, which the start handler wrote
                     # only after validating the target-bound approval receipt. ScanPolicy
@@ -22594,6 +22584,14 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         }
         settled_session = None
         async with db_pool.acquire() as conn:
+            # Outside the settlement transaction on purpose: an archive failure must not
+            # poison the transaction that reconciles the action's budget.
+            await http_archive.archive_recorded_calls(
+                conn, archived_calls, label=f"hunt {hunt_id}",
+                store=lambda content: store_evidence_content(
+                    content, results_dir=RESULTS_DIR,
+                ),
+            )
             async with conn.transaction():
                 locked = await conn.fetchrow(
                     "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,

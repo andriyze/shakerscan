@@ -173,9 +173,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "1853ca0d02a605a6dc9c32d0d9c6ecaf4c4065577d661dba0ab1fe0801ca9c21",
+  "contract_sha256": "e82d99da3d78433ca95d2dc13c43bd7cf20bdd8898417db1c5505c737480b0c3",
   "openapi": "3.1.0",
-  "operation_count": 384,
+  "operation_count": 386,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1583,6 +1583,21 @@
       "surface": "hunt",
       "tags": []
     },
+    "GET /hunts/{hunt_id}/http-transactions": {
+      "deprecated": false,
+      "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get",
+      "parameters_sha256": "38fd8d6e8df9c0e9b3389a4bfe7144bb81f877c80b1dfcf0fd0a8323fdf30690",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
     "GET /investigation/candidates": {
       "deprecated": false,
       "operation_id": "list_investigation_candidates_investigation_candidates_get",
@@ -2289,6 +2304,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": "scan",
       "tags": []
+    },
+    "GET /scans/{scan_id}/http-transactions": {
+      "deprecated": false,
+      "operation_id": "export_scan_transactions_scans__scan_id__http_transactions_get",
+      "parameters_sha256": "522b66a5483816b040745dec416a8776604646dc10ac5d256bd4fb02b6adedcd",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "scan",
+      "tags": [
+        "Scan"
+      ]
     },
     "GET /scans/{scan_id}/logs": {
       "deprecated": false,
@@ -5205,6 +5235,7 @@
       "GET /hunts/contract",
       "GET /hunts/lifecycle-metrics",
       "GET /hunts/{hunt_id}",
+      "GET /hunts/{hunt_id}/http-transactions",
       "POST /hunts",
       "POST /hunts/{hunt_id}/cancel",
       "POST /hunts/{hunt_id}/candidates",
@@ -5286,6 +5317,7 @@
       "GET /scans/{scan_id}/coverage",
       "GET /scans/{scan_id}/deployment-decision",
       "GET /scans/{scan_id}/device-activity",
+      "GET /scans/{scan_id}/http-transactions",
       "GET /scans/{scan_id}/logs",
       "GET /scans/{scan_id}/parity-artifact",
       "GET /scans/{scan_id}/queue-delivery",

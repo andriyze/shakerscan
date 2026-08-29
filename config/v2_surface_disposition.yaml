@@ -32,6 +32,13 @@ surfaces:
     new_writes_allowed: true
     routes: ["/hunts", "/hunts/*", "/hunt/skills", "/hunt/skills/*"]
 
+  - id: http-archive
+    owner: scan
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/scans/*/http-transactions", "/hunts/*/http-transactions"]
+
   - id: credentials
     owner: credentials
     disposition: KEEP_CANONICAL

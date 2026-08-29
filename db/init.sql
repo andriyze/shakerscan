@@ -2114,3 +2114,53 @@ CREATE TABLE IF NOT EXISTS public_api_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_public_api_idempotency_updated
     ON public_api_idempotency(updated_at);
+
+
+-- One row per HTTP call a Scan or Hunt made. Bodies and headers live in the
+-- content-addressed evidence store; the row carries the identity of the work that
+-- made the call so a scan or hunt can be replayed and audited after the fact.
+CREATE TABLE IF NOT EXISTS http_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    plane TEXT NOT NULL CHECK (plane IN ('scan','hunt','device','interactive')),
+    sequence INTEGER NOT NULL DEFAULT 0,
+    scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+    hunt_run_id UUID,
+    hunt_action_id UUID,
+    scan_action_id TEXT,
+    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+    device_target_id UUID,
+    capability_name TEXT,
+    adapter TEXT,
+    principal_slot TEXT,
+    method TEXT NOT NULL,
+    url TEXT NOT NULL,
+    http_version TEXT,
+    status_code INTEGER,
+    request_headers_object_id UUID,
+    request_body_object_id UUID,
+    request_body_sha256 TEXT,
+    request_body_bytes INTEGER NOT NULL DEFAULT 0,
+    response_headers_object_id UUID,
+    response_body_object_id UUID,
+    response_body_sha256 TEXT,
+    response_body_bytes INTEGER NOT NULL DEFAULT 0,
+    remote_ip TEXT,
+    direct_origin BOOLEAN NOT NULL DEFAULT false,
+    redirect_of UUID,
+    started_at TIMESTAMPTZ,
+    elapsed_ms INTEGER,
+    error TEXT,
+    truncated BOOLEAN NOT NULL DEFAULT false,
+    retention_class TEXT NOT NULL DEFAULT 'http_archive',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT http_transactions_owner_check CHECK (
+        scan_id IS NOT NULL OR hunt_run_id IS NOT NULL
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_http_transactions_scan
+    ON http_transactions(scan_id, sequence) WHERE scan_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_http_transactions_hunt
+    ON http_transactions(hunt_run_id, sequence) WHERE hunt_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_http_transactions_target
+    ON http_transactions(target_id, started_at DESC) WHERE target_id IS NOT NULL;

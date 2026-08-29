@@ -288,6 +288,31 @@ def assurance(
     }
 
 
+def severity_notes(findings: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Human-readable notes about what was found, by severity.
+
+    Lives with the scorer so the penalties quoted in the prose cannot drift from the ones
+    the score was actually computed with -- they were separate literals before.
+    """
+    counts: dict[str, int] = {}
+    for finding in findings:
+        severity = _severity(finding)
+        counts[severity] = counts.get(severity, 0) + 1
+    notes: list[str] = []
+    if counts.get("critical"):
+        worst = max(
+            [float(item.get("cvss_score") or 0) for item in findings] or [0]
+        )
+        notes.append(
+            f"{counts['critical']} critical vulnerability(ies) found "
+            f"(max CVSS: {worst:g})."
+        )
+    for severity in ("high", "medium"):
+        if counts.get(severity):
+            notes.append(f"{counts[severity]} {severity} severity issue(s) found.")
+    return notes
+
+
 def score_scan(
     findings: Sequence[Mapping[str, Any]],
     coverage: Mapping[str, Any],

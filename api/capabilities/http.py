@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import sys
 import time
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
@@ -104,6 +106,15 @@ def _origin_key(value: Any) -> tuple[str, str, int] | None:
     )
 
 
+def _archived_request_body(json_body: Any, form_body: Any) -> bytes | None:
+    """Serialize whichever body shape the request carried, for the archive only."""
+    if json_body is not None:
+        return json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+    if form_body is not None:
+        return urllib.parse.urlencode(dict(form_body)).encode("utf-8")
+    return None
+
+
 def _trusted_headers(values: Mapping[str, Any] | None) -> dict[str, str]:
     result: dict[str, str] = {}
     for raw_name, raw_value in dict(values or {}).items():
@@ -164,6 +175,10 @@ async def execute_bound_http_request(
     trusted_headers: Mapping[str, Any] | None = None,
     allow_identity_headers: bool = False,
     direct_origin_addresses: Sequence[str] = (),
+    # Receives the complete request and response for the archive. Kept separate from
+    # private_response_sink, which deliberately hands back only three header names: the
+    # archive's whole purpose is the fidelity that projection removes.
+    transaction_recorder: Callable[[dict[str, Any]], None] | None = None,
     cookies: Mapping[str, Any] | None = None,
     principal_slot: str = "anonymous",
     selected_headers: list[str] | None = None,
@@ -393,6 +408,24 @@ async def execute_bound_http_request(
                 current_url = next_url
                 hops_followed += 1
     except (httpx.InvalidURL, httpx.HTTPError, UnicodeError, ValueError) as exc:
+        # A call that never got a response is still a call the scanner made, and it is
+        # often the interesting one -- a refused connection to a confirmed origin is how a
+        # control proves it works. Archiving only completed responses would leave the
+        # archive quietly describing a different, more successful run than the real one.
+        if transaction_recorder is not None:
+            try:
+                transaction_recorder({
+                    "method": method, "url": final_url,
+                    "request_headers": dict(headers),
+                    "request_body": _archived_request_body(json_body, form_body),
+                    "remote_ip": pinned_address,
+                    "direct_origin": bool(via_address),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "principal_slot": str(principal_slot or "anonymous"),
+                    "error": f"request_error:{type(exc).__name__}",
+                })
+            except Exception:  # pragma: no cover - recording must never mask the error
+                pass
         return {
             "ok": False,
             "error": f"request_error:{type(exc).__name__}",
@@ -404,6 +437,33 @@ async def execute_bound_http_request(
             "error": "request_error:MissingResponse",
             "request": request_view,
         }
+    if transaction_recorder is not None:
+        try:
+            transaction_recorder({
+                "method": method,
+                "url": final_url,
+                "http_version": str(getattr(response, "http_version", "") or ""),
+                "status_code": int(response.status_code),
+                "request_headers": dict(headers),
+                "request_body": _archived_request_body(json_body, form_body),
+                "response_headers": {
+                    str(name).lower(): str(value)
+                    for name, value in response.headers.items()
+                },
+                "response_body": body,
+                "remote_ip": pinned_address,
+                "direct_origin": bool(via_address),
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "principal_slot": str(principal_slot or "anonymous"),
+                "redirect_chain": list(redirect_chain),
+            })
+        except Exception as exc:  # pragma: no cover - recording must never fail a probe
+            # A scan that dies because its own archive failed is worse than one whose
+            # archive has a hole, so this is reported and swallowed rather than raised.
+            print(
+                f"[http-archive] transaction not recorded: {type(exc).__name__}",
+                file=sys.stderr, flush=True,
+            )
     if private_response_sink is not None:
         private_response_sink(WorkerPrivateHTTPResponse(
             status_code=int(response.status_code),

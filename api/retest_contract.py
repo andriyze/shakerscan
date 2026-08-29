@@ -3112,6 +3112,62 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_hunt_runs_created
                 ON hunt_runs(created_at DESC)
             """)
+            # One row per HTTP call a Scan or Hunt made. Bodies and headers live in the
+            # content-addressed evidence store, so identical payloads collapse to one
+            # object and the row stays narrow enough to page through.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS http_transactions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    plane TEXT NOT NULL CHECK (plane IN ('scan','hunt','device','interactive')),
+                    sequence INTEGER NOT NULL DEFAULT 0,
+                    scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+                    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE CASCADE,
+                    hunt_action_id UUID,
+                    scan_action_id TEXT,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL,
+                    capability_name TEXT,
+                    adapter TEXT,
+                    principal_slot TEXT,
+                    method TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    http_version TEXT,
+                    status_code INTEGER,
+                    request_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    request_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    request_body_sha256 TEXT,
+                    request_body_bytes INTEGER NOT NULL DEFAULT 0,
+                    response_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    response_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    response_body_sha256 TEXT,
+                    response_body_bytes INTEGER NOT NULL DEFAULT 0,
+                    remote_ip TEXT,
+                    direct_origin BOOLEAN NOT NULL DEFAULT false,
+                    redirect_of UUID,
+                    started_at TIMESTAMPTZ,
+                    elapsed_ms INTEGER,
+                    error TEXT,
+                    truncated BOOLEAN NOT NULL DEFAULT false,
+                    retention_class TEXT NOT NULL DEFAULT 'http_archive',
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT http_transactions_owner_check CHECK (
+                        scan_id IS NOT NULL OR hunt_run_id IS NOT NULL
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_http_transactions_scan
+                ON http_transactions(scan_id, sequence) WHERE scan_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_http_transactions_hunt
+                ON http_transactions(hunt_run_id, sequence) WHERE hunt_run_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_http_transactions_target
+                ON http_transactions(target_id, started_at DESC) WHERE target_id IS NOT NULL
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_cancellable_jobs (
                     hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
