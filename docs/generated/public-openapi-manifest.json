@@ -87,7 +87,7 @@
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
     "HuntQueryRequest": "bb03e03761b47be560b447986a970a28128bf410dd5597a94e024c81fd221354",
-    "HuntStartV2Response": "f8614aa9d1efaea1230d74d01d6dfc479251c0b9b64f08fbe7cf0fb19bcd6b3b",
+    "HuntStartV2Response": "ff475b8ed3844b4cb9e3c1af02164becc04553c4b7cd607eb5bd6c1ad8a37996",
     "HypothesisCampaignPlanRequest": "47dcf2a7e1aa9c04781a3e0193fb32f2bd7571b32c40b1990ac3964c091a3932",
     "HypothesisClaimRequest": "0f67f3b3b606844225b20ea75e611d662dc1fa48bc475ccad2bbf7b89428e479",
     "HypothesisProofReconcileRequest": "ca685f10d5892ebeaccf3c71ba59fe09b85ac24cbf1e634036933a1b6210566e",
@@ -173,9 +173,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "0b6f4506b6c2cec8518266924e9e26f2c9d38b6cab44f0902489b8954375a275",
+  "contract_sha256": "cad580a967d8b9f23d10e451e6d155fcf01e7f413757f89e85a6bec8402169b4",
   "openapi": "3.1.0",
-  "operation_count": 382,
+  "operation_count": 384,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1498,6 +1498,36 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "GET /hunt/skills": {
+      "deprecated": false,
+      "operation_id": "list_hunt_skills_hunt_skills_get",
+      "parameters_sha256": "6af9b60998cea5216ec900a45b2c36e1ba4f02ae27cc4ca0332ebf3eef1582b9",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunt/skills/{skill_id}": {
+      "deprecated": false,
+      "operation_id": "get_hunt_skill_hunt_skills__skill_id__get",
+      "parameters_sha256": "6e779180c3bdc5139109eee41ba74d3e1d432640c81caa6ade87205d5ed28aa5",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "Hunt"
+      ]
     },
     "GET /hunts": {
       "deprecated": false,
@@ -3989,7 +4019,7 @@
       "deprecated": false,
       "operation_id": "start_hunt_hunts_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "2f9da649f3de743cc321ec85aec882866c4e903254c1a430e638dd1ce61011f3",
+      "request_schema_sha256": "95c536f6a097b7312bec9269def77f8c01872af788d70c6a103579317fc9a047",
       "response_schema_sha256": {
         "200": "87f160d6eeb2c1bfa78deaf517c99df762cf0fc7ce99a07a44df48383dcf9421"
       },

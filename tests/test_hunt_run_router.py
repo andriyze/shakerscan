@@ -229,6 +229,8 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
     assert paths == {
         (frozenset({"POST"}), "/hunts", "start_hunt"),
         (frozenset({"GET"}), "/hunts/contract", "get_hunt_contract"),
+        (frozenset({"GET"}), "/hunt/skills", "list_hunt_skills"),
+        (frozenset({"GET"}), "/hunt/skills/{skill_id}", "get_hunt_skill"),
         (
             frozenset({"GET"}),
             "/hunts/lifecycle-metrics",

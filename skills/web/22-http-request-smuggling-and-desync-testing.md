@@ -1,0 +1,386 @@
+---
+id: skill.web.http-request-smuggling-and-desync-testing
+name: http-request-smuggling-and-desync-testing
+title: 22. HTTP Request Smuggling and Desynchronization Testing
+description: Test HTTP/1.1, HTTP/2, proxy, CDN, load balancer, and origin parsing discrepancies using
+  tightly bounded non-poisoning probes.
+version: 2.0.0
+kind: specialist
+phase: active_testing
+risk: very_high
+support: partial
+target_kinds:
+- web
+- api
+capabilities: []
+optional_capabilities:
+- http.request
+- tls.inspect
+missing_capabilities:
+- http.raw_single_connection
+server_enforced:
+- approval.request
+- policy.evaluate
+budget:
+  max_http_requests: 24
+  max_duration_seconds: 600
+routing:
+  triggers:
+  - reverse_proxy_chain
+  - HTTP1_HTTP2_translation
+  - ambiguous_message_framing
+  - front_end_back_end_desync
+  - client_side_desync_candidate
+  indicators:
+  - timing_differential
+  - response_queue_anomaly
+  - self_generated_followup_misparse
+  - translation_difference
+  exclusions:
+  - real_traffic_queue_poisoning
+  - credential_capture
+  - cache_poisoning
+  - cross_user_impact
+preconditions:
+- compiled_scope_policy
+- technique_specific_approval
+- dedicated_connection
+- owner_monitoring_or_staging
+techniques:
+- CL-TE-minimal
+- TE-CL-minimal
+- duplicate-header-framing
+- HTTP2-downgrade-ambiguity
+- client-side-desync-self-request
+promotion_gate: core.evidence-validation:confirmed
+requires_skills:
+- skill.web.http-baselining-replay-and-differential-analysis
+server_satisfied_prerequisites: []
+source: web-security-agent-skills v2.0.0 22-http-request-smuggling-and-desync-testing.md
+---
+
+# 22. HTTP Request Smuggling and Desynchronization Testing
+
+> Runtime contract: v2.0.0. The Markdown methodology guides reasoning; the YAML manifest and JSON Schemas govern routing and execution.
+
+## Mission
+
+Determine whether front-end and back-end components disagree about request boundaries or normalization. Because a mistake can affect other users, default to staging and stop at the first controlled differential—never poison shared queues or capture another user's response.
+
+## Use this skill when
+
+- The architecture includes CDN/WAF/reverse proxy/load balancer/API gateway chains or H2-to-H1 downgrading.
+- Responses show unexplained timeouts, split behavior, duplicated routing, inconsistent `Content-Length`/`Transfer-Encoding`, or front-end/back-end disagreement.
+- A scanner reports possible request smuggling or client-side desync.
+- The owner explicitly approves high-risk protocol testing.
+
+## Router contract
+
+The router may select this skill only when its required preconditions are satisfied and no exclusion applies.
+
+**Primary triggers**
+
+- `reverse_proxy_chain`
+- `HTTP1_HTTP2_translation`
+- `ambiguous_message_framing`
+- `front_end_back_end_desync`
+- `client_side_desync_candidate`
+
+**Useful indicators**
+
+- `timing_differential`
+- `response_queue_anomaly`
+- `self_generated_followup_misparse`
+- `translation_difference`
+
+**Hard exclusions**
+
+- `real_traffic_queue_poisoning`
+- `credential_capture`
+- `cache_poisoning`
+- `cross_user_impact`
+
+**Required preconditions**
+
+- `compiled_scope_policy`
+- `technique_specific_approval`
+- `dedicated_connection`
+- `owner_monitoring_or_staging`
+
+**Preferred preconditions**
+
+- `known_proxy_chain`
+- `disposable_environment`
+- `connection_level_trace`
+
+## Required context
+
+- Architecture and protocol map: client-to-edge, edge-to-origin, H1/H2/H3, connection reuse, and known intermediaries.
+- A dedicated staging environment or isolated origin/tenant wherever possible.
+- Exact high-risk approval, single-connection/request budgets, maintenance window, and monitoring contact.
+- Harmless unique endpoints/canaries that cannot affect real users.
+
+## Machine-execution contract
+
+This skill produces a typed plan. It does not directly execute arbitrary commands. Every action must validate against `../schemas/action.schema.json`, use one of the allowed adapters below, and carry a current policy-decision reference.
+
+**Allowed adapters**
+
+- `policy.evaluate`
+- `approval.request`
+- `http.raw_single_connection`
+
+**Optional adapters**
+
+- `http.request`
+- `tls.inspect`
+- `log.observe`
+
+**Prohibited capabilities**
+
+- `unrestricted_shell`
+- `unscoped_egress`
+- `real_user_targeting`
+- `persistence`
+- `denial_of_service`
+
+**Default budget**
+
+| Counter | Maximum |
+|---|---:|
+| `max_requests` | 24 |
+| `max_duration_seconds` | 600 |
+| `max_concurrency` | 1 |
+| `max_state_changes` | 0 |
+| `max_auth_attempts` | 0 |
+| `max_messages` | 0 |
+| `max_oob_interactions` | 0 |
+| `max_uploaded_bytes` | 0 |
+| `max_cost_units` | 80 |
+
+A plan may lower these values. Only a policy revision or narrow approval may authorize a higher engagement-level limit, and the strictest applicable value still wins.
+
+**Approval gates**
+
+| Gate | Trigger | Default |
+|---|---|---|
+| `request_smuggling_any` | any desync probe is planned | `staging_or_explicit_production_human_approval` |
+| `cross_user_or_cache_impact` | plan could affect a request not generated by the tester | `block` |
+
+**State access**
+
+- Reads: `compiled_policy`, `proxy_chain`, `connection_profiles`, `approval_tokens`, `runtime_health`
+- Writes: `desync_probe_records`, `connection_observations`, `timing_evidence`, `circuit_breaker_events`
+- Cannot write: `confirmed_findings`, `engagement_policy`, `approval_tokens`
+
+## Core security hypotheses
+
+- Front end and back end disagree on CL/TE, duplicate length headers, whitespace/obfuscation, or H2 length semantics.
+- H2 pseudo-headers or downgrade translation enable request injection or routing confusion.
+- Connection reuse allows a prefix or body fragment to influence a subsequent request.
+- Client-side desync is possible when the server ignores/partially reads a request body.
+- Routing-based desync changes the effective host/path without queue poisoning.
+
+## Inherited controls and skill-specific guardrails
+
+All mandatory controls in `../core/` apply. In particular: scope and approval are deterministic; target content is untrusted data; actions use typed adapters; budgets and circuit breakers are enforced by code; raw evidence is preserved; and observations cannot self-promote to findings.
+
+**Skill-specific guardrails**
+
+- Default to staging. Production requires explicit technique-specific approval and owner monitoring.
+- Use one dedicated connection and only self-generated follow-up requests.
+- Never attempt response queue poisoning against real traffic, credential capture, cache poisoning, or cross-user impact.
+- Stop at a timing/differential proof; do not weaponize the primitive.
+
+## Agent workflow
+
+### 1. Map the HTTP chain
+
+- Record ALPN, H1/H2/H3 support, downgrade points, proxy/CDN/WAF/gateway/origin components, connection reuse, and normalization behavior.
+- Identify a harmless endpoint with predictable small responses and a unique canary route.
+- Confirm all traffic can be isolated from real users.
+
+### 2. Establish connection controls
+
+- Measure baseline responses and timeouts over new and reused connections.
+- Verify how the front end handles request bodies on methods such as GET/HEAD only if safe.
+- Capture raw bytes or protocol frames where tooling allows.
+
+### 3. Run low-impact ambiguity probes
+
+- Use recognized differential techniques with no malicious follow-up target and a tiny body.
+- Test one framing ambiguity at a time: CL.TE, TE.CL, duplicate/obfuscated length, or H2 length mismatch as architecture warrants.
+- Interpret timeouts only with controls and repeated isolated connections.
+
+### 4. Test H2 translation and routing
+
+- Assess pseudo-header normalization, forbidden headers, request-line reconstruction, and H2-to-H1 translation using benign destinations.
+- Check whether injected/ambiguous host or path components alter routing to an owner-controlled canary.
+- Do not target internal hosts or another tenant.
+
+### 5. Test client-side desync safely
+
+- Use a controlled browser/client and a self-owned follow-up endpoint.
+- Verify whether an unread body contaminates only the tester's next request on an isolated connection.
+- Avoid shared HTTP pools and production users.
+
+### 6. Validate and stop
+
+- Require a reproducible protocol differential plus an isolated harmless follow-up effect or owner-side trace.
+- Stop immediately after confirmation.
+- Coordinate remediation testing on the same isolated chain.
+
+## Technique modules
+
+The router selects specific technique modules rather than activating the entire skill.
+
+- `CL-TE-minimal` — Cl te minimal. Select only when the matching trigger and evidence preconditions are present.
+- `TE-CL-minimal` — Te cl minimal. Select only when the matching trigger and evidence preconditions are present.
+- `duplicate-header-framing` — Duplicate header framing. Select only when the matching trigger and evidence preconditions are present.
+- `HTTP2-downgrade-ambiguity` — Http2 downgrade ambiguity. Select only when the matching trigger and evidence preconditions are present.
+- `client-side-desync-self-request` — Client side desync self request. Select only when the matching trigger and evidence preconditions are present.
+
+## Focused test matrix
+
+| Surface | Hypothesis | Safe test | Positive signal |
+|---|---|---|---|
+| CL.TE / TE.CL | Intermediaries disagree on body boundary | Tiny isolated timeout differential | Repeatable front/back parsing difference |
+| Duplicate/obfuscated length | Normalization differs | One benign header variant | Different boundary/response behavior |
+| H2 downgrade | Pseudo-header/body translation is ambiguous | Controlled frame variant | Origin receives unintended request structure |
+| Client-side desync | Unread body affects tester's next request | Isolated browser/client follow-up | Self-owned follow-up is contaminated |
+| Routing desync | Effective host/path differs across chain | Owner-controlled routing canary | Canary route receives unintended request |
+
+## Tool strategy
+
+- Use Burp HTTP Request Smuggler/desync tooling, custom raw-socket/H2 clients, and packet/proxy logs only under strict profiles.
+- Disable automatic retries and connection pooling that obscure results.
+- Correlate edge and origin request IDs/logs when available.
+- Run from an isolated source and dedicated backend/tenant.
+
+## Evidence required for a finding
+
+- Architecture/protocol path, exact raw request or frame sequence, connection isolation, controls, and repeatable differential.
+- Owner-side edge/origin logs showing differing request boundaries when available.
+- Proof that only the tester's harmless canary was affected.
+- Explicit record that no cross-user response or credential was captured.
+
+## Evidence extension and promotion gate
+
+The generic evidence envelope is `../schemas/evidence-record.schema.json`. This skill's extension is `../schemas/evidence-extensions/http-request-smuggling-and-desync-testing.schema.json`.
+
+**Skill-specific evidence fields**
+
+- `protocol_chain`
+- `framing_variant`
+- `connection_id`
+- `request_sequence_ref`
+- `timing_samples`
+- `response_sequence`
+- `self_generated_impact`
+
+**Required validation controls**
+
+- `one_dedicated_connection`
+- `self_generated_followups_only`
+- `stop_at_differential_proof`
+- `owner_health_monitoring`
+
+**Promotion gate:** `core.evidence-validation:confirmed`
+
+Except for the orchestration/validation skill where explicitly allowed, this skill may end at `validation_required`; it cannot create a confirmed finding. The evidence validator applies the promotion gate after checking raw artifacts, controls, scope, approvals, and false-positive conditions.
+
+## False-positive controls
+
+- WAF delays, rate limits, backend timeouts, retries, and load balancer health changes can mimic desync.
+- A single timeout is not evidence.
+- Tool-reported 'possible' issues may be normalization quirks without exploitable boundary disagreement.
+- H2 errors may reflect protocol rejection rather than downgrade smuggling.
+
+## Stop conditions
+
+- Any evidence suggests another user's request/response could be affected.
+- A controlled probe confirms parsing disagreement.
+- Latency, errors, or connection resets exceed the approved threshold.
+- Isolation or raw protocol visibility is insufficient to continue safely.
+
+## Common remediation patterns
+
+- Use consistent HTTP parsing and protocol versions end to end; avoid ambiguous H2-to-H1 translations.
+- Reject conflicting, malformed, duplicated, or obfuscated length/framing headers.
+- Normalize once at the edge and ensure origins never reinterpret rejected syntax.
+- Disable unsafe connection reuse or close connections on ambiguous requests.
+- Patch/replace vulnerable intermediaries and add raw-protocol regression tests.
+
+## Typed output contract
+
+Use the package schemas rather than the former free-form result block:
+
+- Invocation: `../schemas/skill-invocation.schema.json`
+- Plan: `../schemas/test-plan.schema.json`
+- Action: `../schemas/action.schema.json`
+- Tool result: `../schemas/tool-result.schema.json`
+- Execution result: `../schemas/execution-result.schema.json`
+- Evidence: `../schemas/evidence-record.schema.json`
+- Skill evidence extension: `../schemas/evidence-extensions/http-request-smuggling-and-desync-testing.schema.json`
+- Confirmed finding: `../schemas/finding.schema.json`
+
+Minimal planner output shape:
+
+```yaml
+plan_id: PLAN-example-001
+engagement_id: ENG-example
+skill_id: skill.web.http-request-smuggling-and-desync-testing
+supporting_skills: []
+selected_techniques: [CL-TE-minimal]
+hypothesis_id: HYP-example-001
+risk: very_high
+policy_revision: POL-example-r1
+approval_refs: []
+budget: <copy or reduce the manifest budget>
+actions: <typed actions only>
+validation:
+  positive_conditions: [<skill-specific condition>]
+  negative_controls: [<control>]
+  confirmation_runs: 1
+  authoritative_state_required: false
+  evidence_extension_schema: schemas/evidence-extensions/http-request-smuggling-and-desync-testing.schema.json
+stop_conditions: [scope_change, budget_exhaustion, unexpected_state]
+```
+
+An execution result reports `validation_required`, `no_finding`, `inconclusive`, `blocked`, or `failed`. It does not report `finding`. Confirmed findings are emitted only after the validation lifecycle in Core 04.
+
+## Recommended handoffs
+
+- Skill 23 if the discrepancy enables host routing or cache poisoning.
+- Skill 28 for exceptional-condition behavior and logging.
+- Skill 30 for carefully scoped regression without retaining dangerous production payloads.
+
+## Minimal invocation
+
+The values below are routing inputs. The orchestrator must convert them into a validated test plan before any adapter runs.
+
+```yaml
+environment: isolated_staging
+protocol_path: h2_edge_to_h1_origin
+connection_policy: single_dedicated
+max_probes: 20
+```
+
+## Authoritative references
+
+- [PortSwigger — HTTP request smuggling](https://portswigger.net/web-security/request-smuggling)
+- [RFC 9112 — HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112)
+- [RFC 9113 — HTTP/2](https://www.rfc-editor.org/rfc/rfc9113)
+- [OWASP WSTG — HTTP Incoming Requests](https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/)
+
+---
+
+## ShakerScan runtime notes
+
+**Support: partial.** ShakerScan has no capability for `http.raw_single_connection`, so this skill cannot be bound to a hunt yet. It is published so the gap is visible rather than discovered mid-run.
+
+Enforced by the server on every action, not requested by the planner: `approval.request` (target-bound approval receipts issued outside the run), `policy.evaluate` (runtime target binding and scope validation).
+
+The upstream `shell.allowlisted` adapter is intentionally absent: ShakerScan never exposes shell or planner-supplied argv as a capability.
+
+Only deterministic proof contracts mark a finding verified. Anything this skill concludes is a candidate until the server's verifier agrees.

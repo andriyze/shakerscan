@@ -19,14 +19,18 @@ MAX_HUNT_BODY_BYTES = 1_048_576
 MAX_GOAL_CHARS = 20_000
 MAX_CAPABILITIES = 128
 MAX_COLLECTIONS = 32
+# Kept equal to MAX_SKILLS_PER_HUNT in hunt/skills.py; asserted by the skill tests so the
+# request boundary and the library cannot drift into disagreeing about the same limit.
+MAX_SKILLS = 4
 MAX_CREDENTIAL_REFS = 16
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _CAPABILITY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+_SKILL_RE = re.compile(r"^skill\.[a-z0-9][a-z0-9_.-]{0,127}$")
 _ALLOWED_TARGET_KINDS = frozenset({"web", "api", "device", "network"})
 _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "target_id", "target_kind", "goal", "objective", "budget_profile", "policy_profile",
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
-    "approval_receipt_id", "scope_receipt_id", "schema_version",
+    "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
 })
 _ALLOWED_BUDGET_KEYS = frozenset({
     "max_duration_seconds",
@@ -152,11 +156,14 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "capabilities": MAX_CAPABILITIES,
             "request_collections": MAX_COLLECTIONS,
             "credential_refs": MAX_CREDENTIAL_REFS,
+            "skill_ids": MAX_SKILLS,
         },
         "patterns": {
             "identifier": _ID_RE.pattern,
             "capability": _CAPABILITY_RE.pattern,
+            "skill_id": _SKILL_RE.pattern,
         },
+        "skill_catalog": "/hunt/skills",
         "budget_profiles": {
             name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
         },
@@ -385,6 +392,7 @@ class HuntStartContract:
     credential_refs: Mapping[str, str]
     capabilities: Sequence[str]
     request_collection_ids: Sequence[str]
+    skill_ids: Sequence[str] = ()
     schema_version: str = HUNT_START_SCHEMA
 
     @property
@@ -416,6 +424,7 @@ class HuntStartContract:
             "credential_refs": dict(self.credential_refs),
             "capabilities": list(self.capabilities),
             "request_collection_ids": list(self.request_collection_ids),
+            "skill_ids": list(self.skill_ids),
             "secret_values_visible": False,
         }
 
@@ -515,5 +524,11 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
             payload.get("request_collection_ids"),
             "request_collection_ids",
             maximum=MAX_COLLECTIONS,
+        ),
+        skill_ids=_string_list(
+            payload.get("skill_ids"),
+            "skill_ids",
+            maximum=MAX_SKILLS,
+            pattern=_SKILL_RE,
         ),
     )

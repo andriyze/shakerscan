@@ -30,7 +30,7 @@ surfaces:
     disposition: KEEP_CANONICAL
     canonical_replacement: null
     new_writes_allowed: true
-    routes: ["/hunts", "/hunts/*"]
+    routes: ["/hunts", "/hunts/*", "/hunt/skills", "/hunt/skills/*"]
 
   - id: credentials
     owner: credentials

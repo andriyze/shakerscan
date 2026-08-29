@@ -812,6 +812,7 @@ try:
     from capabilities.http import execute_bound_http_request
     from capabilities.tls import inspect_tls_origin
     from hunt.contracts import allowed_capability_names
+    from hunt import skills as _hunt_skills
     from hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
@@ -866,6 +867,7 @@ except ModuleNotFoundError:
     from api.capabilities.http import execute_bound_http_request
     from api.capabilities.tls import inspect_tls_origin
     from api.hunt.contracts import allowed_capability_names
+    from api.hunt import skills as _hunt_skills
     from api.hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
@@ -13236,17 +13238,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     }
 
 
-def _resolve_hunt_allowed_capabilities(
-    contract: HuntStartContract,
-    *,
-    credential_access: bool,
-) -> tuple[str, ...]:
-    return allowed_capability_names(
-        contract,
-        credentials_available=credential_access,
-    )
-
-
 async def _validate_hunt_credential_references(
     conn: Any,
     contract: HuntStartContract,
@@ -13445,10 +13436,19 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             )
 
         credential_access = bool(credential_rows and approval_validated)
-        allowed_capabilities = _resolve_hunt_allowed_capabilities(
-            contract,
-            credential_access=credential_access,
+        allowed_capabilities = allowed_capability_names(
+            contract, credentials_available=credential_access,
         )
+        # Skills narrow a hunt, never widen it: the policy allowlist above stays the
+        # authority and binding a skill only intersects it.
+        try:
+            bound = _hunt_skills.bind_skills_to_hunt(
+                contract.skill_ids, target_kind=contract.target_kind,
+                allowed_capabilities=allowed_capabilities, budget=budget,
+            )
+        except _hunt_skills.HuntSkillError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        allowed_capabilities, budget = bound.allowed_capabilities, bound.budget
         policy = {
             "schema_version": "hunt-policy/v2",
             "target_kind": contract.target_kind,
@@ -13490,6 +13490,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 approval_context.get("runtime_scope_guard") or {}
             )
         context_pack["allowed_capabilities"] = list(allowed_capabilities)
+        context_pack["skills"] = dict(bound.context_section)
 
         row = await conn.fetchrow(
             """INSERT INTO hunt_runs (

@@ -211,8 +211,13 @@ def public_hunt_run(
     }
     if include_capabilities:
         result["capabilities"] = capabilities
+    context = _decode_json(item.get("context_pack"), {})
+    # Surfaced beside capabilities rather than only inside the pack: a client listing runs
+    # needs to see which methodology a hunt was run under without parsing the whole pack.
+    bound_skills = (context.get("skills") or {}).get("bound")
+    result["skills"] = list(bound_skills) if isinstance(bound_skills, list) else []
     if include_context:
-        result["context_pack"] = _decode_json(item.get("context_pack"), {})
+        result["context_pack"] = context
     return result
 
 

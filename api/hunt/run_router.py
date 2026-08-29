@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
+from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
     MAX_HUNT_BODY_BYTES,
@@ -49,6 +50,7 @@ class HuntStartV2Request(BaseModel):
     credential_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
     capabilities: list[str] = Field(default_factory=list, max_length=128)
     request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
+    skill_ids: list[str] = Field(default_factory=list, max_length=4)
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
 
@@ -67,6 +69,7 @@ class HuntStartV2Response(BaseModel):
     budget: dict[str, Any] = Field(default_factory=dict)
     budget_used: dict[str, Any] = Field(default_factory=dict)
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    skills: list[dict[str, Any]] = Field(default_factory=list)
     context_pack: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -184,6 +187,44 @@ async def get_hunt_contract():
     return hunt_start_public_contract()
 
 
+@router.get("/hunt/skills", tags=["Hunt"])
+async def list_hunt_skills(
+    target_kind: str | None = Query(None),
+    support: str | None = Query(None),
+):
+    """List the testing methodology a hunt can bind, with an honest support level.
+
+    Unbindable skills are listed too. ShakerScan has no capability for several adapters the
+    methodology assumes, and naming that gap here is what stops a planner committing to a
+    procedure it cannot execute.
+    """
+    library = skill_library()
+    try:
+        specs = library.list(target_kind=target_kind, support=support)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "skills": [spec.public() for spec in specs],
+        "count": len(specs),
+        "bindable_count": sum(1 for spec in specs if spec.bindable),
+    }
+
+
+@router.get("/hunt/skills/{skill_id}", tags=["Hunt"])
+async def get_hunt_skill(skill_id: str, include_methodology: bool = Query(True)):
+    """Return one skill, with its methodology text unless the caller opts out."""
+    try:
+        spec = skill_library().require(skill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown skill {skill_id}") from exc
+    try:
+        return spec.public(include_body=include_methodology)
+    except (OSError, HuntSkillError) as exc:
+        raise HTTPException(
+            status_code=503, detail="skill methodology is unavailable"
+        ) from exc
+
+
 @router.get("/hunts/lifecycle-metrics", tags=["Hunt"])
 async def get_hunt_lifecycle_metrics():
     if _metrics_provider is None:
@@ -235,6 +276,8 @@ __all__ = [
     "get_hunt",
     "get_hunt_contract",
     "get_hunt_lifecycle_metrics",
+    "get_hunt_skill",
+    "list_hunt_skills",
     "list_hunts",
     "parse_hunt_start_body",
     "resume_hunt",
