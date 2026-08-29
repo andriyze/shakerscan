@@ -13550,17 +13550,32 @@ class _FindingExceptionEditConn:
             self.update_args = args
             updated = dict(self.current_row)
             updated.update({
-                "policy_id": args[1], "scope": args[2], "owner": args[3], "approver": args[4],
-                "reason": args[5], "compensating_controls": args[6],
-                "status": args[7], "expires_at": args[8],
-                "edit_history": args[9],
+                "policy_id": args[1], "target_id": args[2], "scope": args[3],
+                "owner": args[4], "approver": args[5], "reason": args[6],
+                "compensating_controls": args[7], "status": args[8],
+                "expires_at": args[9], "edit_history": args[10],
             })
             return updated
         return None
 
 
-def test_update_finding_exception_requires_owner_or_approver():
-    # The 422 gate must fire before any DB access (db_pool is unset in tests).
+def test_update_finding_exception_rejects_incomplete_merged_effective_waiver(monkeypatch):
+    current_row = {
+        "id": _EXCEPTION_ID,
+        "finding_id": "f1",
+        "fingerprint": None,
+        "policy_id": None,
+        "target_id": None,
+        "scope": None,
+        "owner": None,
+        "approver": None,
+        "reason": None,
+        "compensating_controls": None,
+        "status": "revoked",
+        "expires_at": None,
+        "edit_history": json.dumps([]),
+    }
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_FindingExceptionEditConn(current_row)))
     with pytest.raises(api_module.HTTPException) as exc:
         asyncio.run(
             api_module.update_finding_exception(
@@ -13575,8 +13590,8 @@ def test_update_finding_exception_appends_edit_history(monkeypatch):
         "id": _EXCEPTION_ID,
         "finding_id": "f1",
         "fingerprint": None,
-        "policy_id": None,
-        "target_id": None,
+        "policy_id": uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        "target_id": uuid.UUID("33333333-3333-4333-8333-333333333333"),
         "scope": "old-scope",
         "owner": "alice",
         "approver": "bob",
@@ -13596,7 +13611,7 @@ def test_update_finding_exception_appends_edit_history(monkeypatch):
 
     assert result["owner"] == "carol"
     assert conn.update_query is not None and "edit_history" in conn.update_query
-    snapshot = json.loads(conn.update_args[9])[0]
+    snapshot = json.loads(conn.update_args[10])[0]
     assert snapshot["owner"] == "alice"
     assert snapshot["approver"] == "bob"
     assert snapshot["status"] == "active"

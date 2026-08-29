@@ -12096,7 +12096,7 @@ async def get_scan_deployment_decision(scan_id: str):
             SELECT * FROM finding_exceptions
             WHERE status IN ('active','approved','accepted_risk')
               AND (expires_at IS NULL OR expires_at > NOW())
-              AND (target_id IS NULL OR target_id = $1)
+              AND target_id = $1
         """, target_id)
         # Unresolved (active) critical/high findings on the SAME canonical origin —
         # these gate deploy even if the current scan did not re-detect them and even if

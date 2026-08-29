@@ -14,11 +14,13 @@ from finding_exceptions.router import (  # noqa: E402
 
 
 POLICY_ID = "11111111-1111-4111-8111-111111111111"
+TARGET_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _effective_request(**overrides):
     payload = {
         "policy_id": POLICY_ID,
+        "target_id": TARGET_ID,
         "owner": "service owner",
         "approver": "security approver",
         "reason": "Temporary acceptance during a bounded rollout",
@@ -32,7 +34,7 @@ def _effective_request(**overrides):
 
 @pytest.mark.parametrize(
     "field",
-    ["policy_id", "owner", "approver", "reason", "compensating_controls", "expires_at"],
+    ["policy_id", "target_id", "owner", "approver", "reason", "compensating_controls", "expires_at"],
 )
 def test_effective_exception_requires_every_accountability_field(field):
     request = _effective_request(**{field: None})

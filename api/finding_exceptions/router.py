@@ -94,12 +94,20 @@ class FindingExceptionLifecycleSweepRequest(BaseModel):
 EFFECTIVE_EXCEPTION_STATUSES = {"active", "approved", "accepted_risk"}
 
 
+def _uuid_or_422(value: str, field_name: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be a valid UUID") from exc
+
+
 def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> datetime | None:
     if req.status not in EFFECTIVE_EXCEPTION_STATUSES:
         return _parse_iso_datetime(req.expires_at) if req.expires_at else None
     missing = [
         label for label, value in (
             ("policy_id", req.policy_id),
+            ("target_id", req.target_id),
             ("owner", req.owner),
             ("approver", req.approver),
             ("reason", req.reason),
@@ -112,10 +120,8 @@ def _validate_finding_exception_accountability(req: FindingExceptionRequest) -> 
             status_code=422,
             detail=f"effective exceptions require: {', '.join(missing)}",
         )
-    try:
-        uuid.UUID(str(req.policy_id))
-    except ValueError:
-        raise HTTPException(status_code=422, detail="policy_id must be a valid UUID")
+    _uuid_or_422(str(req.policy_id), "policy_id")
+    _uuid_or_422(str(req.target_id), "target_id")
     expires_at = _parse_iso_datetime(req.expires_at)
     if expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=422, detail="expires_at must be in the future")
@@ -127,7 +133,7 @@ async def _require_active_policy_profile(conn: Any, policy_id: str | None) -> No
         return
     row = await conn.fetchrow(
         "SELECT id FROM policy_profiles WHERE id=$1 AND is_active=true",
-        uuid.UUID(policy_id),
+        _uuid_or_422(policy_id, "policy_id"),
     )
     if not row:
         raise HTTPException(status_code=422, detail="policy_id must reference an active policy profile")
@@ -143,7 +149,7 @@ async def list_finding_exceptions(
 ):
     clauses, params = [], []
     if target_id:
-        params.append(uuid.UUID(target_id))
+        params.append(_uuid_or_422(target_id, "target_id"))
         clauses.append(f"target_id = ${len(params)}")
     if status:
         params.append(status)
@@ -298,8 +304,8 @@ async def create_finding_exception(req: FindingExceptionRequest):
             RETURNING *
             """,
             req.finding_id, req.fingerprint,
-            uuid.UUID(req.policy_id) if req.policy_id else None,
-            uuid.UUID(req.target_id) if req.target_id else None,
+            _uuid_or_422(req.policy_id, "policy_id") if req.policy_id else None,
+            _uuid_or_422(req.target_id, "target_id") if req.target_id else None,
             req.scope, req.owner, req.approver, req.reason, req.compensating_controls,
             req.status, expires_at,
         )
@@ -308,12 +314,23 @@ async def create_finding_exception(req: FindingExceptionRequest):
 
 @router.patch("/finding-exceptions/{exception_id}")
 async def update_finding_exception(exception_id: str, req: FindingExceptionRequest):
-    expires_at = _validate_finding_exception_accountability(req)
+    exception_uuid = _uuid_or_422(exception_id, "exception_id")
     async with _pool().acquire() as conn:
-        await _require_active_policy_profile(conn, req.policy_id)
-        current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
+        current = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", exception_uuid)
         if not current:
             raise HTTPException(status_code=404, detail="Finding exception not found")
+        supplied = req.model_dump(exclude_unset=True)
+        merged = {
+            field: supplied.get(field, current.get(field))
+            for field in FindingExceptionRequest.model_fields
+        }
+        for uuid_field in ("policy_id", "target_id"):
+            if merged.get(uuid_field) is not None:
+                merged[uuid_field] = str(merged[uuid_field])
+        merged_req = FindingExceptionRequest(**merged)
+        expires_at = _validate_finding_exception_accountability(merged_req)
+        if merged_req.status in EFFECTIVE_EXCEPTION_STATUSES:
+            await _require_active_policy_profile(conn, merged_req.policy_id)
         prior_snapshot = {
             "policy_id": str(current["policy_id"]) if current["policy_id"] else None,
             "owner": current["owner"],
@@ -327,14 +344,16 @@ async def update_finding_exception(exception_id: str, req: FindingExceptionReque
         row = await conn.fetchrow(
             """
             UPDATE finding_exceptions SET
-                policy_id=$2, scope=$3, owner=$4, approver=$5, reason=$6, compensating_controls=$7,
-                status=$8, expires_at=$9, updated_at=NOW(),
-                edit_history = edit_history || $10::jsonb
+                policy_id=$2, target_id=$3, scope=$4, owner=$5, approver=$6, reason=$7,
+                compensating_controls=$8, status=$9, expires_at=$10, updated_at=NOW(),
+                edit_history = edit_history || $11::jsonb
             WHERE id=$1 RETURNING *
             """,
-            uuid.UUID(exception_id), uuid.UUID(req.policy_id) if req.policy_id else None,
-            req.scope, req.owner, req.approver, req.reason,
-            req.compensating_controls, req.status, expires_at,
+            exception_uuid,
+            _uuid_or_422(merged_req.policy_id, "policy_id") if merged_req.policy_id else None,
+            _uuid_or_422(merged_req.target_id, "target_id") if merged_req.target_id else None,
+            merged_req.scope, merged_req.owner, merged_req.approver, merged_req.reason,
+            merged_req.compensating_controls, merged_req.status, expires_at,
             json.dumps([prior_snapshot], default=str),
         )
         if not row:
@@ -345,7 +364,10 @@ async def update_finding_exception(exception_id: str, req: FindingExceptionReque
 @router.delete("/finding-exceptions/{exception_id}")
 async def delete_finding_exception(exception_id: str):
     async with _pool().acquire() as conn:
-        result = await conn.execute("DELETE FROM finding_exceptions WHERE id=$1", uuid.UUID(exception_id))
+        result = await conn.execute(
+            "DELETE FROM finding_exceptions WHERE id=$1",
+            _uuid_or_422(exception_id, "exception_id"),
+        )
     if result.endswith("0"):
         raise HTTPException(status_code=404, detail="Finding exception not found")
     return {"deleted": True, "id": exception_id}
