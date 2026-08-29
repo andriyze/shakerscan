@@ -96,6 +96,12 @@ ALTER TABLE request_collection_selections
 DROP CONSTRAINT IF EXISTS request_collection_selections_name_unique;
 ALTER TABLE request_collection_selections
 ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+-- The legacy schema had only is_active, so an inactive row may have been
+-- explicitly revoked. Preserve the safe meaning across the upgrade. New
+-- superseded revisions are retired without revoked_at by the versioned API.
+UPDATE request_collection_selections
+SET revoked_at = COALESCE(revoked_at, updated_at, NOW())
+WHERE is_active=false AND revoked_at IS NULL;
 ALTER TABLE request_collection_selections
 DROP CONSTRAINT IF EXISTS request_collection_selections_replay_policy_check;
 ALTER TABLE request_collection_selections

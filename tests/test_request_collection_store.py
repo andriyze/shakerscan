@@ -155,6 +155,10 @@ def test_store_executes_one_idempotent_schema_bundle():
     assert "ON CONFLICT (collection_id, target_kind, target_id) DO NOTHING" in conn.queries[0]
     assert "DROP CONSTRAINT IF EXISTS request_collection_selections_name_unique" in conn.queries[0]
     assert "ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ" in conn.queries[0]
+    assert "SET revoked_at = COALESCE(revoked_at, updated_at, NOW())" in conn.queries[0]
+    assert conn.queries[0].index("SET revoked_at = COALESCE") < conn.queries[0].index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_request_collection_selections_current_name"
+    )
     assert "ranked_current_selections" in conn.queries[0]
     assert "idx_request_collection_selections_current_name" in conn.queries[0]
 
