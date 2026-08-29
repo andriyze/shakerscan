@@ -7,6 +7,7 @@ import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFin
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
+import HttpArchiveExport from '@/components/HttpArchiveExport'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
@@ -486,7 +487,7 @@ function ScanFindingContextCard({
         </p>
       ) : (
         <ul className="mt-3 divide-y divide-gray-800 rounded-lg border border-gray-800">
-          {current.map((finding: any) => (
+          {current.slice(0, 6).map((finding: any) => (
             <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
               <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
                 {String(finding.severity || 'info')}
@@ -507,6 +508,32 @@ function ScanFindingContextCard({
             </li>
           ))}
         </ul>
+      )}
+      {current.length > 6 && !loading && !error && (
+        <details className="mt-2 rounded-lg border border-gray-800 bg-gray-950/50">
+          <summary className="cursor-pointer px-3 py-2 text-xs text-gray-400 hover:text-gray-200">
+            Show {current.length - 6} more findings observed in this scan
+          </summary>
+          <ul className="divide-y divide-gray-800 border-t border-gray-800">
+            {current.slice(6).map((finding: any) => (
+              <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
+                  {String(finding.severity || 'info')}
+                </span>
+                {finding.id && finding._persisted ? (
+                  <Link href={`/findings/${finding.id}`} className="min-w-0 flex-1 break-words text-gray-200 hover:text-white">
+                    {finding.title || 'Untitled finding'}
+                  </Link>
+                ) : (
+                  <span className="min-w-0 flex-1 break-words text-gray-200">{finding.title || 'Untitled finding'}</span>
+                )}
+                <span className="text-xs text-gray-500">
+                  {finding.proof_state?.replaceAll('_', ' ') || (finding.verified ? 'verified' : finding.suspected ? 'needs verification' : finding.status?.replaceAll('_', ' ') || 'unverified')}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </Card>
   )
@@ -1856,23 +1883,40 @@ function ScanDetailContent() {
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       <ShardContextBanner scan={scan} />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
-      <ParallelShardRollup scan={scan} />
-      <ParentCoverageRollup scan={scan} />
-      <ExecutionPlanCard scan={scan} />
-      {renderStoredScanLogs()}
       <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
-      <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}
         persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
         loading={deploymentDecisionLoading}
         onRefresh={refreshDeploymentDecision}
       />
-      <ReportView
-        scan={scan}
-        isAuthenticated={true}
-        enableRemediationTracking={true}
-      />
+      <HttpArchiveExport ownerKind="scan" ownerId={scan.id} />
+      <AiGateCampaignReviewCard scan={scan} />
+
+      <details className="mb-4 rounded-lg border border-gray-800 bg-gray-900/50">
+        <summary className="cursor-pointer px-4 py-3 font-medium text-gray-200 hover:text-white">
+          Full technical report and finding evidence
+        </summary>
+        <div className="px-4 pb-4">
+          <ReportView
+            scan={scan}
+            isAuthenticated={true}
+            enableRemediationTracking={true}
+          />
+        </div>
+      </details>
+
+      <details className="rounded-lg border border-gray-800 bg-gray-900/50">
+        <summary className="cursor-pointer px-4 py-3 font-medium text-gray-200 hover:text-white">
+          Coverage, execution plan, and logs
+        </summary>
+        <div className="px-4 pb-4">
+          <ParallelShardRollup scan={scan} />
+          <ParentCoverageRollup scan={scan} />
+          <ExecutionPlanCard scan={scan} />
+          {renderStoredScanLogs()}
+        </div>
+      </details>
     </div>
   )
 }

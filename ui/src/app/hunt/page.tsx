@@ -38,6 +38,7 @@ import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/c
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+import HttpArchiveExport from '@/components/HttpArchiveExport'
 import { usableWebTargets } from '@/lib/targetChoices'
 
 type TargetChoice = {
@@ -806,6 +807,7 @@ function HuntContent() {
                 </p>
               )}
               {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
+              <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} compact />
               {hunt.queued_scan?.scan_id && (
                 <Link href={`/scans/${hunt.queued_scan.scan_id}`} className="block rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-200 hover:bg-blue-500/10">
                   Open queued Scan {hunt.queued_scan.scan_id.slice(0, 8)} · {hunt.queued_scan.status}
