@@ -6,10 +6,10 @@ makes a finding defensible and a scan unreviewable -- an operator could not answ
 it actually send", reproduce a result in Burp, or hand an auditor the traffic.
 
 This module is the transaction plane. It stores one row per call with the identity of the
-work that made it, and puts bodies and headers in the existing content-addressed blob store
-so identical payloads collapse to one object. Bodies are kept whole up to a configurable
-ceiling; past it the prefix is stored with the true full-body digest and length, and the row
-says it was truncated. Nothing is silently dropped.
+work that made it, and puts bodies and headers in the existing content-addressed blob store.
+Repeated payloads inside one archive batch reuse one evidence object. Bodies are kept whole
+up to a configurable ceiling; a bounded prefix is retained after that and the row says it was
+truncated. Nothing is silently dropped.
 
 Storing request and response bodies is a deliberate reversal of the content-free stance, and
 it means the archive holds credentials the scanner was given. It is bounded by the same
@@ -379,9 +379,8 @@ def har_document(entries: Sequence[Mapping[str, Any]], *, creator_version: str) 
 async def store_archive_blob(conn, content: Any, *, scan_id: str | None, store) -> str | None:
     """Put one header map or body in the content-addressed store and return its object id.
 
-    Reuses the evidence object plane rather than adding a second blob table, so identical
-    payloads across thousands of calls collapse to one stored object and the existing
-    retention sweep can reach them.
+    Reuses the evidence object plane rather than adding a second blob table. The caller owns
+    batch-level content deduplication; this function persists one unique payload.
     """
     if content is None:
         return None
@@ -416,10 +415,26 @@ async def archive_http_transactions(
     """Store a run's captured calls. Never raises into the caller's execution path."""
     if not archive_enabled() or not transactions:
         return 0
-    blobs: dict[int, str | None] = {}
-
     async def _prepare() -> list[Mapping[str, Any]]:
         pending: list[dict[str, Any]] = []
+        blob_cache: dict[tuple[str | None, str], str | None] = {}
+
+        async def prepare_blob(content: Any, *, owner_scan_id: str | None) -> str | None:
+            if content is None:
+                return None
+            if isinstance(content, (bytes, bytearray)):
+                encoded = bytes(content)
+            else:
+                encoded = json.dumps(
+                    content, sort_keys=True, separators=(",", ":"), default=str,
+                ).encode("utf-8", errors="replace")
+            key = (owner_scan_id, hashlib.sha256(encoded).hexdigest())
+            if key not in blob_cache:
+                blob_cache[key] = await store_archive_blob(
+                    conn, content, scan_id=owner_scan_id, store=store,
+                )
+            return blob_cache[key]
+
         for item in transactions:
             body = capped_body(item.request_body if stores_bodies() else None)
             response = capped_body(item.response_body if stores_bodies() else None)
@@ -434,19 +449,17 @@ async def archive_http_transactions(
             owner_scan_id = item.scan_id or scan_id
             pending.append({
                 "item": item,
-                "request_headers": await store_archive_blob(
-                    conn, normalized_headers(item.request_headers),
-                    scan_id=owner_scan_id, store=store,
+                "request_headers": await prepare_blob(
+                    normalized_headers(item.request_headers), owner_scan_id=owner_scan_id,
                 ) if item.request_headers else None,
-                "request_body": await store_archive_blob(
-                    conn, body["content"], scan_id=owner_scan_id, store=store,
+                "request_body": await prepare_blob(
+                    body["content"], owner_scan_id=owner_scan_id,
                 ) if body["content"] else None,
-                "response_headers": await store_archive_blob(
-                    conn, normalized_headers(item.response_headers),
-                    scan_id=owner_scan_id, store=store,
+                "response_headers": await prepare_blob(
+                    normalized_headers(item.response_headers), owner_scan_id=owner_scan_id,
                 ) if item.response_headers else None,
-                "response_body": await store_archive_blob(
-                    conn, response["content"], scan_id=owner_scan_id, store=store,
+                "response_body": await prepare_blob(
+                    response["content"], owner_scan_id=owner_scan_id,
                 ) if response["content"] else None,
                 "request_meta": body,
                 "response_meta": response,

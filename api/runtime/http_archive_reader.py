@@ -8,7 +8,9 @@ transactions at all -- reporting that as an empty list would read as "it sent no
 
 from __future__ import annotations
 
+import asyncio
 import json
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 try:
@@ -22,6 +24,11 @@ except ModuleNotFoundError:  # package import layout
     from scanner.redaction import redact_sensitive
 
 from .http_archive import ARCHIVE_SCHEMA, har_document, har_entry
+
+try:
+    from evidence_storage import delete_remote_evidence_object, local_evidence_path
+except ModuleNotFoundError:  # package import layout
+    from ..evidence_storage import delete_remote_evidence_object, local_evidence_path
 
 
 EXPORT_FORMATS = frozenset({"transactions", "har"})
@@ -403,8 +410,8 @@ def export_document(
 
 
 async def purge_transactions(
-    conn, *, scan_id: str | None, hunt_run_id: str | None,
-) -> dict[str, int]:
+    conn, *, scan_id: str | None, hunt_run_id: str | None, results_dir: Path | None = None,
+) -> dict[str, Any]:
     """Delete a run's archived calls and the blobs only they referenced.
 
     The evidence retention sweep is target-scoped and reaches objects through a scan or
@@ -417,11 +424,14 @@ async def purge_transactions(
     owner_id = scan_id or hunt_run_id
     async with conn.transaction():
         objects = await conn.fetch(
-            f"""SELECT DISTINCT unnest(ARRAY[
-                    request_headers_object_id, request_body_object_id,
-                    response_headers_object_id, response_body_object_id
-                ]) AS object_id
-                FROM http_transactions WHERE {owner_clause}""",
+            f"""SELECT DISTINCT eo.id AS object_id, eo.storage_uri
+                FROM http_transactions tx
+                CROSS JOIN LATERAL unnest(ARRAY[
+                    tx.request_headers_object_id, tx.request_body_object_id,
+                    tx.response_headers_object_id, tx.response_body_object_id
+                ]) AS ref(object_id)
+                JOIN evidence_objects eo ON eo.id=ref.object_id
+                WHERE tx.{owner_clause}""",
             owner_id,
         )
         removed = await conn.fetchval(
@@ -430,9 +440,9 @@ async def purge_transactions(
             owner_id,
         )
         object_ids = [row["object_id"] for row in objects if row["object_id"]]
-        blobs = 0
+        deleted_objects: list[Any] = []
         if object_ids:
-            blobs = await conn.fetchval(
+            deleted_objects = await conn.fetch(
                 """WITH gone AS (
                        DELETE FROM evidence_objects eo
                        WHERE eo.id = ANY($1::uuid[])
@@ -444,15 +454,60 @@ async def purge_transactions(
                                  t.response_headers_object_id, t.response_body_object_id
                              )
                          )
-                       RETURNING 1
-                   ) SELECT COUNT(*) FROM gone""",
+                         AND NOT EXISTS (
+                             SELECT 1 FROM evidence_instances i
+                             WHERE i.evidence_object_id=eo.id
+                         )
+                         AND NOT EXISTS (
+                             SELECT 1 FROM tool_receipts receipt
+                             WHERE eo.id IN (
+                                 receipt.stdout_evidence_object_id,
+                                 receipt.stderr_evidence_object_id,
+                                 receipt.output_artifact_id
+                             )
+                         )
+                       RETURNING id, storage_uri
+                   ) SELECT id, storage_uri FROM gone""",
                 object_ids,
             )
         await conn.execute(
             "DELETE FROM http_archive_stats WHERE owner_kind=$1 AND owner_id=$2",
             "scan" if scan_id else "hunt", owner_id,
         )
-    return {"transactions_deleted": int(removed or 0), "blobs_deleted": int(blobs or 0)}
+    deleted_files: list[str] = []
+    missing_files: list[str] = []
+    blob_errors: list[dict[str, str]] = []
+    for item in deleted_objects:
+        storage_uri = str(item.get("storage_uri") or "")
+        still_shared = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM evidence_objects WHERE storage_uri=$1)",
+            storage_uri,
+        ) if storage_uri else False
+        if still_shared:
+            continue
+        local_path = local_evidence_path(results_dir, storage_uri) if results_dir else None
+        if local_path is not None:
+            try:
+                local_path.unlink()
+                deleted_files.append(str(local_path))
+            except FileNotFoundError:
+                missing_files.append(str(local_path))
+            except OSError as exc:
+                blob_errors.append({"storage_uri": storage_uri, "error": type(exc).__name__})
+        elif storage_uri.startswith("s3:evidence_objects/"):
+            result = await asyncio.to_thread(delete_remote_evidence_object, storage_uri)
+            if not result.get("deleted"):
+                blob_errors.append({
+                    "storage_uri": storage_uri,
+                    "error": str(result.get("error") or result.get("status") or "delete_failed"),
+                })
+    return {
+        "transactions_deleted": int(removed or 0),
+        "blobs_deleted": len(deleted_objects),
+        "blob_files_deleted": deleted_files,
+        "blob_files_missing": missing_files,
+        "blob_delete_errors": blob_errors,
+    }
 
 
 __all__ = [

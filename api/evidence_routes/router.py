@@ -654,10 +654,24 @@ async def _evidence_retention_sweep(req: EvidenceRetentionSweepRequest, *, pool:
                           END * INTERVAL '1 day'
                       )
                       AND eo.retention_delete_pending_at IS NULL
-                      AND (eo.finding_id IS NOT NULL OR eo.scan_id IS NOT NULL)
                       AND (eo.finding_id IS NULL OR f.target_id = $1)
                       AND (eo.scan_id IS NULL OR s.target_id = $1)
-                      AND (f.target_id = $1 OR s.target_id = $1)
+                      AND (
+                          f.target_id = $1
+                          OR s.target_id = $1
+                          OR EXISTS (
+                              SELECT 1
+                              FROM http_transactions ht
+                              JOIN hunt_runs hr ON hr.id = ht.hunt_run_id
+                              WHERE eo.id IN (
+                                  ht.request_headers_object_id,
+                                  ht.request_body_object_id,
+                                  ht.response_headers_object_id,
+                                  ht.response_body_object_id
+                              )
+                                AND hr.target_id = $1
+                          )
+                      )
                       AND (f.id IS NULL OR f.status <> 'active')
                     ORDER BY eo.created_at ASC, eo.id ASC
                     LIMIT $3
@@ -1487,6 +1501,12 @@ async def _evidence_retention_links_match_target(
     })
     findings: dict[uuid.UUID, Any] = {}
     scans: dict[uuid.UUID, Any] = {}
+    unowned_object_ids = sorted({
+        uuid.UUID(str(row["id"]))
+        for row in rows
+        if not row.get("finding_id") and not row.get("scan_id") and row.get("id")
+    })
+    hunt_archive_scope: dict[uuid.UUID, bool] = {}
     if finding_ids:
         finding_rows = await conn.fetch(
             """
@@ -1511,12 +1531,37 @@ async def _evidence_retention_links_match_target(
             scan_ids,
         )
         scans = {row["id"]: row for row in scan_rows}
+    if unowned_object_ids:
+        hunt_rows = await conn.fetch(
+            """
+            SELECT ref.object_id,
+                   BOOL_AND(hr.target_id = $2) AS target_scoped
+            FROM http_transactions ht
+            JOIN hunt_runs hr ON hr.id = ht.hunt_run_id
+            CROSS JOIN LATERAL unnest(ARRAY[
+                ht.request_headers_object_id,
+                ht.request_body_object_id,
+                ht.response_headers_object_id,
+                ht.response_body_object_id
+            ]) AS ref(object_id)
+            WHERE ref.object_id = ANY($1::uuid[])
+            GROUP BY ref.object_id
+            """,
+            unowned_object_ids,
+            target_id,
+        )
+        hunt_archive_scope = {
+            row["object_id"]: bool(row["target_scoped"])
+            for row in hunt_rows
+        }
     for raw_row in rows:
         row = row_to_dict(raw_row)
         finding_id = uuid.UUID(str(row["finding_id"])) if row.get("finding_id") else None
         scan_id = uuid.UUID(str(row["scan_id"])) if row.get("scan_id") else None
         if not finding_id and not scan_id:
-            return False
+            object_id = uuid.UUID(str(row["id"])) if row.get("id") else None
+            if object_id is None or not hunt_archive_scope.get(object_id, False):
+                return False
         if finding_id:
             finding = findings.get(finding_id)
             if (

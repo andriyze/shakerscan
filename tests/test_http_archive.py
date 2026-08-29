@@ -15,6 +15,7 @@ import pytest
 
 from api.runtime.http_archive import (
     ARCHIVE_MODES,
+    archive_http_transactions,
     DEFAULT_MAX_BODY_BYTES,
     MAX_HEADER_BYTES,
     HttpTransaction,
@@ -31,6 +32,7 @@ from api.runtime.http_archive_reader import (
     count_transactions,
     export_document,
     project,
+    purge_transactions,
     read_transactions,
     read_archive_stats,
 )
@@ -545,6 +547,77 @@ def test_scan_capture_preserves_wire_identity_and_truncation_metadata():
     assert item.remote_ip == "203.0.113.7"
     assert item.direct_origin is True
     assert item.metadata["response_digest_scope"] == "prefix"
+
+
+@pytest.mark.asyncio
+async def test_archive_batch_reuses_identical_evidence_blobs():
+    class Conn:
+        def __init__(self):
+            self.blob_inserts = 0
+
+        async def fetchrow(self, query, *params):
+            self.blob_inserts += 1
+            return {"id": f"00000000-0000-4000-8000-{self.blob_inserts:012d}"}
+
+        async def execute(self, query, *params):
+            return "INSERT 0 2"
+
+    conn = Conn()
+    transactions = [
+        HttpTransaction(
+            plane="scan", scan_id="11111111-1111-4111-8111-111111111111",
+            method="GET", url=f"https://t/{index}",
+            request_headers={"accept": "application/json"}, response_body=b"same-body",
+        )
+        for index in range(2)
+    ]
+    stored = lambda content: {
+        "content_sha256": hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest(),
+        "size_bytes": 10, "storage_uri": "inline:evidence_objects", "content": content,
+    }
+    assert await archive_http_transactions(conn, transactions, store=stored) == 2
+    assert conn.blob_inserts == 2, "one shared header object and one shared body object"
+
+
+@pytest.mark.asyncio
+async def test_purge_removes_unreferenced_local_archive_bytes(tmp_path):
+    storage_uri = "local:evidence_objects/aa/" + ("a" * 64) + ".json"
+    path = tmp_path / "evidence-objects" / "aa" / (("a" * 64) + ".json")
+    path.parent.mkdir(parents=True)
+    path.write_text("secret archive body")
+
+    class Transaction:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+
+    class Conn:
+        def transaction(self): return Transaction()
+
+        async def fetch(self, query, *params):
+            if "CROSS JOIN LATERAL" in query:
+                return [{"object_id": "11111111-1111-4111-8111-111111111111", "storage_uri": storage_uri}]
+            if "DELETE FROM evidence_objects" in query:
+                return [{"id": "11111111-1111-4111-8111-111111111111", "storage_uri": storage_uri}]
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *params):
+            if "DELETE FROM http_transactions" in query:
+                return 1
+            if "SELECT EXISTS" in query:
+                return False
+            raise AssertionError(query)
+
+        async def execute(self, query, *params):
+            assert "DELETE FROM http_archive_stats" in query
+
+    result = await purge_transactions(
+        Conn(), scan_id=None, hunt_run_id="22222222-2222-4222-8222-222222222222",
+        results_dir=tmp_path,
+    )
+    assert result["transactions_deleted"] == 1
+    assert result["blobs_deleted"] == 1
+    assert result["blob_files_deleted"] == [str(path)]
+    assert not path.exists()
 
 
 def test_archive_blobs_use_a_retention_class_the_sweep_accepts():

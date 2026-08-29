@@ -9023,6 +9023,36 @@ def _run_retention_execute(conn, preview_id, **overrides):
     ))
 
 
+def test_retention_scope_accepts_only_target_bound_hunt_archive_blobs():
+    target_id = uuid.uuid4()
+    object_id = uuid.uuid4()
+
+    class Conn:
+        async def fetch(self, query, *params):
+            assert "FROM http_transactions ht" in query
+            assert params == ([object_id], target_id)
+            return [{"object_id": object_id, "target_scoped": True}]
+
+    row = {"id": object_id, "finding_id": None, "scan_id": None}
+    assert asyncio.run(evidence_router_module._evidence_retention_links_match_target(
+        Conn(), [row], target_id=target_id,
+    )) is True
+
+
+def test_retention_scope_rejects_unlinked_archive_blobs():
+    target_id = uuid.uuid4()
+    object_id = uuid.uuid4()
+
+    class Conn:
+        async def fetch(self, query, *params):
+            return []
+
+    row = {"id": object_id, "finding_id": None, "scan_id": None}
+    assert asyncio.run(evidence_router_module._evidence_retention_links_match_target(
+        Conn(), [row], target_id=target_id,
+    )) is False
+
+
 def test_retention_sweep_execute_requires_preview_before_approval(monkeypatch):
     conn = _RetentionConn(policy_on=True)
     monkeypatch.setattr(api_module, "db_pool", _pool_for(conn))

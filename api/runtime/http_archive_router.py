@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -200,6 +201,7 @@ async def _purge(request: Request, *, scan_id: str | None, hunt_run_id: str | No
     async with _pool().acquire() as conn:
         return await purge_transactions(
             conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+            results_dir=Path(os.environ.get("RESULTS_DIR") or "/results"),
         )
 
 
