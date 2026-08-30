@@ -87,9 +87,9 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Timeline (`/timeline`)**: cross-product mission feed for scans, schedules, command results, evidence bindings, refuters, and exports.
 - **Campaigns (`/campaigns`, `/campaigns/{id}`)**: inspect the read-only mission ledger, lifecycle state, finding impact, and action history. It is not a Hunt launcher.
 - **Evidence (`/evidence`)**: browse evidence instances, inspect objects, export content-free manifests/bundles, and run immutable-preview, approval-gated retention cleanup.
-- **Credentials (`/credentials`)**: create, rotate, inspect, and deactivate encrypted profiles bound to an exact Web, API, network, or device target. Public responses are metadata-only; profiles support primary, secondary, service, and SSH principal slots plus optional capability and expiry bounds. Legacy Web and connected-device profiles are backfilled and transactionally mirrored into this store during the V2 compatibility window; execution still decrypts only after worker-side target and approval validation.
+- **Credentials (`/credentials`)**: create, rotate, inspect, and deactivate encrypted profiles bound to an exact Web, API, network, or device target. Public responses are metadata-only; profiles support primary, secondary, service, and SSH principal slots plus optional capability and expiry bounds. `basic_auth`, `form_login`, and `oauth_password` profiles may intentionally contain only a username or only a secret (at least one is required); execution decides whether the target's actual auth flow can use that material. Legacy Web and connected-device profiles are backfilled and transactionally mirrored into this store during the V2 compatibility window; execution still decrypts only after worker-side target and approval validation.
 - **New Scan (`/scan/new`)**: one deterministic Scan with `fast`, `balanced`, or `thorough` budget ceilings; explicit active, subdomain, and network permissions; exact-target generic primary/secondary credential-profile selection; known endpoints; optional lower custom ceilings; and bounded batch submission. Reusable secret values never enter the canonical UI request or queue.
-- **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
+- **Targets (`/targets`)**: hierarchical tree (root domains with collapsible subdomains), filter by discovery source/grade/has-findings, sort by domain/last-scanned/findings/score/date, search. Validated cohorts (`production`, `staging`, `lab`, `demo`, `calibration`, `internal`, or `unclassified` on update) drive grouped target views, Exposure context, and the dashboard's default operational scope without changing scan results. Actions: add target, scan individual (dropdown), scan all in domain set, discover subdomains, create schedule (icon link). Shows subdomain count, scan count, findings count, grade per target.
 - **Connected Devices (`/devices`, `/devices/{id}`, `/devices/policies`)**: separate TV/camera/printer/router/appliance inventory, dedicated worker readiness, positive multi-signal reachability preflight, top-100 or all-TCP posture scans, curated UDP discovery, service/version/CPE evidence, SSH posture on discovered ports, encrypted Postman, HAR 1.2, OpenAPI 3.x, and Swagger 2.0 imports with redacted previews and device-pinned request-aware DAST, meaningful live scan activity, an agent-visible Smart TV capability pack, optional host-key-pinned read-only SSH host review, AI-proposed remote SSH plans that remain inert until a user confirms the exact immutable commands, ordered allow/deny/review/required-control policies, and Web/API handoff for HTTP(S) found on any port. Hunt uses `target_kind=device` and the same semantic runtime; it can inspect and use only user-bound request collections while secrets remain worker-only. Silence is inconclusive and receives no score or grade. Device scans and hidden web children never create Web targets or alter ordinary DAST/ASM metrics.
   Device worker capacity is opt-in (`./scanner.sh devices start|stop|status|logs`) so existing DAST worker slots and memory are unchanged.
 - **Schedules (`/schedules`)**: create/toggle/delete recurring daily/weekly normal scans and typed ASM coverage waves (`asm_improve`). Evidence cleanup is intentionally interactive-only; legacy `evidence_retention_sweep` schedules are disabled and cannot be created or resumed.
@@ -101,7 +101,7 @@ flags, skills, agents, adapters, modules, and durable tables) plus architecture/
 - **Model Intake (`/model-intake`)**: one phased **Advanced / manual** pipeline with a pinned context bar (model, deployment target, policy profile, operator credential, adapter/runner readiness) and four phases rendered one at a time — **Source** picks the model reference and deployment target once, **Preflight** applies the policy profile and queues the technical evidence scan at a visible scan depth that defaults to **Full scan** (complete artifact acquisition, repository snapshot where the adapter supports one, and every ready evidence adapter; a Quick check acquires a bounded prefix and runs no adapter), **Admission** runs the controlled corporate workflow (stages 4.1-4.6) reusing the Source context, and **Status** holds adapter readiness. Queueing a preflight scan keeps you on the page and tracks it to completion; **Use in admission** binds that exact scan as generated evidence, so no scan UUID is ever copied by hand. Queue artifact checks with artifact URL, metadata URL/JSON, checksum, detached signature URL/value, public key URL/PEM, trusted key PEM/fingerprints, saved strict policy profile, model card, approval flags, timeout, and a GB-scale artifact acquisition limit that auto-sizes to the resolved artifact. The Admission stage seeds the deployment bundle from the bound evidence and from embedding facts the scanned revision publishes about itself (`hidden_size`, `max_position_embeddings`/`max_seq_length`, sentence-transformer pooling mode, `torch_dtype`, and Normalize module), so the operator confirms published values instead of looking them up. Prefill is convenience only: an undeclared embedding contract is still rejected. Reports expose a control execution matrix and structured phase timeline. Strict profiles require complete authoritative acquisition, cryptographic trust/attestation, required scanners, and bound runtime evidence; unavailable controls fail closed. Rebuilt source workers package and functionally self-test ModelScan, Semgrep, Fickling, and offline Trivy; `/model-intake/scanners/readiness` proves their versions/rules/DB/receipt. Execution, evaluation, policy, and report capabilities are separately reported at `/model-intake/providers/readiness`. The core worker never imports model code. The production microVM tier is implemented as a separate host service and remains opt-in: `/model-intake/runners/readiness` reports `UNSUPPORTED_HOST` with `supported_host: false` when the host cannot run a microVM as configured — a macOS or Windows host (`unsupported_reason: host_platform`), or a host whose CPU exposes no virtualization extension (`unsupported_reason: no_hardware_virtualization`), which is what a cloud instance without nested virtualization looks like. `NOT_READY` is reserved for a host that could run a microVM but whose prerequisites are incomplete; an unreadable `/proc/cpuinfo` stays `NOT_READY` rather than declaring a fixable host unsupported. Both stay fail-closed. Nested virtualization is a per-instance setting on most clouds (on AWS, the nested-virtualization CPU option, set on a stopped instance), so `no_hardware_virtualization` is often fixable without changing hosts. The microVM tier is **opt-in and not installed by `scanner.sh start`** — it needs root, mutates the host, and costs a multi-gigabyte guest image most hosts cannot use — so `NOT_READY` on a KVM-capable host normally means "never installed". The Status phase shows one exact host command that downloads, verifies, installs, wires, and checks the runner. Curl installs receive a command that first enters `~/.shakerscan`; local source builds receive their actual checkout path. Installation remains an explicit root action on the host; agents must not run it or route it through the API or Docker socket. The same Status card reports runner disk total/free/reserve, scratch, retained conversions, configured input/output limits, safe cleanup preview/action, and automatic scratch/job-metadata retention. Every runner job is admitted against a conservative peak-disk plan both when queued and immediately before execution; large transient drives are removed on success and failure. Acquired or converted evidence is never silently auto-deleted.
 - **Policy Profiles (`/settings/policy-profiles`)**: create, edit, activate/deactivate, and delete deployment gate profiles for AI Gate, Model Intake, and DAST decisions. Model Intake can select saved active profiles.
 - **Command Arsenal (`/settings/arsenal`)**: command contracts, plans, scope/approval receipts, action ledger, hypotheses, refuters, tools, local agents, context packs, and decision traces.
-- **Hunt (`/hunt`)**: launch one target-kind-aware investigation through `/hunts`, selecting exact-target generic primary, secondary, service, and SSH credential profiles without exposing their values. The current Codex/Claude/OpenCode session owns planning; ShakerScan enforces target scope, approval, multidimensional budgets, capability execution, evidence provenance, and deterministic proof promotion. `/deep-hunt` and device-agent pages redirect for compatibility.
+- **Hunt (`/hunt`, history at `/hunts`)**: launch and review one target-kind-aware investigation through `/hunts`, selecting exact-target generic primary, secondary, service, and SSH credential profiles without exposing their values. History supports target/search/status/kind/budget filters, sorting, and pagination. The current Codex/Claude/OpenCode session owns planning; before launch it queries `/hunt/skills`, reads relevant server-shipped methodologies, and explicitly binds up to four supported `skill_ids`. ShakerScan enforces target scope, approval, multidimensional budgets, capability execution, evidence provenance, and deterministic proof promotion. `/deep-hunt` and device-agent pages redirect for compatibility.
 - **Leads and Test Builder (`/deep-hunt/leads`, `/deep-hunt/experiment`)**: inspect the hypothesis backlog or hand-craft an advanced bounded experiment. They support Hunt; they are not separate engines.
 - **Bounded experiments (`/deep-hunt/runs/{id}`)**: inspect durable runs from the compatibility `/research/*` controller, retained for specialized guided verification. Do not route a user's "Deep Hunt" request there; `/deep-hunt/operator` and `/deep-hunt/explorer` are legacy URLs that redirect to `/deep-hunt`.
 - **Removed UI surfaces (2.0.0)**: `/interactive`, `/exceptions`, and
@@ -189,6 +189,10 @@ curl http://localhost:8080/scans/{scan_id}/result
 
 # Get recent scan logs (default 200 lines, max 1000)
 curl "http://localhost:8080/scans/{scan_id}/logs?limit=200"
+
+# Export archived HTTP calls as redacted ShakerScan JSON or raw HAR 1.2
+curl "http://localhost:8080/scans/{scan_id}/http-transactions?format=transactions&redaction=redacted"
+curl "http://localhost:8080/scans/{scan_id}/http-transactions?format=har"
 
 # Cancel a running or pending scan
 curl -X POST http://localhost:8080/scans/{scan_id}/cancel
@@ -509,10 +513,21 @@ Active or budget-increasing intents return `dry_run: true` unless `execute`, `co
 
 The canonical workflow is `POST /hunts` with a registered web or device `target_id`, an objective,
 `fast|balanced|thorough` budget profile, optional bound request-collection IDs, and an optional
-target-bound approval receipt. The response is a filtered capability manifest. The external coding
-agent queries context with `POST /hunts/{id}/query`, invokes only returned capabilities through
-`POST /hunts/{id}/capabilities/{name}`, creates evidence-backed candidates, hands candidates to the
-deterministic verifier, and finishes or cancels the run. It never sees secrets or supplies raw argv.
+target-bound approval receipt. Read `GET /hunts/contract`, then query
+`GET /hunt/skills?target_kind={kind}&goal={objective}`. Read each relevant supported methodology at
+`GET /hunt/skills/{skill_id}` and explicitly include up to four `skill_ids`; suggestions never grant
+authority or bind themselves. The response is a filtered capability manifest plus a nonempty skills
+context explaining bound, suggested, and deferred work. The external coding agent queries context
+with `POST /hunts/{id}/query`, invokes only returned capabilities through
+`POST /hunts/{id}/capabilities/{name}`, and manages evidence-backed candidates with create, `PATCH`,
+`DELETE`, and deterministic `/verify` operations before it finishes or cancels the run. A
+budget-exhausted run still accepts its final debrief while preserving the exhaustion reason. It
+never sees secrets or supplies raw argv.
+
+Historical Hunts are available at `GET /hunts` with target, status, target-kind, budget-profile,
+root-domain, search, sort, limit, and offset controls. `GET /hunts/{id}/record` exports the bounded
+explicit decision trace and debrief; it never exports hidden chain-of-thought. Archived HTTP calls
+are separate at `GET /hunts/{id}/http-transactions`.
 
 The older Deep Hunt material below documents compatibility routes only; do not use it for new runs.
 
@@ -1064,18 +1079,28 @@ The worker resolves private material after target, action-capability, approval, 
 validation. Inline bearer tokens, cookies, passwords, client secrets, arbitrary headers, shell
 commands, and planner-supplied argv are not canonical Scan inputs.
 
-### Deprecated Scan-name compatibility
+### Historical Scan names
 
-The historical names `quick`, `standard`, `deep`, `full`, `aggressive`, and `smart` are
-accepted only as dated request-boundary translations during migration. They map to a V2 budget and
-active-testing policy, emit deprecation telemetry, and sunset on **2026-12-31**. They never enter the
-queued job, immutable action plan, continuation revision, or report as engine authority.
+Old rows may still contain `quick`, `standard`, `deep`, `full`, `aggressive`, or `smart` labels.
+They are display-only history. Current public submissions accept the canonical `fast`, `balanced`,
+or `thorough` `budget_profile` plus explicit policy; do not send a legacy `scan_type` or call removed
+`scan-full` / `scan-smart` commands.
 
 ## Response Interpretation
 
-Scans return:
-- **score**: 0-100 (higher is better)
-- **grade**: A, B, C, D, F
+Scans return two independent axes under score policy `risk_and_assurance/v8`:
+
+- **Observed risk**: `risk_score` (0-100, higher is better) and `risk_grade` (A-F) describe only
+  what deterministic evidence observed. The compatibility `score` and `grade` mirror this axis;
+  `grade` gains `*` when `grade_reliable` is false.
+- **Assurance**: `assurance_score` (0-100) and `assurance_band`
+  (`none|weak|limited|adequate|strong`) describe examination breadth, completed required work,
+  tested families/principals, placement, and proof attempts. It is never blended into risk.
+- **Assessment state**: `risk_assessment_state=not_examined` and `application_observed=false` mean
+  the scanner did not reach the application (for example, only a 401 challenge was observed). Do
+  not present the numerical risk projection as a clean bill of health in this state.
+- **Reliability**: `grade_reliable=false`, `grade_reliability.reasons`, and `assurance_gaps` explain
+  incomplete or weak evidence. A completed plan is not necessarily broad or authenticated coverage.
 - **findings**: Array of vulnerabilities
 - **result**: Rich object with detailed scan data (see below)
 
@@ -1087,6 +1112,11 @@ The `/scans/{id}` endpoint returns detailed data you should report:
 
 | Path | Description |
 |------|-------------|
+| `result.result.risk_score`, `risk_grade` | Observed-risk axis; not a coverage score |
+| `result.result.assurance_score`, `assurance_band` | Independent examination-strength axis |
+| `result.result.risk_assessment_state`, `application_observed` | Whether application behavior was actually observed |
+| `result.result.grade_reliable`, `result.coverage.grade_reliability` | Reliability flag and exact reasons |
+| `result.result.posture_penalty`, `posture_penalties` | Deductions only for posture actually observed from an application response |
 | `result.http.csp_evaluation` | CSP grade, score, issues, parsed directives |
 | `result.http.security_headers` | HSTS, X-Frame-Options, Referrer-Policy, COOP, CORP |
 | `result.tls.certificate` | Subject, issuer, days_remaining, key_size, key_algo |
@@ -1105,9 +1135,10 @@ When AI is enabled, the report also includes `ai_correlations` (cross-finding co
 ```
 ✓ Scan completed
 
-┌─────────────────────────────────────┐
-│  Grade: C    Score: 72/100          │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Observed risk: C · 72/100                   │
+│  Assurance: limited · 58/100                 │
+└──────────────────────────────────────────────┘
 
 📋 SUMMARY
 ├─ TLS: Let's Encrypt R3, 45 days, RSA 4096-bit
@@ -1301,10 +1332,6 @@ Users can also use the CLI directly:
 # Canonical deterministic Scan
 ./scanner.sh scan https://example.com --budget-profile balanced
 ./scanner.sh scan https://example.com --budget-profile thorough --active-testing --confirm-active
-
-# Deprecated compatibility shims (sunset 2026-12-31)
-./scanner.sh scan-full https://example.com --confirm-active
-./scanner.sh scan-smart https://example.com --confirm-active
 
 # Management
 ./scanner.sh status                          # Check status
