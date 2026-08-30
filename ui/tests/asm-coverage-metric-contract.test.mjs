@@ -18,3 +18,13 @@ test('ASM surfaces use one explicit route/variant/attempt coverage contract', ()
   assert.match(page, /snapshot \{coverage\.metric_contract\?\.snapshot_at/)
   assert.match(page, /proved \/ completed \/ attempted/)
 })
+
+test('ASM inventory distinguishes candidates, provenance, and reachability without scoring them', () => {
+  assert.match(api, /provenance_kind\?: 'response_observed'/)
+  assert.match(api, /reachability_state\?: 'reachable_observed'/)
+  assert.match(api, /affects_score_or_grade: boolean/)
+  assert.match(page, /Inventory is a worklist, not a list of confirmed routes/)
+  assert.match(page, /This information does not affect the DAST score or grade/)
+  assert.match(page, /e\.provenance_label/)
+  assert.match(page, /e\.reachability_label/)
+})

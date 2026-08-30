@@ -707,6 +707,10 @@ async def list_findings(
         'total': total,
         'limit': limit,
         'offset': offset,
+        'details_included': include_details,
+        'omitted_detail_fields': (
+            [] if include_details else sorted(_FINDING_DETAIL_ONLY_FIELDS)
+        ),
         'candidates_total': candidates_total,
         'included_candidates': included_candidates,
     }

@@ -2077,9 +2077,27 @@ export interface AsmEndpoint {
   test_status: 'untested' | 'in_progress' | 'tested' | 'stale' | 'gone'
   last_attempt_status?: string | null
   last_verdict?: string | null
+  last_http_status?: number | null
+  unreachable_streak?: number
+  last_reachability_at?: string | null
+  provenance_kind?: 'response_observed' | 'declared_or_imported' | 'scanner_discovered' | 'unknown' | string
+  provenance_label?: string
+  provenance_explanation?: string
+  reachability_state?: 'reachable_observed' | 'unreachable_observed' | 'retired_unreachable' | 'not_checked' | 'inconclusive' | string
+  reachability_label?: string
+  reachability_explanation?: string
   first_seen_at?: string
   last_seen_at?: string
   last_tested_at?: string | null
+}
+
+export interface AsmInventorySemantics {
+  schema_version: string
+  informational_only: boolean
+  affects_score_or_grade: boolean
+  route_claim: string
+  provenance_counts_on_page?: Record<string, number>
+  reachability_counts_on_page?: Record<string, number>
 }
 
 export interface AsmRecommendation {
@@ -5523,7 +5541,11 @@ export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
 export async function getAsmEndpoints(
   targetId: string,
   params?: { status?: string; limit?: number; offset?: number }
-): Promise<{ endpoints: AsmEndpoint[]; coverage: AsmCoverage }> {
+): Promise<{
+  endpoints: AsmEndpoint[]
+  coverage: AsmCoverage
+  inventory_semantics?: AsmInventorySemantics
+}> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
   if (params?.limit) searchParams.set('limit', params.limit.toString())
@@ -5719,7 +5741,17 @@ export async function getFindings(params?: {
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
   include_candidates?: boolean
-}): Promise<{ findings: Finding[]; total: number; limit: number; offset: number; candidates_total?: number; included_candidates?: number }> {
+  include_details?: boolean
+}): Promise<{
+  findings: Finding[]
+  total: number
+  limit: number
+  offset: number
+  details_included: boolean
+  omitted_detail_fields: string[]
+  candidates_total?: number
+  included_candidates?: number
+}> {
   const searchParams = new URLSearchParams()
   if (params?.severity) searchParams.set('severity', params.severity)
   if (params?.status) searchParams.set('status', params.status)
@@ -5743,6 +5775,7 @@ export async function getFindings(params?: {
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
   if (params?.include_candidates === true) searchParams.set('include_candidates', 'true')
+  if (params?.include_details === true) searchParams.set('include_details', 'true')
 
   const res = await fetch(`${API_URL}/findings?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch findings')

@@ -44,6 +44,7 @@ import {
   type AsmCoverage,
   type AsmEndpoint,
   type AsmGaps,
+  type AsmInventorySemantics,
   type AsmPolicy,
   type AsmSchedulerState,
   type AsmTimelineEvent,
@@ -101,6 +102,21 @@ const METHOD_BADGE: Record<string, string> = {
   PUT: 'bg-amber-500/15 text-amber-400',
   PATCH: 'bg-orange-500/15 text-orange-400',
   DELETE: 'bg-red-500/15 text-red-400',
+}
+
+const PROVENANCE_BADGE: Record<string, string> = {
+  response_observed: 'bg-emerald-500/15 text-emerald-300',
+  declared_or_imported: 'bg-violet-500/15 text-violet-300',
+  scanner_discovered: 'bg-sky-500/15 text-sky-300',
+  unknown: 'bg-gray-700/50 text-gray-300',
+}
+
+const REACHABILITY_BADGE: Record<string, string> = {
+  reachable_observed: 'bg-emerald-500/15 text-emerald-300',
+  unreachable_observed: 'bg-amber-500/15 text-amber-300',
+  retired_unreachable: 'bg-red-500/15 text-red-300',
+  not_checked: 'bg-gray-700/50 text-gray-300',
+  inconclusive: 'bg-yellow-500/15 text-yellow-300',
 }
 
 function pct(coverage: number): string {
@@ -1371,6 +1387,7 @@ function TargetView({ targetId }: { targetId: string }) {
   const toast = useToast()
   const [target, setTarget] = useState<Target | null>(null)
   const [endpoints, setEndpoints] = useState<AsmEndpoint[]>([])
+  const [inventorySemantics, setInventorySemantics] = useState<AsmInventorySemantics | null>(null)
   const [coverage, setCoverage] = useState<AsmCoverage | null>(null)
   const [gaps, setGaps] = useState<AsmGaps | null>(null)
   const [activity, setActivity] = useState<AsmActivity[]>([])
@@ -1393,6 +1410,7 @@ function TargetView({ targetId }: { targetId: string }) {
     ])
       .then(([endpointData, gapData, activityData]) => {
         setEndpoints(endpointData.endpoints)
+        setInventorySemantics(endpointData.inventory_semantics || null)
         setCoverage(endpointData.coverage)
         setGaps(gapData)
         setActivity(activityData.activity)
@@ -1553,6 +1571,13 @@ function TargetView({ targetId }: { targetId: string }) {
           Endpoint inventory <span className="ml-2 text-xs font-normal text-gray-500">({endpoints.length} shown)</span>
         </summary>
         <div className="space-y-4 border-t border-gray-800 p-4">
+        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-gray-300">
+          <div className="font-medium text-blue-200">Inventory is a worklist, not a list of confirmed routes</div>
+          <p className="mt-1 text-gray-400">
+            {inventorySemantics?.route_claim || 'Discovery and imported route variants remain candidates until response or reachability evidence establishes them.'}
+            {' '}This information does not affect the DAST score or grade.
+          </p>
+        </div>
         <div className="flex flex-wrap items-center gap-3">
           <select
             value={filters.status ?? ''}
@@ -1587,7 +1612,8 @@ function TargetView({ targetId }: { targetId: string }) {
                   <th className="px-3 py-2 font-medium">Path</th>
                   <th className="px-3 py-2 font-medium">Status</th>
                   <th className="px-3 py-2 font-medium text-right">Priority</th>
-                  <th className="px-3 py-2 font-medium">Source</th>
+                  <th className="px-3 py-2 font-medium">Provenance</th>
+                  <th className="px-3 py-2 font-medium">Reachability</th>
                   <th className="px-3 py-2 font-medium">Auth</th>
                   <th className="px-3 py-2 font-medium">Last tested</th>
                   <th className="px-3 py-2 font-medium">Verdict</th>
@@ -1609,7 +1635,20 @@ function TargetView({ targetId }: { targetId: string }) {
                       </Badge>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-400">{e.priority_score}</td>
-                    <td className="px-3 py-2 text-gray-400">{e.source || '—'}</td>
+                    <td className="px-3 py-2" title={e.provenance_explanation}>
+                      <Badge className={PROVENANCE_BADGE[e.provenance_kind || 'unknown'] || PROVENANCE_BADGE.unknown}>
+                        {e.provenance_label || 'Unknown source'}
+                      </Badge>
+                      <div className="mt-1 text-[11px] text-gray-600">{e.source || 'unspecified'}</div>
+                    </td>
+                    <td className="px-3 py-2" title={e.reachability_explanation}>
+                      <Badge className={REACHABILITY_BADGE[e.reachability_state || 'not_checked'] || REACHABILITY_BADGE.not_checked}>
+                        {e.reachability_label || 'Not checked'}
+                      </Badge>
+                      {e.last_http_status ? (
+                        <div className="mt-1 text-[11px] text-gray-600">HTTP {e.last_http_status}</div>
+                      ) : null}
+                    </td>
                     <td className="px-3 py-2 text-gray-400">{e.auth_state || '—'}</td>
                     <td className="px-3 py-2 text-gray-400">{e.last_tested_at ? formatDate(e.last_tested_at) : '—'}</td>
                     <td className="px-3 py-2 text-gray-400">{e.last_verdict || '—'}</td>

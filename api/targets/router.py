@@ -2090,7 +2090,8 @@ async def asm_list_endpoints(
         params: list[Any] = [uuid.UUID(target_id)]
         q = """SELECT id, method, path, param_shape, param_location, replay_spec, content_type,
                       source, auth_state, priority_score, test_status, last_attempt_status,
-                      last_verdict, first_seen_at, last_seen_at, last_tested_at
+                      last_verdict, last_http_status, unreachable_streak,
+                      last_reachability_at, first_seen_at, last_seen_at, last_tested_at
                FROM target_endpoints WHERE target_id = $1"""
         if status:
             params.append(status)
@@ -2102,7 +2103,33 @@ async def asm_list_endpoints(
         q += f" OFFSET ${len(params)}"
         rows = await conn.fetch(q, *params)
         coverage = await asm_inventory.coverage_summary(conn, target_id)
-    return {"endpoints": [row_to_dict(r) for r in rows], "coverage": coverage}
+    endpoints = [
+        asm_inventory.endpoint_inventory_semantics(row_to_dict(row))
+        for row in rows
+    ]
+    provenance_counts: dict[str, int] = {}
+    reachability_counts: dict[str, int] = {}
+    for endpoint in endpoints:
+        provenance = str(endpoint["provenance_kind"])
+        reachability = str(endpoint["reachability_state"])
+        provenance_counts[provenance] = provenance_counts.get(provenance, 0) + 1
+        reachability_counts[reachability] = reachability_counts.get(reachability, 0) + 1
+    return {
+        "endpoints": endpoints,
+        "coverage": coverage,
+        "inventory_semantics": {
+            "schema_version": "asm-inventory-presentation/v1",
+            "informational_only": True,
+            "affects_score_or_grade": False,
+            "route_claim": (
+                "Rows are route variants queued for examination. Scanner-discovered "
+                "or imported rows are not confirmed application routes unless response "
+                "or reachability evidence says so."
+            ),
+            "provenance_counts_on_page": provenance_counts,
+            "reachability_counts_on_page": reachability_counts,
+        },
+    }
 
 
 @router.get("/targets/{target_id}/asm/coverage")

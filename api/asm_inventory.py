@@ -114,6 +114,73 @@ ATTEMPT_TERMINAL_STATUSES = (
 )
 ATTEMPT_CLAIM_BLOCKING_STATUSES = ATTEMPT_TERMINAL_STATUSES + ("leased",)
 
+_RESPONSE_OBSERVED_SOURCES = frozenset({"scan_telemetry"})
+_SCANNER_DISCOVERED_SOURCES = frozenset({"scan", "coverage_discovery", "asm", "recon"})
+_DECLARED_SOURCES = frozenset({"openapi", "har", "manual", "postman"})
+
+
+def endpoint_inventory_semantics(row: Any) -> dict[str, Any]:
+    """Explain what one inventory row proves without turning it into a score.
+
+    Most rows are work candidates harvested from discovery, not confirmed server
+    routes.  Keep provenance, test execution, and reachability independent so API
+    clients and the UI cannot mistake a large wordlist-derived inventory for a
+    large application surface.
+    """
+    item = dict(row or {})
+    source = str(item.get("source") or "unknown").strip().lower()
+    if source in _RESPONSE_OBSERVED_SOURCES:
+        provenance = "response_observed"
+        provenance_label = "Response observed"
+        provenance_explanation = "Persisted from response-backed scan telemetry."
+    elif source in _DECLARED_SOURCES:
+        provenance = "declared_or_imported"
+        provenance_label = "Declared / imported"
+        provenance_explanation = "Declared by an imported specification or operator; reachability is separate."
+    elif source in _SCANNER_DISCOVERED_SOURCES:
+        provenance = "scanner_discovered"
+        provenance_label = "Scanner candidate"
+        provenance_explanation = "Harvested by scanner discovery; it is a test candidate, not proof of a live route."
+    else:
+        provenance = "unknown"
+        provenance_label = "Unknown source"
+        provenance_explanation = "The inventory source does not establish whether this route exists."
+
+    test_status = str(item.get("test_status") or "untested").strip().lower()
+    last_reachability_at = item.get("last_reachability_at")
+    unreachable_streak = max(0, int(item.get("unreachable_streak") or 0))
+    last_http_status = item.get("last_http_status")
+    if test_status == "gone":
+        reachability = "retired_unreachable"
+        reachability_label = "Retired"
+        reachability_explanation = "Repeated hard-404 or soft-404 controls retired this candidate."
+    elif last_reachability_at is None:
+        reachability = "not_checked"
+        reachability_label = "Not checked"
+        reachability_explanation = "No dedicated reachability control has been recorded."
+    elif unreachable_streak > 0:
+        reachability = "unreachable_observed"
+        reachability_label = "Unreachable observed"
+        reachability_explanation = "A hard-404 or soft-404 control matched; retirement requires confirmation."
+    elif last_http_status is not None:
+        reachability = "reachable_observed"
+        reachability_label = "Reachable response"
+        reachability_explanation = "A dedicated reachability probe received a non-not-found response."
+    else:
+        reachability = "inconclusive"
+        reachability_label = "Inconclusive"
+        reachability_explanation = "The last reachability attempt did not establish existence or absence."
+
+    return {
+        **item,
+        "provenance_kind": provenance,
+        "provenance_label": provenance_label,
+        "provenance_explanation": provenance_explanation,
+        "reachability_state": reachability,
+        "reachability_label": reachability_label,
+        "reachability_explanation": reachability_explanation,
+    }
+
 
 API_ENDPOINT_FILTER_SQL = """(
     {alias}.path = '/api'
