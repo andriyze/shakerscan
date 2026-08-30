@@ -14,7 +14,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -518,21 +518,16 @@ function ScanFindingContextCard({
       !scanPersistedCurrent.some((current: Finding) => current.id === finding.id)
     )),
   ]
-  const findingKey = (finding: any) => [
-    String(finding?.title || ''),
-    String(finding?.url || ''),
-    String(finding?.cwe || ''),
-  ].join('|')
   const persistedByKey = new Map(
-    persistedCurrent.map((finding: Finding) => [findingKey(finding), finding]),
+    persistedCurrent.map((finding: Finding) => [scanFindingIdentity(finding), finding]),
   )
-  const currentKeys = new Set(rawCurrent.map(findingKey))
+  const currentKeys = new Set(rawCurrent.map(scanFindingIdentity))
   const additionalPersistedCurrent = persistedCurrent.filter(
-    (finding: Finding) => !currentKeys.has(findingKey(finding)),
+    (finding: Finding) => !currentKeys.has(scanFindingIdentity(finding)),
   )
   const current = [
     ...rawCurrent.map((finding: any, index: number) => {
-      const persisted = persistedByKey.get(findingKey(finding))
+      const persisted = persistedByKey.get(scanFindingIdentity(finding))
       return {
         ...finding,
         ...persisted,

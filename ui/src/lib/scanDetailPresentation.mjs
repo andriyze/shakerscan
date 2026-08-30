@@ -10,6 +10,15 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback
 }
 
+export function scanFindingIdentity(finding) {
+  const item = record(finding)
+  return [
+    String(item.title || '').trim().toLowerCase(),
+    String(item.url || '').trim().replace(/\/+$/, '').toLowerCase(),
+    String(item.tool || '').trim().toLowerCase(),
+  ].join('|')
+}
+
 export function scanPhasePresentation(scan) {
   const status = String(record(scan).status || 'pending').toLowerCase()
   const rawPhase = String(record(scan).current_phase || '').trim().toLowerCase()

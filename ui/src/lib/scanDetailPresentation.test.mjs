@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -116,4 +116,21 @@ test('ambiguous v3 reports claim posture deductions only when they carry one', (
   }, { band: 'weak', label: 'Weak coverage' })
   assert.equal(postureAware.postureIncluded, true)
   assert.equal(postureAware.posturePenalty, 22)
+})
+
+test('raw and persisted forms of the same scan finding share one UI identity', () => {
+  const raw = {
+    title: 'Legacy TLS protocol negotiated',
+    url: 'https://gap-analytics.com/',
+    tool: 'tls.inspect',
+    cwe: 'CWE-326',
+  }
+  const persistedSummary = {
+    id: 'finding-1',
+    title: 'Legacy TLS protocol negotiated',
+    url: 'https://gap-analytics.com/',
+    tool: 'tls.inspect',
+  }
+
+  assert.equal(scanFindingIdentity(raw), scanFindingIdentity(persistedSummary))
 })

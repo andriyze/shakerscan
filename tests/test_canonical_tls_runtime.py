@@ -46,6 +46,33 @@ class _Writer:
         return None
 
 
+class _ClosedSensitiveTlsObject(_TlsObject):
+    def __init__(self):
+        self.closed = False
+
+    def version(self):
+        return None if self.closed else super().version()
+
+    def cipher(self):
+        return None if self.closed else super().cipher()
+
+    def selected_alpn_protocol(self):
+        return None if self.closed else super().selected_alpn_protocol()
+
+
+class _ClosedSensitiveWriter(_Writer):
+    def __init__(self):
+        super().__init__()
+        self.tls_object = _ClosedSensitiveTlsObject()
+
+    def get_extra_info(self, name):
+        return self.tls_object if name == "ssl_object" else None
+
+    def close(self):
+        self.closed = True
+        self.tls_object.closed = True
+
+
 def test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes(monkeypatch):
     calls = []
     writer = _Writer()
@@ -79,6 +106,28 @@ def test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes(monkeypa
         "tool_wall_seconds": 1,
     }
     assert writer.closed is True
+
+
+def test_tls_evidence_is_snapshotted_before_the_connection_closes(monkeypatch):
+    writers = []
+
+    async def fake_open_connection(**_kwargs):
+        writer = _ClosedSensitiveWriter()
+        writers.append(writer)
+        return object(), writer
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    result = asyncio.run(inspect_tls_origin(
+        "https://app.example.test",
+        target=_target(),
+        timeout_seconds=15,
+    ))
+
+    observation = result["observation"]
+    assert all(writer.closed for writer in writers)
+    assert observation["protocol"] == "TLSv1.3"
+    assert observation["cipher"] == "TLS_AES_256_GCM_SHA384"
+    assert observation["legacy_protocol_negotiated"] is False
 
 
 def test_tls_default_address_is_stable_not_resolver_order(monkeypatch):
