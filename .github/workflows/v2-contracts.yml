@@ -113,8 +113,10 @@ jobs:
       - name: Freeze monolith growth and lock the API contract
         run: |
           python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
           PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
-            tests/test_api_characterization.py
+            tests/test_api_characterization.py \
+            tests/test_documentation_policy.py
 
       - name: Verify the public installer ships its whole import closure
         run: |
