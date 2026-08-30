@@ -214,7 +214,9 @@ Keep these intents distinct:
 - `explain/triage/compare this device` → `device-triage` unless the user explicitly authorizes new traffic.
 
 For Hunt, use the current coding-agent session as planner and the `hunt` skill. Start `POST /hunts`,
-then query context, call only returned capabilities, record evidence-backed candidates, and request
+but first query the server-returned `skill_catalog` for the target kind and objective, read the
+relevant methodology bodies, and explicitly bind suitable supported `skill_ids`. Then query context,
+call only returned capabilities, record or correct evidence-backed candidates, and request
 deterministic verification through the same API. ShakerScan remains authoritative for scope,
 credentials, active authority, budgets, evidence, and proof.
 

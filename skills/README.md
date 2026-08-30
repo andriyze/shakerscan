@@ -40,6 +40,12 @@ session hook automatically.
 | [`device-hunt`](device-hunt/SKILL.md) | Compatibility entry point for older Device Hunt wording; delegates to canonical Hunt with a device target |
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
+The [`web`](web/README.md) directory is the server-shipped Hunt methodology catalog: 31 focused
+web-testing playbooks with routing metadata, capability requirements, evidence gates, and honest
+runtime support levels. It is not one agent skill to load wholesale. The Hunt planner queries
+`GET /hunt/skills`, reads only relevant methodologies, and binds up to four supported entries with
+`skill_ids`; partial and reference entries remain readable but cannot be bound.
+
 Each modern skill is a directory with:
 
 - `SKILL.md` for trigger metadata and operating instructions
@@ -73,7 +79,7 @@ Project-local Claude Code entry points live under `.claude/`:
 
 - Commands: canonical deterministic Scan, status, findings, workers, subdomains, AI Gate,
   Interactive Testing, manual findings, JS analysis, content discovery, Hunt, compatibility
-  research, and skill review. The full/smart names are dated request-boundary shims, not engines.
+  research, and skill review.
 - Specialized agents: JS analysis, content discovery, and skill-system review
 
 The commands delegate to the same skills and API safety rules. They are conveniences, not separate
