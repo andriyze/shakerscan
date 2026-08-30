@@ -254,6 +254,71 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         ("hunt_id",), read_only=True, idempotent=True,
     ),
     HuntMCPTool(
+        "shakerscan_hunt_skill_suggestions", "POST",
+        "/hunts/{hunt_id}/skills/suggestions",
+        "Get at most three adaptive methodology suggestions without loading their bodies.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "signals": {
+                "type": "array", "items": {"type": "string", "maxLength": 160},
+                "maxItems": 20, "uniqueItems": True,
+            },
+        },
+        ("hunt_id",), read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_read", "POST",
+        "/hunts/{hunt_id}/skills/{skill_id}/read",
+        "Load exactly one relevant methodology and record that context spend.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+        ("hunt_id", "skill_id"), idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_bind", "POST",
+        "/hunts/{hunt_id}/skills/{skill_id}/bind",
+        "Bind one reviewed methodology; this never changes Hunt scope, authority, or budget.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+            "reason": {"type": "string", "maxLength": 500},
+            "evidence_refs": {
+                "type": "array", "items": {"type": "string", "maxLength": 256},
+                "maxItems": 20, "uniqueItems": True,
+            },
+        },
+        ("hunt_id", "skill_id"), idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_unbind", "DELETE",
+        "/hunts/{hunt_id}/skills/{skill_id}",
+        "Remove one explicitly selected methodology without changing Hunt authority.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+        ("hunt_id", "skill_id"), destructive=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_usage", "POST",
+        "/hunts/{hunt_id}/skills/{skill_id}/usage",
+        "Record evidenced methodology use, completion, or deferral.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+            "state": {"type": "string", "enum": ["used", "completed", "deferred"]},
+            "action_id": {"type": "string", "format": "uuid"},
+            "evidence_refs": {
+                "type": "array", "items": {"type": "string", "maxLength": 256},
+                "maxItems": 20, "uniqueItems": True,
+            },
+            "reason": {"type": "string", "maxLength": 500},
+        },
+        ("hunt_id", "skill_id", "state"), idempotent=True,
+    ),
+    HuntMCPTool(
         "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query bounded Hunt context.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
@@ -693,6 +758,15 @@ class ArsenalClient:
                 payload.setdefault("capabilities", [])
                 payload.setdefault("request_collection_ids", [])
                 payload.setdefault("skill_ids", [])
+            elif name == "shakerscan_hunt_skill_suggestions":
+                payload.setdefault("signals", [])
+            elif name == "shakerscan_hunt_skill_bind":
+                payload.setdefault("reason", "")
+                payload.setdefault("evidence_refs", [])
+            elif name == "shakerscan_hunt_skill_usage":
+                payload.setdefault("action_id", None)
+                payload.setdefault("evidence_refs", [])
+                payload.setdefault("reason", "")
             path = hunt_tool.path_template
             for key in ("hunt_id", "capability_name", "candidate_id", "skill_id"):
                 marker = "{" + key + "}"

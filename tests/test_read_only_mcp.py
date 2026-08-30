@@ -156,6 +156,9 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
     assert schema["properties"]["skill_ids"]["maxItems"] == 4
     assert annotations["shakerscan_hunt_skills"]["readOnlyHint"] is True
     assert annotations["shakerscan_hunt_skill"]["idempotentHint"] is True
+    assert annotations["shakerscan_hunt_skill_suggestions"]["readOnlyHint"] is True
+    assert annotations["shakerscan_hunt_skill_read"]["readOnlyHint"] is False
+    assert annotations["shakerscan_hunt_skill_unbind"]["destructiveHint"] is True
 
 
 def test_mcp_hunt_methodology_catalog_and_detail_are_read_only_gets():
@@ -180,6 +183,44 @@ def test_mcp_hunt_methodology_catalog_and_detail_are_read_only_gets():
     assert "goal=Cloudflare+origin+exposure" in catalog["structuredContent"]["path"]
     assert detail["structuredContent"]["path"].endswith("?include_methodology=true")
     assert all(call[0] == "GET" and call[2] is None for call in client.calls[-2:])
+
+
+def test_mcp_hunt_methodology_progressive_tools_send_bounded_payloads():
+    class SkillClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if "/skills" in path:
+                self.calls.append((method, path, payload))
+                return {"path": path, "payload": payload}
+            return super().request_json(method, path, payload)
+
+    client = SkillClient()
+    hunt_id = "11111111-1111-1111-1111-111111111111"
+    skill_id = "skill.web.graphql-testing"
+    client.call_tool("shakerscan_hunt_skill_suggestions", {
+        "hunt_id": hunt_id, "signals": ["graphql"],
+    })
+    client.call_tool("shakerscan_hunt_skill_read", {
+        "hunt_id": hunt_id, "skill_id": skill_id,
+    })
+    client.call_tool("shakerscan_hunt_skill_bind", {
+        "hunt_id": hunt_id, "skill_id": skill_id,
+        "reason": "GraphQL endpoint observed",
+    })
+    client.call_tool("shakerscan_hunt_skill_usage", {
+        "hunt_id": hunt_id, "skill_id": skill_id, "state": "deferred",
+        "reason": "No mutations authorized",
+    })
+
+    assert client.calls[-4] == (
+        "POST", f"/hunts/{hunt_id}/skills/suggestions", {"signals": ["graphql"]},
+    )
+    assert client.calls[-3] == (
+        "POST", f"/hunts/{hunt_id}/skills/{skill_id}/read", None,
+    )
+    assert client.calls[-2][2] == {
+        "reason": "GraphQL endpoint observed", "evidence_refs": [],
+    }
+    assert client.calls[-1][2]["state"] == "deferred"
 
 
 def test_mcp_catalog_drift_fails_closed():

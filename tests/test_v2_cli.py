@@ -102,6 +102,48 @@ def test_hunt_skills_cli_queries_server_suggestions():
     assert "goal=Cloudflare+origin+exposure" in result["path"]
 
 
+def test_hunt_cli_progressively_suggests_reads_binds_and_tracks_methodology():
+    calls = []
+
+    class FakeClient:
+        def post(self, path, payload, **_kwargs):
+            calls.append(("POST", path, payload))
+            return {"path": path, "payload": payload}
+
+        def delete(self, path):
+            calls.append(("DELETE", path, None))
+            return {"path": path}
+
+    client = FakeClient()
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-suggest", "hunt-1", "--signal", "graphql",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-read", "hunt-1", "skill.web.graphql-testing",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-bind", "hunt-1", "skill.web.graphql-testing",
+        "--reason", "GraphQL endpoint observed", "--evidence-ref", "evidence-1",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-usage", "hunt-1", "skill.web.graphql-testing", "used",
+        "--action-id", "11111111-1111-1111-1111-111111111111",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-unbind", "hunt-1", "skill.web.graphql-testing",
+    ), client)
+
+    assert calls[0] == (
+        "POST", "/hunts/hunt-1/skills/suggestions", {"signals": ["graphql"]},
+    )
+    assert calls[1][1].endswith("/skill.web.graphql-testing/read")
+    assert calls[2][2]["reason"] == "GraphQL endpoint observed"
+    assert calls[3][2]["state"] == "used"
+    assert calls[4] == (
+        "DELETE", "/hunts/hunt-1/skills/skill.web.graphql-testing", None,
+    )
+
+
 def test_credential_requests_are_checked_against_server_published_schema():
     schema = {
         "properties": {"target_id": {}, "secret": {}},

@@ -353,6 +353,50 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             query["goal"] = args.goal
         suffix = f"?{urllib.parse.urlencode(query)}" if query else ""
         return client.get(f"/hunt/skills{suffix}")
+    if args.hunt_command == "skill-suggest":
+        return client.post(
+            f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/skills/suggestions",
+            {"signals": list(dict.fromkeys(args.signal))},
+        )
+    if args.hunt_command == "skill-read":
+        return client.post(
+            "/hunts/{}/skills/{}/read".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.skill_id, safe=""),
+            ),
+            {},
+        )
+    if args.hunt_command == "skill-bind":
+        return client.post(
+            "/hunts/{}/skills/{}/bind".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.skill_id, safe=""),
+            ),
+            {
+                "reason": args.reason or "",
+                "evidence_refs": list(dict.fromkeys(args.evidence_ref)),
+            },
+        )
+    if args.hunt_command == "skill-unbind":
+        query = urllib.parse.urlencode({"reason": args.reason}) if args.reason else ""
+        path = "/hunts/{}/skills/{}".format(
+            urllib.parse.quote(args.hunt_id, safe=""),
+            urllib.parse.quote(args.skill_id, safe=""),
+        )
+        return client.delete(f"{path}?{query}" if query else path)
+    if args.hunt_command == "skill-usage":
+        return client.post(
+            "/hunts/{}/skills/{}/usage".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.skill_id, safe=""),
+            ),
+            {
+                "state": args.state,
+                "action_id": args.action_id,
+                "evidence_refs": list(dict.fromkeys(args.evidence_ref)),
+                "reason": args.reason or "",
+            },
+        )
     if args.hunt_command == "start":
         contract = client.get("/hunts/contract")
         if not isinstance(contract, Mapping):
@@ -704,6 +748,41 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_skills.add_argument("--target-kind")
     hunt_skills.add_argument("--support", choices=("supported", "partial", "reference"))
     hunt_skills.add_argument("--goal", help="Return deterministic advisory suggestions for this objective")
+    hunt_skill_suggest = hunt_commands.add_parser(
+        "skill-suggest", help="Get a compact adaptive methodology shortlist for one Hunt",
+    )
+    hunt_skill_suggest.add_argument("hunt_id")
+    hunt_skill_suggest.add_argument(
+        "--signal", action="append", default=[],
+        help="Observed technology or surface signal (repeatable; bodies are not loaded)",
+    )
+    hunt_skill_read = hunt_commands.add_parser(
+        "skill-read", help="Load exactly one methodology for an active Hunt",
+    )
+    hunt_skill_read.add_argument("hunt_id")
+    hunt_skill_read.add_argument("skill_id")
+    hunt_skill_bind = hunt_commands.add_parser(
+        "skill-bind", help="Bind one reviewed methodology without changing Hunt authority",
+    )
+    hunt_skill_bind.add_argument("hunt_id")
+    hunt_skill_bind.add_argument("skill_id")
+    hunt_skill_bind.add_argument("--reason")
+    hunt_skill_bind.add_argument("--evidence-ref", action="append", default=[])
+    hunt_skill_unbind = hunt_commands.add_parser(
+        "skill-unbind", help="Remove one explicitly selected methodology",
+    )
+    hunt_skill_unbind.add_argument("hunt_id")
+    hunt_skill_unbind.add_argument("skill_id")
+    hunt_skill_unbind.add_argument("--reason")
+    hunt_skill_usage = hunt_commands.add_parser(
+        "skill-usage", help="Record evidenced methodology use or completion",
+    )
+    hunt_skill_usage.add_argument("hunt_id")
+    hunt_skill_usage.add_argument("skill_id")
+    hunt_skill_usage.add_argument("state", choices=("used", "completed", "deferred"))
+    hunt_skill_usage.add_argument("--action-id")
+    hunt_skill_usage.add_argument("--evidence-ref", action="append", default=[])
+    hunt_skill_usage.add_argument("--reason")
     hunt_start = hunt_commands.add_parser("start", help="Start a target-bound Hunt")
     hunt_start.add_argument("--request", metavar="FILE", help="Complete JSON contract; use - for stdin")
     hunt_start.add_argument("--idempotency-key")
@@ -724,7 +803,10 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--collection-id", action="append", default=[])
     hunt_start.add_argument(
         "--skill-id", action="append", default=[],
-        help="Bind a server-shipped methodology (repeatable; inspect with 'hunt skills')",
+        help=(
+            "Pre-bind an already reviewed methodology (repeatable; normally start empty and "
+            "use skill-suggest, skill-read, then skill-bind)"
+        ),
     )
 
     hunt_get = hunt_commands.add_parser("get", help="Read one Hunt and its capability manifest")
