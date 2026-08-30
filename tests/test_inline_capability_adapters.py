@@ -340,6 +340,48 @@ def test_collection_control_adapter_returns_a_content_free_observation():
     },)
 
 
+def test_control_adapter_preserves_a_typed_finding_observation():
+    specification = CAPABILITY_REGISTRY.require("findings.create")
+    requested = {
+        "agent_actions": 1,
+        "active_actions": 1,
+        "tool_wall_seconds": 5,
+    }
+
+    async def operation():
+        return {
+            "ok": True,
+            "finding_id": "finding-1",
+            "observation": {
+                "kind": "finding_mutation",
+                "operation": "created",
+                "finding_id": "finding-1",
+                "proof_state": "unverified",
+            },
+        }
+
+    result = _execute(
+        specification,
+        ControlPlaneExecutionAdapter(
+            specification=specification,
+            operation=operation,
+            requested_budget=requested,
+            redacted_execution={},
+            blocked_exceptions=(ExpectedControlBlock,),
+            conservative_full_budget=True,
+        ),
+        requested,
+    )
+
+    assert result.status == "success"
+    assert result.observations == ({
+        "kind": "finding_mutation",
+        "operation": "created",
+        "finding_id": "finding-1",
+        "proof_state": "unverified",
+    },)
+
+
 def test_collection_control_adapter_refunds_wall_time_for_a_guard_block():
     specification = CAPABILITY_REGISTRY.require("collections.select")
     requested = {"agent_actions": 1, "tool_wall_seconds": 5}

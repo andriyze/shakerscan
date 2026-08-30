@@ -31,6 +31,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .run_service import agent_tools
+from . import finding_actions as _hunt_finding_actions
 from .cancellation import (
     HuntCancellationWatch,
     record_cancellable_job_durable,
@@ -2262,6 +2263,42 @@ async def _execute_hunt_capability_lifecycle(
                 requested_budget=durable_reservation.record.requested,
             )
             result = collection_adapter.result
+        elif name in {"findings.create", "findings.update", "findings.delete"}:
+            async def mutate_hunt_finding() -> dict[str, Any]:
+                try:
+                    if name == "findings.create":
+                        operation = _hunt_finding_actions.create_hunt_finding
+                    elif name == "findings.update":
+                        operation = _hunt_finding_actions.update_hunt_finding
+                    else:
+                        operation = _hunt_finding_actions.delete_hunt_finding
+                    return await operation(
+                        _pool(),
+                        hunt_id=run["id"],
+                        action_id=action_id,
+                        values=request.input,
+                    )
+                except _hunt_finding_actions.HuntFindingActionError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+            finding_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=mutate_hunt_finding,
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution=_hunt_redacted_capability_input(
+                    name, request.input,
+                ),
+                blocked_exceptions=(HTTPException,),
+                conservative_full_budget=True,
+            )
+            capability_execution = await dispatch_registered_adapter(
+                finding_adapter,
+                target=inline_hunt_target_binding(),
+                requested_budget=durable_reservation.record.requested,
+            )
+            result = finding_adapter.result
+            if finding_adapter.blocked_exception is not None:
+                raise finding_adapter.blocked_exception
         elif name == "collections.select":
             collection_adapter = ControlPlaneExecutionAdapter(
                 specification=spec,

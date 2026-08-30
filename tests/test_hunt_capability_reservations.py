@@ -54,6 +54,9 @@ def test_inline_hunt_capability_set_is_explicit_and_bounded():
         "candidate.verify",
         "collections.inspect",
         "collections.select",
+        "findings.create",
+        "findings.update",
+        "findings.delete",
         "tls.inspect",
     }
     assert hunt_capability_lease_seconds({"tool_wall_seconds": 10}) == 90

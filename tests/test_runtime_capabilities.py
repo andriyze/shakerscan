@@ -66,7 +66,7 @@ def test_registry_filters_target_kind_and_active_permission():
         "device.inspect", "device.capabilities.inspect", "device.http.probe",
         "device.scan", "device.service.verify", "collections.inspect", "collections.select",
         "collections.replay_safe", "device.ssh.propose", "device.ssh.execute_confirmed",
-        "candidate.verify",
+        "candidate.verify", "findings.create", "findings.update", "findings.delete",
     }
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval

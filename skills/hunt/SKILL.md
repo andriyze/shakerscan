@@ -262,8 +262,15 @@ verifier. A candidate is non-authoritative.
 Correct a candidate with `PATCH /hunts/{hunt_id}/candidates/{candidate_id}` when its title, claim,
 severity, evidence references, or verifier contract needs revision. Delete a mistaken, duplicate,
 or unsupported candidate with `DELETE /hunts/{hunt_id}/candidates/{candidate_id}`. These operations
-affect Hunt candidates only; they do not let the planner edit or delete a deterministically verified
-finding.
+affect Hunt candidates only.
+
+When the user wants a durable finding before deterministic verification, an active Hunt may call
+`findings.create` with at least one completed or partial action ID from the same Hunt. The result is
+always explicitly unverified and non-authoritative. `findings.update` can correct metadata or triage
+state, and `findings.delete` requires `confirm_delete: true`; both are limited to findings created by
+that exact Hunt and must cite same-Hunt evidence actions. None accepts proof, verification, request,
+response, or target fields. Never use these controls to rewrite or delete a scanner-owned or
+deterministically verified finding.
 
 Use `POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` for deterministic verification.
 The planner cannot create a verified finding, choose an unregistered verifier, or promote its own

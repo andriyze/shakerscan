@@ -1137,6 +1137,7 @@ async def _run_schema_migrations_once(pool) -> None:
                 ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS ai_classification_source TEXT,
                 ADD COLUMN IF NOT EXISTS ai_target_id UUID,
+                ADD COLUMN IF NOT EXISTS hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS analyst_verdict TEXT,
                 ADD COLUMN IF NOT EXISTS analyst_verdict_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS analyst_verdict_notes TEXT
@@ -1144,6 +1145,10 @@ async def _run_schema_migrations_once(pool) -> None:
             await conn.execute("""
                 UPDATE findings SET verification_count = 0
                 WHERE verification_count IS NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_hunt_run_id
+                ON findings(hunt_run_id) WHERE hunt_run_id IS NOT NULL
             """)
 
             # Ownership/accountability metadata for the exposure inventory,

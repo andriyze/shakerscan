@@ -1023,6 +1023,7 @@ CREATE TABLE findings (
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
     ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
     device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
 
     -- Finding identification (for deduplication)
     fingerprint TEXT NOT NULL,
@@ -1531,6 +1532,7 @@ CREATE INDEX idx_findings_first_seen ON findings(first_seen_at DESC);
 CREATE INDEX idx_findings_last_seen ON findings(last_seen_at DESC NULLS LAST);
 CREATE INDEX idx_findings_source ON findings(source);
 CREATE INDEX idx_findings_session_id ON findings(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_findings_hunt_run_id ON findings(hunt_run_id) WHERE hunt_run_id IS NOT NULL;
 CREATE INDEX idx_findings_last_verified_at ON findings(last_verified_at DESC) WHERE last_verified_at IS NOT NULL;
 CREATE INDEX idx_findings_last_verification_verdict ON findings(last_verification_verdict);
 -- Dedup hot path: save_findings looks up by (target_id, fingerprint) on every
