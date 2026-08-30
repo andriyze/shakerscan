@@ -178,7 +178,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
       <div className="grid gap-px bg-gray-800 md:grid-cols-3">
         <div className="bg-gray-950/80 p-5">
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Observed risk from this run</p>
-          {scorePresentation.status === 'unavailable' ? (
+          {scorePresentation.status === 'not_examined' ? (
+            <p className="mt-3 text-lg font-semibold text-amber-200">Not examined</p>
+          ) : scorePresentation.status === 'unavailable' ? (
             <p className="mt-3 text-sm font-medium text-amber-200">Risk score unavailable</p>
           ) : (
             <div className="mt-2 flex items-baseline gap-3">
@@ -191,7 +193,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
             </div>
           )}
           <p className="mt-2 text-xs leading-5 text-gray-500">
-            {resultPresentation.postureIncluded
+            {resultPresentation.notExamined
+              ? 'No application response was observed, so this run cannot publish a clean risk grade.'
+              : resultPresentation.postureIncluded
               ? 'Finding evidence and deterministic application posture observed by this run.'
               : 'Finding evidence observed by this run; this historical scoring policy may exclude posture deductions.'}
             {' '}This is not an overall safety or release score.
@@ -242,7 +246,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
           </div>
           <p className="mt-3 text-xs leading-5 text-gray-500">
             {resultPresentation.confirmedCount > 0
-              ? `${resultPresentation.confirmedCount} material finding${resultPresentation.confirmedCount === 1 ? '' : 's'} carry deterministic proof.`
+              ? `${resultPresentation.confirmedCount} material finding${resultPresentation.confirmedCount === 1 ? ' carries' : 's carry'} deterministic proof.`
               : resultPresentation.candidateCount > 0
                 ? `${resultPresentation.candidateCount} material candidate${resultPresentation.candidateCount === 1 ? '' : 's'} still need verification.`
                 : 'No confirmed medium, high, or critical finding was produced by this run.'}

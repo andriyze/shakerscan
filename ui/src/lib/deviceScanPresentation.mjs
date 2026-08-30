@@ -39,6 +39,15 @@ export function deviceScorePresentation(scan) {
     : (resultSummary.risk_score ?? resultSummary.score ?? scanRecord.score))
 
   if (!isDevice) {
+    if (resultSummary.risk_assessment_state === 'not_examined') {
+      return {
+        isDevice: false,
+        status: 'not_examined',
+        grade: null,
+        score: null,
+        note: 'The scanner reached an authentication challenge or other non-application response, so no clean risk grade is available.',
+      }
+    }
     const coverage = record(scanResult.coverage)
     const executionCoverage = record(record(scanRecord.execution_explanation).coverage)
     const reliability = record(

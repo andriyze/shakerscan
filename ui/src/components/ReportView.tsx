@@ -1060,7 +1060,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 Provisional posture
               </div>
             )}
-            {scorePresentation.status === 'unavailable' ? (
+            {scorePresentation.status === 'not_examined' ? (
+              <div className="text-sm font-medium text-amber-200">Application not examined</div>
+            ) : scorePresentation.status === 'unavailable' ? (
               <div className="text-sm font-medium text-amber-200">Posture score unavailable</div>
             ) : (
               <>

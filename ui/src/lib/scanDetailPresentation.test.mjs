@@ -68,6 +68,25 @@ test('a shallow clean scan leads with an honest conclusion instead of a perfect 
   assert.deepEqual(result.missingHeaders, ['content-security-policy'])
 })
 
+test('an unobservable application leads with not examined instead of clean', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: {
+        risk_score: 100,
+        risk_grade: 'A',
+        grade_reliable: false,
+        risk_assessment_state: 'not_examined',
+      },
+      http: { status: 401, posture_observed: false, missing_security_headers: [] },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+
+  assert.equal(result.headline, 'Application was not examined')
+  assert.match(result.explanation, /authentication challenge/)
+  assert.equal(result.notExamined, true)
+})
+
 test('confirmed and candidate material findings get distinct conclusions', () => {
   const confirmed = scanResultPresentation({
     result: { findings: [{ severity: 'high', verified: true, proof_state: 'verified' }] },

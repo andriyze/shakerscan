@@ -268,6 +268,99 @@ def test_finalizer_does_not_grade_headers_from_an_auth_challenge():
     assert report["http"]["posture_observed"] is False
     assert report["http"]["missing_security_headers"] == []
     assert report["result"]["posture_penalty"] == 0
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["grade_reliable"] is False
+    assert report["result"]["grade"].endswith("*")
+    assert report["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["application_not_observed"],
+    }
+
+
+def test_finalizer_suppresses_missing_header_template_matches_from_auth_challenge():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    templates = _action(
+        "passive.templates", 1,
+        dependencies=(baseline.action_id,),
+        capability_name="templates.passive_batch",
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(templates.action_id,),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        templates.action_id: _result_with_observation_count(templates, 1),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"origin": "https://app.example.test"},
+            "response": {"status": 401, "security_headers": {}},
+        },),
+        templates.action_id: ({
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": "referrer-policy",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["findings"] == []
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+
+
+def test_finalizer_names_the_specific_header_reported_by_nuclei():
+    templates = _action(
+        "passive.templates", 0, capability_name="templates.passive_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    results = {templates.action_id: _result_with_observation_count(templates, 1)}
+    observations = {templates.action_id: ({
+        "kind": "template_match",
+        "template_id": "http-missing-security-headers",
+        "name": "HTTP Missing Security Headers",
+        "severity": "info",
+        "matched_at": "https://app.example.test/",
+        "matcher_name": "x-permitted-cross-domain-policies",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+    assert finding["title"] == (
+        "Missing HTTP response header: X-Permitted-Cross-Domain-Policies"
+    )
+    assert finding["evidence"]["header_name"] == (
+        "x-permitted-cross-domain-policies"
+    )
 
 
 def test_finalizer_promotes_only_deterministic_proof_contracts():
@@ -316,7 +409,7 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     # still-passing 90; the suspected critical alongside it is real evidence but does not
     # cap as if it were confirmed.
     assert (result["risk_score"], result["risk_grade"]) == (70, "C")
-    assert result["score_policy"] == "risk_and_assurance/v7"
+    assert result["score_policy"] == "risk_and_assurance/v8"
     assert result["grade"] == "C*" and result["grade_reliable"] is False
     assert result["score"] == result["risk_score"], "compatibility alias is the risk axis"
     assert "proven_high:1" in result["score_reasons"]

@@ -145,6 +145,37 @@ test('unreliable DAST grade is explicitly provisional and never displayed as A s
 })
 
 
+test('a DAST run that only reached an auth challenge withholds the clean grade', () => {
+  const presentation = deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A*',
+    score: 100,
+    result: {
+      result: {
+        grade: 'A*',
+        score: 100,
+        risk_grade: 'A',
+        risk_score: 100,
+        grade_reliable: false,
+        risk_assessment_state: 'not_examined',
+      },
+      coverage: {
+        status: 'complete',
+        grade_reliability: {
+          reliable: false,
+          reasons: ['application_not_observed'],
+        },
+      },
+    },
+  })
+
+  assert.equal(presentation.status, 'not_examined')
+  assert.equal(presentation.grade, null)
+  assert.equal(presentation.score, null)
+  assert.match(presentation.note, /authentication challenge/)
+})
+
+
 test('device activity becomes readable content-free report logs', () => {
   assert.deepEqual(deviceActivityLogLines({ events: [
     {

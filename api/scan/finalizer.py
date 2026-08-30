@@ -111,9 +111,35 @@ def _base_finding(
     }
 
 
+def _observed_url_key(value: Any) -> str | None:
+    """Canonicalize one exact response URL for cross-capability comparison."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or ""))
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower().rstrip(".")
+    port = parsed.port
+    authority = host if port is None else f"{host}:{port}"
+    path = (parsed.path or "/").rstrip("/") or "/"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
+
+
+def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
+    template_id = str(item.get("template_id") or "").strip().lower()
+    matcher = str(item.get("matcher_name") or "").strip().lower() or None
+    if template_id == "http-missing-security-headers" and matcher:
+        display = "-".join(part.capitalize() for part in matcher.split("-"))
+        return f"Missing HTTP response header: {display}", matcher
+    return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
+    *,
+    unobserved_response_urls: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     receipt = _receipt(result)
@@ -682,19 +708,31 @@ def _findings_for_action(
                 })
                 findings.append(finding)
         elif kind == "template_match":
+            template_id = str(item.get("template_id") or "").strip().lower()
+            matched_url = item.get("matched_at") or item.get("url")
+            # A missing-header template matching the same 401/403/error response that
+            # the posture projector rejected is not application evidence.  Keeping it
+            # would reintroduce the exact phantom weakness removed from the score path.
+            if (
+                template_id == "http-missing-security-headers"
+                and _observed_url_key(matched_url) in unobserved_response_urls
+            ):
+                continue
             severity = str(item.get("severity") or "info").strip().lower()
             if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
+            title, header_name = _header_template_title(item)
             finding = _base_finding(
                 tool="nuclei",
-                title=str(item.get("name") or item.get("template_id") or "Template match")[:300],
+                title=title,
                 severity=severity,
                 cwe=str(item.get("cwe") or "") or None,
-                url=item.get("matched_at") or item.get("url"),
+                url=matched_url,
                 evidence={
                     "template_id": item.get("template_id"),
                     "matcher_name": item.get("matcher_name"),
-                    "matched_at": item.get("matched_at") or item.get("url"),
+                    **({"header_name": header_name} if header_name else {}),
+                    "matched_at": matched_url,
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
@@ -1193,6 +1231,17 @@ def finalize_scan_report(
     findings_by_id: dict[str, dict[str, Any]] = {}
     action_rows: list[dict[str, Any]] = []
     runtime_destinations: list[dict[str, Any]] = []
+    unobserved_response_urls: set[str] = set()
+    for row in observations.get("baseline.http", ()):
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        if isinstance(status, int) and not 200 <= status < 400:
+            key = _observed_url_key(request.get("origin") or response.get("final_url"))
+            if key:
+                unobserved_response_urls.add(key)
     for action in expected_actions:
         result = action_results[action.action_id]
         if result.action_digest != action.action_digest:
@@ -1205,7 +1254,11 @@ def finalize_scan_report(
             and len(rows) != result.observation_manifest_ref.count
         ):
             raise ScanFinalizationError("observation count differs from its action manifest")
-        for finding in _findings_for_action(result, rows):
+        for finding in _findings_for_action(
+            result,
+            rows,
+            unobserved_response_urls=frozenset(unobserved_response_urls),
+        ):
             findings_by_id.setdefault(_finding_identity(finding), finding)
         runtime_destinations.extend(_runtime_destinations(
             action_id=action.action_id,
@@ -1458,6 +1511,24 @@ def finalize_scan_report(
         for action, result in required_rows
         if result.status is not CapabilityResultStatus.SUCCESS
     ]
+    posture_sections = _posture_sections(observations)
+    http_posture = (
+        posture_sections.get("http")
+        if isinstance(posture_sections.get("http"), Mapping) else {}
+    )
+    explicit_http_status = http_posture.get("status")
+    application_proof_observed = any(
+        item.get("verified") is True
+        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect"}
+        for item in findings
+    )
+    risk_assessment_state = (
+        "observed"
+        if http_posture.get("posture_observed") is True or application_proof_observed
+        else "not_examined"
+        if isinstance(explicit_http_status, int)
+        else "unknown"
+    )
     reliability_reasons = sorted({
         (
             result.reason_code.value
@@ -1468,7 +1539,8 @@ def finalize_scan_report(
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
-      | ({"unproven_critical_high"} if unproven_critical_high else set()))
+      | ({"unproven_critical_high"} if unproven_critical_high else set())
+      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set()))
     grade_reliable = not reliability_reasons
     coverage_reasons = sorted(
         set(reasons)
@@ -1621,7 +1693,6 @@ def finalize_scan_report(
     # Scored after coverage exists, because the assurance axis reads it. The severity-only
     # scorer ran ~350 lines earlier and every one of these signals was computed and then
     # used for nothing but appending a star to the letter.
-    posture_sections = _posture_sections(observations)
     scored_posture_sections = {
         name: value for name, value in posture_sections.items()
         if name != "infrastructure"
@@ -1632,6 +1703,14 @@ def finalize_scan_report(
         posture=scored_posture_sections,
         grade_reliable=grade_reliable,
     )
+    result_block.update({
+        "risk_assessment_state": risk_assessment_state,
+        "application_observed": (
+            True if risk_assessment_state == "observed"
+            else False if risk_assessment_state == "not_examined"
+            else None
+        ),
+    })
     report = {
         "schema_version": SCAN_REPORT_SCHEMA,
         "target": str(target_url),

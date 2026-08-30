@@ -137,13 +137,18 @@ export function scanResultPresentation(scan, assurance) {
   const assuranceBand = String(assurance?.band || result.assurance_band || 'none')
   const assuranceLabel = String(assurance?.label || 'Coverage unavailable')
   const weakExamination = ['none', 'weak', 'limited'].includes(assuranceBand)
+  const notExamined = result.risk_assessment_state === 'not_examined'
 
   let headline = 'No material vulnerability confirmed in this run'
   let explanation = findings.length
     ? `${findings.length} lower-severity or informational observation${findings.length === 1 ? ' was' : 's were'} recorded.`
     : 'This run did not produce a confirmed medium, high, or critical finding.'
   let tone = 'caution'
-  if (confirmed.length) {
+  if (notExamined) {
+    headline = 'Application was not examined'
+    explanation = 'The scanner reached an authentication challenge or another response that did not expose application content.'
+    tone = 'warning'
+  } else if (confirmed.length) {
     headline = `${confirmed.length} confirmed material ${confirmed.length === 1 ? 'issue requires' : 'issues require'} action`
     explanation = 'Deterministic evidence confirmed at least one medium, high, or critical finding in this run.'
     tone = 'danger'
@@ -190,6 +195,7 @@ export function scanResultPresentation(scan, assurance) {
     // v3 was briefly reused for both pre- and post-posture calculations.
     // The emitted penalty disambiguates those rows; v4+ has stable provenance.
     postureIncluded: posturePenalty !== null || policyVersion >= 4,
+    notExamined,
     confirmedCount: confirmed.length,
     candidateCount: candidates.length,
   }
