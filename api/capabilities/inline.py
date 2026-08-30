@@ -183,6 +183,10 @@ class InfrastructureInspectionExecutionAdapter(_MeasuredObservationExecutionAdap
     """Normalize bounded registration and network context observations."""
 
 
+class ArtifactInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize one bounded target-pinned artifact read or static analysis."""
+
+
 class AuthSessionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize a worker-private credential exchange to content-free evidence."""
 

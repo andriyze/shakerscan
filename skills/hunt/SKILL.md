@@ -221,6 +221,10 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - Record evidenced methodology use or completion at
   `POST /hunts/{hunt_id}/skills/{skill_id}/usage`. Unbind it when it is no longer relevant. The
   server retains version, digest, trigger, evidence, and lifecycle outside the planner context.
+- For a client bundle, prefer `javascript.analyze` for compact routes, source-map references,
+  sink signals, and decoded JWT claims. Use `artifact.inspect` only for one necessary redacted
+  byte window. Neither capability returns discovered token values, and neither justifies using a
+  discovered credential.
 - If a useful methodology needs authority the user did not grant, keep it unbound or ask for that
   authority; never enable active, network, credential, direct-origin, state-changing, or OOB
   permission merely to satisfy a methodology.

@@ -8,18 +8,18 @@ version: 2.0.0
 kind: discovery
 phase: discovery
 risk: low
-support: partial
+support: supported
 target_kinds:
 - web
 - api
 capabilities:
 - http.request
 - browser.navigate
-optional_capabilities:
-- templates.scan
-missing_capabilities:
 - artifact.inspect
 - javascript.analyze
+optional_capabilities:
+- templates.scan
+missing_capabilities: []
 server_enforced:
 - policy.evaluate
 budget:
@@ -374,9 +374,9 @@ secret_validation: metadata_only
 
 ## ShakerScan runtime notes
 
-**Support: partial.** ShakerScan has no capability for `artifact.inspect`, `javascript.analyze`, so this skill cannot be bound to a hunt yet. It is published so the gap is visible rather than discovered mid-run.
+**Support: supported.** Hunt can read bounded redacted windows with `artifact.inspect` and run structured `javascript.analyze` extraction for routes, source-map references, client sinks, Supabase origins, and decoded JWT claims. Token values remain worker-private.
 
-Bindable capabilities: `http.request`, `browser.navigate`.
+Bindable capabilities: `http.request`, `browser.navigate`, `artifact.inspect`, `javascript.analyze`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

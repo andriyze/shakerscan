@@ -55,7 +55,8 @@ def test_registry_filters_target_kind_and_active_permission():
 
     assert safe_web == {
         "scan.finalize", "scan.execute",
-        "web.probe", "http.request", "dns.inspect", "infrastructure.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
+        "web.probe", "http.request", "artifact.inspect", "javascript.analyze",
+        "dns.inspect", "infrastructure.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
         "browser.interact", "web.crawl", "web.browser_crawl",
         "web.content_discover",
         "templates.passive_scan", "templates.passive_batch",

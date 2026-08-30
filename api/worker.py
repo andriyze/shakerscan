@@ -74,6 +74,7 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.http import execute_bound_http_request
+from capabilities.artifact import analyze_target_javascript, inspect_target_artifact
 from capabilities.auth import (
     TargetBoundSessionCredential,
     establish_target_bound_http_session,
@@ -84,6 +85,7 @@ from capabilities.authz import (
 )
 from capabilities.dns import inspect_dns_posture
 from capabilities.inline import (
+    ArtifactInspectionExecutionAdapter,
     AuthSessionExecutionAdapter,
     AuthzVerificationExecutionAdapter,
     DnsInspectionExecutionAdapter,
@@ -22502,6 +22504,31 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "principal_contexts_distinct": True,
                 "secret_values_visible": False,
             }
+        elif capability_name in {"artifact.inspect", "javascript.analyze"}:
+            public_input = dict(capability_input)
+
+            async def execute_artifact() -> dict[str, Any]:
+                operation = (
+                    inspect_target_artifact
+                    if capability_name == "artifact.inspect"
+                    else analyze_target_javascript
+                )
+                return await operation(
+                    target_url,
+                    public_input,
+                    target=target,
+                    transaction_recorder=_record_call,
+                )
+
+            operation = execute_artifact
+            adapter_type = ArtifactInspectionExecutionAdapter
+            redacted_execution = {
+                "path": redact_url(str(public_input.get("path") or "")),
+                "offset": int(public_input.get("offset") or 0),
+                "max_bytes": int(public_input.get("max_bytes") or 0) or None,
+                "search_term_count": len(public_input.get("search_terms") or []),
+                "secret_values_visible": False,
+            }
         else:
             supplied_session_ref = capability_input.get("session_ref")
             requested_principal = str(
@@ -22810,7 +22837,10 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 )
                 action_result = {
                     "status": status,
+                    "ok": status == "success",
                     "error": error,
+                    "partial": partial,
+                    "timed_out": timed_out,
                     "record_count": len(observations),
                     "parser_errors": parser_errors[:20],
                     "budget_consumed": dict(terminal.actual),

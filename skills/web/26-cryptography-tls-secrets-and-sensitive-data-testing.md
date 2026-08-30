@@ -9,7 +9,7 @@ version: 2.0.0
 kind: specialist
 phase: active_testing
 risk: medium
-support: partial
+support: supported
 target_kinds:
 - web
 - api
@@ -18,9 +18,9 @@ capabilities:
 - http.request
 - browser.navigate
 - auth.session.establish
-optional_capabilities: []
-missing_capabilities:
 - artifact.inspect
+optional_capabilities: []
+missing_capabilities: []
 server_enforced:
 - policy.evaluate
 budget:
@@ -386,9 +386,9 @@ real_user_data: prohibited
 
 ## ShakerScan runtime notes
 
-**Support: partial.** ShakerScan has no capability for `artifact.inspect`, so this skill cannot be bound to a hunt yet. It is published so the gap is visible rather than discovered mid-run.
+**Support: supported.** Hunt can inspect bounded redacted client-artifact windows while preserving token values as worker-private material. Network validation of a discovered secret remains prohibited unless separate authority and a managed principal exist.
 
-Bindable capabilities: `tls.inspect`, `http.request`, `browser.navigate`, `auth.session.establish`.
+Bindable capabilities: `tls.inspect`, `http.request`, `browser.navigate`, `auth.session.establish`, `artifact.inspect`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

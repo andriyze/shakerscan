@@ -355,6 +355,12 @@ flexibility, not proof that a specific Scan capability can authenticate with inc
 semantic capability names. Query-parameter credentials are not admitted to generic Scan because
 they require exact request-replay authority.
 
+Hunt can inspect public client artifacts without expanding every HTTP response placed in planner
+context. `artifact.inspect` returns one target-pinned, redacted byte window (16 KiB maximum), while
+`javascript.analyze` privately reads at most 256 KiB and returns bounded routes, source-map
+references, client sink signals, Supabase origins, and decoded JWT metadata. JWT values never leave
+the worker result boundary; a classified token remains evidence, not credential authority.
+
 Worker-private form login, OAuth client credentials, and OAuth password exchange are supported.
 Sealed private session checkpoints preserve resumability without plaintext secrets at rest. Session
 headers remain bound to the profile version, action, target, and lane; a resumed action must
