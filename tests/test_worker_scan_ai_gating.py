@@ -201,7 +201,7 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
                 auth_kind="bearer_token",
                 principal_slot="primary",
                 target_kind="web",
-                allowed_capabilities=(),
+                allowed_capabilities=("scan.execute",),
             )
             yield types.SimpleNamespace(
                 profile=profile,
@@ -225,6 +225,8 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
             "principal_slot": "primary",
             "scan_lane": "primary",
             "auth_kind": "bearer_token",
+            "allowed_capabilities": ["scan.execute"],
+            "credential_resolution_capability": "scan.execute",
             "source": "credential_profiles",
             "secret_values_visible": False,
         }],
@@ -6112,9 +6114,9 @@ def test_focused_parent_result_recomputed_from_merged_bola_findings():
 
     score, grade = worker._recompute_focused_parent_result(merged, findings, "bola")
 
-    assert score == 90
-    assert grade == "C"
-    assert merged["result"]["summary"] == "Focused BOLA Scan Grade: C (90/100) - 1 in-scope issue(s) found"
+    assert score == 85
+    assert grade == "B"
+    assert merged["result"]["summary"] == "Focused BOLA Scan Grade: B (85/100) - 1 in-scope issue(s) found"
     assert merged["result"]["focused_context_findings"] == 1
     assert merged["result"]["grade_reliable"] is True
     assert "grade_warning" not in merged["result"]

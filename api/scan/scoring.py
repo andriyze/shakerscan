@@ -77,6 +77,11 @@ def _ratio(done: float, planned: float) -> float:
     return max(0.0, min(1.0, done / planned))
 
 
+def _severity(finding: Mapping[str, Any]) -> str:
+    value = str(finding.get("severity") or "info").strip().lower()
+    return value if value in SEVERITY_WEIGHT else "info"
+
+
 def assurance(
     coverage: Mapping[str, Any],
     *,
