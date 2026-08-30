@@ -30,7 +30,7 @@ import re
 # api/<domain>/router.py plus services.
 LIMITS: dict[str, int] = {
     "api/api.py": 20_897,
-    "api/worker.py": 23_343,
+    "api/worker.py": 23_334,
     "scanner/risk_scoring.py": 140,
     "scanner/score_bands.py": 27,
 }

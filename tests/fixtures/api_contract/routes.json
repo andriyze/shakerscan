@@ -1493,6 +1493,41 @@
     "name": "confirm_hunt_shell_plan"
   },
   {
+    "path": "/hunts/{hunt_id}/skills/suggestions",
+    "methods": [
+      "POST"
+    ],
+    "name": "suggest_hunt_skills"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "unbind_hunt_skill"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/bind",
+    "methods": [
+      "POST"
+    ],
+    "name": "bind_hunt_skill"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/read",
+    "methods": [
+      "POST"
+    ],
+    "name": "read_hunt_skill"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/usage",
+    "methods": [
+      "POST"
+    ],
+    "name": "record_hunt_skill_usage"
+  },
+  {
     "path": "/investigation/candidates",
     "methods": [
       "GET"

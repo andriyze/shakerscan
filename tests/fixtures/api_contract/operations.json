@@ -1050,6 +1050,31 @@
     "operation_id": "confirm_hunt_shell_plan_hunts__hunt_id__shell_plans__plan_id__confirm_post"
   },
   {
+    "path": "/hunts/{hunt_id}/skills/suggestions",
+    "method": "post",
+    "operation_id": "suggest_hunt_skills_hunts__hunt_id__skills_suggestions_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}",
+    "method": "delete",
+    "operation_id": "unbind_hunt_skill_hunts__hunt_id__skills__skill_id__delete"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/bind",
+    "method": "post",
+    "operation_id": "bind_hunt_skill_hunts__hunt_id__skills__skill_id__bind_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/read",
+    "method": "post",
+    "operation_id": "read_hunt_skill_hunts__hunt_id__skills__skill_id__read_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/usage",
+    "method": "post",
+    "operation_id": "record_hunt_skill_usage_hunts__hunt_id__skills__skill_id__usage_post"
+  },
+  {
     "path": "/investigation/candidates",
     "method": "get",
     "operation_id": "list_investigation_candidates_investigation_candidates_get"

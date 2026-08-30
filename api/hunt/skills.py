@@ -715,6 +715,33 @@ def bind_skills_to_hunt(
     )
 
 
+async def record_initial_skill_bindings(
+    conn: Any,
+    *,
+    hunt_run_id: Any,
+    specs: Iterable[HuntSkillSpec],
+    requested_skill_ids: Iterable[str],
+) -> None:
+    """Persist initial methodology selection without adding logic to the API root."""
+    requested = {str(item) for item in requested_skill_ids}
+    for spec in specs:
+        await conn.execute(
+            """INSERT INTO hunt_skill_events (
+                   hunt_run_id, skill_id, event_type, skill_version,
+                   body_sha256, reason, evidence_refs
+               ) VALUES ($1,$2,'bound',$3,$4,$5,'[]'::jsonb)""",
+            hunt_run_id,
+            spec.skill_id,
+            spec.version,
+            spec.body_sha256,
+            (
+                "Explicitly selected at Hunt start"
+                if spec.skill_id in requested
+                else "Required by selected methodology"
+            ),
+        )
+
+
 def skill_context_section(
     specs: Iterable[HuntSkillSpec], *, requested: Iterable[str],
     library: HuntSkillLibrary | None = None,
@@ -805,6 +832,7 @@ __all__ = [
     "build_skill_spec",
     "load_skill_library",
     "skill_context_section",
+    "record_initial_skill_bindings",
     "read_skill_body",
     "skill_library",
     "skill_library_root",

@@ -10,7 +10,11 @@ import pytest
 from fastapi import HTTPException
 
 from api.hunt.run_service import HuntRunService
-from api.hunt.skills import bind_skills_to_hunt, skill_library
+from api.hunt.skills import (
+    bind_skills_to_hunt,
+    record_initial_skill_bindings,
+    skill_library,
+)
 
 
 SKILL_ID = "skill.web.edge-waf-and-origin-exposure-validation"
@@ -42,6 +46,35 @@ class _Pool:
 
     def acquire(self):
         return _Acquire(self.connection)
+
+
+def test_initial_skill_bindings_preserve_requested_and_prerequisite_reasons():
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, query, *args):
+            self.calls.append((query, args))
+
+    library = skill_library()
+    specs = library.resolve_for_hunt([SKILL_ID], target_kind="web")
+    recorder = Recorder()
+    hunt_id = uuid.uuid4()
+
+    asyncio.run(record_initial_skill_bindings(
+        recorder,
+        hunt_run_id=hunt_id,
+        specs=specs,
+        requested_skill_ids=[SKILL_ID],
+    ))
+
+    assert len(recorder.calls) == len(specs)
+    reasons = {args[1]: args[4] for _, args in recorder.calls}
+    assert reasons[SKILL_ID] == "Explicitly selected at Hunt start"
+    assert set(reasons.values()) <= {
+        "Explicitly selected at Hunt start",
+        "Required by selected methodology",
+    }
 
 
 class _Connection:

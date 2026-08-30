@@ -13450,8 +13450,6 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         allowed_capabilities = allowed_capability_names(
             contract, credentials_available=credential_access,
         )
-        # Methodologies are guidance, not an authority layer. Binding verifies that required
-        # capabilities already exist, then preserves this policy-derived allowlist and budget.
         try:
             bound = _hunt_skills.bind_skills_to_hunt(
                 contract.skill_ids, target_kind=contract.target_kind,
@@ -13502,20 +13500,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             json.dumps(context_pack, default=str),
             _optional_uuid(validated_approval_id) if validated_approval_id else None,
         )
-        requested_skills = set(contract.skill_ids)
-        for spec in bound.specs:
-            await conn.execute(
-                """INSERT INTO hunt_skill_events (
-                       hunt_run_id, skill_id, event_type, skill_version,
-                       body_sha256, reason, evidence_refs
-                   ) VALUES ($1,$2,'bound',$3,$4,$5,'[]'::jsonb)""",
-                row["id"], spec.skill_id, spec.version, spec.body_sha256,
-                (
-                    "Explicitly selected at Hunt start"
-                    if spec.skill_id in requested_skills
-                    else "Required by selected methodology"
-                ),
-            )
+        await _hunt_skills.record_initial_skill_bindings(conn, hunt_run_id=row["id"], specs=bound.specs, requested_skill_ids=contract.skill_ids)
     return _hunt_public(row)
 
 
