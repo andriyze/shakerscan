@@ -3317,6 +3317,30 @@ async def _run_schema_migrations_once(pool) -> None:
                 )
             """)
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS hunt_skill_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+                    skill_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    skill_version TEXT NOT NULL,
+                    body_sha256 TEXT NOT NULL,
+                    reason TEXT,
+                    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT hunt_skill_events_type_check CHECK (
+                        event_type IN (
+                            'read','bound','selection_removed','unbound',
+                            'used','completed','deferred'
+                        )
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_skill_events_run
+                ON hunt_skill_events(hunt_run_id, created_at, id)
+            """)
+            await conn.execute("""
                 DO $$
                 BEGIN
                     IF NOT EXISTS (

@@ -993,6 +993,25 @@ CREATE TABLE hunt_actions (
 );
 CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
 
+-- Methodology lifecycle is separate from the planner context so the complete catalog and
+-- historical event stream never consume the model's working context.
+CREATE TABLE hunt_skill_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    skill_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (
+        event_type IN ('read','bound','selection_removed','unbound','used','completed','deferred')
+    ),
+    skill_version TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    reason TEXT,
+    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_hunt_skill_events_run
+ON hunt_skill_events(hunt_run_id, created_at, id);
+
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered
 -- ============================================================

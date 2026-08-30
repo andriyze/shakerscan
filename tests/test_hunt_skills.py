@@ -87,13 +87,27 @@ def test_the_request_boundary_and_the_library_agree_on_the_cap():
     assert MAX_SKILLS == MAX_SKILLS_PER_HUNT
 
 
+def test_catalog_entries_are_compact_and_never_include_methodology_or_checklists(library):
+    entry = library.list(target_kind="web")[0].catalog_entry()
+    assert set(entry) == {
+        "skill_id", "title", "description", "phase", "support", "bindable",
+        "target_kinds", "methodology_url",
+    }
+    assert "methodology" not in entry
+    assert "techniques" not in entry
+    assert "capabilities" not in entry
+
+
 def test_edge_objective_suggests_the_edge_methodology(library):
     suggestions = library.suggest(
         goal="Validate Cloudflare WAF and direct origin exposure",
         target_kind="web",
     )
     assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
-    assert suggestions[0]["selection_required"] is True
+    assert suggestions[0]["auto_bound"] is False
+    assert suggestions[0]["reason"].startswith("Objective matches:")
+    assert "description" not in suggestions[0]
+    assert "capabilities" not in suggestions[0]
 
 
 def test_suggestions_respect_the_hunt_authority_allowlist(library):
@@ -114,9 +128,27 @@ def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
         budget=object(), library=library, goal="Test the authorized application",
     )
     assert bound.context_section["catalog"]["status"] == "ready"
-    assert bound.context_section["selection"]["explicit_selection_required"] is True
+    assert bound.context_section["selection"]["selection_optional"] is True
+    assert bound.context_section["selection"]["binding_is_explicit"] is True
     assert bound.context_section["bound"] == []
     assert "suggested" in bound.context_section
+    assert len(bound.context_section["suggested"]) <= 3
+
+
+def test_binding_methodology_preserves_the_run_authority_and_budget(library):
+    skill_id = "skill.web.stateful-crawling-content-and-parameter-discovery"
+    allowed = (*library.require(skill_id).capabilities, "collections.inspect")
+    budget = object()
+    bound = bind_skills_to_hunt(
+        [skill_id],
+        target_kind="web", allowed_capabilities=allowed,
+        budget=budget, library=library, goal="Map the application",
+    )
+
+    assert bound.allowed_capabilities == allowed
+    assert bound.budget is budget
+    assert "techniques" not in bound.context_section["bound"][0]
+    assert "body_sha256" in bound.context_section["bound"][0]
 
 
 def test_a_partial_skill_cannot_be_bound_to_a_hunt(library):

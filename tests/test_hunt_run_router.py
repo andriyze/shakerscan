@@ -242,6 +242,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
             return _row(id=uuid.UUID(hunt_id))
 
         async def fetch(self, query, *args):
+            if "FROM hunt_skill_events" in query:
+                return []
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
             assert args == (uuid.UUID(hunt_id),)
             return [{
@@ -297,6 +299,8 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
             raise AssertionError(query)
 
         async def fetch(self, query, *args):
+            if "FROM hunt_skill_events" in query:
+                return []
             if "FROM hunt_actions WHERE hunt_run_id=$1" in query:
                 return [{
                     "id": uuid.uuid4(),
@@ -440,6 +444,11 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
         ),
         (frozenset({"GET"}), "/hunts/{hunt_id}", "get_hunt"),
         (frozenset({"GET"}), "/hunts/{hunt_id}/record", "export_hunt_record"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/suggestions", "suggest_hunt_skills"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/read", "read_hunt_skill"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/bind", "bind_hunt_skill"),
+        (frozenset({"DELETE"}), "/hunts/{hunt_id}/skills/{skill_id}", "unbind_hunt_skill"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/usage", "record_hunt_skill_usage"),
         (frozenset({"GET"}), "/hunts", "list_hunts"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/finish", "finish_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/cancel", "cancel_hunt"),

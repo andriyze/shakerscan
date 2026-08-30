@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 168,
+  "component_schema_count": 171,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -88,6 +88,9 @@
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
     "HuntQueryRequest": "bb03e03761b47be560b447986a970a28128bf410dd5597a94e024c81fd221354",
+    "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
+    "HuntSkillSuggestionRequest": "12f4bced74b87bcfaa23c429aaa6c8851a80d6325a57706dafb2614952e49487",
+    "HuntSkillUsageRequest": "9a1b268fd05dfd816f0295f80103c06e6e6b0f52104085cbacba08ccdb88e5af",
     "HuntStartV2Response": "ff475b8ed3844b4cb9e3c1af02164becc04553c4b7cd607eb5bd6c1ad8a37996",
     "HypothesisCampaignPlanRequest": "47dcf2a7e1aa9c04781a3e0193fb32f2bd7571b32c40b1990ac3964c091a3932",
     "HypothesisClaimRequest": "0f67f3b3b606844225b20ea75e611d662dc1fa48bc475ccad2bbf7b89428e479",
@@ -174,9 +177,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "3976d847add253cb8d671dacdcef298808c2e0acb54e65547af9f4def7dbbc5a",
+  "contract_sha256": "2b48ba295bc1ee736d02f22ad3939dabc65def6cd1333517b81f4b254cb4b075",
   "openapi": "3.1.0",
-  "operation_count": 392,
+  "operation_count": 397,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -327,6 +330,21 @@
       "deprecated": false,
       "operation_id": "purge_hunt_transactions_hunts__hunt_id__http_transactions_delete",
       "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "DELETE /hunts/{hunt_id}/skills/{skill_id}": {
+      "deprecated": false,
+      "operation_id": "unbind_hunt_skill_hunts__hunt_id__skills__skill_id__delete",
+      "parameters_sha256": "3672dc8aceff7e78a11c6de65a522f3efccae16c24f41f06962047bd828d01a4",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -4250,6 +4268,66 @@
       "surface": "hunt",
       "tags": []
     },
+    "POST /hunts/{hunt_id}/skills/suggestions": {
+      "deprecated": false,
+      "operation_id": "suggest_hunt_skills_hunts__hunt_id__skills_suggestions_post",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": "a9b59c8bafd2277c9a40a05ee6fe0c9d7a01472de88762d9b21fdd3b090d5736",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "POST /hunts/{hunt_id}/skills/{skill_id}/bind": {
+      "deprecated": false,
+      "operation_id": "bind_hunt_skill_hunts__hunt_id__skills__skill_id__bind_post",
+      "parameters_sha256": "b33fbcbc2430480bf5ed267c1207ebf991553b83718b66145873eba0851783ba",
+      "request_schema_sha256": "9636a948dbc79f182b8142cf37aa635c64a520e45c40ebb10d96067c024b6e63",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "POST /hunts/{hunt_id}/skills/{skill_id}/read": {
+      "deprecated": false,
+      "operation_id": "read_hunt_skill_hunts__hunt_id__skills__skill_id__read_post",
+      "parameters_sha256": "b33fbcbc2430480bf5ed267c1207ebf991553b83718b66145873eba0851783ba",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "POST /hunts/{hunt_id}/skills/{skill_id}/usage": {
+      "deprecated": false,
+      "operation_id": "record_hunt_skill_usage_hunts__hunt_id__skills__skill_id__usage_post",
+      "parameters_sha256": "b33fbcbc2430480bf5ed267c1207ebf991553b83718b66145873eba0851783ba",
+      "request_schema_sha256": "9899bfcb2bfb2841132cbdba69a90d444325757fed464b21d8ccbef60375e68d",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
     "POST /model-intake/admission/verify": {
       "deprecated": false,
       "operation_id": "verify_model_intake_admission_model_intake_admission_verify_post",
@@ -5321,6 +5399,7 @@
     "hunt": [
       "DELETE /hunts/{hunt_id}/candidates/{candidate_id}",
       "DELETE /hunts/{hunt_id}/http-transactions",
+      "DELETE /hunts/{hunt_id}/skills/{skill_id}",
       "GET /hunts",
       "GET /hunts/contract",
       "GET /hunts/lifecycle-metrics",
@@ -5336,7 +5415,11 @@
       "POST /hunts/{hunt_id}/finish",
       "POST /hunts/{hunt_id}/query",
       "POST /hunts/{hunt_id}/resume",
-      "POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm"
+      "POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm",
+      "POST /hunts/{hunt_id}/skills/suggestions",
+      "POST /hunts/{hunt_id}/skills/{skill_id}/bind",
+      "POST /hunts/{hunt_id}/skills/{skill_id}/read",
+      "POST /hunts/{hunt_id}/skills/{skill_id}/usage"
     ],
     "model_intake": [
       "DELETE /model-intake/trust-anchors/{anchor_id}",

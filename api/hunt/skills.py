@@ -1,10 +1,9 @@
 """The Hunt skill library: methodology the planner reads, bound to real capabilities.
 
 A skill is testing methodology plus a declaration of which capabilities it needs. It is not
-a new execution path, a second registry, or an authority. Binding a skill to a hunt can only
-*narrow* what that hunt may do -- the capability allowlist is intersected, never extended,
-and budget ceilings only ever move down. ``api/hunt/contracts.py`` remains the sole authority
-on what a run is allowed to call.
+a new execution path, a second registry, or an authority. Binding validates that the Hunt's
+existing authority can execute the methodology, but does not grant, remove, or resize that
+authority. ``api/hunt/contracts.py`` remains the sole authority on what a run may call.
 
 Skills are published with an honest support level. ShakerScan has no capability for several
 adapters the upstream library assumes (out-of-band callbacks, concurrent batches, raw single
@@ -15,7 +14,6 @@ cannot execute, is the failure this replaces.
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 import hashlib
 import os
@@ -30,12 +28,13 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
 
 
-SKILL_LIBRARY_SCHEMA = "hunt-skill/v1"
+SKILL_LIBRARY_SCHEMA = "hunt-skill/v2"
 LIBRARY_DOCUMENT_FILES = frozenset({"README.md"})
 SUPPORT_LEVELS = frozenset({"supported", "partial", "reference"})
 # Only these may be bound to a run. The others are published for reading.
 BINDABLE_SUPPORT = frozenset({"supported"})
 MAX_SKILLS_PER_HUNT = 4
+MAX_CONTEXT_SKILL_SUGGESTIONS = 3
 _SUGGESTION_STOP_WORDS = frozenset({
     "and", "application", "authorized", "comprehensive", "for", "from", "hunt",
     "investigate", "security", "target", "test", "testing", "the", "this", "web",
@@ -101,6 +100,19 @@ class HuntSkillSpec:
     @property
     def bindable(self) -> bool:
         return self.support in BINDABLE_SUPPORT
+
+    def catalog_entry(self) -> dict[str, Any]:
+        """Small routing record suitable for listing the complete catalog."""
+        return {
+            "skill_id": self.skill_id,
+            "title": self.title,
+            "description": self.description,
+            "phase": self.phase,
+            "support": self.support,
+            "bindable": self.bindable,
+            "target_kinds": sorted(self.target_kinds),
+            "methodology_url": f"/hunt/skills/{self.skill_id}",
+        }
 
     def public(self, *, include_body: bool = False) -> dict[str, Any]:
         """The content-free projection served to clients and planners."""
@@ -396,13 +408,23 @@ class HuntSkillLibrary:
         goal: str,
         target_kind: str,
         allowed_capabilities: Iterable[str] | None = None,
+        signals: Iterable[str] = (),
         exclude: Iterable[str] = (),
-        limit: int = MAX_SKILLS_PER_HUNT,
+        limit: int = MAX_CONTEXT_SKILL_SUGGESTIONS,
     ) -> tuple[dict[str, Any], ...]:
-        """Suggest relevant methodology without selecting it or expanding authority."""
+        """Return compact, deterministic advice without loading methodology bodies.
+
+        ``goal`` is the operator's objective. ``signals`` are bounded technology or surface
+        observations collected later in the run. They influence ranking only: they cannot bind
+        a skill, grant a capability, or modify scope.
+        """
         goal_terms = self._routing_terms(goal)
+        signal_terms = self._routing_terms(" ".join(str(item) for item in signals))
+        query_terms = goal_terms | signal_terms
         excluded = {str(item) for item in exclude}
-        ranked: list[tuple[int, HuntSkillSpec, tuple[str, ...]]] = []
+        ranked: list[
+            tuple[int, HuntSkillSpec, tuple[str, ...], tuple[str, ...]]
+        ] = []
         for spec in self.available_for_hunt(
             target_kind=target_kind, allowed_capabilities=allowed_capabilities,
         ):
@@ -412,12 +434,18 @@ class HuntSkillLibrary:
                 spec.skill_id, spec.name, spec.title, spec.description,
                 *spec.triggers, *spec.indicators, *spec.techniques,
             ))
-            matched = tuple(sorted(goal_terms & self._routing_terms(routing_text)))
+            skill_terms = self._routing_terms(routing_text)
+            matched_goal = tuple(sorted(goal_terms & skill_terms))
+            matched_signals = tuple(sorted(signal_terms & skill_terms))
             # Routing metadata is more intentional than prose, so an overlap there is worth
             # more. This remains deterministic advice: only an explicit skill_ids request binds.
             routing_terms = self._routing_terms(" ".join((*spec.triggers, *spec.indicators)))
-            score = len(matched) + (3 * len(goal_terms & routing_terms))
-            ranked.append((score, spec, matched))
+            score = (
+                len(query_terms & skill_terms)
+                + (3 * len(goal_terms & routing_terms))
+                + (5 * len(signal_terms & routing_terms))
+            )
+            ranked.append((score, spec, matched_goal, matched_signals))
 
         ranked.sort(key=lambda item: (-item[0], item[1].skill_id))
         selected = [item for item in ranked if item[0] > 0]
@@ -429,18 +457,24 @@ class HuntSkillLibrary:
                 "skill.web.api-inventory-openapi-and-contract-testing",
             )
             by_id = {item[1].skill_id: item for item in ranked}
-            selected = [by_id[skill_id] for skill_id in baseline_order if skill_id in by_id]
-        return tuple({
-            "skill_id": spec.skill_id,
-            "title": spec.title,
-            "description": spec.description,
-            "matched_terms": list(matched),
-            "capabilities": list(spec.capabilities),
-            "requires_skills": list(spec.requires_skills),
-            "deferred_techniques": [dict(item) for item in spec.deferred_techniques],
-            "methodology_url": f"/hunt/skills/{spec.skill_id}",
-            "selection_required": True,
-        } for _, spec, matched in selected[:max(0, int(limit))])
+            selected = [by_id[skill_id] for skill_id in baseline_order if skill_id in by_id][:1]
+        suggestions: list[dict[str, Any]] = []
+        for _, spec, matched_goal, matched_signals in selected[:max(0, int(limit))]:
+            if matched_signals:
+                reason = "Observed signals: " + ", ".join(matched_signals[:4])
+            elif matched_goal:
+                reason = "Objective matches: " + ", ".join(matched_goal[:4])
+            else:
+                reason = "Baseline methodology for initial surface discovery"
+            suggestions.append({
+                "skill_id": spec.skill_id,
+                "title": spec.title,
+                "reason": reason,
+                "methodology_url": f"/hunt/skills/{spec.skill_id}",
+                "bind_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/bind",
+                "auto_bound": False,
+            })
+        return tuple(suggestions)
 
     def resolve_for_hunt(
         self, skill_ids: Iterable[str], *, target_kind: str,
@@ -500,11 +534,7 @@ class HuntSkillLibrary:
 
     @staticmethod
     def capability_allowlist(specs: Iterable[HuntSkillSpec]) -> tuple[str, ...]:
-        """The union of what the bound skills need.
-
-        A union across bound skills, then intersected by the caller with what the run's
-        policy already permits. A skill can therefore only ever narrow a hunt.
-        """
+        """The union of declared requirements, for diagnostics and UI only."""
         names: list[str] = []
         for spec in specs:
             for name in (*spec.capabilities, *spec.optional_capabilities):
@@ -514,12 +544,7 @@ class HuntSkillLibrary:
 
     @staticmethod
     def budget_ceilings(specs: Iterable[HuntSkillSpec]) -> dict[str, int]:
-        """The most permissive ceiling any bound skill declares.
-
-        Taking the maximum lets two skills run in one hunt without starving each other,
-        while the run's own profile still caps the result -- the caller applies these only
-        where they are lower than what the profile already allows.
-        """
+        """Aggregate methodology budget guidance without modifying the Hunt budget."""
         ceilings: dict[str, int] = {}
         for spec in specs:
             for name, amount in spec.budget.items():
@@ -649,12 +674,11 @@ def bind_skills_to_hunt(
     library: HuntSkillLibrary | None = None,
     goal: str = "",
 ) -> BoundSkills:
-    """Resolve the bound skills and apply them as a narrowing of an already-decided run.
+    """Resolve methodology against an already-decided authority envelope.
 
-    Returns the bound specs, the intersected capability allowlist, a budget whose dimensions
-    are lowered only where a skill is stricter than the profile, and the planner-facing
-    context section. Raises ``HuntSkillError`` when the selection cannot be honoured, so the
-    caller can refuse the start rather than run something other than what was asked for.
+    Binding is descriptive and auditable. It verifies that every required capability is already
+    allowed, but preserves the Hunt capability manifest and budget exactly. Methodology must not
+    become a second authority system or turn a later adaptive choice into a privilege change.
     """
     resolved_library = library or skill_library()
     specs = resolved_library.resolve_for_hunt(
@@ -682,19 +706,8 @@ def bind_skills_to_hunt(
                 f"skill {spec.skill_id} requires {', '.join(withheld)}, which this Hunt "
                 "policy withholds; grant the matching authority or choose another skill"
             )
-    wanted = set(HuntSkillLibrary.capability_allowlist(specs))
-    narrowed = tuple(name for name in allowed_capabilities if name in wanted)
-    if not narrowed:
-        raise HuntSkillError(
-            "the selected skills need capabilities this Hunt policy withholds; grant the "
-            "matching authority or choose another skill"
-        )
-    for name, ceiling in HuntSkillLibrary.budget_ceilings(specs).items():
-        current = getattr(budget, name, None)
-        if isinstance(current, int) and 0 < ceiling < current:
-            budget = dataclasses.replace(budget, **{name: ceiling})
     return BoundSkills(
-        specs, narrowed, budget, skill_context_section(
+        specs, allowed_capabilities, budget, skill_context_section(
             specs, requested=skill_ids, library=resolved_library,
             target_kind=target_kind, allowed_capabilities=allowed_capabilities,
             goal=goal,
@@ -716,43 +729,51 @@ def skill_context_section(
     available = resolved_library.available_for_hunt(
         target_kind=target_kind, allowed_capabilities=allowed_capabilities,
     )
+    suggested = [
+        {
+            **item,
+            "methodology_url": (
+                f"/hunts/{{hunt_id}}/skills/{item['skill_id']}/read"
+            ),
+        }
+        for item in resolved_library.suggest(
+            goal=goal, target_kind=target_kind,
+            allowed_capabilities=allowed_capabilities,
+            exclude=(spec.skill_id for spec in resolved_specs),
+        )
+    ]
     return {
         "schema_version": SKILL_LIBRARY_SCHEMA,
         "catalog": {
             "url": "/hunt/skills",
+            "suggestions_url": "/hunts/{hunt_id}/skills/suggestions",
             "status": resolved_library.catalog_status,
             "loaded_count": len(resolved_library),
             "bindable_for_policy_count": len(available),
         },
         "selection": {
             "requested_skill_ids": sorted(chosen),
-            "explicit_selection_required": True,
+            "selection_optional": True,
+            "binding_is_explicit": True,
             "auto_bound": False,
             "maximum": MAX_SKILLS_PER_HUNT,
             "instruction": (
-                "Read a suggested methodology_url, then explicitly submit its skill_id; "
-                "a suggestion never grants authority or binds itself."
+                "Do not read the whole catalog. Fetch one suggested methodology only when "
+                "its evidence trigger is relevant, then bind it explicitly if used."
             ),
         },
-        "suggested": list(resolved_library.suggest(
-            goal=goal, target_kind=target_kind,
-            allowed_capabilities=allowed_capabilities,
-            exclude=(spec.skill_id for spec in resolved_specs),
-        )),
+        "suggested": suggested,
         "bound": [
             {
                 "skill_id": spec.skill_id,
                 "title": spec.title,
+                "version": spec.version,
+                "body_sha256": spec.body_sha256,
                 "phase": spec.phase,
-                "techniques": list(spec.techniques),
-                "preconditions": list(spec.preconditions),
-                "promotion_gate": spec.promotion_gate,
-                "capabilities": list(spec.capabilities),
-                "deferred_techniques": [dict(item) for item in spec.deferred_techniques],
                 # False marks a prerequisite the server added, so the planner can tell what
                 # it chose from what it inherited.
                 "requested": spec.skill_id in chosen,
-                "methodology_url": f"/hunt/skills/{spec.skill_id}",
+                "methodology_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/read",
             }
             for spec in resolved_specs
         ],
@@ -771,6 +792,7 @@ def skill_library() -> HuntSkillLibrary:
 
 __all__ = [
     "BINDABLE_SUPPORT",
+    "MAX_CONTEXT_SKILL_SUGGESTIONS",
     "MAX_SKILLS_PER_HUNT",
     "SKILL_BUDGET_DIMENSIONS",
     "SKILL_LIBRARY_SCHEMA",
