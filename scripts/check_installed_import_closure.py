@@ -30,7 +30,10 @@ IMPORT_ROOTS = ("api", "scanner", "")
 
 def installed_paths() -> set[str]:
     text = INSTALLER.read_text(encoding="utf-8")
-    return set(re.findall(r'download "\$REPO_RAW_BASE/([^"]+)"', text))
+    paths = set(re.findall(r'download "\$REPO_RAW_BASE/([^"]+)"', text))
+    # Looped downloads contain shell variables rather than literal manifest
+    # paths. They are non-Python skill/docs assets validated by installer_smoke.sh.
+    return {path for path in paths if "$" not in path}
 
 
 def _resolve_absolute(module: str) -> str | None:
