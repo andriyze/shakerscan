@@ -13456,6 +13456,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             bound = _hunt_skills.bind_skills_to_hunt(
                 contract.skill_ids, target_kind=contract.target_kind,
                 allowed_capabilities=allowed_capabilities, budget=budget,
+                goal=contract.goal,
             )
         except _hunt_skills.HuntSkillError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -194,6 +194,7 @@ async def get_hunt_contract():
 async def list_hunt_skills(
     target_kind: str | None = Query(None),
     support: str | None = Query(None),
+    goal: str | None = Query(None, max_length=2000),
 ):
     """List the testing methodology a hunt can bind, with an honest support level.
 
@@ -206,12 +207,18 @@ async def list_hunt_skills(
         specs = library.list(target_kind=target_kind, support=support)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    result = {
         "skills": [spec.public() for spec in specs],
         "count": len(specs),
         "bindable_count": sum(1 for spec in specs if spec.bindable),
         "catalog": library.health(),
     }
+    if goal is not None:
+        result["suggested"] = list(library.suggest(
+            goal=goal, target_kind=target_kind or "web",
+        ))
+        result["suggestions_are_advisory"] = True
+    return result
 
 
 @router.get("/hunt/skills/{skill_id}", tags=["Hunt"])

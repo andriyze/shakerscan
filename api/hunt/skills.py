@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 import pathlib
+import re
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
@@ -35,6 +36,11 @@ SUPPORT_LEVELS = frozenset({"supported", "partial", "reference"})
 # Only these may be bound to a run. The others are published for reading.
 BINDABLE_SUPPORT = frozenset({"supported"})
 MAX_SKILLS_PER_HUNT = 4
+_SUGGESTION_STOP_WORDS = frozenset({
+    "and", "application", "authorized", "comprehensive", "for", "from", "hunt",
+    "investigate", "security", "target", "test", "testing", "the", "this", "web",
+    "with",
+})
 # Budget dimensions a skill may lower. Deliberately a subset of the hunt budget: a skill
 # declares testing cost, not run topology.
 SKILL_BUDGET_DIMENSIONS = frozenset({
@@ -349,6 +355,93 @@ class HuntSkillLibrary:
     def bindable(self, *, target_kind: str | None = None) -> tuple[HuntSkillSpec, ...]:
         return self.list(target_kind=target_kind, support="supported")
 
+    @staticmethod
+    def _routing_terms(value: str) -> frozenset[str]:
+        return frozenset(
+            token for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+            if len(token) > 2 and token not in _SUGGESTION_STOP_WORDS
+        )
+
+    def available_for_hunt(
+        self,
+        *,
+        target_kind: str,
+        allowed_capabilities: Iterable[str] | None = None,
+    ) -> tuple[HuntSkillSpec, ...]:
+        """Return bindable skills whose complete prerequisite chain fits this authority.
+
+        The public catalog can call this without an allowlist to describe target-kind support.
+        Hunt start passes its already-derived policy allowlist, making the context-pack result
+        authoritative without letting a recommendation grant authority.
+        """
+        available = set(allowed_capabilities) if allowed_capabilities is not None else None
+        compatible: list[HuntSkillSpec] = []
+        for spec in self.bindable(target_kind=target_kind):
+            try:
+                expanded = self.resolve_for_hunt([spec.skill_id], target_kind=target_kind)
+            except HuntSkillError:
+                continue
+            if available is not None and any(
+                name not in available
+                for item in expanded
+                for name in item.capabilities
+            ):
+                continue
+            compatible.append(spec)
+        return tuple(compatible)
+
+    def suggest(
+        self,
+        *,
+        goal: str,
+        target_kind: str,
+        allowed_capabilities: Iterable[str] | None = None,
+        exclude: Iterable[str] = (),
+        limit: int = MAX_SKILLS_PER_HUNT,
+    ) -> tuple[dict[str, Any], ...]:
+        """Suggest relevant methodology without selecting it or expanding authority."""
+        goal_terms = self._routing_terms(goal)
+        excluded = {str(item) for item in exclude}
+        ranked: list[tuple[int, HuntSkillSpec, tuple[str, ...]]] = []
+        for spec in self.available_for_hunt(
+            target_kind=target_kind, allowed_capabilities=allowed_capabilities,
+        ):
+            if spec.skill_id in excluded:
+                continue
+            routing_text = " ".join((
+                spec.skill_id, spec.name, spec.title, spec.description,
+                *spec.triggers, *spec.indicators, *spec.techniques,
+            ))
+            matched = tuple(sorted(goal_terms & self._routing_terms(routing_text)))
+            # Routing metadata is more intentional than prose, so an overlap there is worth
+            # more. This remains deterministic advice: only an explicit skill_ids request binds.
+            routing_terms = self._routing_terms(" ".join((*spec.triggers, *spec.indicators)))
+            score = len(matched) + (3 * len(goal_terms & routing_terms))
+            ranked.append((score, spec, matched))
+
+        ranked.sort(key=lambda item: (-item[0], item[1].skill_id))
+        selected = [item for item in ranked if item[0] > 0]
+        if not selected:
+            # A broad objective still benefits from an explicit baseline. Never silently bind it.
+            baseline_order = (
+                "skill.web.http-baselining-replay-and-differential-analysis",
+                "skill.web.stateful-crawling-content-and-parameter-discovery",
+                "skill.web.api-inventory-openapi-and-contract-testing",
+            )
+            by_id = {item[1].skill_id: item for item in ranked}
+            selected = [by_id[skill_id] for skill_id in baseline_order if skill_id in by_id]
+        return tuple({
+            "skill_id": spec.skill_id,
+            "title": spec.title,
+            "description": spec.description,
+            "matched_terms": list(matched),
+            "capabilities": list(spec.capabilities),
+            "requires_skills": list(spec.requires_skills),
+            "deferred_techniques": [dict(item) for item in spec.deferred_techniques],
+            "methodology_url": f"/hunt/skills/{spec.skill_id}",
+            "selection_required": True,
+        } for _, spec, matched in selected[:max(0, int(limit))])
+
     def resolve_for_hunt(
         self, skill_ids: Iterable[str], *, target_kind: str,
     ) -> tuple[HuntSkillSpec, ...]:
@@ -554,6 +647,7 @@ def bind_skills_to_hunt(
     allowed_capabilities: tuple[str, ...],
     budget: Any,
     library: HuntSkillLibrary | None = None,
+    goal: str = "",
 ) -> BoundSkills:
     """Resolve the bound skills and apply them as a narrowing of an already-decided run.
 
@@ -562,11 +656,19 @@ def bind_skills_to_hunt(
     context section. Raises ``HuntSkillError`` when the selection cannot be honoured, so the
     caller can refuse the start rather than run something other than what was asked for.
     """
-    specs = (library or skill_library()).resolve_for_hunt(
+    resolved_library = library or skill_library()
+    specs = resolved_library.resolve_for_hunt(
         skill_ids, target_kind=target_kind,
     )
     if not specs:
-        return BoundSkills((), allowed_capabilities, budget, {})
+        return BoundSkills(
+            (), allowed_capabilities, budget,
+            skill_context_section(
+                (), requested=skill_ids, library=resolved_library,
+                target_kind=target_kind, allowed_capabilities=allowed_capabilities,
+                goal=goal,
+            ),
+        )
 
     # Every capability a skill lists as required must survive the policy filter. Checking
     # only that *something* survived let a session-testing skill bind to a passive,
@@ -592,18 +694,51 @@ def bind_skills_to_hunt(
         if isinstance(current, int) and 0 < ceiling < current:
             budget = dataclasses.replace(budget, **{name: ceiling})
     return BoundSkills(
-        specs, narrowed, budget, skill_context_section(specs, requested=skill_ids),
+        specs, narrowed, budget, skill_context_section(
+            specs, requested=skill_ids, library=resolved_library,
+            target_kind=target_kind, allowed_capabilities=allowed_capabilities,
+            goal=goal,
+        ),
     )
 
 
 def skill_context_section(
     specs: Iterable[HuntSkillSpec], *, requested: Iterable[str],
+    library: HuntSkillLibrary | None = None,
+    target_kind: str = "web",
+    allowed_capabilities: Iterable[str] | None = None,
+    goal: str = "",
 ) -> dict[str, Any]:
     """The planner-facing skill block written into a run's context pack."""
+    resolved_library = library or skill_library()
+    resolved_specs = tuple(specs)
     chosen = {str(item) for item in requested}
+    available = resolved_library.available_for_hunt(
+        target_kind=target_kind, allowed_capabilities=allowed_capabilities,
+    )
     return {
         "schema_version": SKILL_LIBRARY_SCHEMA,
-        "catalog": "/hunt/skills",
+        "catalog": {
+            "url": "/hunt/skills",
+            "status": resolved_library.catalog_status,
+            "loaded_count": len(resolved_library),
+            "bindable_for_policy_count": len(available),
+        },
+        "selection": {
+            "requested_skill_ids": sorted(chosen),
+            "explicit_selection_required": True,
+            "auto_bound": False,
+            "maximum": MAX_SKILLS_PER_HUNT,
+            "instruction": (
+                "Read a suggested methodology_url, then explicitly submit its skill_id; "
+                "a suggestion never grants authority or binds itself."
+            ),
+        },
+        "suggested": list(resolved_library.suggest(
+            goal=goal, target_kind=target_kind,
+            allowed_capabilities=allowed_capabilities,
+            exclude=(spec.skill_id for spec in resolved_specs),
+        )),
         "bound": [
             {
                 "skill_id": spec.skill_id,
@@ -619,7 +754,7 @@ def skill_context_section(
                 "requested": spec.skill_id in chosen,
                 "methodology_url": f"/hunt/skills/{spec.skill_id}",
             }
-            for spec in specs
+            for spec in resolved_specs
         ],
     }
 

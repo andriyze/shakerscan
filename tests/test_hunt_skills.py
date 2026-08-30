@@ -87,6 +87,38 @@ def test_the_request_boundary_and_the_library_agree_on_the_cap():
     assert MAX_SKILLS == MAX_SKILLS_PER_HUNT
 
 
+def test_edge_objective_suggests_the_edge_methodology(library):
+    suggestions = library.suggest(
+        goal="Validate Cloudflare WAF and direct origin exposure",
+        target_kind="web",
+    )
+    assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
+    assert suggestions[0]["selection_required"] is True
+
+
+def test_suggestions_respect_the_hunt_authority_allowlist(library):
+    suggestions = library.suggest(
+        goal="Validate Cloudflare WAF and direct origin exposure",
+        target_kind="web",
+        allowed_capabilities=("http.request",),
+    )
+    assert all(
+        item["skill_id"] != "skill.web.edge-waf-and-origin-exposure-validation"
+        for item in suggestions
+    )
+
+
+def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
+    bound = bind_skills_to_hunt(
+        (), target_kind="web", allowed_capabilities=("http.request",),
+        budget=object(), library=library, goal="Test the authorized application",
+    )
+    assert bound.context_section["catalog"]["status"] == "ready"
+    assert bound.context_section["selection"]["explicit_selection_required"] is True
+    assert bound.context_section["bound"] == []
+    assert "suggested" in bound.context_section
+
+
 def test_a_partial_skill_cannot_be_bound_to_a_hunt(library):
     partial = next(s for s in library.list(support="partial"))
     with pytest.raises(HuntSkillError, match="cannot be bound"):

@@ -338,10 +338,21 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
         "credential_refs": _pairs(args.credential_ref, label="credential reference"),
         "capabilities": list(dict.fromkeys(args.capability)),
         "request_collection_ids": list(dict.fromkeys(args.collection_id)),
+        "skill_ids": list(dict.fromkeys(args.skill_id)),
     }
 
 
 def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
+    if args.hunt_command == "skills":
+        query = {}
+        if args.target_kind:
+            query["target_kind"] = args.target_kind
+        if args.support:
+            query["support"] = args.support
+        if args.goal is not None:
+            query["goal"] = args.goal
+        suffix = f"?{urllib.parse.urlencode(query)}" if query else ""
+        return client.get(f"/hunt/skills{suffix}")
     if args.hunt_command == "start":
         contract = client.get("/hunts/contract")
         if not isinstance(contract, Mapping):
@@ -687,6 +698,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     hunt = products.add_parser("hunt", help="Manage the complete canonical Hunt lifecycle")
     hunt_commands = hunt.add_subparsers(dest="hunt_command", required=True)
+    hunt_skills = hunt_commands.add_parser(
+        "skills", help="List or suggest server-shipped Hunt methodologies",
+    )
+    hunt_skills.add_argument("--target-kind")
+    hunt_skills.add_argument("--support", choices=("supported", "partial", "reference"))
+    hunt_skills.add_argument("--goal", help="Return deterministic advisory suggestions for this objective")
     hunt_start = hunt_commands.add_parser("start", help="Start a target-bound Hunt")
     hunt_start.add_argument("--request", metavar="FILE", help="Complete JSON contract; use - for stdin")
     hunt_start.add_argument("--idempotency-key")
@@ -705,6 +722,10 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--credential-ref", action="append", default=[], metavar="SLOT=ID")
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
+    hunt_start.add_argument(
+        "--skill-id", action="append", default=[],
+        help="Bind a server-shipped methodology (repeatable; inspect with 'hunt skills')",
+    )
 
     hunt_get = hunt_commands.add_parser("get", help="Read one Hunt and its capability manifest")
     hunt_get.add_argument("hunt_id")

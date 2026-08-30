@@ -25,6 +25,7 @@ HUNT_CONTRACT = {
         {"name": "max_state_changing_requests", "minimum": 0, "zeroable": True},
         {"name": "max_hosts", "minimum": 0, "zeroable": True},
     ],
+    "limits": {"skill_ids": 4},
 }
 
 
@@ -39,6 +40,7 @@ def test_hunt_start_cli_uses_server_contract_and_preserves_explicit_zero():
         "--budget", "max_state_changing_requests=0",
         "--credential-ref", "primary_credential_profile_id=profile-1",
         "--collection-id", "collection-1",
+        "--skill-id", "skill.web.http-baselining-replay-and-differential-analysis",
     )
     payload = v2_cli._hunt_start_payload(args, HUNT_CONTRACT)
     assert payload["schema_version"] == "hunt-start/v2"
@@ -49,6 +51,9 @@ def test_hunt_start_cli_uses_server_contract_and_preserves_explicit_zero():
         "primary_credential_profile_id": "profile-1",
     }
     assert payload["request_collection_ids"] == ["collection-1"]
+    assert payload["skill_ids"] == [
+        "skill.web.http-baselining-replay-and-differential-analysis"
+    ]
     assert "scan_type" not in payload
 
 
@@ -76,8 +81,25 @@ def test_hunt_cli_help_is_first_class_and_non_mutating(capsys):
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "start" in output
+    assert "skills" in output
     assert "call" in output
     assert "deep-hunt" not in output
+
+
+def test_hunt_skills_cli_queries_server_suggestions():
+    args = _parse(
+        "hunt", "skills", "--target-kind", "web", "--support", "supported",
+        "--goal", "Cloudflare origin exposure",
+    )
+
+    class FakeClient:
+        def get(self, path):
+            return {"path": path}
+
+    result = v2_cli._run_hunt(args, FakeClient())
+    assert result["path"].startswith("/hunt/skills?")
+    assert "target_kind=web" in result["path"]
+    assert "goal=Cloudflare+origin+exposure" in result["path"]
 
 
 def test_credential_requests_are_checked_against_server_published_schema():
