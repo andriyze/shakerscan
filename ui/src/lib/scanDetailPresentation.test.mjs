@@ -134,3 +134,18 @@ test('raw and persisted forms of the same scan finding share one UI identity', (
 
   assert.equal(scanFindingIdentity(raw), scanFindingIdentity(persistedSummary))
 })
+
+test('requested coverage failures are promoted into the result summary', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: { risk_score: 94, risk_grade: 'A' },
+      coverage: {
+        status: 'partial',
+        reasons: ['subdomain_discovery_failed'],
+      },
+    },
+  }, { band: 'weak', label: 'Weak coverage' })
+
+  assert.deepEqual(result.coverageWarnings, ['subdomain discovery failed'])
+})

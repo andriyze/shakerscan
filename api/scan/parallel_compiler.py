@@ -1667,6 +1667,8 @@ def merge_parallel_action_executions(
     observation_refs: list[dict[str, Any]] = []
     children: list[dict[str, Any]] = []
     incomplete_children: list[str] = []
+    candidate_coverage: dict[str, dict[str, Any]] = {}
+    family_coverage: dict[str, dict[str, Any]] = {}
     for scan_id in sorted(expected, key=lambda key: int(expected[key].get("index", 0))):
         partition_child = expected[scan_id]
         status = str(child_statuses[scan_id] or "unknown").strip().lower()
@@ -1696,6 +1698,63 @@ def merge_parallel_action_executions(
             raise ParallelActionPlanError(
                 "parallel child canonical action execution is malformed"
             )
+        child_coverage = (
+            report.get("coverage")
+            if isinstance(report.get("coverage"), Mapping) else {}
+        )
+        for family, raw in (
+            child_coverage.get("candidate_coverage") or {}
+        ).items():
+            if not isinstance(raw, Mapping) or not str(family).strip():
+                continue
+            family_name = str(family).strip()
+            aggregate = candidate_coverage.setdefault(family_name, {
+                "status": "complete",
+                "batch_actions": 0,
+                "planned_candidates": 0,
+                "attempted_candidates": 0,
+                "completed_candidates": 0,
+                "incomplete_candidates": 0,
+                "unattempted_candidates": 0,
+            })
+            for key in (
+                "batch_actions", "planned_candidates", "attempted_candidates",
+                "completed_candidates", "incomplete_candidates",
+                "unattempted_candidates",
+            ):
+                aggregate[key] += max(0, int(raw.get(key) or 0))
+            if str(raw.get("status") or "complete").lower() != "complete":
+                aggregate["status"] = "partial"
+        for raw in child_coverage.get("family_coverage") or ():
+            if not isinstance(raw, Mapping) or not str(raw.get("family") or "").strip():
+                continue
+            family_name = str(raw.get("family")).strip()
+            aggregate = family_coverage.setdefault(family_name, {
+                "family": family_name,
+                "selected": False,
+                "required": False,
+                "coverage_status": "complete",
+                "reason": None,
+                "batch_actions": 0,
+                "planned_candidates": 0,
+                "attempted_candidates": 0,
+                "completed_candidates": 0,
+                "incomplete_candidates": 0,
+                "unattempted_candidates": 0,
+                "verified_findings": 0,
+                "suspected_findings": 0,
+            })
+            aggregate["selected"] = aggregate["selected"] or raw.get("selected") is True
+            aggregate["required"] = aggregate["required"] or raw.get("required") is True
+            for key in (
+                "batch_actions", "planned_candidates", "attempted_candidates",
+                "completed_candidates", "incomplete_candidates",
+                "unattempted_candidates", "verified_findings", "suspected_findings",
+            ):
+                aggregate[key] += max(0, int(raw.get(key) or 0))
+            if str(raw.get("coverage_status") or "complete").lower() != "complete":
+                aggregate["coverage_status"] = "partial"
+                aggregate["reason"] = aggregate["reason"] or raw.get("reason") or "child_family_incomplete"
         expected_ids = list(partition_child.get("expected_action_ids") or ())
         actual_ids = [
             str(item.get("action_id") or "")
@@ -1752,6 +1811,10 @@ def merge_parallel_action_executions(
         "observation_manifests": observation_refs,
         "incomplete_child_scan_ids": incomplete_children,
         "partial": bool(incomplete_children),
+        "candidate_coverage": {
+            key: candidate_coverage[key] for key in sorted(candidate_coverage)
+        },
+        "family_coverage": [family_coverage[key] for key in sorted(family_coverage)],
     }
     return {**payload, "merge_digest": _digest(payload)}
 
@@ -1848,4 +1911,20 @@ def summarize_parallel_action_coverage(
         },
         "optional_gaps": optional_gaps,
         "active_zero_attempt_actions": [],
+        "candidate_coverage": {
+            str(key): dict(value)
+            for key, value in (merge.get("candidate_coverage") or {}).items()
+            if isinstance(value, Mapping)
+        },
+        "family_coverage": [
+            dict(item) for item in merge.get("family_coverage") or ()
+            if isinstance(item, Mapping)
+        ],
+        "selected_family_gaps": sorted({
+            str(item.get("family"))
+            for item in merge.get("family_coverage") or ()
+            if isinstance(item, Mapping)
+            and item.get("required") is True
+            and str(item.get("coverage_status") or "").lower() != "complete"
+        }),
     }

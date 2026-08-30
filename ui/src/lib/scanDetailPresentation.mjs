@@ -183,6 +183,12 @@ export function scanResultPresentation(scan, assurance) {
   const scorePolicy = String(result.score_policy || '')
   const posturePenalty = finiteNumber(result.posture_penalty, null)
   const policyVersion = Number(scorePolicy.match(/^risk_and_assurance\/v(\d+)$/)?.[1] || 0)
+  const coverageReasons = Array.isArray(record(report.coverage).reasons)
+    ? record(report.coverage).reasons
+    : []
+  const coverageWarnings = coverageReasons.map((reason) => (
+    String(reason || '').replaceAll('_', ' ')
+  )).filter(Boolean)
 
   return {
     headline,
@@ -207,5 +213,6 @@ export function scanResultPresentation(scan, assurance) {
     notExamined,
     confirmedCount: confirmed.length,
     candidateCount: candidates.length,
+    coverageWarnings,
   }
 }

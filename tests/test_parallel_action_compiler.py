@@ -921,6 +921,29 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
         scan_id: _canonical_child_report(plan)
         for scan_id, plan in plans.items()
     }
+    reports[CHILD_IDS[1]]["coverage"] = {
+        "candidate_coverage": {
+            "nuclei_passive": {
+                "status": "complete",
+                "batch_actions": 1,
+                "planned_candidates": 1,
+                "attempted_candidates": 1,
+                "completed_candidates": 1,
+                "incomplete_candidates": 0,
+                "unattempted_candidates": 0,
+            },
+        },
+        "family_coverage": [{
+            "family": "nuclei_passive",
+            "selected": True,
+            "required": True,
+            "coverage_status": "complete",
+            "planned_candidates": 1,
+            "attempted_candidates": 1,
+            "verified_findings": 0,
+            "suspected_findings": 1,
+        }],
+    }
     merged = merge_parallel_action_executions(
         record,
         child_results=reports,
@@ -935,9 +958,31 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
     assert len({
         action["occurrence_id"] for action in merged["actions"]
     }) == len(merged["actions"])
+    assert merged["candidate_coverage"]["nuclei_passive"][
+        "attempted_candidates"
+    ] == 1
+    assert merged["family_coverage"] == [{
+        "family": "nuclei_passive",
+        "selected": True,
+        "required": True,
+        "coverage_status": "complete",
+        "reason": None,
+        "batch_actions": 0,
+        "planned_candidates": 1,
+        "attempted_candidates": 1,
+        "completed_candidates": 0,
+        "incomplete_candidates": 0,
+        "unattempted_candidates": 0,
+        "verified_findings": 0,
+        "suspected_findings": 1,
+    }]
     coverage = summarize_parallel_action_coverage(merged)
     assert coverage["status"] == "complete"
     assert coverage["grade_reliability"] == {"reliable": True, "reasons": []}
+    assert coverage["candidate_coverage"]["nuclei_passive"][
+        "attempted_candidates"
+    ] == 1
+    assert coverage["family_coverage"][0]["coverage_status"] == "complete"
 
     lost = dict(reports)
     lost[CHILD_IDS[2]] = None

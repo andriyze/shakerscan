@@ -277,6 +277,14 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
             </p>
           </div>
         )}
+        {resultPresentation.coverageWarnings.length > 0 && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">Requested coverage did not complete</p>
+            <p className="mt-1 text-xs leading-5 text-amber-100/75">
+              {resultPresentation.coverageWarnings.join(' · ')}. Review the execution details before relying on this run.
+            </p>
+          </div>
+        )}
         {assurance && assurance.gaps.length > 0 && (
           <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
             <p className="text-xs font-medium text-gray-300">What was not established</p>

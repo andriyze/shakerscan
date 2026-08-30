@@ -14650,6 +14650,48 @@ def _mark_parallel_parent_degraded(
     return True
 
 
+def _mark_parallel_parent_coverage_incomplete(merged: dict[str, Any]) -> bool:
+    """Make a requested non-shard coverage failure authoritative on the parent."""
+    coverage = merged.get("coverage") if isinstance(merged.get("coverage"), dict) else {}
+    status = str(coverage.get("status") or "").strip().lower()
+    if status not in {"partial", "failed", "cancelled"}:
+        return False
+    reasons = sorted({
+        str(item).strip() for item in coverage.get("reasons") or ()
+        if str(item).strip()
+    } or {f"coverage_{status}"})
+    coverage["grade_reliability"] = {
+        "reliable": False,
+        "reasons": reasons,
+    }
+    merged["coverage"] = coverage
+
+    meta = merged.setdefault("scan_metadata", {})
+    if isinstance(meta, dict):
+        meta["partial"] = True
+        meta["degraded"] = True
+        meta["grade_reliable"] = False
+        meta["grade_reliability_reasons"] = reasons
+
+    result = merged.setdefault("result", {})
+    if isinstance(result, dict):
+        result["grade_reliable"] = False
+        result["degraded"] = True
+        reason = "Requested scan coverage did not complete: " + ", ".join(reasons)
+        result["grade_warning"] = reason
+        issues = result.get("coverage_issues")
+        if not isinstance(issues, list):
+            issues = [str(issues)] if issues else []
+        if reason not in issues:
+            issues.append(reason)
+        result["coverage_issues"] = issues
+        grade = result.get("grade")
+        if grade is not None and not str(grade).endswith("*"):
+            result.setdefault("original_grade", str(grade))
+            result["grade"] = f"{grade}*"
+    return True
+
+
 async def _record_endpoint_telemetry_attempts(
     conn,
     *,
@@ -17110,6 +17152,24 @@ async def process_scan_merge_job(job_data: dict):
             canonical_action_merge,
             additional_reliability_reasons=extra_reasons,
         )
+        # The parent summary must use the same merged action ledger as the detailed
+        # execution view.  Keeping one base shard's budget made the header say
+        # "Unavailable" while the report below showed the actual total.
+        merged_budget_used: dict[str, int] = {}
+        for action in canonical_action_merge.get("actions") or ():
+            if not isinstance(action, Mapping):
+                continue
+            for name, amount in (action.get("budget_consumed") or {}).items():
+                try:
+                    value = max(0, int(amount or 0))
+                except (TypeError, ValueError):
+                    continue
+                merged_budget_used[str(name)] = (
+                    merged_budget_used.get(str(name), 0) + value
+                )
+        metadata = merged.setdefault("scan_metadata", {})
+        if isinstance(metadata, dict):
+            metadata["budget_used"] = merged_budget_used
 
     # Coverage-aware merge: the parent must reflect the whole fan-out, not just
     # the base shard. For scope/coverage shards, use the assigned endpoint
@@ -17149,6 +17209,8 @@ async def process_scan_merge_job(job_data: dict):
         ),
     )
 
+    coverage_incomplete = _mark_parallel_parent_coverage_incomplete(merged)
+
     if _mark_parallel_parent_degraded(
         merged,
         failed_count=failed_n,
@@ -17159,7 +17221,9 @@ async def process_scan_merge_job(job_data: dict):
         if isinstance(merged.get('result'), dict):
             agg_grade = merged['result'].get('grade', agg_grade)
             agg_score = merged['result'].get('score', agg_score)
-    technically_incomplete = bool(failed_n or cancelled_n or partial_n)
+    technically_incomplete = bool(
+        failed_n or cancelled_n or partial_n or coverage_incomplete
+    )
     merged['technical_outcome'] = 'INCOMPLETE' if technically_incomplete else 'COMPLETE'
     scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=completed_n, total_count=len(children),

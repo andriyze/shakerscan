@@ -6142,6 +6142,30 @@ def test_parallel_parent_degraded_when_any_shard_fails():
     assert merged["result"]["coverage_issues"]
 
 
+def test_parallel_parent_requested_discovery_failure_is_incomplete():
+    merged = {
+        "result": {"score": 94, "grade": "A", "grade_reliable": True},
+        "scan_metadata": {},
+        "coverage": {
+            "status": "partial",
+            "reasons": ["subdomain_discovery_failed"],
+            "grade_reliability": {"reliable": True, "reasons": []},
+        },
+    }
+
+    changed = worker._mark_parallel_parent_coverage_incomplete(merged)
+
+    assert changed is True
+    assert merged["scan_metadata"]["partial"] is True
+    assert merged["scan_metadata"]["grade_reliable"] is False
+    assert merged["result"]["grade_reliable"] is False
+    assert merged["result"]["grade"] == "A*"
+    assert merged["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["subdomain_discovery_failed"],
+    }
+
+
 def test_parallel_parent_assurance_is_recomputed_and_capped_by_all_shards():
     merged = {
         "result": {"assurance_score": 100, "assurance_band": "strong"},
