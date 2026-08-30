@@ -167,7 +167,8 @@ curl -X POST http://localhost:8080/scans \
 
 `fast`, `balanced`, and `thorough` are ceilings, not scan identities. Never enable
 `policy.active_testing` without confirming that the user owns or is explicitly authorized to test
-the target. Old `scan_type` values are accepted only as deprecated compatibility mappings.
+the target. Public submissions reject old `scan_type` values; translate historical wording to a
+canonical budget and explicit policy before submitting.
 
 ### Check Scan Status
 

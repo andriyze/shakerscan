@@ -41,10 +41,8 @@ The agent follows `skills/ai-security-session/SKILL.md` and uses the local `/ses
 Existing scan results can provide known routes, browser-captured APIs, technology hints, and
 findings to reproduce. If a suitable completed scan exists, the agent can load it first.
 
-If a new scan would help, choose one explicitly:
-
-- `quick`, `standard`, or `deep` for non-active context gathering
-- `full`, `aggressive`, or `smart` only after explicit active-testing authorization
+If a new scan would help, choose a canonical `fast`, `balanced`, or `thorough` resource budget.
+Budget does not imply permission: enable active testing only after explicit authorization.
 
 After a scan is submitted, the agent reports the scan ID and UI link and stops. Start or continue
 the interactive session after the scan completes or proceed without that context.

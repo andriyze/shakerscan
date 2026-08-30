@@ -11,7 +11,9 @@ Run JavaScript and frontend attack-surface analysis for a target, completed scan
 3. Prefer a completed ShakerScan scan first:
    - if the argument is a scan ID, use it directly
    - otherwise look for the latest completed scan for the target
-4. If no useful scan exists, ask whether to queue a `standard` or `deep` scan. Do not queue `smart`, `full`, or `aggressive` without explicit permission.
+4. If no useful scan exists, ask whether to queue the canonical Scan with a `balanced` or
+   `thorough` budget. Keep active testing off unless the user separately confirms authorization and
+   asks for active probes.
 5. Return:
    - a concise markdown report
    - a `custom_endpoints` block

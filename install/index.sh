@@ -327,7 +327,7 @@ print_next_steps() {
     say "     \"Red team my chatbot API with AI Gate smoke tests\""
     say ""
     say "2) Or run it yourself from the CLI:"
-    say "     $(sk) scan https://example.com   # quick scan"
+    say "     $(sk) scan https://example.com   # default passive Scan"
     say "     $(sk) status                     # what's running + UI/API URLs"
     say "     $(sk) stop                       # stop everything"
     say ""
