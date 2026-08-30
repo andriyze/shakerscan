@@ -420,6 +420,44 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             payload,
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
+    if args.hunt_command == "candidate-update":
+        if args.request:
+            payload = _read_json(args.request, default={})
+            if not isinstance(payload, dict):
+                raise CliError("Hunt candidate update must be one JSON object")
+        else:
+            payload = {
+                key: value
+                for key, value in {
+                    "title": args.title,
+                    "claim": args.claim,
+                    "severity": args.severity,
+                    "evidence_refs": (
+                        list(dict.fromkeys(args.evidence_ref))
+                        if args.evidence_ref else None
+                    ),
+                    "verifier_contract_id": args.verifier_contract_id,
+                }.items()
+                if value is not None
+            }
+        if not payload:
+            raise CliError("candidate-update requires --request or at least one changed field")
+        return client.request(
+            "PATCH",
+            "/hunts/{}/candidates/{}".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.candidate_id, safe=""),
+            ),
+            payload=payload,
+        )
+    if args.hunt_command == "candidate-delete":
+        return client.request(
+            "DELETE",
+            "/hunts/{}/candidates/{}".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.candidate_id, safe=""),
+            ),
+        )
     if args.hunt_command == "verify":
         return client.post(
             "/hunts/{}/candidates/{}/verify".format(
@@ -702,6 +740,24 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_candidate.add_argument("--evidence-ref", action="append", default=[])
     hunt_candidate.add_argument("--verifier-contract-id")
     hunt_candidate.add_argument("--idempotency-key")
+
+    hunt_candidate_update = hunt_commands.add_parser(
+        "candidate-update", help="Correct metadata on a Hunt-owned candidate",
+    )
+    hunt_candidate_update.add_argument("hunt_id")
+    hunt_candidate_update.add_argument("candidate_id")
+    hunt_candidate_update.add_argument("--request", metavar="FILE", help="Complete JSON update; use - for stdin")
+    hunt_candidate_update.add_argument("--title")
+    hunt_candidate_update.add_argument("--claim")
+    hunt_candidate_update.add_argument("--severity", choices=("critical", "high", "medium", "low", "info"))
+    hunt_candidate_update.add_argument("--evidence-ref", action="append", default=[])
+    hunt_candidate_update.add_argument("--verifier-contract-id")
+
+    hunt_candidate_delete = hunt_commands.add_parser(
+        "candidate-delete", help="Delete a Hunt-owned candidate while preserving its audit record",
+    )
+    hunt_candidate_delete.add_argument("hunt_id")
+    hunt_candidate_delete.add_argument("candidate_id")
 
     hunt_verify = hunt_commands.add_parser("verify", help="Run canonical deterministic candidate verification")
     hunt_verify.add_argument("hunt_id")

@@ -135,6 +135,11 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
         "idempotentHint": True, "openWorldHint": True,
     }
     assert annotations["shakerscan_hunt_verify"]["openWorldHint"] is True
+    assert annotations["shakerscan_hunt_candidate_update"]["destructiveHint"] is True
+    assert annotations["shakerscan_hunt_candidate_delete"] == {
+        "readOnlyHint": False, "destructiveHint": True,
+        "idempotentHint": True, "openWorldHint": False,
+    }
     assert annotations["shakerscan_hunt_cancel"]["destructiveHint"] is True
 
     start = next(item for item in descriptors if item["name"] == "shakerscan_hunt_start")
@@ -290,6 +295,20 @@ def test_mcp_hunt_tools_wrap_canonical_api_and_validate_ids():
 
     assert result["structuredContent"]["hunt_id"] == hunt_id
     assert client.calls[-1] == ("POST", f"/hunts/{hunt_id}/query", {"kind": "endpoints", "limit": 25})
+
+    candidate_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    client.call_tool("shakerscan_hunt_candidate_update", {
+        "hunt_id": hunt_id, "candidate_id": candidate_id, "title": "Corrected",
+    })
+    assert client.calls[-1] == (
+        "PATCH", f"/hunts/{hunt_id}/candidates/{candidate_id}", {"title": "Corrected"},
+    )
+    client.call_tool("shakerscan_hunt_candidate_delete", {
+        "hunt_id": hunt_id, "candidate_id": candidate_id,
+    })
+    assert client.calls[-1] == (
+        "DELETE", f"/hunts/{hunt_id}/candidates/{candidate_id}", None,
+    )
 
     with pytest.raises(mcp.MCPError):
         client.call_tool("shakerscan_hunt_get", {"hunt_id": "not-a-uuid"})

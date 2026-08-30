@@ -210,11 +210,17 @@ def test_hunt_cli_exposes_complete_lifecycle_and_uses_canonical_routes(tmp_path)
             self.calls.append(("POST", path, payload))
             return {"path": path, "payload": payload}
 
+        def request(self, method, path, *, payload=None, **_kwargs):
+            self.calls.append((method, path, payload))
+            return {"path": path, "payload": payload}
+
     cases = (
         (("hunt", "get", "hunt-1"), "GET", "/hunts/hunt-1"),
         (("hunt", "list", "--status", "active", "--limit", "10"), "GET", "/hunts?limit=10&status=active"),
         (("hunt", "query", "hunt-1", "candidates", "--limit", "8"), "POST", "/hunts/hunt-1/query"),
         (("hunt", "candidate", "hunt-1", "--request", str(candidate_request)), "POST", "/hunts/hunt-1/candidates"),
+        (("hunt", "candidate-update", "hunt-1", "candidate-1", "--title", "Corrected"), "PATCH", "/hunts/hunt-1/candidates/candidate-1"),
+        (("hunt", "candidate-delete", "hunt-1", "candidate-1"), "DELETE", "/hunts/hunt-1/candidates/candidate-1"),
         (("hunt", "verify", "hunt-1", "candidate-1"), "POST", "/hunts/hunt-1/candidates/candidate-1/verify"),
         (("hunt", "finish", "hunt-1", "--summary", "done"), "POST", "/hunts/hunt-1/finish"),
         (("hunt", "cancel", "hunt-1"), "POST", "/hunts/hunt-1/cancel"),

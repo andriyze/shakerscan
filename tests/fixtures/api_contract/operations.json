@@ -995,6 +995,16 @@
     "operation_id": "create_hunt_candidate_hunts__hunt_id__candidates_post"
   },
   {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "method": "delete",
+    "operation_id": "delete_hunt_candidate_hunts__hunt_id__candidates__candidate_id__delete"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "method": "patch",
+    "operation_id": "update_hunt_candidate_hunts__hunt_id__candidates__candidate_id__patch"
+  },
+  {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
     "method": "post",
     "operation_id": "verify_hunt_candidate_hunts__hunt_id__candidates__candidate_id__verify_post"

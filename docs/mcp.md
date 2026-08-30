@@ -45,7 +45,8 @@ Target-bound Hunt V2 (including state-changing and target-facing operations):
 
 - `shakerscan_hunt_start`, `shakerscan_hunt_get`, and `shakerscan_hunt_query`
 - `shakerscan_hunt_capability` for capabilities returned by that Hunt's manifest
-- `shakerscan_hunt_candidate`, `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
+- `shakerscan_hunt_candidate`, `shakerscan_hunt_candidate_update`, and `shakerscan_hunt_candidate_delete`
+- `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
 
 Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain `read_only` risk,
 and dispatch through the audited Arsenal endpoint. Hunt discovery reads `GET /hunts/contract` and
@@ -63,7 +64,9 @@ results fail closed.
 
 Tool annotations reflect these boundaries: Arsenal inspection and Hunt get/query are read-only;
 capability and verification operations are conservatively marked destructive and open-world;
-start, candidate, finish, and cancel are state-changing. Raw secrets, target-address overrides,
+start, candidate create/update/delete, finish, and cancel are state-changing. Candidate updates
+cannot change identity or proof-owned fields; deletion expires the candidate while retaining its
+immutable audit record. Raw secrets, target-address overrides,
 planner argv, and arbitrary shell commands are not representable. Input schemas enforce UUIDs,
 enums, required/nested fields, patterns, uniqueness, and numeric bounds before dispatch. The
 transport also caps request and response sizes and rejects redirects.

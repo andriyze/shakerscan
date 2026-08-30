@@ -1142,7 +1142,9 @@ adapter. Arsenal inspection exposes targets, ASM gaps, findings, content-free ev
 the mission timeline, saved dry-run plans, and tool status through `POST /arsenal/execute`; it
 revalidates the live catalog and never represents state-changing Arsenal commands. Hunt tools load
 `GET /hunts/contract`, generate the canonical start schema, and wrap start/get/query/capability/
-candidate/verify/finish/cancel. Capability calls require the live Hunt manifest, validate its
+candidate-create/candidate-update/candidate-delete/verify/finish/cancel. Candidate edits are
+Hunt-scoped and cannot alter deterministic proof state; deletion retains an immutable audit record.
+Capability calls require the live Hunt manifest, validate its
 published input schema, and use a caller-provided or returned generated idempotency key. Target
 binding, approvals, budgets, receipts, evidence, and deterministic proof remain server-enforced.
 See [`docs/mcp.md`](mcp.md).
@@ -1655,6 +1657,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/hunts/{hunt_id}` | `get_hunt` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
+| `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
+| `PATCH` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `update_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |

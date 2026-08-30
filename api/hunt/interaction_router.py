@@ -28,7 +28,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .run_service import agent_tools
 from .cancellation import (
@@ -221,6 +221,30 @@ class HuntCandidateRequest(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"] = "info"
     evidence_refs: list[str] = Field(min_length=1, max_length=100)
     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+
+
+class HuntCandidateUpdateRequest(BaseModel):
+    """Editable candidate metadata; identity and proof-owned fields are absent by design."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    claim: Optional[str] = Field(default=None, min_length=1, max_length=8000)
+    severity: Optional[
+        Literal["critical", "high", "medium", "low", "info"]
+    ] = None
+    evidence_refs: Optional[list[str]] = Field(
+        default=None, min_length=1, max_length=100,
+    )
+    verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if not self.model_fields_set:
+            raise ValueError("Candidate update must change at least one field")
+        for field_name in ("title", "claim", "severity", "evidence_refs"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 @router.post("/hunts/{hunt_id}/query")
@@ -1036,6 +1060,67 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
+
+
+def _candidate_lifecycle_http_error(
+    exc: investigation_candidates.CandidateLifecycleError,
+) -> HTTPException:
+    if exc.code == "candidate_not_owned":
+        return HTTPException(status_code=404, detail=str(exc))
+    if exc.code in {
+        "candidate_update_empty", "candidate_update_field_forbidden",
+        "candidate_evidence_required",
+    }:
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=409, detail=str(exc))
+
+
+@router.patch("/hunts/{hunt_id}/candidates/{candidate_id}")
+async def update_hunt_candidate(
+    hunt_id: str, candidate_id: str, request: HuntCandidateUpdateRequest,
+):
+    """Correct metadata on a candidate produced by this Hunt.
+
+    Candidate identity, proof state, and verification results remain server-owned. Historical
+    Hunts may correct their own non-terminal candidates because this operation performs no target
+    traffic and appends an immutable lifecycle observation.
+    """
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction():
+                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                result = await investigation_candidates.update_candidate_for_hunt(
+                    conn,
+                    hunt_run_id=str(hunt_uuid),
+                    candidate_id=str(candidate_uuid),
+                    changes=request.model_dump(exclude_unset=True),
+                    created_by=f"hunt_v2:{hunt_uuid}",
+                )
+    except investigation_candidates.CandidateLifecycleError as exc:
+        raise _candidate_lifecycle_http_error(exc) from exc
+    return {"hunt_id": str(hunt_uuid), "candidate": result}
+
+
+@router.delete("/hunts/{hunt_id}/candidates/{candidate_id}")
+async def delete_hunt_candidate(hunt_id: str, candidate_id: str):
+    """Delete a Hunt-owned candidate from active use without erasing its audit record."""
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction():
+                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                result = await investigation_candidates.expire_candidate_for_hunt(
+                    conn,
+                    hunt_run_id=str(hunt_uuid),
+                    candidate_id=str(candidate_uuid),
+                    created_by=f"hunt_v2:{hunt_uuid}",
+                )
+    except investigation_candidates.CandidateLifecycleError as exc:
+        raise _candidate_lifecycle_http_error(exc) from exc
+    return {"hunt_id": str(hunt_uuid), "candidate": result}
 
 
 # Mirror of the fan-out `_device_verify_candidate_tool` performs. A test pins these against the

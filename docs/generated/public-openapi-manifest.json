@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 167,
+  "component_schema_count": 168,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -83,6 +83,7 @@
     "FleetScaleRequest": "78e53605ce3941f5f47a4246ccf758ce51f46bb4a1803fa9db036f563caafafe",
     "HTTPValidationError": "7373c21f1389312367e27e440140ba11d587693c56d8aa27249b36d3f58c10c6",
     "HuntCandidateRequest": "7a890f858641b412dd5b74a13342c278a09b816d10c4980b8225c58994231972",
+    "HuntCandidateUpdateRequest": "d8bf357f06e099fa5b57be30706a1bc654509f14c1c01f3281f9e22a86ab8568",
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
@@ -173,9 +174,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "48c00baada7e74bebdb6422a978807d6fce3e7d0fa540997ff3bb87ba21d51d1",
+  "contract_sha256": "93421bc917909d775eb99d7cce14e82228b587583bc08cfc8b43e20589001418",
   "openapi": "3.1.0",
-  "operation_count": 390,
+  "operation_count": 392,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -307,6 +308,19 @@
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
+      "tags": []
+    },
+    "DELETE /hunts/{hunt_id}/candidates/{candidate_id}": {
+      "deprecated": false,
+      "operation_id": "delete_hunt_candidate_hunts__hunt_id__candidates__candidate_id__delete",
+      "parameters_sha256": "c5027abac6ba6e359f72afd6bd0998d54eb449569d2649b79263a317f6df4d5a",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
       "tags": []
     },
     "DELETE /hunts/{hunt_id}/http-transactions": {
@@ -2883,6 +2897,19 @@
       "surface": null,
       "tags": []
     },
+    "PATCH /hunts/{hunt_id}/candidates/{candidate_id}": {
+      "deprecated": false,
+      "operation_id": "update_hunt_candidate_hunts__hunt_id__candidates__candidate_id__patch",
+      "parameters_sha256": "c5027abac6ba6e359f72afd6bd0998d54eb449569d2649b79263a317f6df4d5a",
+      "request_schema_sha256": "25a1069b1d07e280473031ccdab22b77d819abb4d26f8345aa9d68f559cabfa0",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": []
+    },
     "PATCH /model-intake/trust-anchors/{anchor_id}": {
       "deprecated": false,
       "operation_id": "update_model_intake_trust_anchor_model_intake_trust_anchors__anchor_id__patch",
@@ -5292,6 +5319,7 @@
       "POST /evidence/retention/sweep"
     ],
     "hunt": [
+      "DELETE /hunts/{hunt_id}/candidates/{candidate_id}",
       "DELETE /hunts/{hunt_id}/http-transactions",
       "GET /hunts",
       "GET /hunts/contract",
@@ -5299,6 +5327,7 @@
       "GET /hunts/{hunt_id}",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
+      "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",
       "POST /hunts",
       "POST /hunts/{hunt_id}/cancel",
       "POST /hunts/{hunt_id}/candidates",

@@ -1416,6 +1416,20 @@
     "name": "create_hunt_candidate"
   },
   {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_hunt_candidate"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_hunt_candidate"
+  },
+  {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
     "methods": [
       "POST"

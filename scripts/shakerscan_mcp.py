@@ -272,6 +272,31 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         ("hunt_id", "family", "locus", "title", "claim", "evidence_refs"),
     ),
     HuntMCPTool(
+        "shakerscan_hunt_candidate_update", "PATCH",
+        "/hunts/{hunt_id}/candidates/{candidate_id}",
+        "Correct metadata on a non-terminal candidate produced by this Hunt; proof state cannot be changed.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "candidate_id": {"type": "string", "format": "uuid"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 300},
+            "claim": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+            "evidence_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100},
+            "verifier_contract_id": {"type": "string", "maxLength": 160},
+        },
+        ("hunt_id", "candidate_id"), destructive=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_candidate_delete", "DELETE",
+        "/hunts/{hunt_id}/candidates/{candidate_id}",
+        "Remove a non-terminal candidate produced by this Hunt while retaining its immutable audit record.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "candidate_id": {"type": "string", "format": "uuid"},
+        },
+        ("hunt_id", "candidate_id"), destructive=True, idempotent=True,
+    ),
+    HuntMCPTool(
         "shakerscan_hunt_verify", "POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
         "Request registered deterministic verification for one candidate.",
         {"hunt_id": {"type": "string", "format": "uuid"}, "candidate_id": {"type": "string", "format": "uuid"}},

@@ -5,6 +5,8 @@ import asyncio
 import os
 import uuid
 
+import pytest
+
 from api import investigation_candidates as candidates
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
@@ -136,6 +138,130 @@ def test_terminal_upsert_is_immutable_and_every_sighting_appends_an_observation(
     assert "REFERENCES agent_hunt_runs(id) ON DELETE SET NULL" in migration
 
 
+def _candidate_row(*, status="new"):
+    return {
+        "id": uuid.uuid4(),
+        "plane": "web",
+        "target_id": uuid.uuid4(),
+        "device_target_id": None,
+        "family": "sqli",
+        "canonical_locus": {"method": "GET", "route": "/search", "parameter": "q"},
+        "title": "Original title",
+        "claim": "Original claim",
+        "claimed_severity": "medium",
+        "evidence_refs": ["evidence-1"],
+        "verifier_contract_id": "web.sqli",
+        "source_kind": "hunt_v2",
+        "status": status,
+        "latest_verification_id": uuid.uuid4() if status == "inconclusive" else None,
+    }
+
+
+class _CandidateLifecycleConnection:
+    def __init__(self, row):
+        self.row = dict(row) if row is not None else None
+        self.observations = []
+        self.queries = []
+
+    async def fetchrow(self, query, *args):
+        self.queries.append((query, args))
+        if query.lstrip().startswith("SELECT c.*"):
+            return dict(self.row) if self.row is not None else None
+        if "SET title=$2" in query:
+            self.row.update({
+                "title": args[1],
+                "claim": args[2],
+                "claimed_severity": args[3],
+                "evidence_refs": args[4],
+                "verifier_contract_id": args[5],
+                "status": "new" if self.row["status"] in {"inconclusive", "blocked"} else self.row["status"],
+                "latest_verification_id": None if self.row["status"] in {"inconclusive", "blocked"} else self.row["latest_verification_id"],
+            })
+            return dict(self.row)
+        if "SET status='expired'" in query:
+            self.row["status"] = "expired"
+            return dict(self.row)
+        raise AssertionError(query)
+
+    async def execute(self, query, *args):
+        assert "INSERT INTO investigation_candidate_observations" in query
+        self.observations.append(args)
+        return "INSERT 0 1"
+
+
+def test_hunt_can_update_its_candidate_without_gaining_proof_authority():
+    conn = _CandidateLifecycleConnection(_candidate_row(status="inconclusive"))
+    result = asyncio.run(candidates.update_candidate_for_hunt(
+        conn,
+        hunt_run_id=str(uuid.uuid4()),
+        candidate_id=str(conn.row["id"]),
+        changes={"title": "Corrected title", "severity": "high"},
+        created_by="hunt_v2:test",
+    ))
+
+    assert result == {
+        "id": str(conn.row["id"]),
+        "status": "new",
+        "updated_fields": ["severity", "title"],
+        "authoritative": False,
+        "verified": False,
+    }
+    assert conn.row["title"] == "Corrected title"
+    assert conn.row["latest_verification_id"] is None
+    assert len(conn.observations) == 1
+    observation_context = conn.observations[0][8]
+    assert '"event": "candidate.updated"' in observation_context
+    assert '"verification_state_mutated": false' in observation_context
+
+
+@pytest.mark.parametrize("status", ["verification_queued", "verifying", "verified", "refuted"])
+def test_hunt_cannot_edit_candidate_during_or_after_proof(status):
+    conn = _CandidateLifecycleConnection(_candidate_row(status=status))
+    with pytest.raises(candidates.CandidateLifecycleError):
+        asyncio.run(candidates.update_candidate_for_hunt(
+            conn,
+            hunt_run_id=str(uuid.uuid4()),
+            candidate_id=str(conn.row["id"]),
+            changes={"title": "Must not change"},
+            created_by="hunt_v2:test",
+        ))
+    assert conn.row["title"] == "Original title"
+    assert conn.observations == []
+
+
+def test_hunt_delete_is_soft_audited_and_idempotent():
+    conn = _CandidateLifecycleConnection(_candidate_row())
+    hunt_id = str(uuid.uuid4())
+    first = asyncio.run(candidates.expire_candidate_for_hunt(
+        conn, hunt_run_id=hunt_id, candidate_id=str(conn.row["id"]),
+        created_by="hunt_v2:test",
+    ))
+    second = asyncio.run(candidates.expire_candidate_for_hunt(
+        conn, hunt_run_id=hunt_id, candidate_id=str(conn.row["id"]),
+        created_by="hunt_v2:test",
+    ))
+
+    assert first["status"] == "deleted"
+    assert first["candidate_status"] == "expired"
+    assert first["recoverable_audit_record"] is True
+    assert second["idempotent_replay"] is True
+    assert len(conn.observations) == 1
+    assert '"event": "candidate.deleted"' in conn.observations[0][8]
+
+
+def test_hunt_candidate_lifecycle_is_scoped_to_an_observing_run():
+    conn = _CandidateLifecycleConnection(None)
+    with pytest.raises(candidates.CandidateLifecycleError) as raised:
+        asyncio.run(candidates.update_candidate_for_hunt(
+            conn,
+            hunt_run_id=str(uuid.uuid4()),
+            candidate_id=str(uuid.uuid4()),
+            changes={"title": "Cross-run edit"},
+            created_by="hunt_v2:test",
+        ))
+    assert raised.value.code == "candidate_not_owned"
+
+
 def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():
     root = os.path.join(os.path.dirname(__file__), "..")
     api_source = api_tree_source()
@@ -144,6 +270,21 @@ def test_candidate_read_api_exposes_lifecycle_without_promotion_authority():
     assert 'payload["authoritative"] = False' in api_source
     assert "FROM finding_verifications WHERE candidate_id=$1" in api_source
     assert "FROM evidence_instances WHERE candidate_id=$1" in api_source
+
+
+def test_hunt_candidate_lifecycle_routes_are_declared_and_proof_constrained():
+    assert route_is_declared("PATCH", "/hunts/{hunt_id}/candidates/{candidate_id}")
+    assert route_is_declared("DELETE", "/hunts/{hunt_id}/candidates/{candidate_id}")
+    update_model = definition_source("HuntCandidateUpdateRequest")
+    for forbidden in (
+        "verified", "proof_state", "latest_verification_verdict", "family", "locus",
+    ):
+        assert f"{forbidden}:" not in update_model
+    update_handler = definition_source("update_hunt_candidate")
+    delete_handler = definition_source("delete_hunt_candidate")
+    assert "update_candidate_for_hunt" in update_handler
+    assert "expire_candidate_for_hunt" in delete_handler
+    assert "DELETE FROM investigation_candidates" not in delete_handler
 
 
 def test_candidate_verification_is_an_approval_bound_canonical_capability():
