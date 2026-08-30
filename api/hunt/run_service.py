@@ -559,9 +559,16 @@ class HuntRunService:
     ) -> dict[str, Any]:
         async with self._pool().acquire() as connection:
             row = await connection.fetchrow(
-                """UPDATE hunt_runs SET status='completed', stop_reason='completed',
-                          final_debrief=$2, completed_at=NOW(), updated_at=NOW()
-                   WHERE id=$1 AND status IN ('active','awaiting_planner')
+                """UPDATE hunt_runs
+                   SET status = CASE
+                           WHEN status='budget_exhausted' THEN status ELSE 'completed' END,
+                       stop_reason = CASE
+                           WHEN status='budget_exhausted'
+                           THEN COALESCE(stop_reason, 'budget_exhausted') ELSE 'completed' END,
+                       final_debrief=$2, completed_at=COALESCE(completed_at, NOW()),
+                       updated_at=NOW()
+                   WHERE id=$1
+                     AND status IN ('active','awaiting_planner','budget_exhausted')
                    RETURNING *""",
                 _uuid_or_400(hunt_id, "hunt id"),
                 json.dumps({"summary": summary, "next_actions": next_actions}),

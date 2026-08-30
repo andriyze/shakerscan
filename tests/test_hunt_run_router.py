@@ -375,7 +375,7 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
             self.status = "active"
 
         async def fetchrow(self, query, *args):
-            if "SET status='completed'" in query:
+            if "UPDATE hunt_runs" in query and "final_debrief=$2" in query:
                 self.status = "completed"
                 return _row(id=uuid.UUID(hunt_id), status=self.status)
             if "SET status='cancelled'" in query:
@@ -393,6 +393,34 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
 
     assert finished["status"] == "completed"
     assert cancelled_after_finish["status"] == "completed"
+
+
+def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            assert "'budget_exhausted'" in query
+            assert "COALESCE(stop_reason, 'budget_exhausted')" in query
+            assert json.loads(args[1]) == {
+                "summary": "Budget ended after the useful checks.",
+                "next_actions": ["Increase only the HTTP request ceiling."],
+            }
+            return _row(
+                id=uuid.UUID(hunt_id), status="budget_exhausted",
+                stop_reason="budget_exhausted:http_requests",
+                final_debrief=args[1],
+            )
+
+    result = asyncio.run(HuntRunService(lambda: _Pool(Connection())).finish(
+        hunt_id,
+        summary="Budget ended after the useful checks.",
+        next_actions=["Increase only the HTTP request ceiling."],
+    ))
+
+    assert result["status"] == "budget_exhausted"
+    assert result["stop_reason"] == "budget_exhausted:http_requests"
+    assert result["final_debrief"]["summary"].startswith("Budget ended")
 
 
 def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
