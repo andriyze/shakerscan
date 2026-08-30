@@ -209,6 +209,30 @@ def test_scanner_image_contains_runtime_device_catalog():
     assert (ROOT / "scanner" / "data" / "device_api_catalog.json").is_file()
 
 
+def test_release_api_image_contains_hunt_methodology_catalog():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+
+    assert "COPY skills/web /app/skills/web" in dockerfile
+    assert (ROOT / "skills" / "web" / "README.md").is_file()
+    assert len(list((ROOT / "skills" / "web").glob("[0-9][0-9]-*.md"))) == 31
+
+
+def test_fresh_installer_downloads_every_hunt_methodology_asset():
+    installers = (
+        (ROOT / "install" / "index.sh").read_text(),
+        (ROOT / "install" / "index.html").read_text(),
+    )
+    assets = [
+        path.relative_to(ROOT / "skills" / "web").as_posix()
+        for path in (ROOT / "skills" / "web").rglob("*.md")
+    ]
+    assert len(assets) == 39
+    for installer in installers:
+        assert 'mkdir -p "$INSTALL_STAGE/skills/web/core"' in installer
+        for relative in assets:
+            assert relative.split("/")[-1] in installer
+
+
 def test_release_compose_has_dedicated_agent_tool_fast_lane():
     release = (ROOT / "docker-compose.release.yml").read_text()
     local = (ROOT / "docker-compose.yml").read_text()

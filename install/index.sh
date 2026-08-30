@@ -410,6 +410,7 @@ mkdir -p "$INSTALL_STAGE/skills/device-triage/agents" "$INSTALL_STAGE/skills/hun
 mkdir -p "$INSTALL_STAGE/skills/js-analyze/agents" "$INSTALL_STAGE/skills/js-analyze/references"
 mkdir -p "$INSTALL_STAGE/skills/review-skills/agents" "$INSTALL_STAGE/skills/research-agent/agents"
 mkdir -p "$INSTALL_STAGE/skills/shakerscan/agents" "$INSTALL_STAGE/skills/shakerscan/references"
+mkdir -p "$INSTALL_STAGE/skills/web/core"
 mkdir -p "$INSTALL_STAGE/.claude/agents" "$INSTALL_STAGE/.claude/commands" "$INSTALL_STAGE/.claude/hooks"
 touch "$INSTALL_STAGE/.env"
 : > "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
@@ -530,6 +531,51 @@ download "$REPO_RAW_BASE/runner/host/requirements.lock" "$INSTALL_DIR/runner/hos
 download "$REPO_RAW_BASE/runner/host/system-requirements.ubuntu.txt" "$INSTALL_DIR/runner/host/system-requirements.ubuntu.txt"
 download "$REPO_RAW_BASE/skills/README.md" "$INSTALL_DIR/skills/README.md"
 download "$REPO_RAW_BASE/skills/scanner-skill.md" "$INSTALL_DIR/skills/scanner-skill.md"
+for skill_file in \
+    01-scope-authorization-and-agent-safety.md \
+    02-attack-surface-and-asset-discovery.md \
+    03-stateful-crawling-content-and-parameter-discovery.md \
+    04-javascript-source-map-and-client-route-analysis.md \
+    05-http-baselining-replay-and-differential-analysis.md \
+    06-authentication-and-identity-enumeration-testing.md \
+    07-session-cookie-token-and-jwt-testing.md \
+    08-account-recovery-mfa-and-lifecycle-testing.md \
+    09-authorization-idor-bola-bfla-and-property-level-testing.md \
+    10-business-logic-and-insecure-design-testing.md \
+    11-api-inventory-openapi-and-contract-testing.md \
+    12-graphql-security-testing.md \
+    13-websocket-sse-and-realtime-security-testing.md \
+    14-sql-nosql-orm-and-ldap-injection-testing.md \
+    15-command-ssti-expression-and-deserialization-testing.md \
+    16-xss-dom-and-client-side-injection-testing.md \
+    17-csrf-cors-clickjacking-and-cross-origin-testing.md \
+    18-ssrf-url-fetch-and-cloud-metadata-testing.md \
+    19-path-traversal-file-inclusion-and-xxe-testing.md \
+    20-file-upload-and-file-processing-testing.md \
+    21-oauth-oidc-saml-and-sso-testing.md \
+    22-http-request-smuggling-and-desync-testing.md \
+    23-cache-poisoning-deception-and-host-routing-testing.md \
+    24-race-condition-concurrency-and-idempotency-testing.md \
+    25-rate-limit-resource-consumption-and-automation-abuse-testing.md \
+    26-cryptography-tls-secrets-and-sensitive-data-testing.md \
+    27-software-supply-chain-and-integrity-testing.md \
+    28-security-misconfiguration-error-handling-and-logging-testing.md \
+    29-web-llm-and-ai-feature-security-testing.md \
+    30-scanner-orchestration-evidence-chaining-and-regression.md \
+    31-edge-waf-and-origin-exposure-validation.md \
+    README.md; do
+    download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
+done
+for core_file in \
+    00-engagement-scope-policy.md \
+    01-agent-trust-boundary.md \
+    02-tool-execution-safety.md \
+    03-approval-and-risk-gates.md \
+    04-evidence-validation-and-finding-promotion.md \
+    05-engagement-state-contract.md \
+    06-skill-routing-and-composition.md; do
+    download "$REPO_RAW_BASE/skills/web/core/$core_file" "$INSTALL_DIR/skills/web/core/$core_file"
+done
 download "$REPO_RAW_BASE/skills/ai-security-session/SKILL.md" "$INSTALL_DIR/skills/ai-security-session/SKILL.md"
 download "$REPO_RAW_BASE/skills/ai-security-session/agents/openai.yaml" "$INSTALL_DIR/skills/ai-security-session/agents/openai.yaml"
 download "$REPO_RAW_BASE/skills/ai-security-session/references/api.md" "$INSTALL_DIR/skills/ai-security-session/references/api.md"
