@@ -3701,6 +3701,84 @@ def test_broker_shard_result_ingest_never_reclaims_execution_slots_or_budget(mon
     assert any(mapping.get("status") == "completed" for _key, _args, mapping in redis.hashes)
 
 
+def test_local_parallel_shard_archives_traffic_before_result_persistence(monkeypatch, tmp_path):
+    redis = _FakeJobRedis()
+    conn = _FakeAsmConn(child_status="running", parent_status="running")
+    calls = []
+
+    async def identity_options(options, _scan_id):
+        return options
+
+    async def execute_scan(*_args, **_kwargs):
+        calls.append("execute")
+        return {
+            "target": "https://example.test",
+            "result": {"score": 100, "grade": "A"},
+            "findings": [],
+            "coverage": {"status": "complete", "reasons": []},
+        }
+
+    def start_capture(capture, broker_result):
+        assert capture is worker.scanner_http_capture
+        assert broker_result is None
+        calls.append("capture-start")
+        return True
+
+    async def drain_capture(pool, capture, **kwargs):
+        assert pool is worker.db_pool
+        assert capture is worker.scanner_http_capture
+        assert kwargs["scan_id"] == "22222222-2222-4222-8222-222222222222"
+        assert kwargs["target_id"] == "33333333-3333-4333-8333-333333333333"
+        calls.append("archive")
+
+    def reset_capture(capture, active):
+        assert capture is worker.scanner_http_capture
+        assert active is False
+        calls.append("capture-reset")
+
+    async def persist_result(*_args, **_kwargs):
+        calls.append("persist")
+        return str(tmp_path / "result.json")
+
+    async def no_progress(*_args, **_kwargs):
+        return None
+
+    async def no_merge(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_try_acquire_parallel_shard_slot", lambda *_a, **_k: (True, 1))
+    monkeypatch.setattr(worker, "_release_parallel_shard_slot", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_hydrate_generic_scan_credentials", identity_options)
+    monkeypatch.setattr(worker, "_hydrate_managed_scan_credentials", identity_options)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", execute_scan)
+    monkeypatch.setattr(worker, "persist_result_artifact", persist_result)
+    monkeypatch.setattr(worker, "update_scan_progress", no_progress)
+    monkeypatch.setattr(worker, "send_heartbeats", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", no_merge)
+    monkeypatch.setattr(worker.http_archive, "start_scan_capture", start_capture)
+    monkeypatch.setattr(worker.http_archive, "drain_and_archive_scan_capture", drain_capture)
+    monkeypatch.setattr(worker.http_archive, "reset_scan_capture", reset_capture)
+    monkeypatch.setattr(worker, "RESULTS_DIR", tmp_path)
+
+    asyncio.run(worker.process_scan_shard_job({
+        "job_id": "job-local-shard",
+        "scan_id": "22222222-2222-4222-8222-222222222222",
+        "parent_scan_id": "55555555-5555-4555-8555-555555555555",
+        "target_id": "33333333-3333-4333-8333-333333333333",
+        "target": "https://example.test",
+        "options": {"scan_type": "smart"},
+        "shard_label": "scope[0]",
+        "shard_index": 0,
+        "shard_count": 1,
+    }))
+
+    assert calls == [
+        "capture-start", "execute", "archive", "persist", "capture-reset",
+    ]
+
+
 def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
     target_id = "00000000-0000-0000-0000-000000000001"
     profile_id = "00000000-0000-4000-8000-000000000002"

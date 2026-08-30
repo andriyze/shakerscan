@@ -16521,6 +16521,12 @@ async def process_scan_shard_job(job_data: dict):
         name=f"heartbeat-{job_id[:8]}", daemon=True,
     )
     heartbeat_thread.start()
+    # Shards execute the same scanner adapters as standalone scans. Their traffic must
+    # be captured against the child row so the visible parent export can aggregate it.
+    # Broker ingestion already executed elsewhere and must never synthesize a local trace.
+    capture_started = http_archive.start_scan_capture(
+        scanner_http_capture, job_data.get("_broker_result_id"),
+    )
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -16538,6 +16544,18 @@ async def process_scan_shard_job(job_data: dict):
             result = {'target': target, 'error': str(e),
                       'result': {'score': None, 'grade': None}, 'findings': []}
             print(f"[{job_id[:8]}] Shard '{label}' run_scan error: {e}", flush=True)
+
+        # Archive before result persistence: a later scoring or storage failure must not
+        # erase the exact traffic that explains what this shard actually attempted.
+        if capture_started:
+            capture_started = False
+            await http_archive.drain_and_archive_scan_capture(
+                db_pool,
+                scanner_http_capture,
+                scan_id=scan_id,
+                target_id=target_id,
+                results_dir=RESULTS_DIR,
+            )
 
         result['job_id'] = job_id
         result['scan_id'] = scan_id
@@ -16603,6 +16621,7 @@ async def process_scan_shard_job(job_data: dict):
         r.expire(f"job:{job_id}", 86400)
         print(f"[{job_id[:8]}] Shard '{label}' done | findings: {len(findings)} | error: {bool(error)}", flush=True)
     finally:
+        http_archive.reset_scan_capture(scanner_http_capture, capture_started)
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
         if slot_acquired:
