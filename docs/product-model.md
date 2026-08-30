@@ -1,17 +1,21 @@
 # ShakerScan product model
 
+**Status:** canonical product vocabulary; reconciled 2026-08-29.
+
 This document is the canonical user-facing vocabulary for ShakerScan. API namespaces and database
 values may retain older names for compatibility, but the UI, README, agent skills, and live
 documentation should use the terms below.
 
-## Four primary workflows
+## Two core security workflows
 
 | User goal | Product workflow | Execution |
 |---|---|---|
 | Run established automated checks | **DAST Scan** | `/scans`, scanner workers |
 | Let an AI investigate adaptively | **Hunt** | canonical `/hunts/*` runtime |
-| Test manually with a browser or multiple users | **Interactive Testing** | `/session/*` |
-| Review and triage results | **Findings** | `/findings*`, `/retests*` |
+
+**Findings** (`/findings*`, `/retests*`) is the shared review and triage surface, not another
+execution engine. Manual browser work through `/session*` is an agent/Command Arsenal compatibility
+API with no standalone 2.0 UI; prefer Hunt for new adaptive investigations.
 
 Specialized scanners remain first-class:
 
@@ -36,7 +40,7 @@ Agents must preserve these distinctions:
 | “investigate autonomously”, “hunt this target” | Hunt |
 | “investigate/hunt this TV, camera, printer, router, or device” | Hunt with `target_kind=device` |
 | “verify this finding” | Deterministic finding verifier/retest |
-| “interactive testing”, “test manually”, “browser session” | Interactive Testing |
+| “interactive testing”, “test manually”, “browser session” | Compatibility `/session*` only when bounded manual browser work is specifically required; otherwise Hunt |
 
 Older names are accepted only at explicitly documented compatibility boundaries. They never select a
 different engine. See [`compatibility.md`](compatibility.md); current clients should discover Scan and
@@ -93,7 +97,7 @@ The primary source labels are:
 
 - DAST
 - Hunt
-- Interactive
+- Interactive (compatibility/manual provenance)
 - AI Gate
 - Model Intake
 - ASM
@@ -133,7 +137,7 @@ technical metadata.
 | Operator | Guided verifier implementation |
 | Research Agent | Hunt or guided verifier, depending on route |
 | AI Device Investigation / device agent | Hunt (`target_kind=device`) |
-| AI Session / `ai_session` | Interactive |
+| AI Session / `ai_session` | Interactive (compatibility/manual provenance) |
 | Autonomous / `autonomous` finding source | Hunt |
 | Plan a test | Test Builder |
 | Campaigns | Mission Ledger |

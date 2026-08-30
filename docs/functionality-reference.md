@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-08-24
+**Reconciled:** 2026-08-29
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -656,7 +656,8 @@ The AI side has five capabilities:
    not a target-specific planning engine. Historical Deep Hunt/device-agent URLs redirect to Hunt.
 2. **AI Gate** — probe-driven runtime testing of chat, RAG, agent, MCP, and widget surfaces.
 3. **Model Intake** — static artifact and supply-chain vetting before deployment.
-4. **AI Security Sessions** — interactive browser/session testing with separate user contexts.
+4. **Interactive session compatibility API** — bounded browser/session testing retained for
+   Command Arsenal and the compatibility skill; no standalone 2.0 UI.
 5. **AI-assisted analysis** — correlation, explanation, and retest planning for DAST findings.
 
 **Design principle.** AI may help judge, correlate, and explain, but verified security decisions must
@@ -668,7 +669,7 @@ are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belo
 
 ### AI capability status quick read
 
-These implemented components were last reconciled against code on 2026-08-08. AI Gate remains a
+These implemented components were last reconciled against code on 2026-08-29. AI Gate remains a
 preview product surface for 2.0.0. Model Intake is release-gated for deterministic static review,
 artifact and report generation, and its opt-in AMD64 Linux/KVM Firecracker tier; unsupported formats,
 incomplete evidence, missing required tools, and unavailable runtime qualification fail closed. The
@@ -842,18 +843,20 @@ Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with 
 `source_type=model_intake`; they are excluded from `source_type=dast`. Sensitive URL params and
 metadata keys are redacted.
 
-### 11.3 Interactive Testing
+### 11.3 Interactive session compatibility API
 
-`api/session_manager.py` plus `/session/*` endpoints provide collaborative, interactive testing in a
-headless browser. You start a session, drive browser actions (`navigate`, `click`, `fill`, `register`,
+`api/session_manager.py` plus `/session/*` endpoints remain available to agents and Command Arsenal
+for bounded manual browser work. There is no standalone 2.0 UI and new adaptive investigation should
+normally use Hunt. A compatibility client can start a session and drive actions (`navigate`, `click`, `fill`, `register`,
 `login`, `submit`, `wait`, `extract`), maintain **separate per-user contexts** (e.g. user1/user2),
 capture screenshots, and test endpoints for cross-user access (`test-endpoint` with `as_user`).
 Endpoint tests that name a user require that user to exist and be authenticated in the session; authz
 replay automation also requires at least two authenticated principals before it can make a
 cross-principal claim.
-Validated findings are saved via `POST /session/{id}/findings` (the compatibility source value is
+Evidence-backed findings can be saved via `POST /session/{id}/findings` (the compatibility source value is
 `ai_session`; the user-facing source label is **Interactive**). This is the engine behind the
-`/ai-security-session` compatibility skill; see
+`/ai-security-session` compatibility skill. These findings remain unverified until deterministic
+proof establishes impact; see
 [`docs/INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md).
 
 ### 11.4 AI-assisted analysis of DAST findings
@@ -2803,7 +2806,7 @@ Scan feature or a second orchestration engine.
 | Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
-| Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
+| Interactive session compatibility API | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
 | DAST execution and Continuous ASM architecture | [`dast-asm-architecture.md`](dast-asm-architecture.md) |
 | Connected-device architecture, policies, and safety boundary | [`connected-device-security.md`](connected-device-security.md) |
 | Multi-node fleet architecture (RFC) | [`multi-node-architecture.md`](multi-node-architecture.md) |

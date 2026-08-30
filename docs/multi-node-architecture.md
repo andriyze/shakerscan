@@ -28,7 +28,7 @@ implemented. Capacity-weighted fleet-wide scaling, immutable execution-context s
 durable per-node lifecycle events are implemented. The broker path is the 2.0.0 production
 candidate; exact-SHA physical acceptance is optional operational evidence. WireGuard remains outside that supported boundary.
 **Scope:** run a coordinated ShakerScan fleet across multiple VMs/VPS hosts so one UI/API
-can scan more targets at once and run high-budget Full Coverage scans by using workers
+can scan more targets at once and run high-budget or parallel Scan workloads using workers
 from many machines.
 **Operator guide:** [multi-node-guide.md](multi-node-guide.md).
 **Related design:** [dast-asm-architecture.md](dast-asm-architecture.md).
@@ -109,8 +109,8 @@ queue already runs shards of one logical scan; the merge reconciles regardless o
    queue → more concurrent shards, so `coverage` fan-outs finish faster); it does not change the
    orchestration. The transport/trust substrate is now implemented in both owned-overlay and
    outbound-only broker forms. This is important for the
-   Honey/Juice Shop/crAPI class of targets: fleet capacity lets one logical Full Coverage
-   scan discover once, queue many endpoint shards, and try many more probes without forcing
+   Honey/Juice Shop/crAPI class of targets: fleet capacity lets one logical parallel Scan
+   discover once, queue many endpoint shards, and try many more probes without forcing
    all work through one VPS.
 7. **The hard parts are lifecycle, evidence, queue reliability, routing, rate limiting,
    and security.** The existing queue/dedup model is a good substrate, but a production
@@ -195,7 +195,7 @@ Multi-node does not change that shape. It changes where those jobs can execute.
 |---|---|
 | Before parallel scan fan-out | More total throughput for independent scans and batch scans. Each scan still runs on one worker, but the shared queue spreads scans across VPSs. |
 | After `scan_plan` / `scan_shard` / `scan_merge` | Shards from one logical scan can be consumed by workers on different VPSs. |
-| After Full Coverage mode | One target can queue many endpoint shards; more VPSs drain those shards faster while the parent scan still merges into one report. |
+| After parallel endpoint fan-out | One target can queue many endpoint shards; more VPSs drain those shards faster while the parent scan still merges into one report. |
 | After routing and affinity | The control plane can place jobs by region, egress IP, internal-network reachability, scan tier, or tool capability. |
 
 The shared requirements between the two designs are:
@@ -280,7 +280,7 @@ Flow:
 This immediately improves throughput for batches and independent targets. If there are
 four VPSs with five workers each, the fleet can run about twenty worker jobs at once,
 subject to scan type, memory, CPU, and global rate limits.
-Known-endpoint ASM and Full Coverage work reserves endpoint budget through shared Redis buckets.
+Known-endpoint ASM and parallel endpoint work reserve endpoint budget through shared Redis buckets.
 Joined workers turn the compatibility request-meter default into enforcement and use shared
 root-domain request-token reservation. A broker job deferred by an exhausted domain budget remains
 pending with the explicit `waiting_for_request_budget` phase instead of appearing stuck with no
@@ -862,7 +862,7 @@ Implementation options:
 | Redis Streams with routing fields | **Implemented.** Producers atomically register and enqueue to a deterministic Stream for each normalized constraint set; matching workers discover and subscribe to it. Submissions reject constraint sets that no active enrollment can satisfy. Empty routes and their requirement metadata are removed after drain, stale worker snapshots cannot recreate orphan streams, and the live registry is capped by `SHAKERSCAN_QUEUE_ROUTE_MAX` (default 512, configurable through 4096). Capacity exhaustion returns an actionable HTTP 429 rather than an internal error. |
 | Broker-side scheduler | Best in Phase 3. The broker leases only jobs a node is allowed to run. |
 
-Rate limiting is global, not per node. Known-endpoint ASM and Full Coverage batches use Redis
+Rate limiting is global, not per node. Known-endpoint ASM and parallel endpoint batches use Redis
 token buckets keyed by root domain so local/owned workers do not multiply endpoint pressure. Joined
 workers enforce request metering by default and fail closed if active-scan admission cannot be
 authorized. Explicit `off` remains an operator-controlled escape hatch; physical multi-node rate

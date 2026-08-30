@@ -1,6 +1,6 @@
 # AI Test Workflows
 
-**Status:** live operator workflow, reconciled 2026-07-11. The generic APIs work with configured
+**Status:** live AI Gate/Model Intake operator reference, reconciled 2026-08-29. The generic APIs work with configured
 targets; Honey routes are optional calibration fixtures, not detector inputs or product prerequisites.
 
 Run active workflows only against local systems or targets you own and are authorized to test.

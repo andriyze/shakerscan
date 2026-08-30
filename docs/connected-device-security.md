@@ -1,5 +1,7 @@
 # Connected-device security
 
+**Status:** current device product and safety boundary; reconciled 2026-08-29.
+
 ShakerScan treats TVs, cameras, printers, routers, NAS systems, conference equipment, and other
 network-connected devices as a separate security product surface. A device is not a Web DAST target,
 even when it exposes one or more web interfaces.

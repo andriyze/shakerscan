@@ -1,6 +1,6 @@
 # ShakerScan MCP
 
-**Status:** shipped and contract-tested as of 2026-08-25.
+**Status:** shipped and contract-tested as of 2026-08-29.
 
 ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal and canonical
 Hunt V2. Arsenal tools remain read-only. Hunt tools wrap `/hunts` directly and inherit its exact

@@ -2,9 +2,10 @@
 
 @AGENTS.md
 
-`AGENTS.md` is the canonical product and operating guide for all coding agents. This import is
+`AGENTS.md` is the compact canonical operating-policy guide for all coding agents. Product catalog
+mechanics come from the live contracts and functionality reference. This import is
 intentional: follow it completely, including authorization gates, asynchronous scan handoffs,
-evidence standards, API examples, and remote-link handling.
+evidence standards, interpretation rules, and remote-link handling.
 
 ## Claude Code entry points
 
@@ -23,7 +24,7 @@ Project-local commands under `.claude/commands/` cover:
 - `/research` (compatibility) and `/review-skills`
 
 Reusable task instructions live under `skills/`. Use `skills/shakerscan/SKILL.md` for the general
-workflow and the specialized skill directory for Interactive Testing, JS analysis, content
+workflow and the specialized skill directory for compatibility browser sessions, JS analysis, content
 discovery, Hunt, or skill-system review. For Hunt, use `skills/hunt/SKILL.md`: keep the methodology
 catalog server-side, request a compact shortlist after discovery reveals useful signals, and load
 and bind only the one methodology currently needed. Never load the catalog wholesale. Binding is

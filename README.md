@@ -687,7 +687,7 @@ Common fixes:
 - [Connected-device security](https://github.com/andriyze/shakerscan/blob/v2/docs/connected-device-security.md)
 - [OWASP coverage matrix](https://github.com/andriyze/shakerscan/blob/main/docs/owasp-coverage-matrix.md)
 - [AI security workflows](https://github.com/andriyze/shakerscan/blob/main/docs/AI_TEST_WORKFLOWS.md)
-- [Interactive session guide](https://github.com/andriyze/shakerscan/blob/main/docs/INTERACTIVE_SESSIONS_GUIDE.md)
+- [Interactive session compatibility API](https://github.com/andriyze/shakerscan/blob/main/docs/INTERACTIVE_SESSIONS_GUIDE.md)
 
 Superseded plans and point-in-time audits are available through Git history and release tags; they
 are not shipped as current product instructions.

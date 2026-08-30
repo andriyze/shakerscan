@@ -1,103 +1,49 @@
-# Proposed Next Steps
+# Current roadmap and next validation work
 
-**Status (2026-07-26):** future-only product roadmap. Shipped behavior belongs in the
-[functionality reference](functionality-reference.md), release gates and candidate evidence belong in
-[release readiness](release-readiness.md), while implementation history remains available in Git.
+**Status:** future-only roadmap; reconciled 2026-08-29.
 
-The coordinated **Multi-Node ShakerScan fleet is implemented** in both owned-WireGuard and
-outbound-HTTPS broker forms. It is no longer future roadmap work. The immediate priority is proving
-that implementation on the frozen release candidate, then improving DAST quality and operational
-truth without weakening operator capability.
+Shipped behavior belongs in `functionality-reference.md`; stop-ship and candidate evidence belong in
+`release-readiness.md`. The superseded July roadmap is preserved at
+[`archive/proposed-next-steps-2026-07.md`](archive/proposed-next-steps-2026-07.md).
 
-## 1. Multi-node fleet acceptance and operations
+## 1. Freeze and qualify 2.0.0
 
-One control plane now coordinates local and remote workers, central state/artifacts, bounded
-enrollment, placement, leases, reclaim, lifecycle changes, and build truth. Remaining work is
-release evidence and operational hardening:
+- Freeze one source SHA and produce immutable multi-architecture candidate digests.
+- Run exact-SHA CodeQL, contract, migration, upgrade, installer, UI, and release gates.
+- Renew the physical outbound-HTTPS broker receipt on the frozen candidate, including worker loss,
+  reclaim, duplicate completion, central artifacts, and public data-store isolation.
+- Keep WireGuard preview-only until its separate physical acceptance succeeds.
+- Publish and promote stable only through the sequence in `release-process.md`.
 
-1. Preserve a passing two-VPS broker acceptance receipt on the frozen candidate, including physical
-   worker loss, reclaim, duplicate completion, remote placement, cancellation, and central artifacts.
-2. Run the equivalent owned-WireGuard acceptance or explicitly exclude that topology from the
-   candidate boundary; an implemented but unproven topology must not be implied release-ready.
-3. Exercise controlled multi-host enrollment with one expiring `--max-uses` token, then revoke its
-   unused capacity and prove exhaustion/revocation under concurrent joins.
-4. Test upgrade and rollback from the previous published database and from the earlier one-use fleet
-   token schema; preserve nodes, credentials, desired state, scans, and artifacts.
-5. Add operator-visible backup/restore and node-replacement exercises for a lost control plane or
-   worker disk, without copying node identity between hosts.
+## 2. Improve DAST evidence quality
 
-The detailed design authority is [Multi-Node Architecture](multi-node-architecture.md). Do not
-duplicate its topology, protocol, or security design here. Production enablement is gated by the
-lease/fencing, evidence-transfer, and partition acceptance above—not merely by connecting another
-worker to Redis.
+- Improve broad authenticated discovery without benchmark-specific routes or detector hints.
+- Increase stored/DOM XSS and workflow/write-BOLA recall while retaining deterministic controls.
+- Keep auth-challenge, weak-assurance, and “not examined” presentation distinct from clean results.
+- Reduce queue, scope re-check, and external-tool failure classes with behavioral regressions.
+- Calibrate on current uniform worker builds and preserve contamination/integrity ledgers.
 
-## 2. DAST and authenticated discovery quality
+## 3. Complete lifecycle portability
 
-- Improve universal authenticated OpenAPI, link, JavaScript, browser, producer/consumer, and
-  response-guided request discovery without benchmark-specific routes or labels.
-- Require redacted accepted-auth and distinct-principal receipts for BOLA; configured or attempted
-  contexts alone never satisfy proof.
-- Rerun current-fleet Smart Juice Shop and authenticated crAPI scorecards, preserving seeded
-  detector-isolation runs as explicitly seeded evidence.
-- Improve broad/stored XSS and workflow/write-BOLA recall while keeping deterministic proof gates.
+- Add product-aware archive/restore across Scan, Hunt, AI Gate, and Model Intake.
+- Design and accept schema-versioned full-system export/import without importing authority, secrets,
+  or proof accidentally.
+- Add legal/operational holds and storage accounting before considering automatic retention.
 
-## 3. Execution contracts and operational truth
+## 4. Harden Hunt usability
 
-- Close release-critical registry bypasses while keeping `proof_contract` authoritative and the
-  wired XSS/SQLi/BOLA/auth/mass-assignment/JWT severity caps authoritative. Registry
-  `severity_rules` may remain advisory.
-- Finish cooperative cancellation and practical request/time/payload/redirect bounds for every
-  claimed active path.
-- Standardize metering quality (`exact`, `adapter_reported`, `reserved_upper_bound`, `estimated`, or
-  `unknown`) and expose whether each budget is hard, soft, or unavailable.
-- Keep static/dynamic Full Coverage and Continuous ASM rollups consistent under partial, failed,
-  cancelled, and missing telemetry.
+- Continue compact evidence-led methodology selection without preloading the 31-method catalogue.
+- Improve client artifact, authentication, multi-principal, and business-logic workflows through
+  canonical capabilities rather than planner commands.
+- Keep budget-exhausted debriefs, truthful action accounting, and finding CRUD covered by live E2E.
+- Evaluate methodology relevance and context cost without turning selection into authority.
 
-## 4. Continuous ASM and application graph
+## 5. Qualify specialized product boundaries
 
-- Use observed auth, route, object, producer/consumer, attempt, and proof facts to prioritize the
-  next campaign rather than treating endpoint touch count as coverage.
-- Expand focused families only when their scanner integrations, proof contracts, budgets, and
-  cancellation paths are runnable and tested.
-- Complete large-target parity, rate, lease, cancellation, and placement soak before calling
-  multi-node ASM campaigns release-proven.
+- Keep AI Gate preview until policy/exception and deterministic-judge seams have release gates.
+- Qualify Model Intake runner/provider combinations separately from static review.
+- Add authorized physical connected-device receipts without weakening silence/inconclusive handling.
+- Preserve Fleet, device, model, and web namespaces so metrics cannot contaminate one another.
 
-## 5. Hunt acceptance
-
-The engine design authority — ReAct loop, provenance gate, the two-tier verification bridge, and this
-backlog mapped to concrete seams — is the historical
-[retired investigation architecture](archive/deep-hunt-architecture.md).
-
-- Replace tool-call-as-request accounting with adapter-reported or reserved-upper-bound target-request
-  metering, and add an honest whole-session deadline for keyless runs.
-- Align the evidence contract with runtime provenance: advertise `scan_N` safely or require HTTP
-  confirmation, and make useful response diffs citeable.
-- Add DB-backed integration coverage for both drivers, cancellation/restart boundaries, provenance
-  persistence, deterministic retest queueing, and proof promotion before expanding active behavior.
-- Improve target-observed object-instance route induction and persist authorized OpenAPI/custom
-  endpoint ingestion into the canonical target surface.
-- Add an operator-approved BOLA ownership oracle and restoration-backed PUT/PATCH mass-assignment
-  verification without relaxing the family-proof moat.
-- Measure useful action selection, verified net-new yield, false promotion, cost, retry behavior,
-  cleanup, and stop quality across current-agent and configured-provider planners.
-- Make configured-provider turns checkpointable and keyless in-flight recovery idempotent; never
-  replay uncertain active traffic after a restart.
-- Keep arbitrary shell, model-supplied credentials, and AI-only verified findings excluded.
-
-## 6. Graduate the remaining AI preview surface
-
-- Implement the remaining AI Gate full-pipeline E2E cases for deterministic-judge and exception
-  seams.
-- Promote AI Gate from preview only after its candidate build passes those real-stack gates.
-- Keep Model Intake's real-model/KVM matrix current as a release gate; do not move deterministic
-  admission authority into an AI planner.
-- Keep live MCP invocation fuzzing, full registry-native Sigstore/cosign, and built-in AV/YARA as
-  separately scoped future capabilities.
-
-## Delivery order
-
-1. Freeze and validate 0.8.0 using `release-readiness.md`.
-2. Retain physical broker and Model Intake KVM acceptance evidence for the exact frozen SHA.
-3. Run upgrade/rollback, installer, full E2E, and current-fleet benchmark gates without code changes.
-4. Test WireGuard separately before considering it for a future supported release boundary.
-5. Continue DAST/auth quality and execution-contract work only on a new post-candidate branch.
+This roadmap is deliberately short. Completed work should be removed rather than accumulated into an
+implementation diary; detailed design belongs in an ADR or architecture document.

@@ -1,6 +1,6 @@
 # ShakerScan End-to-End Test Plan
 
-**Status (reconciled 2026-07-30):** this is the E2E coverage contract, not a current pass report.
+**Status (reconciled 2026-08-29):** this is the E2E coverage contract, not a current pass report.
 Historical `10/10`, `12/12`, and `12/12` totals were produced by an older harness/fleet and are not
 release evidence. The change-aware PR smoke workflow runs the platform regression lane,
 deterministic MI-1/MI-2–MI-6, and AI-1–AI-4 coverage. The manual full release workflow additionally
@@ -19,7 +19,7 @@ Every recent escaped bug lived at an **integration seam that unit tests mocked o
 |---|---|---|
 | 206 partial-download → false `sha256_mismatch` / false invalid safetensors header | mocked `_download_http` / local files | fetch a real multi-shard HF model, assert capped checksum semantics and full-size header validation |
 | AI judge redactor leaked secrets to the LLM | called `_redact_secrets_for_judge(...)` | plant a secret in a honey AI target, scan, assert it is absent from the stored transcript |
-| `UnboundLocalError` in Full Coverage | unit-tested `harvest_endpoints_with_meta` | run a real Full Coverage scan and assert it completes |
+| `UnboundLocalError` in a legacy Full Coverage run | unit-tested `harvest_endpoints_with_meta` | run the equivalent canonical thorough Scan and assert it completes |
 | Principal-probe production bypass | tested `classify_production_safety` | run a production AI scan, assert the admin-impersonation probe never executes |
 
 **Principle:** an e2e test exercises the full pipeline — `POST` to the public API → Redis → worker → **pinned target or deterministic fixture** → DB → result JSON → deployment decision — and asserts on the **real output**, including adversarial negatives (secrets must not leak, truncation must be flagged, false criticals must not fire). No mocking the seams. Explicit opt-in cases cover external network fetches. Ground truth lives in per-target answer keys.
@@ -74,11 +74,11 @@ a separate quality signal and is not currently scheduled nightly. The DAST area 
 | D-2 | Implemented | bounded (un-sharded) active scan of the injectable login | critical SQLi detected | active SQLi recall (spot) |
 | D-3 | Implemented | bounded active scan of the search | XSS detected | active XSS recall (spot) |
 | D-4 | Implemented | attack-chain assertions | the 3 removed phantom chains never appear | overclaim regression |
-| D-5 | **Planned slow case** | Full Coverage run producing truncated/NUL-byte evidence | scan completes; oversized evidence is truncated-and-flagged and NUL bytes stripped before DB persist | truncation + NUL-byte crash class |
+| D-5 | **Planned slow case** | parallel thorough Scan producing truncated/NUL-byte evidence | scan completes; oversized evidence is truncated-and-flagged and NUL bytes stripped before DB persist | truncation + NUL-byte crash class |
 
 Slow benchmark scope (quality, not the E2E release gate): authenticated smart recall ≥ 70% of the
 Juice Shop answer key, crAPI dual-user BOLA/IDOR + mass-assignment + JWT, precision
-(false-positive rate), Full Coverage truncation, and NUL-byte evidence persistence.
+(false-positive rate), parallel-scan truncation, and NUL-byte evidence persistence.
 
 ### Platform regression (Phase 4)
 

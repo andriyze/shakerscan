@@ -1,5 +1,7 @@
 # Release process
 
+**Status:** current immutable-candidate publication process; reconciled 2026-08-29.
+
 ShakerScan releases use one immutable source commit and one set of image digests. Building,
 accepting, publishing, and moving the stable channel are separate gates.
 

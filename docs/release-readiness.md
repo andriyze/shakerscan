@@ -1,8 +1,8 @@
 # ShakerScan 2.0.0 Release Readiness
 
-**Status (2026-08-25): candidate preparation; not approved for publication.** The V2 source audit
-and current-head manual product pass are complete on the `v2` branch; fresh long-running Scan
-submissions and frozen-candidate qualification remain separate follow-up gates. `VERSION` and release
+**Status (reconciled 2026-08-29): candidate preparation; not approved for publication.** Earlier V2
+source/manual passes predate subsequent behavior changes and are regression evidence only; fresh
+current-head checks and frozen-candidate qualification remain separate gates. `VERSION` and release
 notes are prepared for 2.0.0, but no release tag, candidate image publication, GitHub Release, `latest` alias, hosted
 installer change, or stable-channel promotion is authorized by this document. The stable installer
 must remain on 0.8.18 until every frozen-candidate gate below has a successful exact-SHA receipt.
