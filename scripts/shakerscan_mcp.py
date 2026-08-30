@@ -227,6 +227,28 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         {},
     ),
     HuntMCPTool(
+        "shakerscan_hunt_skills", "GET", "/hunt/skills",
+        "List server-shipped Hunt methodologies or get advisory suggestions for an objective.",
+        {
+            "target_kind": {"type": "string", "enum": ["web", "api", "network", "device"]},
+            "support": {"type": "string", "enum": ["supported", "partial", "reference"]},
+            "goal": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+        read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill", "GET", "/hunt/skills/{skill_id}",
+        "Read one server-shipped Hunt methodology and its runtime limitations.",
+        {
+            "skill_id": {
+                "type": "string", "minLength": 1, "maxLength": 160,
+                "pattern": DEFAULT_CAPABILITY_PATTERN,
+            },
+            "include_methodology": {"type": "boolean"},
+        },
+        ("skill_id",), read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
         "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}", "Read a Hunt and its capability manifest.",
         {"hunt_id": {"type": "string", "format": "uuid"}},
         ("hunt_id",), read_only=True, idempotent=True,
@@ -369,6 +391,7 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
 
     identifier_pattern = str(patterns.get("identifier") or DEFAULT_IDENTIFIER_PATTERN)
     capability_pattern = str(patterns.get("capability") or DEFAULT_CAPABILITY_PATTERN)
+    skill_pattern = str(patterns.get("skill_id") or DEFAULT_CAPABILITY_PATTERN)
     identifier_schema = {
         "type": "string", "minLength": 1, "maxLength": 256,
         "pattern": identifier_pattern,
@@ -422,6 +445,15 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
             "type": "array",
             "items": dict(identifier_schema),
             "maxItems": _positive_int(limits.get("request_collections"), 32),
+            "uniqueItems": True,
+        },
+        "skill_ids": {
+            "type": "array",
+            "items": {
+                "type": "string", "minLength": 1, "maxLength": 160,
+                "pattern": skill_pattern,
+            },
+            "maxItems": _positive_int(limits.get("skill_ids"), 4),
             "uniqueItems": True,
         },
     }
@@ -660,11 +692,20 @@ class ArsenalClient:
                 payload.setdefault("credential_refs", {})
                 payload.setdefault("capabilities", [])
                 payload.setdefault("request_collection_ids", [])
+                payload.setdefault("skill_ids", [])
             path = hunt_tool.path_template
-            for key in ("hunt_id", "capability_name", "candidate_id"):
+            for key in ("hunt_id", "capability_name", "candidate_id", "skill_id"):
                 marker = "{" + key + "}"
                 if marker in path:
                     path = path.replace(marker, urllib.parse.quote(str(payload.pop(key)), safe=""))
+            if name in {"shakerscan_hunt_skills", "shakerscan_hunt_skill"}:
+                query = urllib.parse.urlencode({
+                    key: str(value).lower() if isinstance(value, bool) else value
+                    for key, value in payload.items()
+                })
+                if query:
+                    path = f"{path}?{query}"
+                payload = {}
             generated_idempotency_key: str | None = None
             if name == "shakerscan_hunt_capability":
                 hunt_id = str(arguments["hunt_id"])

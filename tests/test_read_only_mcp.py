@@ -63,10 +63,12 @@ def _hunt_contract():
         "limits": {
             "goal_chars": 20_000, "capabilities": 128,
             "request_collections": 32, "credential_refs": 16,
+            "skill_ids": 4,
         },
         "patterns": {
             "identifier": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$",
             "capability": r"^[a-z0-9][a-z0-9_.:-]{0,127}$",
+            "skill_id": r"^[a-z0-9][a-z0-9_.:-]{0,159}$",
         },
         "budget_profiles": {
             "fast": budget,
@@ -151,6 +153,33 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
     assert "max_http_requests" in schema["properties"]["budgets"]["properties"]
     assert "primary_credential_profile_id" in schema["properties"]["credential_refs"]["properties"]
     assert schema["properties"]["request_collection_ids"]["maxItems"] == 32
+    assert schema["properties"]["skill_ids"]["maxItems"] == 4
+    assert annotations["shakerscan_hunt_skills"]["readOnlyHint"] is True
+    assert annotations["shakerscan_hunt_skill"]["idempotentHint"] is True
+
+
+def test_mcp_hunt_methodology_catalog_and_detail_are_read_only_gets():
+    class SkillClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if path.startswith("/hunt/skills"):
+                self.calls.append((method, path, payload))
+                return {"path": path}
+            return super().request_json(method, path, payload)
+
+    client = SkillClient()
+    catalog = client.call_tool("shakerscan_hunt_skills", {
+        "target_kind": "web", "support": "supported",
+        "goal": "Cloudflare origin exposure",
+    })
+    detail = client.call_tool("shakerscan_hunt_skill", {
+        "skill_id": "skill.web.edge-waf-and-origin-exposure-validation",
+        "include_methodology": True,
+    })
+
+    assert catalog["structuredContent"]["path"].startswith("/hunt/skills?")
+    assert "goal=Cloudflare+origin+exposure" in catalog["structuredContent"]["path"]
+    assert detail["structuredContent"]["path"].endswith("?include_methodology=true")
+    assert all(call[0] == "GET" and call[2] is None for call in client.calls[-2:])
 
 
 def test_mcp_catalog_drift_fails_closed():
@@ -349,10 +378,11 @@ def test_mcp_hunt_start_dispatches_complete_canonical_v2_request():
             },
             "budgets": {},
             "credential_refs": {},
-            "capabilities": [],
-            "request_collection_ids": [],
-        },
-    )
+                "capabilities": [],
+                "request_collection_ids": [],
+                "skill_ids": [],
+            },
+        )
 
 
 @pytest.mark.parametrize(
