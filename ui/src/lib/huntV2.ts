@@ -88,8 +88,43 @@ export interface HuntV2 {
   skills?: Array<{
     skill_id: string
     title: string
+    version?: string
+    body_sha256?: string
+    phase?: string
     requested: boolean
   }>
+  skill_activity?: HuntSkillActivity[]
+}
+
+export interface HuntSkillSuggestion {
+  skill_id: string
+  title: string
+  reason: string
+  methodology_url: string
+  bind_url: string
+  auto_bound: false
+}
+
+export interface HuntSkillSuggestions {
+  hunt_id: string
+  catalog_url: string
+  suggestions: HuntSkillSuggestion[]
+  count: number
+  signals_considered: number
+  methodology_bodies_loaded: 0
+  advisory_only: true
+}
+
+export interface HuntSkillActivity {
+  event_id: string
+  skill_id: string
+  event_type: 'read' | 'bound' | 'selection_removed' | 'unbound' | 'used' | 'completed' | 'deferred'
+  skill_version: string
+  body_sha256: string
+  reason?: string | null
+  evidence_refs: string[]
+  action_id?: string | null
+  created_at?: string
 }
 
 export interface HuntStartV2Request {
@@ -149,6 +184,54 @@ export async function startHuntV2Native(request: HuntStartV2Request): Promise<Hu
 export async function getHuntV2(huntId: string): Promise<HuntV2> {
   const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}`)
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to load Hunt (${response.status})`))
+  return response.json()
+}
+
+export async function suggestHuntSkills(
+  huntId: string,
+  signals: string[] = [],
+): Promise<HuntSkillSuggestions> {
+  const response = await fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/suggestions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signals }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to suggest Hunt methodologies (${response.status})`))
+  }
+  return response.json()
+}
+
+export async function bindHuntSkill(
+  huntId: string,
+  skillId: string,
+  reason: string,
+): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/${encodeURIComponent(skillId)}/bind`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, evidence_refs: [] }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to apply Hunt methodology (${response.status})`))
+  }
+  return response.json()
+}
+
+export async function unbindHuntSkill(huntId: string, skillId: string): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/${encodeURIComponent(skillId)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to remove Hunt methodology (${response.status})`))
+  }
   return response.json()
 }
 

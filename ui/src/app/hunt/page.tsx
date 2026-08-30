@@ -24,8 +24,10 @@ import {
   confirmHuntShellPlan,
   getHuntV2,
   listHuntsV2,
+  suggestHuntSkills,
   startHuntV2Native,
   type HuntBudgetProfile,
+  type HuntSkillSuggestion,
   type HuntTargetKind,
   type HuntV2,
 } from '@/lib/huntV2'
@@ -179,6 +181,8 @@ function HuntContent() {
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
+  const [skillSuggestions, setSkillSuggestions] = useState<HuntSkillSuggestion[]>([])
+  const [skillSuggestionsError, setSkillSuggestionsError] = useState<string | null>(null)
   const [huntHistory, setHuntHistory] = useState<HuntV2[]>([])
   const [huntHistoryLoading, setHuntHistoryLoading] = useState(false)
   const [huntHistoryTotal, setHuntHistoryTotal] = useState(0)
@@ -254,6 +258,28 @@ function HuntContent() {
       })
     return () => { cancelled = true }
   }, [searchParams])
+
+  useEffect(() => {
+    if (!hunt?.hunt_id) {
+      setSkillSuggestions([])
+      setSkillSuggestionsError(null)
+      return
+    }
+    let cancelled = false
+    suggestHuntSkills(hunt.hunt_id)
+      .then((result) => {
+        if (!cancelled) {
+          setSkillSuggestions(result.suggestions || [])
+          setSkillSuggestionsError(null)
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setSkillSuggestionsError(cause instanceof Error ? cause.message : 'Failed to load methodology suggestions')
+        }
+      })
+    return () => { cancelled = true }
+  }, [hunt?.hunt_id, hunt?.skills?.length])
 
   const choices = useMemo<TargetChoice[]>(() => [
     ...webTargets.map((target) => ({
@@ -865,6 +891,44 @@ function HuntContent() {
               <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
                 Back to launcher and history
               </Link>
+            </Card>
+
+            <Card className="space-y-4 p-5">
+              <div>
+                <h2 className="font-medium text-white">Methodologies</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  Compact recommendations only. Your agent loads one full methodology when target evidence makes it relevant.
+                </p>
+              </div>
+              {(hunt.skills || []).length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Applied</p>
+                  {(hunt.skills || []).map((skill) => (
+                    <div key={skill.skill_id} className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
+                      <p className="text-sm font-medium text-violet-200">{skill.title}</p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {skill.requested ? 'Selected explicitly' : 'Required prerequisite'}
+                        {skill.phase ? ` · ${skill.phase}` : ''}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">No methodology is applied. The agent can begin with ordinary discovery.</p>
+              )}
+              {skillSuggestions.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Suggested now</p>
+                  {skillSuggestions.map((suggestion) => (
+                    <div key={suggestion.skill_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                      <p className="text-sm text-gray-200">{suggestion.title}</p>
+                      <p className="mt-1 text-xs text-gray-500">{suggestion.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {skillSuggestionsError && <p className="text-xs text-amber-300">{skillSuggestionsError}</p>}
+              <p className="text-xs text-gray-600">At most three suggestions are returned; methodology bodies are never preloaded.</p>
             </Card>
 
             {hunt.target_kind === 'device' && shellPlans.length > 0 && (

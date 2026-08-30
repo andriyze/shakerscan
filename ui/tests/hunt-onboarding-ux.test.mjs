@@ -21,3 +21,10 @@ test('Hunt explains why it cannot start before privileged prerequisites are read
   assert.match(hunt, /aria-describedby="hunt-start-guidance"/)
   assert.match(hunt, /<p role="alert"/)
 })
+
+test('Hunt presents compact adaptive methodologies without preloading the catalog', () => {
+  assert.match(hunt, />Methodologies</)
+  assert.match(hunt, /At most three suggestions are returned; methodology bodies are never preloaded\./)
+  assert.match(hunt, /suggestHuntSkills\(hunt\.hunt_id\)/)
+  assert.doesNotMatch(hunt, /map\(.*methodology/i)
+})
