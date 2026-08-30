@@ -213,9 +213,9 @@ Keep these intents distinct:
   target; target-kind policy preserves device-specific safety.
 - `explain/triage/compare this device` → `device-triage` unless the user explicitly authorizes new traffic.
 
-For Hunt, use the current coding-agent session as planner and the `hunt` skill. Start `POST /hunts`,
-but first query the server-returned `skill_catalog` for the target kind and objective, read the
-relevant methodology bodies, and explicitly bind suitable supported `skill_ids`. Then query context,
+For Hunt, use the current coding-agent session as planner and the `hunt` skill. Start `POST /hunts`
+with no methodology unless one is already clearly required. After discovery, request the compact
+Hunt-specific suggestions, load exactly one relevant methodology on demand, and bind it explicitly. Then query context,
 call only returned capabilities, record or correct evidence-backed candidates, and request
 deterministic verification through the same API. ShakerScan remains authoritative for scope,
 credentials, active authority, budgets, evidence, and proof.

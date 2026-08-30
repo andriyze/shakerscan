@@ -43,8 +43,10 @@ Read-only Arsenal inspection:
 
 Target-bound Hunt V2 (including state-changing and target-facing operations):
 
-- `shakerscan_hunt_skills` for catalog routing/suggestions and `shakerscan_hunt_skill` for one
-  complete methodology plus its deferred techniques
+- `shakerscan_hunt_skills` for catalog metadata and `shakerscan_hunt_skill` for global detail
+- `shakerscan_hunt_skill_suggestions`, `shakerscan_hunt_skill_read`,
+  `shakerscan_hunt_skill_bind`, `shakerscan_hunt_skill_unbind`, and
+  `shakerscan_hunt_skill_usage` for progressive, audited methodology use
 - `shakerscan_hunt_start`, `shakerscan_hunt_get`, and `shakerscan_hunt_query`
 - `shakerscan_hunt_capability` for capabilities returned by that Hunt's manifest
 - `shakerscan_hunt_candidate`, `shakerscan_hunt_candidate_update`, and `shakerscan_hunt_candidate_delete`
@@ -54,9 +56,10 @@ Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain
 and dispatch through the audited Arsenal endpoint. Hunt discovery reads `GET /hunts/contract` and
 generates the start schema from the live authority contract. The MCP boundary uses only the
 canonical `goal` name and sends the complete V2 body: schema version, target kind, policy, budgets,
-credential references, capability allowlist, request-collection references, and explicit
-`skill_ids`. Suggestions are advisory: the planner reads relevant methodology with
-`shakerscan_hunt_skill` and chooses supported IDs; MCP never auto-binds them or expands authority.
+credential references, capability allowlist, request-collection references, and optional
+`skill_ids`. A run normally starts without one. Adaptive suggestions return at most three compact
+records and no bodies; the planner loads exactly one relevant method through the Hunt-specific read
+tool before binding it. MCP never auto-binds a methodology or changes authority.
 
 Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an active or
 awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input

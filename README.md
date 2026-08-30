@@ -76,8 +76,9 @@ expiring target-bound approval, and remains responsible for budgets, execution, 
 shakerscan scan https://app.example.test
 shakerscan scan https://app.example.test --budget-profile thorough
 shakerscan scan https://app.example.test --budget-profile thorough --active-testing --confirm-active
-shakerscan hunt skills --target-kind web --goal "Review the authenticated application"
-shakerscan hunt start --target-id "$TARGET_ID" --target-kind web --skill-id skill.web.http-baselining-replay-and-differential-analysis
+shakerscan hunt start --target-id "$TARGET_ID" --target-kind web
+shakerscan hunt skill-suggest "$HUNT_ID" --signal graphql
+shakerscan hunt skill-read "$HUNT_ID" skill.web.graphql-testing
 shakerscan credentials test "$PROFILE_ID"
 shakerscan collections select "$COLLECTION_ID" --method GET
 shakerscan evidence export --scan-id "$SCAN_ID" --format manifest
@@ -90,9 +91,9 @@ internal decisions. Legacy `--type`, `scan-full`, and `scan-smart` writes have b
 web UI or REST API for authentication values so secrets do not enter shell history. Credential create and
 rotation requests are read from a file or stdin, never secret-bearing command-line flags. Hunt,
 credential, and collection commands read their accepted fields from the running server contracts.
-Hunt methodologies are server-shipped and fingerprinted: query `hunt skills` first, read the relevant
-supported entries, and explicitly repeat `--skill-id` for the methods the run should bind. A
-suggestion does not authorize or start anything.
+Hunt methodologies are server-shipped and fingerprinted. Start normally with none selected; after
+discovery, request a three-item metadata-only shortlist and read exactly one relevant methodology.
+A suggestion or binding never changes Hunt authority, scope, capabilities, or budget.
 `credentials test` is deliberately a content-free storage, lifecycle, target-binding, and capability
 admission check; it does not attempt a live login. Exercise a profile only through a separately
 authorized, target-bound Scan or Hunt capability. Mutating CLI commands accept an opaque
@@ -286,10 +287,10 @@ expiring target-bound approval. ShakerScan keeps credentials server-side, enforc
 ceilings, blocks arbitrary write methods in the free-form loop, and promotes a Suspected finding to
 Verified only through deterministic proof.
 
-ShakerScan also ships a 31-entry web-testing methodology catalog. The agent queries `/hunt/skills`
-using the target kind and objective, reads only relevant methods, and explicitly binds at most four
-supported `skill_ids`. Partial/reference entries remain readable so unavailable techniques are clear
-before execution; they cannot be bound, and no skill can expand target or approval authority.
+ShakerScan also ships a 31-entry web-testing methodology catalog. It stays server-side instead of
+occupying the planner context. A Hunt receives at most three compact suggestions, then loads and
+binds one relevant method as technology or surface evidence emerges. Partial/reference entries are
+readable but unbindable, and no methodology can alter target or approval authority.
 
 To start:
 
@@ -531,7 +532,7 @@ scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
 backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
 scan <target> [options]       Submit the deterministic DAST Scan
-hunt skills|start|call        Discover methodologies, start a Hunt, or call one returned capability
+hunt start|skill-*|call       Start a Hunt, adapt methodology, or call one returned capability
 credentials create|rotate|test  Manage encrypted exact-target profiles
 collections upload|bind|select  Manage encrypted request collections
 evidence export                Export content-free evidence manifests or bundles

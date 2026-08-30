@@ -42,9 +42,10 @@ session hook automatically.
 
 The [`web`](web/README.md) directory is the server-shipped Hunt methodology catalog: 31 focused
 web-testing playbooks with routing metadata, capability requirements, evidence gates, and honest
-runtime support levels. It is not one agent skill to load wholesale. The Hunt planner queries
-`GET /hunt/skills`, reads only relevant methodologies, and binds up to four supported entries with
-`skill_ids`; partial and reference entries remain readable but cannot be bound.
+runtime support levels. It is not one agent skill to load wholesale. A Hunt normally starts with no
+methodology selected, receives at most three compact suggestions, and loads one complete method only
+when objective or observed-stack evidence makes it relevant. Partial and reference entries remain
+readable but cannot be bound.
 
 Each modern skill is a directory with:
 

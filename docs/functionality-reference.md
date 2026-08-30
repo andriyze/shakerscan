@@ -879,13 +879,13 @@ The current Codex, Claude, or OpenCode session plans through `POST /hunts`, `/qu
 server-returned capability manifest; ShakerScan alone executes actions. Active or credentialed
 capabilities require a live, target-bound, expiring approval that is revalidated per call.
 
-`GET /hunt/skills` publishes 31 server-shipped web-testing methodologies with routing triggers,
-preconditions, capability requirements, evidence gates, support level, and deferred techniques.
-Supplying `goal` returns deterministic advisory suggestions. The planner reads a relevant method at
-`GET /hunt/skills/{skill_id}` and explicitly binds up to four supported `skill_ids` in the Hunt start
-contract. Suggestions never auto-bind and never expand authority; partial/reference skills are
-readable but unbindable. The run context always distinguishes catalog health, suggestions, explicit
-selection, prerequisites, bound skills, and runtime limitations, even when nothing was selected.
+`GET /hunt/skills` publishes metadata for 31 server-shipped web-testing methodologies. Complete
+methodology bodies remain server-side. A Hunt normally starts with no selection, then
+`POST /hunts/{id}/skills/suggestions` returns at most three compact recommendations from the
+objective, target metadata, and bounded observed-stack signals. The planner loads exactly one at the
+Hunt-specific `/read` endpoint before `/bind`; it can later unbind or record evidenced use. Binding
+validates existing prerequisites but never grants, removes, or resizes authority. Versioned lifecycle
+events are stored outside the planner context and included in the Hunt record export.
 
 The planner can issue read probes on explicit target-bound origins, compare managed principal
 contexts when they are configured, query stored knowledge, record candidates, and invoke bounded
@@ -1183,8 +1183,9 @@ server-materialized create/read-back proof and is surfaced in the run outcome.
 adapter. Arsenal inspection exposes targets, ASM gaps, findings, content-free evidence manifests,
 the mission timeline, saved dry-run plans, and tool status through `POST /arsenal/execute`; it
 revalidates the live catalog and never represents state-changing Arsenal commands. Hunt tools load
-`GET /hunts/contract`, generate the canonical start schema, expose methodology catalog/detail, and wrap start/get/query/capability/
-candidate-create/candidate-update/candidate-delete/verify/finish/cancel. Candidate edits are
+`GET /hunts/contract`, generate the canonical start schema, expose progressive methodology
+suggest/read/bind/unbind/usage operations, and wrap start/get/query/capability/candidate-create/
+candidate-update/candidate-delete/verify/finish/cancel. Candidate edits are
 Hunt-scoped and cannot alter deterministic proof state; deletion retains an immutable audit record.
 Capability calls require the live Hunt manifest, validate its
 published input schema, and use a caller-provided or returned generated idempotency key. Target
@@ -1213,6 +1214,9 @@ See [`docs/mcp.md`](mcp.md).
 
 **Hunt**: `GET /hunts/contract` · `GET /hunt/skills` · `GET /hunt/skills/{skill_id}` ·
 `POST|GET /hunts` · `GET /hunts/{hunt_id}` · `GET /hunts/{hunt_id}/record` ·
+`POST /hunts/{hunt_id}/skills/suggestions` ·
+`POST /hunts/{hunt_id}/skills/{skill_id}/read|bind|usage` ·
+`DELETE /hunts/{hunt_id}/skills/{skill_id}` ·
 `POST /hunts/{hunt_id}/query` · `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `POST /hunts/{hunt_id}/candidates` · `PATCH|DELETE /hunts/{hunt_id}/candidates/{candidate_id}` ·
 `POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` ·
@@ -1481,8 +1485,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 402 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 336 | `api/**/*.py` |
+| Public REST operations | 407 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 341 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1499,7 +1503,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 99 | `db/init.sql` + migrations |
+| Durable tables | 100 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1719,6 +1723,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/hunts/{hunt_id}/record` | `export_hunt_record` |
 | `POST` | `/hunts/{hunt_id}/resume` | `resume_hunt` |
 | `POST` | `/hunts/{hunt_id}/shell-plans/{plan_id}/confirm` | `confirm_hunt_shell_plan` |
+| `POST` | `/hunts/{hunt_id}/skills/suggestions` | `suggest_hunt_skills` |
+| `DELETE` | `/hunts/{hunt_id}/skills/{skill_id}` | `unbind_hunt_skill` |
+| `POST` | `/hunts/{hunt_id}/skills/{skill_id}/bind` | `bind_hunt_skill` |
+| `POST` | `/hunts/{hunt_id}/skills/{skill_id}/read` | `read_hunt_skill` |
+| `POST` | `/hunts/{hunt_id}/skills/{skill_id}/usage` | `record_hunt_skill_usage` |
 | `POST` | `/internal/model-intake/admissions/issue` | `issue` |
 | `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
 | `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |
@@ -2717,6 +2726,7 @@ Scan feature or a second orchestration engine.
 | `hunt_actions` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_runs` | `db/init.sql` |
+| `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
 | `investigation_candidate_observations` | `api/retest_contract.py` |
 | `investigation_candidates` | `api/retest_contract.py` |
