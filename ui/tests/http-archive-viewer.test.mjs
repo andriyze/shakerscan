@@ -31,6 +31,8 @@ test('HAR export is explicitly raw, sensitive, and confirmation-gated', () => {
 
 test('archive viewer explains historical and partial capture instead of implying completeness', () => {
   assert.match(source, /archive\.fidelity_detail/)
+  assert.match(source, /useEffect/)
+  assert.match(source, /Raw HAR 1\.2.*archive\.fidelity/s)
   assert.match(source, /No request archive is available for this historical run/)
   assert.match(source, /archive\.archive_total/)
 })

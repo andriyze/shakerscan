@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
@@ -145,6 +145,13 @@ export default function HttpArchiveExport({
     }
   }
 
+  useEffect(() => {
+    void load(0)
+    // Load fidelity immediately so a collapsed export cannot imply that a
+    // partial archive is complete. Filters are intentionally user-triggered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownerKind, ownerId])
+
   const download = async (format: ArchiveFormat) => {
     if (format === 'har' && !window.confirm(
       'Raw HAR contains verbatim URLs, authentication headers, cookies, request bodies, and response data. Treat the downloaded file as sensitive. Continue?',
@@ -206,6 +213,12 @@ export default function HttpArchiveExport({
           <p className="mt-1 text-xs text-gray-500">
             Browse masked JSON or download the raw replay-ready HAR recorded during this {ownerKind}. Fidelity states when capture was partial.
           </p>
+          {archive && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span className={`rounded px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
+              <span>{archive.fidelity_detail}</span>
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           {ownerKind === 'hunt' && (
@@ -217,7 +230,7 @@ export default function HttpArchiveExport({
             <Download className="h-4 w-4" />{downloading === 'transactions' ? 'Preparing…' : 'Requests JSON'}
           </Button>
           <Button size="sm" variant="secondary" onClick={() => download('har')} disabled={downloading !== null}>
-            <Download className="h-4 w-4" />{downloading === 'har' ? 'Preparing…' : 'Raw HAR 1.2'}
+            <Download className="h-4 w-4" />{downloading === 'har' ? 'Preparing…' : `Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}
           </Button>
         </div>
       </div>
