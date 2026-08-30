@@ -903,6 +903,9 @@ function HuntContent() {
                 <p className="mt-1 text-xs text-gray-500">
                   Compact recommendations only. Your agent loads one full methodology when target evidence makes it relevant.
                 </p>
+                <p className="mt-1 text-xs text-gray-600">
+                  Methodologies guide investigation; applying one does not grant or restrict the Hunt&apos;s existing capabilities.
+                </p>
               </div>
               {(hunt.skills || []).length > 0 ? (
                 <div className="space-y-2">

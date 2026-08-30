@@ -429,7 +429,8 @@ def test_a_skill_whose_requirements_are_all_passive_still_binds_passively(librar
         ["skill.web.stateful-crawling-content-and-parameter-discovery"],
         target_kind="web", allowed_capabilities=passive_only, budget=None, library=library,
     )
-    assert bound.specs and set(bound.allowed_capabilities) <= set(passive_only)
+    assert bound.specs
+    assert bound.allowed_capabilities == passive_only
 
 
 def test_optional_capabilities_may_be_withheld_without_refusing_the_skill(library):

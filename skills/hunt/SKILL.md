@@ -16,6 +16,8 @@ candidates, and proof. Do not start a second in-server reasoning loop.
 3. Read `GET /hunts/contract`. Its `skill_catalog` is a server-side library, not required prompt
    context. Do not enumerate or read all methodologies. Starting with no `skill_ids` is normal;
    select one early only when the objective already makes it clearly relevant.
+   Methodology selection is not a safety control: binding validates required capabilities but leaves
+   the run's complete policy-derived capability set unchanged.
 4. Start `POST /hunts` with the complete `hunt-start/v2` authority contract. The planner must state
    the registered target kind, policy, lower budget ceilings, content-free credential references,
    capability allowlist, request-collection references, and `skill_ids`. An empty capability list
@@ -218,6 +220,8 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `POST /hunts/{hunt_id}/skills/{skill_id}/read`, review its prerequisites, then bind it with
   `/bind`. Never read the whole catalog. Binding validates existing authority; it cannot add or
   remove capabilities, change scope, or resize the Hunt budget.
+- Do not describe binding as narrowing, sandboxing, or fencing the Hunt. To reduce authority, start
+  a new Hunt with a smaller policy/capability contract; methodology binding cannot do that.
 - Record evidenced methodology use or completion at
   `POST /hunts/{hunt_id}/skills/{skill_id}/usage`. Unbind it when it is no longer relevant. The
   server retains version, digest, trigger, evidence, and lifecycle outside the planner context.

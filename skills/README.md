@@ -44,8 +44,9 @@ The [`web`](web/README.md) directory is the server-shipped Hunt methodology cata
 web-testing playbooks with routing metadata, capability requirements, evidence gates, and honest
 runtime support levels. It is not one agent skill to load wholesale. A Hunt normally starts with no
 methodology selected, receives at most three compact suggestions, and loads one complete method only
-when objective or observed-stack evidence makes it relevant. Partial and reference entries remain
-readable but cannot be bound.
+when objective or observed-stack evidence makes it relevant. Binding validates that the Hunt already
+has the method's required capabilities; it neither grants nor narrows authority and must not be used
+as a safety fence. Partial and reference entries remain readable but cannot be bound.
 
 Each modern skill is a directory with:
 

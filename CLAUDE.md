@@ -26,7 +26,8 @@ Reusable task instructions live under `skills/`. Use `skills/shakerscan/SKILL.md
 workflow and the specialized skill directory for Interactive Testing, JS analysis, content
 discovery, Hunt, or skill-system review. For Hunt, use `skills/hunt/SKILL.md`: keep the methodology
 catalog server-side, request a compact shortlist after discovery reveals useful signals, and load
-and bind only the one methodology currently needed. Never load the catalog wholesale.
+and bind only the one methodology currently needed. Never load the catalog wholesale. Binding is
+descriptive validation, not a capability fence; the run keeps its policy-derived capability set.
 
 Do not duplicate API contracts in this file. Use `AGENTS.md`, the live OpenAPI document at the API
 URL printed by `./scanner.sh status` (loopback installs use `http://localhost:8080/openapi.json`), and the public
