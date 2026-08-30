@@ -386,7 +386,14 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         "started_at": item.get("started_at"),
         "completed_at": item.get("completed_at"),
         "result": {
-            "ok": result_summary.get("ok") is True,
+            # Missing is unknown, not failure. Several worker adapters historically stored an
+            # execution status but no semantic `ok` field; coercing that absence to False made
+            # the public record contradict its own completed status.
+            "ok": (
+                result_summary.get("ok")
+                if isinstance(result_summary.get("ok"), bool)
+                else None
+            ),
             "partial": result_summary.get("partial") is True,
             "timed_out": result_summary.get("timed_out") is True,
             "observation_count": observation_count,
@@ -423,13 +430,26 @@ def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
     }
     observations = 0
     successful_calls = 0
+    executed_calls = 0
+    unsuccessful_calls = 0
+    indeterminate_calls = 0
+    partial_calls = 0
     for action in actions:
         status = str(action.get("status") or "unknown")
         statuses[status] = statuses.get(status, 0) + 1
-        if status != "completed":
+        if status not in {"completed", "failed", "partial"}:
             continue
-        successful_calls += 1
+        executed_calls += 1
         result = action.get("result") if isinstance(action.get("result"), Mapping) else {}
+        semantic_ok = result.get("ok") if isinstance(result.get("ok"), bool) else None
+        if status == "partial":
+            partial_calls += 1
+        elif status == "failed" or semantic_ok is False:
+            unsuccessful_calls += 1
+        elif status == "completed" and semantic_ok is True:
+            successful_calls += 1
+        else:
+            indeterminate_calls += 1
         observations += max(0, int(result.get("observation_count") or 0))
         typed = result.get("reference_ids") if isinstance(result.get("reference_ids"), Mapping) else {}
         for key in references:
@@ -437,9 +457,17 @@ def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
                 if _uuid_reference(reference):
                     references[key].add(str(reference))
     return {
-        "schema_version": "hunt-outcome-summary/v2",
+        "schema_version": "hunt-outcome-summary/v3",
+        # Compatibility field retained for existing clients. Unlike v2 it now means what its
+        # UI label always claimed: semantically successful calls, not merely completed dispatch.
         "capability_calls": successful_calls,
         "total_capability_calls": len(actions),
+        "attempted_calls": len(actions),
+        "executed_calls": executed_calls,
+        "successful_calls": successful_calls,
+        "unsuccessful_calls": unsuccessful_calls,
+        "indeterminate_calls": indeterminate_calls,
+        "partial_calls": partial_calls,
         "action_statuses": statuses,
         "observation_count": observations,
         "finding_ids": sorted(references["finding_ids"]),

@@ -65,9 +65,15 @@ export interface HuntV2 {
   }>
   actions?: HuntActionV2[]
   outcome_summary?: {
-    schema_version: 'hunt-outcome-summary/v2'
+    schema_version: 'hunt-outcome-summary/v2' | 'hunt-outcome-summary/v3'
     capability_calls: number
     total_capability_calls: number
+    attempted_calls?: number
+    executed_calls?: number
+    successful_calls?: number
+    unsuccessful_calls?: number
+    indeterminate_calls?: number
+    partial_calls?: number
     action_statuses: Record<string, number>
     observation_count: number
     finding_ids: string[]

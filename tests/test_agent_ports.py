@@ -316,6 +316,22 @@ def test_header_filter_drops_auth():
     assert filtered.get("X-Custom") == "ok"
 
 
+def test_header_filter_explains_decisions_without_echoing_values():
+    accepted, rejected = at.classify_request_headers({
+        "Authorization": "Bearer should-never-be-echoed",
+        "Origin": "https://comparison.example",
+        "X-Forwarded-For": "127.0.0.1",
+        "Transfer-Encoding": "chunked",
+    })
+    assert accepted == {"Origin": "https://comparison.example"}
+    assert rejected == {
+        "authorization": "managed_principal_required",
+        "transfer-encoding": "executor_owned_header",
+        "x-forwarded-for": "identity_header_approval_required",
+    }
+    assert "should-never-be-echoed" not in repr(rejected)
+
+
 def test_principal_slot_normalize():
     assert at.normalize_principal_slot("") == "anonymous"
     assert at.normalize_principal_slot("User1") == "user1"

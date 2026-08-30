@@ -362,9 +362,10 @@ async def execute_bound_http_request(
     except ValueError as exc:
         return {"ok": False, "error": f"scope: {exc}"}
 
-    headers = agent_tools.filter_request_headers(
+    headers, rejected_headers = agent_tools.classify_request_headers(
         args.get("headers"), allow_identity_headers=allow_identity_headers,
     )
+    accepted_header_names = sorted(str(name).strip().lower() for name in headers)
     headers.update(_trusted_headers(trusted_headers))
     query = args.get("query") if isinstance(args.get("query"), dict) else None
     json_body = (
@@ -386,6 +387,10 @@ async def execute_bound_http_request(
             "json" if json_body is not None
             else "form" if form_body is not None else None
         ),
+        # Values remain hidden.  Reporting the decision prevents a planner from treating a
+        # silently filtered experiment as one that reached the target as proposed.
+        "accepted_header_names": accepted_header_names,
+        "rejected_headers": dict(sorted(rejected_headers.items())),
         "pinned_address": pinned_address,
         # Recorded so a reader can always tell whether a response came through the target's
         # resolved address or an operator-confirmed origin. The two are not comparable

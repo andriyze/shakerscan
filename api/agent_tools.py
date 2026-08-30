@@ -1626,10 +1626,10 @@ def validate_same_origin_path(path: Any) -> str:
     return text
 
 
-def filter_request_headers(
+def classify_request_headers(
     headers: Any, *, allow_identity_headers: bool = False,
-) -> dict[str, str]:
-    """Drop any header the planner must not set. Returns the surviving headers.
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return accepted headers plus value-free rejection reasons.
 
     ``allow_identity_headers`` is the operator's explicit decision that forging a client
     address against this target is in scope. It never unlocks credential or transport
@@ -1637,27 +1637,51 @@ def filter_request_headers(
     requests, which is not the operator's to waive.
     """
     out: dict[str, str] = {}
+    rejected: dict[str, str] = {}
     if not isinstance(headers, dict):
-        return out
+        return out, rejected
     refused = (
         _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS
         if allow_identity_headers else _FORBIDDEN_HEADERS
     )
     for name, value in headers.items():
         lname = str(name).strip().lower()
-        if not lname or lname in refused:
+        if not lname:
+            continue
+        if lname in _CREDENTIAL_HEADERS:
+            rejected[lname] = "managed_principal_required"
+            continue
+        if lname in _TRANSPORT_HEADERS:
+            rejected[lname] = "executor_owned_header"
+            continue
+        if lname in IDENTITY_HEADERS and lname in refused:
+            rejected[lname] = "identity_header_approval_required"
             continue
         if any(sub in lname for sub in _SENSITIVE_HEADER_SUBSTR):
+            rejected[lname] = "sensitive_header_name_forbidden"
             continue
         sval = str(value)
         if not lname.isascii() or not sval.isascii():
+            rejected[lname] = "non_ascii_header_forbidden"
             continue
         if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name + sval):
+            rejected[lname] = "control_character_forbidden"
             continue
         if len(sval.encode("utf-8")) > 2000:
+            rejected[lname] = "header_value_too_large"
             continue
         out[str(name)] = sval
-    return out
+    return out, rejected
+
+
+def filter_request_headers(
+    headers: Any, *, allow_identity_headers: bool = False,
+) -> dict[str, str]:
+    """Compatibility view returning only planner headers safe to send."""
+    accepted, _ = classify_request_headers(
+        headers, allow_identity_headers=allow_identity_headers,
+    )
+    return accepted
 
 
 def normalize_principal_slot(value: Any) -> str:

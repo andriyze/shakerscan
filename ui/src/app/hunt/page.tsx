@@ -866,7 +866,11 @@ function HuntContent() {
                   <p className="text-xs uppercase tracking-wide text-gray-500">Final debrief</p>
                   <p className="mt-2 text-sm font-medium text-gray-200">Factual run record</p>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400 sm:grid-cols-3">
-                    <span>{hunt.outcome_summary.capability_calls} of {hunt.outcome_summary.total_capability_calls} calls succeeded</span>
+                    <span>{hunt.outcome_summary.successful_calls ?? hunt.outcome_summary.capability_calls} succeeded</span>
+                    <span>{hunt.outcome_summary.unsuccessful_calls ?? 0} unsuccessful</span>
+                    {(hunt.outcome_summary.indeterminate_calls ?? 0) > 0 && <span>{hunt.outcome_summary.indeterminate_calls} outcome unknown</span>}
+                    {(hunt.outcome_summary.partial_calls ?? 0) > 0 && <span>{hunt.outcome_summary.partial_calls} partial</span>}
+                    <span>{hunt.outcome_summary.executed_calls ?? hunt.outcome_summary.total_capability_calls} executed · {hunt.outcome_summary.total_capability_calls} attempted</span>
                     <span>{hunt.outcome_summary.observation_count} observations</span>
                     <span>{hunt.outcome_summary.finding_ids.length} findings</span>
                     <span>{hunt.outcome_summary.candidate_ids.length} candidates</span>

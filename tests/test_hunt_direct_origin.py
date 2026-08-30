@@ -197,6 +197,19 @@ def test_the_target_address_is_still_used_when_no_address_is_named():
     assert result.get("request", {}).get("direct_origin") is not True
 
 
+def test_http_result_reports_header_filtering_without_values():
+    result = _run(args={"headers": {
+        "Authorization": "Bearer hidden-token",
+        "Origin": "https://comparison.example",
+    }})
+    request = result["request"]
+    assert request["accepted_header_names"] == ["origin"]
+    assert request["rejected_headers"] == {
+        "authorization": "managed_principal_required",
+    }
+    assert "hidden-token" not in repr(request)
+
+
 # --- forged identity headers are metered like the active action they are ------------------
 
 def test_forging_identity_is_classified_as_an_active_call():

@@ -197,7 +197,7 @@ def test_factual_hunt_outcome_excludes_unsuccessful_action_claims():
     summary = hunt_action_outcome_summary([
         {
             "status": "completed",
-            "result": {"observation_count": 2, "reference_ids": {"finding_ids": [finding_id]}},
+            "result": {"ok": True, "observation_count": 2, "reference_ids": {"finding_ids": [finding_id]}},
         },
         {
             "status": "blocked",
@@ -210,6 +210,28 @@ def test_factual_hunt_outcome_excludes_unsuccessful_action_claims():
     assert summary["observation_count"] == 2
     assert summary["finding_ids"] == [finding_id]
     assert summary["action_statuses"] == {"completed": 1, "blocked": 1}
+    assert summary["successful_calls"] == 1
+    assert summary["executed_calls"] == 1
+    assert summary["indeterminate_calls"] == 0
+
+
+def test_hunt_outcome_does_not_call_unknown_or_false_results_successful():
+    summary = hunt_action_outcome_summary([
+        {"status": "completed", "result": {"ok": False, "observation_count": 1}},
+        {"status": "completed", "result": {"ok": None, "observation_count": 2}},
+        {"status": "partial", "result": {"ok": True, "observation_count": 3}},
+        {"status": "blocked", "result": {"ok": False, "observation_count": 99}},
+    ])
+
+    assert summary["schema_version"] == "hunt-outcome-summary/v3"
+    assert summary["capability_calls"] == 0
+    assert summary["successful_calls"] == 0
+    assert summary["unsuccessful_calls"] == 1
+    assert summary["indeterminate_calls"] == 1
+    assert summary["partial_calls"] == 1
+    assert summary["executed_calls"] == 3
+    assert summary["attempted_calls"] == 4
+    assert summary["observation_count"] == 6
 
 
 def test_explicit_hunt_trace_preserves_decision_without_secrets_or_hidden_thoughts():
@@ -263,9 +285,15 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
     assert result["outcome_summary"] == {
-        "schema_version": "hunt-outcome-summary/v2",
-        "capability_calls": 1,
+        "schema_version": "hunt-outcome-summary/v3",
+        "capability_calls": 0,
         "total_capability_calls": 1,
+        "attempted_calls": 1,
+        "executed_calls": 1,
+        "successful_calls": 0,
+        "unsuccessful_calls": 0,
+        "indeterminate_calls": 1,
+        "partial_calls": 0,
         "action_statuses": {"completed": 1},
         "observation_count": 0,
         "finding_ids": [],
