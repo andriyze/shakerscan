@@ -76,7 +76,8 @@ expiring target-bound approval, and remains responsible for budgets, execution, 
 shakerscan scan https://app.example.test
 shakerscan scan https://app.example.test --budget-profile thorough
 shakerscan scan https://app.example.test --budget-profile thorough --active-testing --confirm-active
-shakerscan hunt start --target-id "$TARGET_ID" --target-kind web
+shakerscan hunt skills --target-kind web --goal "Review the authenticated application"
+shakerscan hunt start --target-id "$TARGET_ID" --target-kind web --skill-id skill.web.http-baselining-replay-and-differential-analysis
 shakerscan credentials test "$PROFILE_ID"
 shakerscan collections select "$COLLECTION_ID" --method GET
 shakerscan evidence export --scan-id "$SCAN_ID" --format manifest
@@ -89,6 +90,9 @@ internal decisions. Legacy `--type`, `scan-full`, and `scan-smart` writes have b
 web UI or REST API for authentication values so secrets do not enter shell history. Credential create and
 rotation requests are read from a file or stdin, never secret-bearing command-line flags. Hunt,
 credential, and collection commands read their accepted fields from the running server contracts.
+Hunt methodologies are server-shipped and fingerprinted: query `hunt skills` first, read the relevant
+supported entries, and explicitly repeat `--skill-id` for the methods the run should bind. A
+suggestion does not authorize or start anything.
 `credentials test` is deliberately a content-free storage, lifecycle, target-binding, and capability
 admission check; it does not attempt a live login. Exercise a profile only through a separately
 authorized, target-bound Scan or Hunt capability. Mutating CLI commands accept an opaque
@@ -134,6 +138,13 @@ finding semantics. Active testing is off by default and requires explicit author
 selects compatible workers and shards internally, preserves partial discovery output at deadlines,
 and reports incomplete coverage separately from failure.
 
+Completed reports keep observed risk separate from assurance. `risk_score` / `risk_grade` describe
+only material risk supported by this run's evidence. `assurance_score` / `assurance_band` describe how
+much relevant work actually ran. `risk_assessment_state=not_examined` means ShakerScan did not reach
+the application (for example, it saw only an authentication challenge); never read the compatibility
+`A 100/100` risk projection as a clean bill of health in that state. `grade_reliable=false` and
+`assurance_gaps` explain incomplete evidence.
+
 ## Common workflows
 
 ### Submit scans
@@ -159,6 +170,9 @@ After a scan is queued, ShakerScan returns a scan ID. On a default install, foll
 Use **New Scan → Authentication** to create encrypted, exact-target credential profiles for bearer
 tokens, cookies, custom headers, form login, or two-user BOLA/IDOR testing. The canonical REST API
 accepts profile IDs only; reusable secret values never enter a Scan request or queue payload.
+For edge-case Basic, form, and OAuth password flows, a profile may contain only a username or only a
+secret; at least one is required, and runtime authentication still reports whether the target accepted
+the available material.
 
 ```bash
 # Create this once after registering the target. The response contains profile.id.
@@ -272,11 +286,21 @@ expiring target-bound approval. ShakerScan keeps credentials server-side, enforc
 ceilings, blocks arbitrary write methods in the free-form loop, and promotes a Suspected finding to
 Verified only through deterministic proof.
 
+ShakerScan also ships a 31-entry web-testing methodology catalog. The agent queries `/hunt/skills`
+using the target kind and objective, reads only relevant methods, and explicitly binds at most four
+supported `skill_ids`. Partial/reference entries remain readable so unavailable techniques are clear
+before execution; they cannot be bound, and no skill can expand target or approval authority.
+
 To start:
 
 1. Add the authorized target under **Targets**.
 2. Run `shakerscan agent codex` (or `claude` / `opencode`).
 3. Ask: `Run a Hunt on this authorized target.`
+
+Historical runs are searchable in **AI Investigator → Hunt history**. Hunt candidates can be
+created, corrected, deleted while non-terminal, and sent to deterministic verification. The Hunt
+record export includes explicit capability decisions and the final debrief, never hidden model
+chain-of-thought.
 
 An administrator can disable every gated AI Operations execution path by setting
 `AI_OPS_ROUTER_EXECUTE_ENABLED=false` in `.env` and restarting ShakerScan.
@@ -306,7 +330,7 @@ and compatibility. It is not the Hunt launcher.
 | Coverage (Continuous ASM) | Endpoint inventory, proof-family coverage, gaps, recommendations, and activity |
 | Findings | Triage, notes, retests, replay, cleanup, and accepted risk |
 | AI Gate / Model Intake | AI endpoint red teaming and pre-deployment model checks |
-| Hunt / Leads | AI-driven exploration through target-aware capabilities, bounded exploitation, proof promotion, and the hypothesis backlog |
+| Hunt / Hunt history / Leads | AI-driven exploration through selected methodologies and target-aware capabilities, searchable historical runs, bounded exploitation, proof promotion, and the hypothesis backlog |
 | Evidence / Timeline / Campaigns | Proof inventory, exports, retention, mission history, and the read-only mission ledger |
 | Settings | AI providers, scan policy, automation, deployment policies, and Arsenal |
 
@@ -507,7 +531,7 @@ scale <N>                     Scale to 1-20 workers
 logs [service] [-f]           Read API, worker, UI, PostgreSQL, or Redis logs
 backup [directory]            Back up PostgreSQL, results, configuration, and release metadata
 scan <target> [options]       Submit the deterministic DAST Scan
-hunt start|call               Start a Hunt or call one returned capability
+hunt skills|start|call        Discover methodologies, start a Hunt, or call one returned capability
 credentials create|rotate|test  Manage encrypted exact-target profiles
 collections upload|bind|select  Manage encrypted request collections
 evidence export                Export content-free evidence manifests or bundles
@@ -547,7 +571,20 @@ curl -X POST http://localhost:8080/scans \
 
 # Read one scan
 curl http://localhost:8080/scans/{scan_id}
+
+# Export captured HTTP calls. JSON is redacted by default; HAR 1.2 is intentionally raw.
+curl "http://localhost:8080/scans/{scan_id}/http-transactions?format=transactions&redaction=redacted"
+curl "http://localhost:8080/scans/{scan_id}/http-transactions?format=har"
+
+# Hunt records and Hunt HTTP calls are separate exports.
+curl http://localhost:8080/hunts/{hunt_id}/record
+curl "http://localhost:8080/hunts/{hunt_id}/http-transactions?format=transactions&redaction=redacted"
 ```
+
+HTTP archive `fidelity` states how completely instrumented capabilities contributed calls; an empty
+or partial archive does not prove that no other traffic occurred. HAR is raw replay evidence and can
+contain credentials, cookies, request/response bodies, and personal data. Store and share it as a
+secret. Raw non-HAR JSON additionally requires the deployment switch and operator credential.
 
 For a loopback install, the live OpenAPI document is available at
 [http://localhost:8080/openapi.json](http://localhost:8080/openapi.json); remote installs use the API

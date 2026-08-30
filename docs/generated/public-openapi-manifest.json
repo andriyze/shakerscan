@@ -174,7 +174,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "93421bc917909d775eb99d7cce14e82228b587583bc08cfc8b43e20589001418",
+  "contract_sha256": "3976d847add253cb8d671dacdcef298808c2e0acb54e65547af9f4def7dbbc5a",
   "openapi": "3.1.0",
   "operation_count": 392,
   "operations": {
@@ -1561,7 +1561,7 @@
     "GET /hunt/skills": {
       "deprecated": false,
       "operation_id": "list_hunt_skills_hunt_skills_get",
-      "parameters_sha256": "6af9b60998cea5216ec900a45b2c36e1ba4f02ae27cc4ca0332ebf3eef1582b9",
+      "parameters_sha256": "40db1b44005101a8a4b3e2d4c3a7093a5d4ff677b92d421ac4691b12a3716e9c",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
