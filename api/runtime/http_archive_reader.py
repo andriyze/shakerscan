@@ -51,6 +51,29 @@ LEFT JOIN evidence_objects sb ON sb.id = t.response_body_object_id
 """
 
 
+def _scan_ids(scan_id: str | None, scan_ids: Sequence[str] | None) -> tuple[str, ...]:
+    values = tuple(dict.fromkeys(
+        str(item).strip() for item in (scan_ids or ()) if str(item).strip()
+    ))
+    if values:
+        return values
+    return (str(scan_id).strip(),) if scan_id and str(scan_id).strip() else ()
+
+
+def _append_scan_clause(
+    clauses: list[str], params: list[Any], *, column: str,
+    scan_id: str | None, scan_ids: Sequence[str] | None,
+) -> tuple[str, ...]:
+    owners = _scan_ids(scan_id, scan_ids)
+    if len(owners) == 1:
+        params.append(owners[0])
+        clauses.append(f"{column}=${len(params)}")
+    elif owners:
+        params.append(list(owners))
+        clauses.append(f"{column}=ANY(${len(params)}::uuid[])")
+    return owners
+
+
 def _search_pattern(value: str) -> str:
     """Literal ILIKE pattern; `%`, `_`, and backslash are ordinary search text."""
     escaped = (
@@ -92,6 +115,7 @@ async def read_transactions(
     conn,
     *,
     scan_id: str | None = None,
+    scan_ids: Sequence[str] | None = None,
     hunt_run_id: str | None = None,
     method: str | None = None,
     status_code: int | None = None,
@@ -101,12 +125,14 @@ async def read_transactions(
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
-    if scan_id:
-        params.append(scan_id)
-        clauses.append(f"t.scan_id=${len(params)}")
-    if hunt_run_id:
+    owners = _append_scan_clause(
+        clauses, params, column="t.scan_id", scan_id=scan_id, scan_ids=scan_ids,
+    )
+    if not owners and hunt_run_id:
         params.append(hunt_run_id)
         clauses.append(f"t.hunt_run_id=${len(params)}")
+    elif not owners:
+        raise ValueError("an export must name a scan or a hunt")
     if method:
         params.append(str(method).upper())
         clauses.append(f"t.method=${len(params)}")
@@ -120,12 +146,10 @@ async def read_transactions(
             f" OR COALESCE(t.adapter,'') ILIKE ${len(params)} ESCAPE '\\'"
             f" OR t.method ILIKE ${len(params)} ESCAPE '\\')"
         )
-    if not clauses:
-        raise ValueError("an export must name a scan or a hunt")
     where = " WHERE " + " AND ".join(clauses)
     params.extend([min(int(limit), MAX_EXPORT_ROWS), max(0, int(offset))])
     rows = await conn.fetch(
-        f"{_SELECT}{where} ORDER BY t.sequence, t.started_at, t.id"
+        f"{_SELECT}{where} ORDER BY t.started_at, t.sequence, t.id"
         f" LIMIT ${len(params) - 1} OFFSET ${len(params)}",
         *params,
     )
@@ -136,6 +160,7 @@ async def count_transactions(
     conn,
     *,
     scan_id: str | None,
+    scan_ids: Sequence[str] | None = None,
     hunt_run_id: str | None,
     method: str | None = None,
     status_code: int | None = None,
@@ -144,13 +169,13 @@ async def count_transactions(
     """Count one archive, optionally using the same filters as ``read_transactions``."""
     clauses: list[str] = []
     params: list[Any] = []
-    if scan_id:
-        params.append(scan_id)
-        clauses.append(f"scan_id=${len(params)}")
-    elif hunt_run_id:
+    owners = _append_scan_clause(
+        clauses, params, column="scan_id", scan_id=scan_id, scan_ids=scan_ids,
+    )
+    if not owners and hunt_run_id:
         params.append(hunt_run_id)
         clauses.append(f"hunt_run_id=${len(params)}")
-    else:
+    elif not owners:
         raise ValueError("an export must name a scan or a hunt")
     if method:
         params.append(str(method).upper())
@@ -173,22 +198,43 @@ async def count_transactions(
 
 async def read_archive_stats(
     conn, *, scan_id: str | None, hunt_run_id: str | None,
+    scan_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """What the archive attempted for this run, against what it holds."""
-    owner_kind = "scan" if scan_id else "hunt"
-    owner_id = scan_id or hunt_run_id
-    row = await conn.fetchrow(
-        """SELECT attempted, stored, failed, dropped FROM http_archive_stats
-           WHERE owner_kind=$1 AND owner_id=$2""",
-        owner_kind, owner_id,
-    )
+    owners = _scan_ids(scan_id, scan_ids)
+    owner_kind = "scan" if owners else "hunt"
+    owner_id = owners[0] if owners else hunt_run_id
+    if len(owners) > 1:
+        row = await conn.fetchrow(
+            """SELECT COALESCE(SUM(attempted),0) AS attempted,
+                      COALESCE(SUM(stored),0) AS stored,
+                      COALESCE(SUM(failed),0) AS failed,
+                      COALESCE(SUM(dropped),0) AS dropped
+               FROM http_archive_stats
+               WHERE owner_kind='scan' AND owner_id=ANY($1::uuid[])""",
+            list(owners),
+        )
+    else:
+        row = await conn.fetchrow(
+            """SELECT attempted, stored, failed, dropped FROM http_archive_stats
+               WHERE owner_kind=$1 AND owner_id=$2""",
+            owner_kind, owner_id,
+        )
     if row is None:
         return {}
     stats = {
         key: int(row[key] or 0)
         for key in ("attempted", "stored", "failed", "dropped")
     }
-    if scan_id:
+    if len(owners) > 1:
+        capture_limited = await conn.fetchval(
+            """SELECT COUNT(*) FROM http_transactions
+               WHERE scan_id=ANY($1::uuid[])
+                 AND COALESCE(metadata_json->>'fidelity','')
+                     NOT IN ('wire_request','attempted_no_response')""",
+            list(owners),
+        )
+    elif scan_id:
         capture_limited = await conn.fetchval(
             """SELECT COUNT(*) FROM http_transactions
                WHERE scan_id=$1
@@ -206,10 +252,15 @@ async def read_archive_stats(
         )
     stats["capture_limited"] = int(capture_limited or 0)
     if scan_id:
+        scan_filter = (
+            "action.scan_id=ANY($1::uuid[])" if len(owners) > 1
+            else "action.scan_id=$1"
+        )
+        scan_param: Any = list(owners) if len(owners) > 1 else scan_id
         missing_rows = await conn.fetch(
-            """SELECT DISTINCT action.capability_name
+            f"""SELECT DISTINCT action.capability_name
                FROM scan_capability_actions action
-               WHERE action.scan_id=$1
+               WHERE {scan_filter}
                  AND action.status IN ('success','partial')
                  AND COALESCE(NULLIF(action.requested_budget->>'http_requests','')::int,0) > 0
                  AND NOT EXISTS (
@@ -218,7 +269,7 @@ async def read_archive_stats(
                        AND tx.capability_name=action.capability_name
                  )
                ORDER BY action.capability_name""",
-            scan_id,
+            scan_param,
         )
         missing = [str(item["capability_name"]) for item in missing_rows]
     else:
@@ -376,6 +427,7 @@ def export_document(
         ]
         document = har_document(entries, creator_version=creator_version)
         document["log"]["comment"] = json.dumps({
+            "owner": dict(owner),
             "redaction": redaction,
             "redaction_detail": redaction_detail,
             "sensitive": redaction == "raw",

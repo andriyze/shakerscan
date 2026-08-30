@@ -148,12 +148,14 @@ def test_har_is_always_raw_and_honestly_labelled():
     secret_url = "https://admin:hunter2@t.example/x?access_token=LIVE_TOKEN"
     document = export_document(
         [{"id": "1", "method": "GET", "url": secret_url, "sequence": 0, "plane": "scan"}],
-        export_format="har", redaction="redacted", owner={}, total=1,
+        export_format="har", redaction="redacted",
+        owner={"scan_id": "parent", "included_scan_ids": ["parent", "child"]}, total=1,
     )
     comment = json.loads(document["log"]["comment"])
     assert document["log"]["entries"][0]["request"]["url"] == secret_url
     assert comment["redaction"] == "raw"
     assert comment["sensitive"] is True
+    assert comment["owner"]["included_scan_ids"] == ["parent", "child"]
     assert "Treat this export as sensitive" in comment["redaction_detail"]
 
 
@@ -504,6 +506,39 @@ async def test_archive_browser_filters_count_and_rows_with_the_same_search():
         assert "adapter" in query
     assert count_params == ("scan-1", "POST", 401, "%/login%")
     assert row_params == ("scan-1", "POST", 401, "%/login%", 25, 50)
+
+
+@pytest.mark.asyncio
+async def test_parallel_scan_archive_queries_parent_and_children_together():
+    conn = _ArchiveQueryConnection()
+    scan_ids = ("11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222")
+    await count_transactions(
+        conn, scan_id=scan_ids[0], scan_ids=scan_ids, hunt_run_id=None,
+    )
+    await read_transactions(
+        conn, scan_id=scan_ids[0], scan_ids=scan_ids, hunt_run_id=None,
+    )
+
+    for _, query, params in conn.calls:
+        assert "scan_id=ANY($1::uuid[])" in query
+        assert params[0] == list(scan_ids)
+
+
+@pytest.mark.asyncio
+async def test_scan_archive_resolver_includes_nested_worker_children():
+    from api.runtime.http_archive_router import _scan_archive_ids
+
+    class Conn:
+        async def fetch(self, query, scan_id):
+            assert "WITH RECURSIVE scan_tree" in query
+            assert "parent_scan_id=parent.id" in query
+            assert scan_id == "parent"
+            return [{"id": "parent"}, {"id": "child"}, {"id": "grandchild"}]
+
+    assert await _scan_archive_ids(Conn(), "parent") == (
+        "parent", "child", "grandchild",
+    )
 
 
 def test_archive_search_escapes_like_operators_and_never_queries_raw_urls():

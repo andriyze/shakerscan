@@ -85,6 +85,31 @@ def _pool():
     return pool
 
 
+async def _scan_archive_ids(conn, scan_id: str) -> tuple[str, ...]:
+    """Resolve a visible scan to every descendant that executed part of its work.
+
+    Parallel and discovery scans retain the parent as the user's run while HTTP calls are
+    captured against worker-owned child rows. Exporting only the parent silently produced
+    an empty HAR. The bounded path also protects a damaged parent graph from looping.
+    """
+    rows = await conn.fetch(
+        """WITH RECURSIVE scan_tree AS (
+               SELECT id, created_at, 0 AS depth, ARRAY[id] AS path
+               FROM scans WHERE id=$1
+               UNION ALL
+               SELECT child.id, child.created_at, parent.depth + 1,
+                      parent.path || child.id
+               FROM scans child
+               JOIN scan_tree parent ON child.parent_scan_id=parent.id
+               WHERE parent.depth < 16 AND NOT child.id=ANY(parent.path)
+           )
+           SELECT id FROM scan_tree ORDER BY depth, created_at, id""",
+        scan_id,
+    )
+    values = tuple(str(row["id"]) for row in rows)
+    return values or (scan_id,)
+
+
 async def _export(
     *,
     request: Request,
@@ -108,23 +133,27 @@ async def _export(
     if effective_redaction == "raw" and export_format != "har":
         _authorize_raw(request)
     async with _pool().acquire() as conn:
+        scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
         archive_total = await count_transactions(
-            conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+            conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id,
         )
         total = await count_transactions(
-            conn, scan_id=scan_id, hunt_run_id=hunt_run_id, method=method,
+            conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id, method=method,
             status_code=status_code, search=search,
         )
         stats = await read_archive_stats(
-            conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+            conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id,
         )
         rows = await read_transactions(
-            conn, scan_id=scan_id, hunt_run_id=hunt_run_id, method=method,
+            conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id, method=method,
             status_code=status_code, search=search, limit=limit, offset=offset,
         )
+    owner = {"scan_id": scan_id, "hunt_id": hunt_run_id}
+    if scan_ids and len(scan_ids) > 1:
+        owner["included_scan_ids"] = list(scan_ids)
     document = export_document(
         rows, export_format=export_format, redaction=effective_redaction,
-        owner={"scan_id": scan_id, "hunt_id": hunt_run_id}, total=total,
+        owner=owner, total=total,
         archive_total=archive_total, stats=stats,
     )
     name = scan_id or hunt_run_id or "export"
