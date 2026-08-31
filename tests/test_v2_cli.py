@@ -200,6 +200,29 @@ def test_credential_requests_are_checked_against_server_published_schema():
         )
 
 
+def test_credential_metadata_test_treats_empty_allowlist_as_no_authority():
+    class FakeClient:
+        def get(self, path):
+            assert path == "/credential-profiles/profile-1"
+            return {"profile": {
+                "profile_id": "profile-1",
+                "status": "active",
+                "execution_compatible": True,
+                "storage_encrypted": True,
+                "encryption_available": True,
+                "target_id": "target-1",
+                "target_kind": "web",
+                "allowed_capabilities": [],
+            }}
+
+    result = v2_cli._run_credentials(_parse(
+        "credentials", "test", "profile-1", "--capability", "http.request",
+    ), FakeClient())
+
+    assert result["checks"]["capability_allowed"] is False
+    assert result["passed"] is False
+
+
 def test_credentials_and_collections_are_first_class_commands():
     parser = v2_cli.build_parser()
     create = parser.parse_args([

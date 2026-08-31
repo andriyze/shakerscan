@@ -574,7 +574,7 @@ def _run_credentials(args: argparse.Namespace, client: ApiClient) -> Any:
         }
         if args.capability:
             allowed = {str(item) for item in profile.get("allowed_capabilities") or ()}
-            checks["capability_allowed"] = not allowed or args.capability in allowed
+            checks["capability_allowed"] = args.capability in allowed
         return {
             "schema_version": "credential-admission-test/v1",
             "profile_id": str(profile.get("profile_id") or args.profile_id),

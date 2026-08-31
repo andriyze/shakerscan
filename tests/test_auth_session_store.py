@@ -300,6 +300,24 @@ def test_expiry_rotation_and_live_capability_changes_fail_closed(monkeypatch):
             now=NOW + timedelta(minutes=1),
         ))
 
+    async def emptied(query, *args):
+        row = await original(query, *args)
+        if row and "SELECT s.*, p.current_version" in query:
+            row["live_allowed_capabilities"] = []
+        return row
+
+    conn.fetchrow = emptied
+    with pytest.raises(sessions.AuthSessionStoreError, match="no longer allows"):
+        asyncio.run(store.load_for_worker(
+            conn,
+            session_ref=SESSION_ID,
+            owner_kind="hunt",
+            owner_id=OWNER_ID,
+            target=target(),
+            capability="http.request",
+            now=NOW + timedelta(minutes=1),
+        ))
+
 
 def test_revocation_destroys_ciphertext_and_binds_evidence(monkeypatch):
     install_fake_crypto(monkeypatch)

@@ -259,7 +259,7 @@ def open_scan_auth_session_state(
         allowed = {
             str(item) for item in metadata.get("compatible_capabilities") or ()
         }
-        if allowed and str(capability_name) not in allowed:
+        if str(capability_name) not in allowed:
             raise ScanPrivateStateError(
                 "Scan auth session is incompatible with the capability"
             )

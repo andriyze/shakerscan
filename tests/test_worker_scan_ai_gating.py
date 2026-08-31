@@ -26,6 +26,32 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 import worker  # noqa: E402
 
 
+def test_hunt_session_credential_empty_allowlist_grants_nothing():
+    resolved = types.SimpleNamespace(
+        interactive_http=lambda: types.SimpleNamespace(
+            endpoint_url=None,
+            username=None,
+            secret="worker-private",
+            client_id=None,
+            scopes=(),
+        ),
+        profile=types.SimpleNamespace(
+            profile_id="profile-1",
+            current_version=1,
+            principal_slot="primary",
+            principal_label="Primary",
+            auth_kind="bearer_token",
+        ),
+    )
+
+    with pytest.raises(worker.CredentialReferenceError, match="no session capabilities"):
+        worker._worker_session_credential(
+            resolved,
+            {"allowed_capabilities": []},
+            target=types.SimpleNamespace(digest="a" * 64),
+        )
+
+
 def test_scope_refusal_reconciles_terminal_shard_parent(monkeypatch):
     parent_id = uuid.uuid4()
     scan_id = uuid.uuid4()

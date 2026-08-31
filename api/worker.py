@@ -20216,7 +20216,7 @@ def _worker_session_credential(
         if str(item).strip()
     }))
     if not allowed:
-        allowed = ("http.request",)
+        raise CredentialReferenceError("managed Hunt principal grants no session capabilities")
     binding_digest = hashlib.sha256(json.dumps({
         "schema_version": "hunt-session-credential-binding/v1",
         "profile_id": resolved.profile.profile_id,
