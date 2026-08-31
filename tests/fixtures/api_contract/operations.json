@@ -10,11 +10,6 @@
     "operation_id": "get_agent_context_pack_agent_context__target_id__get"
   },
   {
-    "path": "/agent/findings/{finding_id}/verify",
-    "method": "post",
-    "operation_id": "verify_suspected_agent_finding_agent_findings__finding_id__verify_post"
-  },
-  {
     "path": "/agent/findings/{target_id}",
     "method": "get",
     "operation_id": "get_agent_two_tier_findings_agent_findings__target_id__get"

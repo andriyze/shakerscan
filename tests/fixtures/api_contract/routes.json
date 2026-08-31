@@ -14,13 +14,6 @@
     "name": "get_agent_context_pack"
   },
   {
-    "path": "/agent/findings/{finding_id}/verify",
-    "methods": [
-      "POST"
-    ],
-    "name": "verify_suspected_agent_finding"
-  },
-  {
     "path": "/agent/findings/{target_id}",
     "methods": [
       "GET"

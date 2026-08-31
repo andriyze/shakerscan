@@ -1494,8 +1494,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 407 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 341 | `api/**/*.py` |
+| Public REST operations | 406 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 340 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1520,7 +1520,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 |---|---|---|
 | `GET` | `/` | `root` |
 | `GET` | `/agent/context/{target_id}` | `get_agent_context_pack` |
-| `POST` | `/agent/findings/{finding_id}/verify` | `verify_suspected_agent_finding` |
 | `GET` | `/agent/findings/{target_id}` | `get_agent_two_tier_findings` |
 | `GET` | `/agent/hunt/runs` | `list_agent_hunt_runs` |
 | `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |

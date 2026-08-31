@@ -3910,31 +3910,9 @@ export interface AgentTwoTierFindings {
   suspected: AgentSuspectedFinding[]
 }
 
-export interface AgentVerifyResult {
-  finding_id: string
-  candidate_id?: string
-  verified: boolean
-  verified_finding_id: string | null
-  upgraded_in_place?: boolean
-  hypothesis_id?: string
-  superseded_suspected?: boolean
-  family_proof?: { verdict: string | null; promotable: boolean | null; novelty_gate: unknown }
-  error?: string
-}
-
 export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTwoTierFindings> {
   const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(targetId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load agent findings'))
-  return res.json()
-}
-
-export async function verifySuspectedAgentFinding(findingId: string, approvalReceiptId: string): Promise<AgentVerifyResult> {
-  const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(findingId)}/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approval_receipt_id: approvalReceiptId }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to verify finding'))
   return res.json()
 }
 

@@ -195,13 +195,6 @@ class AgentToolExecuteRequest(BaseModel):
 
 
 
-class AgentVerifyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    # Verification runs a gated credential-tier workflow, so a valid target-bound approval receipt
-    # is required (the same authorization the menu experiment.workflow path uses).
-    approval_receipt_id: str = Field(min_length=1)
-
-
 @router.get("/agent/tools/readiness")
 async def get_agent_tool_readiness():
     return _agent_tool_worker_readiness()
@@ -385,15 +378,6 @@ async def get_agent_two_tier_findings(target_id: str):
     }
 
 
-@router.post("/agent/findings/{finding_id}/verify")
-async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyRequest):
-    """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
-    family_proof two-run verification (Gap B). On success the SUSPECTED row becomes the VERIFIED one
-    (in place); otherwise it stays SUSPECTED. Requires gated execution (enabled by default) plus a
-    valid target-bound approval receipt. Supports the bola / auth_bypass / data_exposure families."""
-    finding_uuid = _uuid_or_400(finding_id, "finding id")
-    return await _verify_suspected_finding_workflow(
-        finding_uuid, req.approval_receipt_id, created_by="agent_verify_bridge")
 def _resolve_hunt_origin(primary_url: Any, origins: list[str], requested_origin: Any = None) -> str:
     """Choose a concrete Hunt origin inside the target's host boundary.
 
@@ -1801,8 +1785,8 @@ async def _agent_auto_verify(
         # OWNERSHIP — so an authenticated shared-behind-login collection (everyone may read any object)
         # passes every predicate and would false-VERIFY. Distinguishing "private, broken" from
         # "intentionally shared" is fundamentally a policy question no autonomous run can settle, so a
-        # suspected BOLA stays SUSPECTED for a human to promote. The manual /agent/findings/{id}/verify
-        # endpoint remains for an accountable human decision. (Zero-FP: unattended never promotes BOLA.)
+        # suspected BOLA stays SUSPECTED for an accountable canonical Hunt verification decision.
+        # (Zero-FP: unattended runs never promote BOLA.)
         if family in _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES:
             record_skip({"finding_id": str(record["id"]), "verified": False,
                          "skipped": "auto_verify_disabled_ownership_unprovable"})
@@ -2409,8 +2393,6 @@ def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Option
     if len(operations) == 1:
         return operations[0]
     return None, None
-
-
 
 
 

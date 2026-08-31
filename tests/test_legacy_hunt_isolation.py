@@ -142,6 +142,19 @@ def test_deleted_legacy_agent_hunt_symbols_are_gone_from_the_api_tree():
         assert symbol not in source, f"{symbol} survived the legacy Hunt deletion"
 
 
+def test_legacy_agent_finding_verification_write_is_deleted():
+    """Candidate reads remain, but verification uses canonical Hunt/finding flows."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "agent_routes" / "router.py").read_text()
+    ui_client = (root / "ui" / "src" / "lib" / "api.ts").read_text()
+
+    assert not route_is_declared("POST", "/agent/findings/{finding_id}/verify")
+    assert route_is_declared("GET", "/agent/findings/{target_id}")
+    assert route_is_declared("POST", "/findings/{finding_id:path}/retest")
+    assert "verify_suspected_agent_finding" not in source
+    assert "verifySuspectedAgentFinding" not in ui_client
+
+
 def test_legacy_agent_hunt_writes_return_410_without_invoking_the_old_engine():
     """The migration response must not reach any former handler."""
     from hunt.legacy import LegacyHuntIsolationMiddleware, legacy_hunt_write_blocked

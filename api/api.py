@@ -7031,7 +7031,6 @@ try:
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
         AgentToolExecuteRequest,
-        AgentVerifyRequest,
         _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
         _AGENT_AUTO_VERIFY_LIMIT,
         _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT,
@@ -7081,7 +7080,6 @@ try:
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
-        verify_suspected_agent_finding,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from api.agent_routes.router import (
@@ -7089,7 +7087,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
         AgentToolExecuteRequest,
-        AgentVerifyRequest,
         _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
         _AGENT_AUTO_VERIFY_LIMIT,
         _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT,
@@ -7139,7 +7136,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
-        verify_suspected_agent_finding,
     )
 configure_agent_router(
     lambda: db_pool,

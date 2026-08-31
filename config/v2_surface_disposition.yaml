@@ -156,8 +156,6 @@ surfaces:
     disposition: MERGE_THEN_DELETE
     canonical_replacement: /findings and the deterministic verifier
     new_writes_allowed: false
-    pending_write_removals:
-      - POST /agent/findings/{finding_id}/verify
     routes: ["/agent/findings/*"]
     files: ["api/agent_routes/router.py"]
 
