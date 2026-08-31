@@ -3774,7 +3774,11 @@ def _hunt_managed_principal_reference(
     context: Mapping[str, Any], value: Any,
 ) -> dict[str, Any] | None:
     try:
-        return select_hunt_principal_reference(context, value)
+        return select_hunt_principal_reference(
+            context,
+            value,
+            capability="collections.replay_safe",
+        )
     except CredentialReferenceError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 

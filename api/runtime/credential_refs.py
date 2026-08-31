@@ -38,7 +38,7 @@ def select_hunt_principal_reference(
     context: Mapping[str, Any],
     value: Any,
     *,
-    capability: str = "request.replay",
+    capability: str = "collections.replay_safe",
 ) -> dict[str, Any] | None:
     """Select exactly one content-free generic profile from an admitted Hunt context."""
     slot = normalize_hunt_principal_slot(value)

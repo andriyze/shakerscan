@@ -57,7 +57,7 @@ def _profile(
         rotated_at=NOW,
         created_at=NOW,
         updated_at=NOW,
-        allowed_capabilities=("request.replay",),
+        allowed_capabilities=("collections.replay_safe",),
     )
 
 
@@ -128,7 +128,7 @@ def test_hunt_principal_selection_is_exact_content_free_and_capability_bound():
             "profile_id": "profile-a",
             "profile_version": 4,
             "principal_slot": "primary",
-            "allowed_capabilities": ["request.replay"],
+            "allowed_capabilities": ["collections.replay_safe"],
             "source": "credential_profiles",
             "secret_values_visible": False,
         }],
@@ -141,6 +141,21 @@ def test_hunt_principal_selection_is_exact_content_free_and_capability_bound():
     }
 
     context["credential_refs"][0]["allowed_capabilities"] = ["web.probe"]
+    with pytest.raises(CredentialReferenceError, match="exactly one usable"):
+        select_hunt_principal_reference(context, "primary")
+
+
+def test_hunt_principal_selection_rejects_retired_replay_authority():
+    context = {
+        "credential_refs": [{
+            "profile_id": "profile-a",
+            "profile_version": 4,
+            "principal_slot": "primary",
+            "allowed_capabilities": ["request.replay"],
+            "source": "credential_profiles",
+        }],
+    }
+
     with pytest.raises(CredentialReferenceError, match="exactly one usable"):
         select_hunt_principal_reference(context, "primary")
 

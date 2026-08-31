@@ -19688,7 +19688,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         conn,
                         profile_id=credential_profile_id,
                         target=target,
-                        capability="request.replay",
+                        capability="collections.replay_safe",
                         authority=authority,
                     )
                 )
