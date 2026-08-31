@@ -16,6 +16,11 @@ from typing import Any, Callable, Mapping
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
 from runtime.models import TargetBinding
 
+try:
+    from redaction import redact_text as _shared_redact_text
+except ModuleNotFoundError:
+    from scanner.redaction import redact_text as _shared_redact_text
+
 
 MAX_INSPECT_BYTES = 16_384
 MAX_JAVASCRIPT_BYTES = 262_144
@@ -84,7 +89,10 @@ def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
             break
 
     routes = sorted(set(_ROUTE_RE.findall(text)))[:200]
-    source_maps = sorted(set(_SOURCE_MAP_RE.findall(text)))[:20]
+    source_maps = sorted({
+        str(_shared_redact_text(value))
+        for value in _SOURCE_MAP_RE.findall(text)
+    })[:20]
     supabase_origins = sorted(set(_SUPABASE_RE.findall(text)))[:20]
     sink_names = (
         "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(",
@@ -112,7 +120,7 @@ def _redacted_text_sample(body: bytes) -> str:
     text = re.sub(
         r"(?i)(bearer\s+)[a-z0-9._~+/=-]+", r"\1<redacted>", text,
     )
-    return text
+    return str(_shared_redact_text(text))
 
 
 async def _fetch_artifact(

@@ -124,7 +124,7 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
 # JSON / dict-literal `"api_key": "SECRET"` shapes, which transcript request and
 # response bodies embed as text and which the `=`-only pattern misses.
 _SENSITIVE_TEXT_KEY = (
-    r"[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|authorization|"
+    r"[a-z0-9_-]*(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|authorization|"
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
     r"refresh[_-]?token|csrf|xsrf|signature|bearer)[a-z0-9_-]*"
 )
@@ -132,7 +132,7 @@ _SENSITIVE_TEXT_KEY = (
 # bearer — those are owned by the dedicated Authorization header rule below, and
 # letting this rule also match them would clobber its "Bearer ***" output.
 _SENSITIVE_COLON_KEY = (
-    r"[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|"
+    r"[a-z0-9_-]*(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|"
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
     r"refresh[_-]?token|csrf|xsrf|signature)[a-z0-9_-]*"
 )

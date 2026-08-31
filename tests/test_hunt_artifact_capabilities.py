@@ -93,8 +93,36 @@ def test_artifact_window_redacts_jwt_and_reports_range_decision(monkeypatch):
     assert seen["headers"] == {"Range": "bytes=10-99"}
     assert result["ok"] is True
     sample = result["observation"]["text_sample"]
-    assert "<jwt:sha256:" in sample
+    assert "***" in sample
     assert token not in sample
+
+
+def test_artifact_window_redacts_common_secret_shapes_before_planner_exposure():
+    sample = artifact_capability._redacted_text_sample(b"\n".join((
+        b'const password="correct-horse-battery";',
+        b'const apiKey="sk-live-123456789";',
+        b'const config={"client_secret":"CLIENT-SECRET-123"};',
+        b'Cookie: session=topsecret; csrf=csrfsecret',
+        b'Authorization: Basic dXNlcjpwYXNz',
+        b'https://user:dbsecret@db.example.test/app?token=querysecret&safe=1',
+        b'tokens_used: 42',
+    )))
+
+    for secret in (
+        "correct-horse-battery", "sk-live-123456789", "CLIENT-SECRET-123",
+        "topsecret", "csrfsecret", "dXNlcjpwYXNz", "dbsecret", "querysecret",
+    ):
+        assert secret not in sample
+    assert "tokens_used: 42" in sample
+
+
+def test_javascript_analysis_redacts_source_map_query_credentials():
+    result = analyze_javascript_bytes(
+        b"//# sourceMappingURL=app.js.map?token=source-map-secret&build=42"
+    )
+
+    assert "source-map-secret" not in json.dumps(result)
+    assert "build=42" in result["source_maps"][0]
 
 
 def test_worker_persists_semantic_ok_for_future_hunt_outcomes():

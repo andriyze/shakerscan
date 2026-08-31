@@ -152,6 +152,31 @@ def test_receipt_redacts_execution_observations_errors_and_url_secrets_before_ha
     assert receipt.public_dict()["redacted_execution"]["cookie"] == "***"
 
 
+def test_receipt_redacts_artifact_assignment_and_config_secret_shapes():
+    receipt = _receipt(observations=[{
+        "kind": "artifact_observation",
+        "text_sample": "\n".join((
+            'const password="correct-horse-battery";',
+            'const apiKey="sk-live-123456789";',
+            'config={"client_secret":"CLIENT-SECRET-123"}',
+            'Cookie: session=topsecret; csrf=csrfsecret',
+            'tokens_used: 42',
+        )),
+        "secret_values_visible": False,
+    }])
+
+    public = receipt.public_dict()
+    text = repr(public)
+    for secret in (
+        "correct-horse-battery", "sk-live-123456789", "CLIENT-SECRET-123",
+        "topsecret", "csrfsecret",
+    ):
+        assert secret not in text
+    observation = public["observations"][0]
+    assert observation["secret_values_visible"] is False
+    assert "tokens_used: 42" in observation["text_sample"]
+
+
 def test_budget_usage_must_be_declared_and_fit_the_reservation():
     with pytest.raises(ValueError, match="absent"):
         _receipt(budget_consumed={"http_requests": 1})

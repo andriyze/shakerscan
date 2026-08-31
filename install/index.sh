@@ -513,6 +513,7 @@ download "$REPO_RAW_BASE/api/runtime/scan_credentials.py" "$INSTALL_DIR/api/runt
 download "$REPO_RAW_BASE/api/runtime/request_collection_store.py" "$INSTALL_DIR/api/runtime/request_collection_store.py"
 download "$REPO_RAW_BASE/api/runtime/target_bound_socket.py" "$INSTALL_DIR/api/runtime/target_bound_socket.py"
 download "$REPO_RAW_BASE/scanner/ai_verdict_policy.py" "$INSTALL_DIR/scanner/ai_verdict_policy.py"
+download "$REPO_RAW_BASE/scanner/redaction.py" "$INSTALL_DIR/scanner/redaction.py"
 download "$REPO_RAW_BASE/scanner/risk_scoring.py" "$INSTALL_DIR/scanner/risk_scoring.py"
 download "$REPO_RAW_BASE/scanner/score_bands.py" "$INSTALL_DIR/scanner/score_bands.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/__init__.py" "$INSTALL_DIR/scanner/scanner_tools/__init__.py"
