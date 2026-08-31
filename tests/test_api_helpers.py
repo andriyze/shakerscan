@@ -3304,6 +3304,11 @@ async def _fake_create_asm_campaign(*_args, **_kwargs):
 
 
 def _freeze_test_asm_target(monkeypatch):
+    async def validate(_url):
+        return ("192.0.2.10",)
+
+    monkeypatch.setattr(api_module, "validate_schedule_target_destination", validate)
+
     async def freeze(**kwargs):
         return {
             "target_id": str(kwargs["target_id"]),
@@ -3733,6 +3738,53 @@ def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatc
     assert redis_client.rpush_calls
 
 
+def test_run_due_schedules_retries_transient_dns_without_consuming_run(monkeypatch):
+    schedule = _due_schedule()
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+
+    async def unresolved(_url):
+        raise api_module.ScheduleTargetResolutionError(
+            "Scheduled target DNS resolution failed."
+        )
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module, "validate_schedule_target_destination", unresolved)
+
+    before = api_module.utc_now()
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+    after = api_module.utc_now()
+
+    assert redis_client.rpush_calls == []
+    assert len(conn.executes) == 1
+    query, args = conn.executes[0]
+    assert "is_active=($1::timestamptz IS NOT NULL)" in query
+    assert "last_run_at" not in query
+    assert args[1] == schedule["id"]
+    assert before + timedelta(minutes=14) < args[0] < after + timedelta(minutes=16)
+
+
+def test_run_due_schedules_disables_unsafe_dns_destination(monkeypatch):
+    schedule = _due_schedule()
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+
+    async def unsafe(_url):
+        raise api_module.ScheduleTargetSafetyError(
+            "Scheduled targets must not resolve to a private destination."
+        )
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module, "validate_schedule_target_destination", unsafe)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    assert redis_client.rpush_calls == []
+    query, args = conn.executes[0]
+    assert "is_active=($1::timestamptz IS NOT NULL)" in query
+    assert args == (None, schedule["id"])
+
+
 def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatch):
     conn = _FakeConn([_due_schedule()])
     redis_client = _RecordingRedis()
@@ -3868,6 +3920,7 @@ def test_run_due_schedules_disables_legacy_destructive_retention_schedule(monkey
 
 
 def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
+    _freeze_test_asm_target(monkeypatch)
     schedule = _due_schedule()
     schedule["schedule_kind"] = "asm_improve"
     schedule["scan_options"] = {

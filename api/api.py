@@ -3207,14 +3207,8 @@ async def run_due_schedules(pool: asyncpg.Pool):
         try:
             await validate_schedule_target_destination(str(target_url))
         except ScheduleTargetSafetyError as exc:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE schedules SET is_active=false, next_run_at=NULL, updated_at=NOW() WHERE id=$1",
-                    schedule_id,
-                )
-            print(
-                f"[scheduler] Disabled schedule {str(schedule_id)[:8]}: {exc}",
-                flush=True,
+            await handle_schedule_target_failure(
+                pool, schedule_id=schedule_id, error=exc, now=now,
             )
             continue
 
@@ -5618,9 +5612,11 @@ try:
         delete_schedule,
         get_schedule,
         list_schedules,
+        handle_schedule_target_failure,
         router as schedule_router,
         update_schedule,
         validate_schedule_target_destination,
+        ScheduleTargetResolutionError,
         ScheduleTargetSafetyError,
     )
 except ModuleNotFoundError:  # package import in host-side tests
@@ -5640,9 +5636,11 @@ except ModuleNotFoundError:  # package import in host-side tests
         delete_schedule,
         get_schedule,
         list_schedules,
+        handle_schedule_target_failure,
         router as schedule_router,
         update_schedule,
         validate_schedule_target_destination,
+        ScheduleTargetResolutionError,
         ScheduleTargetSafetyError,
     )
 configure_schedule_router(lambda: db_pool)

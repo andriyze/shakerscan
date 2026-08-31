@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from schedules.router import (
+    ScheduleTargetResolutionError,
     ScheduleTargetSafetyError,
     validate_schedule_target_destination,
 )
@@ -51,3 +52,16 @@ def test_schedule_rejects_mixed_public_and_private_dns_answers():
         asyncio.run(validate_schedule_target_destination(
             "https://example.test/", resolver=resolver,
         ))
+
+
+def test_schedule_distinguishes_retryable_dns_failure_from_unsafe_destination():
+    async def resolver(_host, _port):
+        raise OSError("temporary resolver failure")
+
+    with pytest.raises(ScheduleTargetResolutionError) as exc:
+        asyncio.run(validate_schedule_target_destination(
+            "https://example.test/", resolver=resolver,
+        ))
+
+    assert exc.value.retryable is True
+    assert ScheduleTargetSafetyError("unsafe").retryable is False

@@ -199,6 +199,41 @@ class ScheduleUpdate(BaseModel):
 class ScheduleTargetSafetyError(ValueError):
     """A recurring job cannot safely bind the target destination."""
 
+    retryable = False
+
+
+class ScheduleTargetResolutionError(ScheduleTargetSafetyError):
+    """A recurring target could not be resolved due to a transient failure."""
+
+    retryable = True
+
+
+async def handle_schedule_target_failure(
+    pool: Any,
+    *,
+    schedule_id: Any,
+    error: ScheduleTargetSafetyError,
+    now: datetime,
+    retry_minutes: int = 15,
+) -> None:
+    """Persist a retry for resolver outages or disable an unsafe destination."""
+    retry_at = (
+        now + timedelta(minutes=max(1, int(retry_minutes)))
+        if isinstance(error, ScheduleTargetResolutionError) else None
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE schedules
+               SET is_active=($1::timestamptz IS NOT NULL), next_run_at=$1,
+                   updated_at=NOW() WHERE id=$2""",
+            retry_at, schedule_id,
+        )
+    disposition = "Retrying" if retry_at is not None else "Disabled"
+    print(
+        f"[scheduler] {disposition} schedule {str(schedule_id)[:8]}: {error}",
+        flush=True,
+    )
+
 
 async def _default_schedule_resolver(host: str, port: int) -> list[Any]:
     loop = asyncio.get_running_loop()
@@ -242,7 +277,7 @@ async def validate_schedule_target_destination(
                 (resolver or _default_schedule_resolver)(host, port), timeout=5.0,
             )
         except (asyncio.TimeoutError, OSError, socket.gaierror) as exc:
-            raise ScheduleTargetSafetyError(
+            raise ScheduleTargetResolutionError(
                 "Scheduled target DNS resolution failed."
             ) from exc
         for record in records or ():
@@ -256,7 +291,7 @@ async def validate_schedule_target_destination(
                 continue
 
     if not addresses:
-        raise ScheduleTargetSafetyError(
+        raise ScheduleTargetResolutionError(
             "Scheduled target did not resolve to a usable IP address."
         )
     unsafe = sorted(
