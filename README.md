@@ -80,7 +80,7 @@ shakerscan hunt start --target-id "$TARGET_ID" --target-kind web
 shakerscan hunt skill-suggest "$HUNT_ID" --signal graphql
 shakerscan hunt skill-read "$HUNT_ID" skill.web.graphql-testing
 shakerscan credentials test "$PROFILE_ID"
-shakerscan collections select "$COLLECTION_ID" --method GET
+shakerscan collections select "$COLLECTION_ID" --binding-id "$BINDING_ID" --name baseline --method GET
 shakerscan evidence export --scan-id "$SCAN_ID" --format manifest
 shakerscan status
 ```

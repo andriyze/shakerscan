@@ -214,11 +214,97 @@ def test_credentials_and_collections_are_first_class_commands():
     assert rotate.profile_id == "profile-1"
     select = parser.parse_args([
         "--api-url", "http://localhost:8080", "collections", "select",
-        "collection-1", "--method", "get", "--limit", "12",
+        "collection-1", "--binding-id", "binding-1", "--name", "baseline",
+        "--method", "get", "--limit", "12",
     ])
     assert select.collections_command == "select"
     assert select.method == ["get"]
     assert select.limit == 12
+
+
+def test_collection_select_saves_durable_selection_and_preview_is_explicit():
+    calls = []
+
+    class FakeClient:
+        def get(self, path):
+            assert path == "/openapi.json"
+            return {
+                "components": {"schemas": {
+                    "RequestCollectionSelectionUpsert": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["name", "binding_id"],
+                        "properties": {
+                            name: {} for name in (
+                                "name", "binding_id", "replay_policy", "request_ids",
+                                "folders", "methods", "path_regex", "tags",
+                                "safe_methods_only", "max_requests",
+                                "disposable_credentials",
+                            )
+                        },
+                    },
+                    "RequestCollectionSelect": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            name: {} for name in (
+                                "request_ids", "folders", "methods", "path_regex",
+                                "tags", "safe_methods_only", "limit",
+                            )
+                        },
+                    },
+                }},
+            }
+
+        def post(self, path, payload, **kwargs):
+            calls.append((path, payload, kwargs))
+            return {"path": path, "payload": payload}
+
+    client = FakeClient()
+    saved = v2_cli._run_collections(_parse(
+        "collections", "select", "collection/1", "--binding-id", "binding-1",
+        "--name", "baseline", "--method", "get", "--limit", "12",
+    ), client)
+    preview = v2_cli._run_collections(_parse(
+        "collections", "select", "collection/1", "--preview", "--method", "get",
+    ), client)
+
+    assert saved["path"] == "/request-collections/collection%2F1/selections"
+    assert saved["payload"] == {
+        "name": "baseline",
+        "binding_id": "binding-1",
+        "replay_policy": "safe_reads",
+        "request_ids": [],
+        "folders": [],
+        "methods": ["GET"],
+        "tags": [],
+        "safe_methods_only": True,
+        "max_requests": 12,
+        "disposable_credentials": False,
+    }
+    assert preview["path"] == "/request-collections/collection%2F1/select"
+    assert preview["payload"]["limit"] == 500
+    assert "name" not in preview["payload"]
+
+
+def test_collection_select_rejects_ambiguous_or_unsafe_shortcuts():
+    class FakeClient:
+        def get(self, _path):
+            return {"components": {"schemas": {
+                "RequestCollectionSelectionUpsert": {
+                    "properties": {}, "additionalProperties": False,
+                },
+            }}}
+
+    with pytest.raises(v2_cli.CliError, match="requires --name and --binding-id"):
+        v2_cli._run_collections(
+            _parse("collections", "select", "collection-1"), FakeClient(),
+        )
+    with pytest.raises(v2_cli.CliError, match="confirmed_active"):
+        v2_cli._run_collections(_parse(
+            "collections", "select", "collection-1", "--binding-id", "binding-1",
+            "--name", "active", "--include-mutating",
+        ), FakeClient())
 
 
 def test_collection_upload_document_accepts_json_or_openapi_yaml(tmp_path):

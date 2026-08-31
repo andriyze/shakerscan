@@ -647,10 +647,19 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
     if args.collections_command == "select":
-        schema = _openapi_schema(client, "RequestCollectionSelect")
+        schema_name = (
+            "RequestCollectionSelect"
+            if args.preview
+            else "RequestCollectionSelectionUpsert"
+        )
+        schema = _openapi_schema(client, schema_name)
         if args.request:
             payload = _read_json(args.request, default={})
-        else:
+        elif args.preview:
+            if args.name or args.binding_id or args.disposable_credentials:
+                raise CliError(
+                    "collection preview does not accept durable selection fields"
+                )
             payload = {
                 "request_ids": list(dict.fromkeys(args.request_id)),
                 "folders": list(dict.fromkeys(args.folder)),
@@ -661,11 +670,40 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
             }
             if args.path_regex:
                 payload["path_regex"] = args.path_regex
+        else:
+            if not args.name or not args.binding_id:
+                raise CliError(
+                    "durable collection selection requires --name and --binding-id; "
+                    "use --preview for a non-durable preview"
+                )
+            if (
+                args.include_mutating
+                and args.replay_policy not in {"confirmed_active", "safe_authentication"}
+            ):
+                raise CliError(
+                    "--include-mutating requires --replay-policy confirmed_active "
+                    "or safe_authentication"
+                )
+            payload = {
+                "name": args.name,
+                "binding_id": args.binding_id,
+                "replay_policy": args.replay_policy,
+                "request_ids": list(dict.fromkeys(args.request_id)),
+                "folders": list(dict.fromkeys(args.folder)),
+                "methods": list(dict.fromkeys(method.upper() for method in args.method)),
+                "tags": list(dict.fromkeys(args.tag)),
+                "safe_methods_only": not args.include_mutating,
+                "max_requests": args.limit,
+                "disposable_credentials": args.disposable_credentials,
+            }
+            if args.path_regex:
+                payload["path_regex"] = args.path_regex
         payload = _validate_schema_object(
             payload, schema, label="request collection selection",
         )
+        endpoint = "select" if args.preview else "selections"
         return client.post(
-            f"/request-collections/{collection_id}/select",
+            f"/request-collections/{collection_id}/{endpoint}",
             payload,
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
@@ -932,16 +970,31 @@ def build_parser() -> argparse.ArgumentParser:
     collection_bind.add_argument("--environment-id")
     collection_bind.add_argument("--idempotency-key")
     collection_select = collection_commands.add_parser(
-        "select", help="Preview one redacted bounded request selection",
+        "select", help="Save one bounded request selection and return its durable ID",
     )
     collection_select.add_argument("collection_id")
     collection_select.add_argument("--request", metavar="FILE")
+    collection_select.add_argument("--name")
+    collection_select.add_argument("--binding-id")
+    collection_select.add_argument(
+        "--replay-policy",
+        choices=(
+            "discovery_only", "safe_reads", "safe_authentication",
+            "confirmed_active",
+        ),
+        default="safe_reads",
+    )
     collection_select.add_argument("--request-id", action="append", default=[])
     collection_select.add_argument("--folder", action="append", default=[])
     collection_select.add_argument("--method", action="append", default=[])
     collection_select.add_argument("--path-regex")
     collection_select.add_argument("--tag", action="append", default=[])
     collection_select.add_argument("--include-mutating", action="store_true")
+    collection_select.add_argument("--disposable-credentials", action="store_true")
+    collection_select.add_argument(
+        "--preview", action="store_true",
+        help="Preview matching redacted requests without saving a selection",
+    )
     collection_select.add_argument("--limit", type=int, default=500)
     collection_select.add_argument("--idempotency-key")
 
