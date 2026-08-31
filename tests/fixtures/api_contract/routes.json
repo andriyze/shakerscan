@@ -49,13 +49,6 @@
     "name": "get_agent_tool_readiness"
   },
   {
-    "path": "/agent/tools/{target_id}/execute",
-    "methods": [
-      "POST"
-    ],
-    "name": "execute_agent_tool_endpoint"
-  },
-  {
     "path": "/agents/local",
     "methods": [
       "GET"

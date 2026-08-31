@@ -182,11 +182,6 @@ def worker_build_current(*a: Any, **k: Any) -> Any:
 
 
 __all__ = ["configure_agent_router", "router"]
-class AgentToolExecuteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    tool: str = Field(min_length=1, max_length=64)
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    approval_receipt_id: Optional[str] = None
 
 
 
@@ -247,29 +242,6 @@ async def get_agent_context_pack(
     }
 
 
-@router.post("/agent/tools/{target_id}/execute")
-async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteRequest):
-    """Execute ONE autonomous-agent tool against a target (read-only surface: http_request
-    is limited to safe methods here; state-changing writes flow through a gated research
-    episode with a validated approval receipt). Same building block the ReAct loop uses."""
-    target_uuid = _uuid_or_400(target_id, "target id")
-    async with _pool().acquire() as conn:
-        target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
-        if not target or not target["is_active"]:
-            raise HTTPException(status_code=404, detail="Active target not found")
-        await _require_approval_receipt_if_policy_enabled(
-            conn, req.approval_receipt_id, action_name="agent.tool", risk_tier="active",
-            created_by="agent_tool_endpoint",
-        )
-    name = str(req.tool or "").strip()
-    if name not in agent_tools.CALLABLE_TOOL_NAMES:
-        raise HTTPException(status_code=400, detail=f"unknown tool; allowed {sorted(agent_tools.CALLABLE_TOOL_NAMES)}")
-    result = await _execute_agent_tool(
-        target_uuid, str(target["url"]), name, req.arguments,
-        created_by="agent_tool_endpoint", allow_write=False, allow_active=False,
-        authorized_addresses=await _resolve_agent_target_addresses(str(target["url"])),
-    )
-    return {"target_id": str(target_uuid), "tool": name, "result": result}
 
 
 
@@ -2393,8 +2365,6 @@ def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Option
     if len(operations) == 1:
         return operations[0]
     return None, None
-
-
 
 
 

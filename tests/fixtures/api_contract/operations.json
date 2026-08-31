@@ -35,11 +35,6 @@
     "operation_id": "get_agent_tool_readiness_agent_tools_readiness_get"
   },
   {
-    "path": "/agent/tools/{target_id}/execute",
-    "method": "post",
-    "operation_id": "execute_agent_tool_endpoint_agent_tools__target_id__execute_post"
-  },
-  {
     "path": "/agents/local",
     "method": "get",
     "operation_id": "local_agents_agents_local_get"

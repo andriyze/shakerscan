@@ -144,7 +144,6 @@ surfaces:
     canonical_replacement: operations capability catalog and Hunt context pack
     new_writes_allowed: false
     pending_write_removals:
-      - POST /agent/tools/{target_id}/execute
       - POST /agents/local/plan
       - POST /agents/local/plan/parse
       - POST /agents/local/test

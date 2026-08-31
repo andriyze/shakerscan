@@ -155,6 +155,19 @@ def test_legacy_agent_finding_verification_write_is_deleted():
     assert "verifySuspectedAgentFinding" not in ui_client
 
 
+def test_legacy_direct_agent_tool_execution_write_is_deleted():
+    """Tool metadata remains readable; execution belongs to a canonical Hunt."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "agent_routes" / "router.py").read_text()
+
+    assert not route_is_declared("POST", "/agent/tools/{target_id}/execute")
+    assert route_is_declared("GET", "/agent/tools/readiness")
+    assert route_is_declared(
+        "POST", "/hunts/{hunt_id}/capabilities/{capability_name:path}",
+    )
+    assert "execute_agent_tool_endpoint" not in source
+
+
 def test_legacy_agent_hunt_writes_return_410_without_invoking_the_old_engine():
     """The migration response must not reach any former handler."""
     from hunt.legacy import LegacyHuntIsolationMiddleware, legacy_hunt_write_blocked

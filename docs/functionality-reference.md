@@ -1494,8 +1494,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 406 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 340 | `api/**/*.py` |
+| Public REST operations | 405 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 339 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1525,7 +1525,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |
 | `POST` | `/agent/hunt/session/{run_id}/cancel` | `cancel_agent_hunt_session` |
 | `GET` | `/agent/tools/readiness` | `get_agent_tool_readiness` |
-| `POST` | `/agent/tools/{target_id}/execute` | `execute_agent_tool_endpoint` |
 | `GET` | `/agents/local` | `local_agents` |
 | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
 | `POST` | `/agents/local/plan/parse` | `local_agent_parse_candidate_plan` |

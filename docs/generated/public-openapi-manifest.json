@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 170,
+  "component_schema_count": 169,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -23,7 +23,6 @@
     "AgentContextPackRequest": "b4074a180bcaca334dd41f78175c63faa57ff20c6f18dae86d5adf2d72aeef6b",
     "AgentDecisionTraceRequest": "d66adb099903f4250044bf4fb5eae6bccf5cf02a383ccdf4a9d52f540818ec51",
     "AgentDecisionTraceStep": "6776a0d4fdd8168c9e1ea68343b639f30ab821ba38917d543abd2d08f11beb3a",
-    "AgentToolExecuteRequest": "a25c8d8d3ddf8b94b7d3a527327979bbc56d25119d3e9c3db5fdea8de990faab",
     "ApprovalReceiptRequest": "3126e2c8534118b4bf15e9ae1d5c5fd56ca78de37a1d51952e1162b7f4d6899a",
     "ApprovalReceiptRevocationRequest": "91e484f43354b7f71485f4f76db798b5955cf22f7c8902a6229e670877d24d42",
     "ArsenalExecuteRequest": "81fc0dca36c6a663d85a7ad9879303051cce5726bdef56a4269a167e5757c07a",
@@ -176,9 +175,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "3db089ed16d885db662f27599e380a3e5d71ae4391e83c56ec39d475c8914fed",
+  "contract_sha256": "4f8e5c5b605c231fb66db6eabe990fe3ee3aa63e1cd134befe0dec07c61d837c",
   "openapi": "3.1.0",
-  "operation_count": 396,
+  "operation_count": 395,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3010,19 +3009,6 @@
       "operation_id": "cancel_agent_hunt_session_agent_hunt_session__run_id__cancel_post",
       "parameters_sha256": "c0e5887313ffd165f0c855eb4ee8b5061d5b7ada82cb8eee38ce2d9409684486",
       "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /agent/tools/{target_id}/execute": {
-      "deprecated": false,
-      "operation_id": "execute_agent_tool_endpoint_agent_tools__target_id__execute_post",
-      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
-      "request_schema_sha256": "415a22b83e7057f8c0653f22b666142320f930de86805d5e3404dafd869c5c5c",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
