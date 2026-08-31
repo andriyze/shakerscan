@@ -106,6 +106,7 @@ BENCHMARK_CREDENTIAL_CAPABILITIES = [
     "templates.passive_scan", "templates.scan", "collections.replay_safe",
     "collections.replay_active", "xss.verify", "sqli.verify",
     "xss.request_verify", "sqli.request_verify", "authz.verify",
+    "sqli.prove_batch", "nosqli.verify_batch", "authz_surface.verify_batch",
 ]
 
 
@@ -306,7 +307,7 @@ def _patch(url, body, timeout=30):
 
 
 def _canonical_benchmark_authority(api, target_url, *, credential_risk):
-    """Create an exact-target scope/approval pair for one authorized benchmark."""
+    """Create exact-target scan and credential approvals for one benchmark."""
     target = _post(f"{api}/targets", {
         "url": target_url,
         "name": "DAST benchmark target",
@@ -328,21 +329,35 @@ def _canonical_benchmark_authority(api, target_url, *, credential_risk):
         raise RuntimeError("benchmark scope preview returned no receipt id")
     if scope_receipt.get("verdict") == "blocked":
         raise RuntimeError("benchmark target scope was blocked")
-    approval = _post(f"{api}/arsenal/approvals", {
-        "scope_receipt_id": scope_id,
-        "risk_tier": "credential" if credential_risk else "active",
-        "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
-        "action_name": "scan.submit",
-        "approved_by": "benchmark_targets.py",
-        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
-    })
-    approval_id = str((approval.get("approval_receipt") or {}).get("id") or "")
-    if not approval_id:
-        raise RuntimeError("benchmark approval returned no receipt id")
-    return target_id, approval_id
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+
+    def create_approval(action_name):
+        approval = _post(f"{api}/arsenal/approvals", {
+            "scope_receipt_id": scope_id,
+            "risk_tier": "credential" if credential_risk else "active",
+            "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+            "action_name": action_name,
+            "approved_by": "benchmark_targets.py",
+            "expires_at": expires_at,
+        })
+        approval_id = str((approval.get("approval_receipt") or {}).get("id") or "")
+        if not approval_id:
+            raise RuntimeError(f"benchmark {action_name} approval returned no receipt id")
+        return approval_id
+
+    scan_approval_id = create_approval("scan.submit")
+    credential_approval_id = (
+        create_approval("credential_profile.active_capabilities")
+        if credential_risk else None
+    )
+    return target_id, scan_approval_id, credential_approval_id
 
 
-def _create_benchmark_bearer_profile(api, *, target_id, token, lane):
+def _create_benchmark_bearer_profile(
+    api, *, target_id, token, lane, active_capability_approval_id,
+):
+    if not active_capability_approval_id:
+        raise RuntimeError("active benchmark credential capabilities require an approval receipt")
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
     name = f"Ephemeral benchmark {lane}"
     listing = _get(
@@ -379,6 +394,8 @@ def _create_benchmark_bearer_profile(api, *, target_id, token, lane):
             "expires_at": expires_at,
             "is_active": True,
             "allowed_capabilities": BENCHMARK_CREDENTIAL_CAPABILITIES,
+            "allow_active_capabilities": True,
+            "approval_receipt_id": active_capability_approval_id,
         })
         patched_profile = patched.get("profile") or {}
         rotated = _post(f"{api}/credential-profiles/{profile_id}/rotate", {
@@ -402,6 +419,8 @@ def _create_benchmark_bearer_profile(api, *, target_id, token, lane):
         "secret": token,
         "expires_at": expires_at,
         "allowed_capabilities": BENCHMARK_CREDENTIAL_CAPABILITIES,
+        "allow_active_capabilities": True,
+        "approval_receipt_id": active_capability_approval_id,
         "created_by": "benchmark_targets.py",
     })
     profile_id = str((created.get("profile") or {}).get("id") or "")
@@ -1139,19 +1158,21 @@ def submit_target(
                 ],
                 "validation_method": "jwt_stable_claim",
             })
-    target_id, approval_id = _canonical_benchmark_authority(
+    target_id, approval_id, credential_approval_id = _canonical_benchmark_authority(
         api, fx["target_url"], credential_risk=bool(minted_tokens),
     )
     credential_profile_ids = [
         _create_benchmark_bearer_profile(
             api, target_id=target_id, token=token, lane=lane,
+            active_capability_approval_id=credential_approval_id,
         )
         for lane, token in minted_tokens
     ]
     # Select the canonical family set explicitly (§17) so every first-class
     # family the fixture expects actually runs — no reliance on preset defaults
-    # and no alias credit. authz_surface (BFLA) is credential-gated, so add it
-    # only when a primary principal was minted; nuclei_active stays off.
+    # and no alias credit. Cross-principal BOLA and BFLA are credential-gated,
+    # so add them only when two distinct principals were minted; nuclei_active
+    # stays off.
     include_families = [
         "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure", "nosqli",
     ]
@@ -1159,7 +1180,7 @@ def submit_target(
     # report zero attempts, which then fails the mandatory family-attempt gate for a reason that has
     # nothing to do with the engine. Select it only when two principals actually exist.
     if len(minted_tokens) >= 2:
-        include_families.append("authz_surface")
+        include_families.extend(("bola", "authz_surface"))
     resp = _post(f"{api}/scans", {
         "target": fx["target_url"],
         "target_kind": "web",
