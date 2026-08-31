@@ -18,6 +18,7 @@ import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
+from runtime.capability_registry import CapabilityInputContractError
 from tests.api_sources import (
     api_tree_source, definition_source, route_is_declared, route_source,
 )
@@ -1086,16 +1087,68 @@ def test_nuclei_interactsh_disabled_by_default_and_off_without_gate(monkeypatch)
     monkeypatch.delenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", raising=False)
     _, argv, _ = at.build_scanner_argv("nuclei", "https://t/", {}, pinned_address="10.0.0.1")
     assert "-no-interactsh" in argv and "-interactsh-server" not in argv
-    assert at.resolve_hunt_interactsh_config(allow_active=True) == (None, None)
-    assert at.resolve_hunt_interactsh_config(allow_active=False) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=False, reserved_oob_interactions=1,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=0,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=False, allow_oob=True, reserved_oob_interactions=1,
+    ) == (None, None)
 
 
 def test_nuclei_interactsh_requires_gate_and_private_server(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "https://oast.fun")
-    assert at.resolve_hunt_interactsh_config(allow_active=True) == (None, None)  # public rejected
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=1,
+    ) == (None, None)  # public rejected
     monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "oob.corp.example")
-    assert at.resolve_hunt_interactsh_config(allow_active=False) == (None, None)  # not gated
-    assert at.resolve_hunt_interactsh_config(allow_active=True) == ("https://oob.corp.example", None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=False, reserved_oob_interactions=1,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=0,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=1,
+    ) == ("https://oob.corp.example", None)
+
+
+def test_hunt_scanner_projection_rejects_body_mutation_but_preserves_scan_input():
+    body = {
+        "path": "/rest/user/login",
+        "method": "DELETE",
+        "content_type": "application/json",
+        "body_field_names": ["email", "password"],
+        "injection_field": "email",
+    }
+    for capability in ("xss.verify", "sqli.verify"):
+        # Deterministic Scan may still execute an immutable body candidate.
+        assert at.CAPABILITY_REGISTRY.validate_input(capability, body) == body
+        # Hunt planners cannot turn those private adapter fields into mutation.
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.CAPABILITY_REGISTRY.validate_hunt_input(capability, body)
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.canonical_hunt_scanner_options(capability, body)
+
+
+def test_hunt_nuclei_uses_server_owned_get_only_pack():
+    options = at.canonical_hunt_scanner_options(
+        "templates.scan", {"path": "/api/products?limit=10"},
+    )
+    assert options["template_ids"] == at._CANONICAL_PASSIVE_NUCLEI_IDS
+    assert options["template_pack_digest"]
+    assert options["template_request_cost_upper_bound"] == 7
+    _, argv, _ = at.build_scanner_argv("nuclei", "https://t/", options)
+    assert argv[argv.index("-id") + 1] == at._CANONICAL_PASSIVE_NUCLEI_IDS
+    assert "-no-interactsh" in argv
+    assert "-tags" not in argv
+    for forbidden in ("tags", "severity", "template_ids", "template_pack_digest"):
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.CAPABILITY_REGISTRY.validate_hunt_input(
+                "templates.scan", {forbidden: "cve"},
+            )
 
 
 def test_nuclei_interactsh_enable_drops_proxy_internal_keeps_scan_pin():

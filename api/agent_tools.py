@@ -34,6 +34,7 @@ from scan.external_process import (
 )
 from scan.work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
+    canonical_passive_nuclei_template_pack_digest,
     canonical_passive_nuclei_request_upper_bound,
 )
 from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
@@ -636,14 +637,50 @@ def validate_private_interactsh_server(url: Any) -> str | None:
     return f"{scheme}://{authority}"
 
 
-def resolve_hunt_interactsh_config(*, allow_active: bool) -> tuple[str | None, str | None]:
+def canonical_hunt_scanner_options(
+    capability_name: str,
+    planner_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive worker scanner options from the bounded planner projection.
+
+    Body candidates remain available to deterministic Scan through the full
+    capability input schema. Hunt sees only ``planner_input_schema`` and this
+    worker-side projection validates that narrower schema again before a process
+    is built. Nuclei selection is replaced with the reviewed immutable GET-only
+    pack so planner tags can never select mutating or OOB templates.
+    """
+    name = str(capability_name or "").strip().lower()
+    options = CAPABILITY_REGISTRY.validate_hunt_input(name, planner_input)
+    if name != "templates.scan":
+        return options
+    return {
+        **options,
+        "severity": "critical,high,medium,low,info",
+        "template_ids": _CANONICAL_PASSIVE_NUCLEI_IDS,
+        "template_pack_digest": canonical_passive_nuclei_template_pack_digest(),
+        "template_request_cost_upper_bound": (
+            canonical_passive_nuclei_request_upper_bound()
+        ),
+    }
+
+
+def resolve_hunt_interactsh_config(
+    *,
+    allow_active: bool,
+    allow_oob: bool,
+    reserved_oob_interactions: int,
+) -> tuple[str | None, str | None]:
     """Resolve the operator-configured private OOB server for a gated hunt, or (None, None).
 
-    Only a gated-execution (credential-tier approved) hunt may use OOB, and only when the
-    operator has set ``SHAKERSCAN_HUNT_INTERACTSH_SERVER`` to their own private server. This is
-    off by default, so no hunt gains external OOB egress without an explicit operator opt-in.
+    Active approval, persisted OOB authority, a durable nonzero OOB reservation, and an
+    operator-owned private server are all required. This is off by default, so deployment
+    configuration alone can never grant a Hunt external OOB egress.
     """
-    if not allow_active:
+    if (
+        not allow_active
+        or not allow_oob
+        or int(reserved_oob_interactions) <= 0
+    ):
         return None, None
     server = validate_private_interactsh_server(os.environ.get("SHAKERSCAN_HUNT_INTERACTSH_SERVER"))
     if not server:
@@ -652,6 +689,24 @@ def resolve_hunt_interactsh_config(*, allow_active: bool) -> tuple[str | None, s
     if token and (any(ch in token for ch in "\r\n") or len(token) > 512):
         token = None
     return server, token
+
+
+def canonical_hunt_scanner_execution(
+    capability_name: str,
+    planner_input: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    requested_budget: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None, str | None]:
+    """Return the server-derived scanner options and independently gated OOB config."""
+    options = canonical_hunt_scanner_options(capability_name, planner_input)
+    server, token = resolve_hunt_interactsh_config(
+        allow_active=bool(policy.get("active_testing")),
+        allow_oob=bool(policy.get("allow_oob_interactions")),
+        reserved_oob_interactions=int(
+            requested_budget.get("oob_interactions") or 0
+        ),
+    )
+    return options, server, token
 
 
 def _apply_nuclei_interactsh(argv: list[str], server: str | None, token: str | None) -> list[str]:

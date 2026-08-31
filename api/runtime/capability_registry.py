@@ -358,6 +358,14 @@ _INJECTION_BODY_PROPERTIES: Mapping[str, Any] = {
 }
 
 
+_SAME_ORIGIN_PATH_PROPERTY: Mapping[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 2_048,
+    "pattern": r"^/(?!/)[^\r\n]*$",
+}
+
+
 def _http_principal_schema(
     properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
@@ -415,21 +423,36 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
-            "templates.scan", "Bounded target-bound Nuclei HTTP template scan.",
+            "templates.scan",
+            "Reviewed target-bound GET-only Nuclei template scan.",
             "external_tool", "active", _HTTP_TARGETS, "nuclei", "1",
             "active_testing", {"http_requests": 4_000, "tool_wall_seconds": 300},
-            {"network_reachability": True, "binary": "nuclei"},
+            {
+                "network_reachability": True,
+                "binary": "nuclei",
+                "server_owned_template_pack": True,
+                "state_changing_http": False,
+                "oob_interactions": False,
+            },
             _http_principal_schema({
+                "path": _SAME_ORIGIN_PATH_PROPERTY,
                 "severity": {"type": "string"},
                 "tags": {"type": "string"},
+                "template_ids": {"type": "string"},
                 "template_pack_digest": {
                     "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+                "template_request_cost_upper_bound": {
+                    "type": "integer", "minimum": 1,
                 },
             }),
             "nuclei-jsonl/v1", ("template_match", "request_response"),
             "nuclei", "nuclei", 300_000, ("-version",), ("/opt/tools/nuclei",),
             retest_contract="rerun-template-or-family-on-same-surface",
             hunt_executor="worker_scanner",
+            planner_input_schema=_http_principal_schema({
+                "path": _SAME_ORIGIN_PATH_PROPERTY,
+            }),
         ),
         CapabilitySpec(
             "templates.passive_scan",
@@ -560,6 +583,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "active_testing", {"http_requests": 400, "tool_wall_seconds": 120},
             {"network_reachability": True, "binary": "dalfox"},
             _http_principal_schema({
+                "path": _SAME_ORIGIN_PATH_PROPERTY,
                 **_INJECTION_BODY_PROPERTIES,
                 "severity": {
                     "type": "string", "enum": ["low", "medium", "high"],
@@ -568,6 +592,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "dalfox-jsonl/v1", ("xss_reflection_or_browser_proof",),
             "dalfox", "dalfox", 120_000, ("version",), ("/opt/tools/dalfox",),
             hunt_executor="worker_scanner",
+            planner_input_schema=_http_principal_schema({
+                "path": _SAME_ORIGIN_PATH_PROPERTY,
+                "severity": {
+                    "type": "string", "enum": ["low", "medium", "high"],
+                },
+            }),
         ),
         CapabilitySpec(
             "xss.verify_batch",
@@ -636,11 +666,17 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "external_tool", "active", _HTTP_TARGETS, "sqlmap", "1",
             "active_testing", {"http_requests": 900, "tool_wall_seconds": 300},
             {"network_reachability": True, "binary": "sqlmap"},
-            _http_principal_schema(_INJECTION_BODY_PROPERTIES),
+            _http_principal_schema({
+                "path": _SAME_ORIGIN_PATH_PROPERTY,
+                **_INJECTION_BODY_PROPERTIES,
+            }),
             "sqlmap-output/v1", ("sqli_dbms_or_error_proof",),
             "sqlmap", "sqlmap", 300_000, ("--version",), ("/opt/tools/sqlmap",),
             arsenal_status="gated", retest_contract="rerun-request-with-sqli-proof",
             hunt_executor="worker_scanner",
+            planner_input_schema=_http_principal_schema({
+                "path": _SAME_ORIGIN_PATH_PROPERTY,
+            }),
         ),
         CapabilitySpec(
             "sqli.verify_batch",

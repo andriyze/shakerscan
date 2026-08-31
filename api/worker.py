@@ -20659,15 +20659,14 @@ async def process_canonical_scanner_capability_job(
                         current=heartbeat_record,
                     )
 
-        oob_server, oob_token = agent_tools.resolve_hunt_interactsh_config(
-            allow_active=bool(policy.active_testing),
-        )
+        scanner_options, oob_server, oob_token = agent_tools.canonical_hunt_scanner_execution(
+            capability_name, capability_input, hunt_policy, persisted.record.requested)
         receipt_properties = dict(
             spec.input_schema.get("properties") or {}
         )
         receipt_input = {
             key: value
-            for key, value in capability_input.items()
+            for key, value in scanner_options.items()
             if key in receipt_properties
         }
         if receipt_input.get("path"):
@@ -20682,7 +20681,7 @@ async def process_canonical_scanner_capability_job(
                 "tool_name": spec.process_tool_name,
                 "execution_target": execution_target,
                 "registered_target": registered_target,
-                "scanner_options": capability_input,
+                "scanner_options": scanner_options,
                 "timeout_ms": int(spec.default_timeout_ms),
                 "pinned_address": pinned_address,
                 "authorized_addresses": authorized_addresses,
