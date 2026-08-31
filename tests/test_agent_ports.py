@@ -526,7 +526,10 @@ def test_katana_argv_is_bounded_and_same_host():
     assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
     assert argv[argv.index("-crawl-duration") + 1] == "30s"      # hard wall cap
     assert argv[argv.index("-rate-limit") + 1] == "5"
-    assert "-jsonl" not in argv                                # URL-only; no raw bodies
+    assert "-jsonl" in argv                                  # typed method/body shape
+    assert "-omit-raw" in argv and "-omit-body" in argv
+    excluded = argv[argv.index("-exclude-output-fields") + 1].split(",")
+    assert {"headers", "response", "raw"} <= set(excluded)
     assert at.scanner_request_reservation("katana") == 150
     assert timeout > 0
     # no form-submission / cross-scope flags leaked in
@@ -748,6 +751,39 @@ def test_katana_compact_output_is_typed_deduplicated_and_host_scoped():
         "method": "GET",
         "source": None,
     }]
+
+
+def test_katana_jsonl_retains_only_value_free_request_body_shape():
+    secret = "worker-private-password"
+    output = at.parse_scanner_output("katana", "\n".join([
+        json.dumps({"request": {
+            "method": "GET",
+            "endpoint": "https://app.test/api/session",
+        }}),
+        json.dumps({"request": {
+            "method": "POST",
+            "endpoint": "https://app.test/api/session",
+            "body": json.dumps({"email": "operator@example.test", "password": secret}),
+        }}),
+    ]), allowed_host="app.test")
+
+    assert output["records"] == [
+        {
+            "kind": "discovered_route",
+            "url": "https://app.test/api/session",
+            "method": "GET",
+            "source": None,
+        },
+        {
+            "kind": "discovered_route",
+            "url": "https://app.test/api/session",
+            "method": "POST",
+            "source": None,
+            "content_type": "application/json",
+            "body_field_names": ["email", "password"],
+        },
+    ]
+    assert secret not in repr(output)
 
 
 def test_nuclei_focused_default_and_progress_counter_contract():

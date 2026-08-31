@@ -1461,7 +1461,14 @@ async def enhanced_url_discovery(
         selected: list[tuple[str, str, str]] = []
         seen: set[str] = set()
 
-        def add_candidate(method: Any, candidate: Any, producer: str) -> None:
+        def add_candidate(
+            method: Any,
+            candidate: Any,
+            producer: str,
+            *,
+            content_type: Any = None,
+            body_schema: Any = None,
+        ) -> None:
             candidate_url = str(candidate or "").strip()
             parsed = urllib.parse.urlsplit(candidate_url)
             if (
@@ -1481,6 +1488,8 @@ async def enhanced_url_discovery(
                         method=normalized_method,
                         url=candidate_url,
                         source=producer,
+                        content_type=(str(content_type) if content_type else None),
+                        body_schema=body_schema,
                     ),
                 )
             except ValueError:
@@ -1494,6 +1503,8 @@ async def enhanced_url_discovery(
             if isinstance(observation, dict):
                 add_candidate(
                     observation.get("method"), observation.get("url"), "katana",
+                    content_type=observation.get("content_type"),
+                    body_schema=observation.get("body_field_names"),
                 )
         endpoint_manifest.finish_producer(
             "katana", reason="canonical_capability_placement",

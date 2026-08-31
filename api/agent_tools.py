@@ -26,6 +26,7 @@ import urllib.parse
 from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.request_shape import public_request_body_shape
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     EnforcedProcessPlan,
@@ -335,9 +336,9 @@ _AGENT_FFUF_WORDLISTS: dict[str, str] = {
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
-    # origin), 8s per-request timeout, URL-only output. Katana's JSONL records embed raw
-    # request/response bodies and can exhaust the worker output cap after only a few pages.
-    # The compact stream is sufficient for route discovery and keeps planner evidence bounded.
+    # origin), 8s per-request timeout. JSONL is required to retain observed methods and
+    # request-body shape. Raw requests, headers, and responses are excluded at the process;
+    # the parser projects any remaining request body into field names before persistence.
     #
     # -jsluice and -kb-endpoints parse the JavaScript this crawl already fetched, so they
     # cost no additional HTTP request and stay inside the rate-derived reservation below.
@@ -351,7 +352,9 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
-            "-timeout", "8", "-retry", "0", "-disable-redirects", "-silent"]
+            "-timeout", "8", "-retry", "0", "-disable-redirects",
+            "-jsonl", "-omit-raw", "-omit-body",
+            "-exclude-output-fields", "headers,response,raw", "-silent"]
 
 
 def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
@@ -374,7 +377,9 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
             "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "4",
             "-rate-limit", "5", "-crawl-duration", "45s", "-field-scope", "fqdn",
-            "-timeout", "10", "-retry", "0", "-disable-redirects", "-silent"]
+            "-timeout", "10", "-retry", "0", "-disable-redirects",
+            "-jsonl", "-omit-raw", "-omit-body",
+            "-exclude-output-fields", "headers,response,raw", "-silent"]
 
 
 # An inert placeholder for every body field the engine sends. The scanner supplies the attack; a
@@ -1511,7 +1516,7 @@ def parse_scanner_output(
                     decoded.append({"url": candidate, "method": "GET"})
 
     records: list[dict[str, Any]] = []
-    seen_katana_urls: set[str] = set()
+    seen_katana_requests: set[tuple[str, str, tuple[str, ...]]] = set()
     for item in decoded[:MAX_TOOL_RECORDS]:
         if scanner == "nuclei":
             info = item.get("info") if isinstance(item.get("info"), dict) else {}
@@ -1545,15 +1550,26 @@ def parse_scanner_output(
                     continue
                 if observed_host != str(allowed_host).lower().rstrip("."):
                     continue
-            if observed_url in seen_katana_urls:
+            method = str(item.get("method") or request.get("method") or "GET").upper()[:16]
+            content_type, body_field_names = public_request_body_shape(
+                request.get("body")
+            )
+            request_identity = (observed_url, method, body_field_names)
+            if request_identity in seen_katana_requests:
                 continue
-            seen_katana_urls.add(observed_url)
-            records.append({
+            seen_katana_requests.add(request_identity)
+            record = {
                 "kind": "discovered_route",
                 "url": observed_url,
-                "method": str(item.get("method") or request.get("method") or "GET").upper()[:16],
+                "method": method,
                 "source": _public_observed_url(item.get("source") or item.get("from")),
-            })
+            }
+            if body_field_names:
+                record.update({
+                    "content_type": content_type,
+                    "body_field_names": list(body_field_names),
+                })
+            records.append(record)
         elif scanner == "ffuf":
             records.append({
                 "kind": "content_discovery",

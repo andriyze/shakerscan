@@ -219,7 +219,10 @@ def build_scan_surface_manifest(
     collect(
         "web.crawl",
         (
-            (item.get("method") or "GET", item.get("url"))
+            (
+                item.get("method") or "GET", item.get("url"),
+                item.get("content_type"), item.get("body_field_names"),
+            )
             for item in crawl.get("observations") or ()
             if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
         ),
@@ -228,7 +231,10 @@ def build_scan_surface_manifest(
     collect(
         "web.browser_crawl",
         (
-            (item.get("method") or "GET", item.get("url"))
+            (
+                item.get("method") or "GET", item.get("url"),
+                item.get("content_type"), item.get("body_field_names"),
+            )
             for item in browser.get("observations") or ()
             if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
         ),

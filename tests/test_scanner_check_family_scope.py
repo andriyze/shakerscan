@@ -1238,6 +1238,8 @@ def test_canonical_web_crawl_placement_is_bound_and_adapted(monkeypatch):
         "url": "https://app.example.test/api/orders",
         "method": "GET",
         "source": "https://app.example.test/",
+        "content_type": None,
+        "body_field_names": [],
     }]
 
 

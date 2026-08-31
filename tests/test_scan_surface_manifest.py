@@ -4,6 +4,7 @@ import json
 
 from api.runtime.models import TargetBinding
 from api.scan.surface_manifest import build_scan_surface_manifest
+from api.scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
 
 
 TARGET = TargetBinding(
@@ -100,3 +101,51 @@ def test_surface_manifest_marks_out_of_scope_or_truncated_output_partial():
     assert "out_of_scope_observations" in (
         manifest["producers"]["web.crawl"]["reason"] or ""
     )
+
+
+def test_browser_observed_post_body_shape_survives_without_values():
+    secret = "browser-private-password"
+    manifest = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("success"),
+        crawl=_summary("success"),
+        browser=_summary("success", [{
+            "kind": "discovered_route",
+            "method": "POST",
+            "url": "https://app.example.test/rest/user/login",
+            "content_type": "application/json",
+            "body_field_names": ["email", "password"],
+            "discarded_example_value": secret,
+        }]),
+        content=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        max_endpoints=20,
+    )
+
+    login = next(
+        item for item in manifest["endpoints"]
+        if item["method"] == "POST" and item["concrete_path"] == "/rest/user/login"
+    )
+    assert login["content_type"] == "application/json"
+    assert login["body_field_names"] == ["email", "password"]
+    assert secret not in json.dumps(manifest, sort_keys=True)
+
+    endpoints = build_endpoint_manifest(
+        scan_id="10000000-0000-4000-8000-000000000001",
+        target_binding_digest=TARGET.digest,
+        surface_manifest=manifest,
+        source_action_ids=("discover.browser_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoints,
+        source_action_ids=("discover.browser_crawl",),
+        maximum=50,
+        allow_state_changing_http=True,
+    )
+    assert len(candidates.entries) == 1
+    assert candidates.entries[0]["method"] == "POST"
+    assert candidates.entries[0]["content_type"] == "application/json"
+    assert list(candidates.entries[0]["body_field_names"]) == ["email", "password"]

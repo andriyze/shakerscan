@@ -15895,6 +15895,8 @@ def _canonical_katana_observations(summary: Any) -> list[dict[str, Any]]:
             "url": item.get("url"),
             "method": str(item.get("method") or "GET").upper()[:16],
             "source": item.get("source"),
+            "content_type": item.get("content_type"),
+            "body_field_names": list(item.get("body_field_names") or ())[:128],
         }
         for item in summary.get("observations") or []
         if isinstance(item, Mapping)
