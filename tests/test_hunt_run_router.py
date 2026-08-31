@@ -55,6 +55,8 @@ class _Acquire:
 class _Pool:
     def __init__(self, connection):
         self.connection = connection
+        if not hasattr(connection, "transaction"):
+            connection.transaction = lambda: _Acquire(connection)
 
     def acquire(self):
         return _Acquire(self.connection)
@@ -407,13 +409,16 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
             self.status = "active"
 
         async def fetchrow(self, query, *args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                return _row(id=uuid.UUID(hunt_id), status=self.status)
+            if "FROM hunt_actions" in query:
+                assert "FROM budget_reservations" in query
+                return {"actions": False, "reservations": False}
             if "UPDATE hunt_runs" in query and "final_debrief=$2" in query:
                 self.status = "completed"
                 return _row(id=uuid.UUID(hunt_id), status=self.status)
             if "SET status='cancelled'" in query:
                 return None
-            if query.startswith("SELECT * FROM hunt_runs"):
-                return _row(id=uuid.UUID(hunt_id), status=self.status)
             raise AssertionError(query)
 
     connection = Connection()
@@ -432,6 +437,13 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
 
     class Connection:
         async def fetchrow(self, query, *args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                return _row(
+                    id=uuid.UUID(hunt_id), status="budget_exhausted",
+                    stop_reason="budget_exhausted:http_requests",
+                )
+            if "FROM hunt_actions" in query:
+                return {"actions": False, "reservations": False}
             assert "'budget_exhausted'" in query
             assert "COALESCE(stop_reason, 'budget_exhausted')" in query
             assert json.loads(args[1]) == {
@@ -453,6 +465,40 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     assert result["status"] == "budget_exhausted"
     assert result["stop_reason"] == "budget_exhausted:http_requests"
     assert result["final_debrief"]["summary"].startswith("Budget ended")
+
+
+@pytest.mark.parametrize("source", ["action", "reservation"])
+def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        updated = False
+
+        async def fetchrow(self, query, *_args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                assert "FOR UPDATE" in query
+                return _row(id=uuid.UUID(hunt_id), status="active")
+            if "FROM hunt_actions" in query:
+                assert "FROM budget_reservations" in query
+                assert "status IN ('reserved','running')" in query
+                return {
+                    "actions": source == "action",
+                    "reservations": source == "reservation",
+                }
+            if "UPDATE hunt_runs" in query:
+                self.updated = True
+                return _row(id=uuid.UUID(hunt_id), status="completed")
+            raise AssertionError(query)
+
+    connection = Connection()
+    with pytest.raises(run_router.HTTPException) as exc:
+        asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
+            hunt_id, summary="Premature", next_actions=[],
+        ))
+
+    assert exc.value.status_code == 409
+    assert "reserved or running" in exc.value.detail
+    assert connection.updated is False
 
 
 def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():

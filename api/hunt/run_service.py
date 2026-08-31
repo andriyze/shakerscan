@@ -1079,27 +1079,47 @@ class HuntRunService:
         self, hunt_id: str, *, summary: str, next_actions: list[str]
     ) -> dict[str, Any]:
         async with self._pool().acquire() as connection:
-            row = await connection.fetchrow(
-                """UPDATE hunt_runs
-                   SET status = CASE
-                           WHEN status='budget_exhausted' THEN status ELSE 'completed' END,
-                       stop_reason = CASE
-                           WHEN status='budget_exhausted'
-                           THEN COALESCE(stop_reason, 'budget_exhausted') ELSE 'completed' END,
-                       final_debrief=$2, completed_at=COALESCE(completed_at, NOW()),
-                       updated_at=NOW()
-                   WHERE id=$1
-                     AND status IN ('active','awaiting_planner','budget_exhausted')
-                   RETURNING *""",
-                _uuid_or_400(hunt_id, "hunt id"),
-                json.dumps({"summary": summary, "next_actions": next_actions}),
-            )
-            if not row:
-                row = await hunt_run_or_404(connection, hunt_id)
-                if row["status"] != "completed":
+            async with connection.transaction():
+                run_uuid = _uuid_or_400(hunt_id, "hunt id")
+                row = await hunt_run_or_404(connection, hunt_id, for_update=True)
+                if row["status"] == "completed":
+                    return public_hunt_run(row)
+                if row["status"] not in {
+                    "active", "awaiting_planner", "budget_exhausted",
+                }:
                     raise HTTPException(
                         status_code=409, detail=f"Hunt is {row['status']}"
                     )
+                in_flight = await connection.fetchrow(
+                    """SELECT
+                           EXISTS(SELECT 1 FROM hunt_actions
+                                  WHERE hunt_run_id=$1
+                                    AND status IN ('reserved','running')) AS actions,
+                           EXISTS(SELECT 1 FROM budget_reservations
+                                     WHERE owner_kind='hunt' AND owner_id=$1::text
+                                       AND status IN ('reserved','running')) AS reservations""",
+                    run_uuid,
+                )
+                if in_flight["actions"] or in_flight["reservations"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Hunt has reserved or running actions",
+                    )
+                row = await connection.fetchrow(
+                    """UPDATE hunt_runs
+                       SET status = CASE
+                               WHEN status='budget_exhausted' THEN status ELSE 'completed' END,
+                           stop_reason = CASE
+                               WHEN status='budget_exhausted'
+                               THEN COALESCE(stop_reason, 'budget_exhausted') ELSE 'completed' END,
+                           final_debrief=$2, completed_at=COALESCE(completed_at, NOW()),
+                           updated_at=NOW()
+                       WHERE id=$1
+                         AND status IN ('active','awaiting_planner','budget_exhausted')
+                       RETURNING *""",
+                    run_uuid,
+                    json.dumps({"summary": summary, "next_actions": next_actions}),
+                )
         return public_hunt_run(row)
 
     async def cancel(self, hunt_id: str) -> dict[str, Any]:
