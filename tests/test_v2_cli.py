@@ -144,6 +144,44 @@ def test_hunt_cli_progressively_suggests_reads_binds_and_tracks_methodology():
     )
 
 
+def test_hunt_skill_unbind_uses_real_api_client_delete(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read(_limit):
+            return b'{"removed":true}'
+
+    def urlopen(request, *, timeout):
+        captured.update(request=request, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(v2_cli.urllib.request, "urlopen", urlopen)
+    result = v2_cli._run_hunt(
+        _parse(
+            "hunt", "skill-unbind", "hunt/1", "skill.web/graphql-testing",
+            "--reason", "no longer applicable",
+        ),
+        v2_cli.ApiClient("http://localhost:8080", timeout=12.0),
+    )
+
+    request = captured["request"]
+    assert result == {"removed": True}
+    assert request.get_method() == "DELETE"
+    assert request.data is None
+    assert request.full_url == (
+        "http://localhost:8080/hunts/hunt%2F1/skills/"
+        "skill.web%2Fgraphql-testing?reason=no+longer+applicable"
+    )
+    assert captured["timeout"] == 12.0
+
+
 def test_credential_requests_are_checked_against_server_published_schema():
     schema = {
         "properties": {"target_id": {}, "secret": {}},

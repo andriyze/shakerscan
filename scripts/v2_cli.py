@@ -120,6 +120,9 @@ class ApiClient:
             "POST", path, payload=payload, idempotency_key=idempotency_key,
         )
 
+    def delete(self, path: str) -> Any:
+        return self.request("DELETE", path)
+
     def download(self, path: str, *, max_bytes: int = MAX_REQUEST_BYTES) -> tuple[bytes, str]:
         request = urllib.request.Request(
             f"{self.base_url}{path}", headers={"Accept": "application/json, application/zip"},
