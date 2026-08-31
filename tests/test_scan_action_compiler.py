@@ -86,6 +86,18 @@ def _request_candidate_manifest_ref(count: int = 1):
     ).canonical_dict()
 
 
+def test_full_plan_does_not_schedule_unreviewed_external_intelligence():
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("recon",), active=False),
+        target_binding=_target(),
+    )
+
+    assert "infrastructure.inspect" not in {
+        action.capability_name for action in plan.actions
+    }
+
+
 def test_large_manifest_compiles_to_bounded_batch_graph():
     endpoint_ref = ScanWorkManifestReference(
         manifest_id="10000000-0000-4000-8000-000000000083",

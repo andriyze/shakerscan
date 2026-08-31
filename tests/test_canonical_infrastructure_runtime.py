@@ -96,6 +96,17 @@ def test_infrastructure_intelligence_is_explicitly_informational_and_bound():
     assert result["budget_consumed"]["hosts_attempted"] <= 40
 
 
+def test_infrastructure_intelligence_has_no_implicit_external_transport():
+    result = asyncio.run(inspect_infrastructure_intelligence(_target()))
+
+    assert result == {
+        "ok": False,
+        "status": "blocked",
+        "error": "infrastructure_intelligence_transport_unavailable",
+        "budget_consumed": {},
+    }
+
+
 @pytest.mark.parametrize("url", (
     "http://rdap.example.test",
     "https://localhost/rdap",

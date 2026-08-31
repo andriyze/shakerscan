@@ -12,12 +12,9 @@ from datetime import UTC, datetime
 import ipaddress
 import json
 import math
-import socket
 import time
 from typing import Any, Awaitable, Callable, Mapping
-import urllib.error
 import urllib.parse
-import urllib.request
 
 try:
     from runtime.models import TargetBinding
@@ -31,17 +28,7 @@ _BOOTSTRAP_URLS = {
     "ipv6": "https://data.iana.org/rdap/ipv6.json",
 }
 _MAX_ADDRESSES = 8
-_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-_BOOTSTRAP_TTL_SECONDS = 24 * 60 * 60
-_BOOTSTRAP_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_BOOTSTRAP_LOCK = asyncio.Lock()
-
 JsonFetcher = Callable[[str, int], Awaitable[Mapping[str, Any]]]
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        return None
 
 
 def _validated_external_url(value: Any) -> str:
@@ -73,45 +60,6 @@ def _validated_external_url(value: Any) -> str:
     return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, ""))
 
 
-async def _fetch_json(url: str, timeout_seconds: int) -> Mapping[str, Any]:
-    validated = _validated_external_url(url)
-
-    def read() -> Mapping[str, Any]:
-        parsed = urllib.parse.urlsplit(validated)
-        try:
-            resolved = socket.getaddrinfo(
-                parsed.hostname, 443, type=socket.SOCK_STREAM,
-            )
-        except socket.gaierror as exc:
-            raise ValueError("RDAP destination cannot be resolved") from exc
-        addresses = {
-            str(item[4][0]) for item in resolved
-            if item and len(item) > 4 and item[4]
-        }
-        if not addresses or any(
-            not ipaddress.ip_address(address).is_global for address in addresses
-        ):
-            raise ValueError("RDAP destination resolved outside public address space")
-        opener = urllib.request.build_opener(_NoRedirect())
-        request = urllib.request.Request(
-            validated,
-            headers={
-                "Accept": "application/rdap+json, application/json",
-                "User-Agent": "ShakerScan/2.0 infrastructure-intelligence",
-            },
-        )
-        with opener.open(request, timeout=max(1, int(timeout_seconds))) as response:
-            content = response.read(_MAX_RESPONSE_BYTES + 1)
-        if len(content) > _MAX_RESPONSE_BYTES:
-            raise ValueError("RDAP response exceeds the bounded size")
-        decoded = json.loads(content.decode("utf-8"))
-        if not isinstance(decoded, Mapping):
-            raise ValueError("RDAP response is not an object")
-        return dict(decoded)
-
-    return await asyncio.to_thread(read)
-
-
 async def _bootstrap(
     kind: str,
     *,
@@ -119,19 +67,7 @@ async def _bootstrap(
     timeout_seconds: int,
 ) -> Mapping[str, Any]:
     url = _BOOTSTRAP_URLS[kind]
-    if fetch_json is not _fetch_json:
-        return await fetch_json(url, timeout_seconds)
-    now = time.monotonic()
-    cached = _BOOTSTRAP_CACHE.get(kind)
-    if cached and now - cached[0] < _BOOTSTRAP_TTL_SECONDS:
-        return cached[1]
-    async with _BOOTSTRAP_LOCK:
-        cached = _BOOTSTRAP_CACHE.get(kind)
-        if cached and now - cached[0] < _BOOTSTRAP_TTL_SECONDS:
-            return cached[1]
-        value = dict(await fetch_json(url, timeout_seconds))
-        _BOOTSTRAP_CACHE[kind] = (time.monotonic(), value)
-        return value
+    return await fetch_json(url, timeout_seconds)
 
 
 def _service_rows(bootstrap: Mapping[str, Any]) -> tuple[tuple[list[str], list[str]], ...]:
@@ -354,12 +290,18 @@ async def inspect_infrastructure_intelligence(
     domain = _registration_domain(target)
     if not domain and not addresses:
         return {"ok": False, "status": "blocked", "error": "scope:no bound domain or address", "budget_consumed": {}}
-
-    fetch = fetch_json or _fetch_json
-    if resolver is None:
-        import dns.asyncresolver
-
-        resolver = dns.asyncresolver.Resolver(configure=True)
+    # RDAP and Team Cymru are non-target egress. Canonical Scan does not own a reviewed
+    # transport for them yet, so production execution fails closed instead of opening raw
+    # sockets from a capability module. Tests or a future reviewed provider may inject both
+    # transports explicitly; neither target credentials nor target routing are passed to them.
+    if fetch_json is None or resolver is None:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "infrastructure_intelligence_transport_unavailable",
+            "budget_consumed": {},
+        }
+    fetch = fetch_json
     started = time.perf_counter()
     attempts = 0
     errors: list[str] = []
@@ -376,7 +318,7 @@ async def inspect_infrastructure_intelligence(
                 bootstraps[kind] = await _bootstrap(
                     kind, fetch_json=fetch, timeout_seconds=bootstrap_timeout,
                 )
-            except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
                 errors.append(f"{kind}_bootstrap:{type(exc).__name__}")
 
         if domain and "domain" in bootstraps:
@@ -388,7 +330,7 @@ async def inspect_infrastructure_intelligence(
                     registration = _domain_summary(
                         await fetch(url, bootstrap_timeout), source_url=url,
                     )
-                except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
                     errors.append(f"domain_rdap:{type(exc).__name__}")
             else:
                 errors.append("domain_rdap:service_unavailable")
@@ -407,7 +349,7 @@ async def inspect_infrastructure_intelligence(
                         row["network"] = _network_summary(
                             await fetch(url, bootstrap_timeout), source_url=url,
                         )
-                    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
                         errors.append(f"ip_rdap:{address}:{type(exc).__name__}")
                 else:
                     errors.append(f"ip_rdap:{address}:service_unavailable")
