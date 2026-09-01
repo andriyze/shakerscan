@@ -1857,82 +1857,6 @@ async def _require_approval_receipt_if_policy_enabled(
 
 
 
-def _scan_option_was_explicit(options: Any, field: str) -> bool:
-    return field in getattr(options, "model_fields_set", set())
-
-
-def _custom_endpoint_count(options_payload: dict[str, Any]) -> int:
-    endpoints = options_payload.get("custom_endpoints")
-    if not isinstance(endpoints, list):
-        return 0
-    seen: set[str] = set()
-    for endpoint in endpoints:
-        if not isinstance(endpoint, str):
-            continue
-        value = endpoint.strip()
-        if value:
-            seen.add(value)
-    return len(seen)
-
-
-def _auto_shard_eligibility(
-    active_testing: bool, options_payload: dict[str, Any],
-) -> tuple[bool, str]:
-    endpoint_count = _custom_endpoint_count(options_payload)
-    if endpoint_count >= 2:
-        return True, f"{endpoint_count} explicit endpoints can be split by scope"
-    # A focused check_family scan (sqli/xss/bola/auth) is a deep single-family
-    # pass. Auto-sharding it into broad `coverage` dilutes that family's budget
-    # and adds the slow recon+merge path (observed: a focused SQLi scan hung in
-    # coverage and found nothing, while the direct pass found the login SQLi).
-    # Focused scans therefore run DIRECT; only broad scans fan out.
-    family = check_registry.normalize_check_family(_scan_check_family_value(options_payload))
-    if family and family != "all":
-        return False, f"focused {family} scan runs direct (auto-sharding would dilute the family pass)"
-    if active_testing:
-        return True, "active Scan can fan out endpoint coverage across workers"
-    return False, "passive Scan has no endpoint list and no active families to shard"
-
-
-def _resolve_auto_parallel_strategy(
-    strategy: Any,
-    active_testing: bool,
-    options_payload: dict[str, Any],
-) -> str:
-    """Resolve auto-sharding to the concrete strategy we will store/execute."""
-    normalized = _normalize_parallel_strategy(strategy, default="auto")
-    # A focused check_family scan must never run the broad `coverage` strategy:
-    # that fans out broad/sqli/xss lanes and dilutes (or skips) the requested
-    # family. `coverage_family` with a single requested family runs ONLY that
-    # family across endpoint slices, so it parallelizes without diluting. This
-    # holds for both explicit `coverage` and the auto path below.
-    focused = bool(
-        (lambda fam: fam and fam != "all")(
-            check_registry.normalize_check_family(_scan_check_family_value(options_payload))
-        )
-    )
-    if focused and normalized == "coverage":
-        return "coverage_family"
-    if normalized != "auto":
-        return normalized
-    endpoint_count = _custom_endpoint_count(options_payload)
-    if endpoint_count >= 2:
-        return "scope"
-    # Authenticated active scans: prefer the additive auth split so a primary
-    # credential ADDS an authenticated pass on top of the anonymous baseline
-    # instead of REPLACING it (which silently drops anonymous-only findings like
-    # unauthenticated SQLi). Each auth_split shard is a full smart scan — no
-    # family/scope fragmentation of the global+browser checks — and the authed
-    # shard keeps user1+user2 so cross-user BOLA still runs. Focused-family scans
-    # keep coverage_family (they need per-family endpoint slicing).
-    has_primary_auth = any(options_payload.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS)
-    if has_primary_auth and not focused and active_testing:
-        return "auth_split"
-    if active_testing:
-        return "coverage_family" if focused else "coverage"
-    return "family"
-
-
 def _build_canonical_scan_options_payload(
     options: Any,
     contract: ResolvedScanContract,
@@ -1984,18 +1908,32 @@ def _apply_auto_sharding_policy(
     options: Any,
     options_payload: dict[str, Any],
     active_testing: bool,
+    max_workers: int | None = None,
 ) -> tuple[bool, int | None]:
     """Resolve whether this scan should become a parallel parent.
 
     Explicit per-scan intent wins. If `parallel` is omitted, the global
     scan-execution setting can turn eligible scans into parent scans.
+
+    A resolved ceiling of one worker is authority, not a hint: advanced
+    force_single_worker lowers max_workers to 1, and a parent that fans out to
+    a single worker is not what the caller asked for. Previously only the
+    deprecated `options.parallel` could prevent fan-out, so the canonical
+    control was accepted and silently ignored. The refusal is recorded rather
+    than applied quietly, so the resolved scan says why it did not shard.
     """
-    if _scan_option_was_explicit(options, "parallel"):
+    if max_workers is not None and int(max_workers) <= 1:
+        options_payload["parallel"] = False
+        options_payload["auto_sharding_reason"] = (
+            "auto-sharding skipped: the resolved budget allows one worker"
+        )
+        return False, None
+    if sharding_policy.scan_option_was_explicit(options, "parallel"):
         if options.parallel:
             options_payload["parallel"] = True
             if not options_payload.get("shards"):
                 options_payload["shards"] = "auto"
-            options_payload["shard_strategy"] = _resolve_auto_parallel_strategy(
+            options_payload["shard_strategy"] = sharding_policy.resolve_auto_parallel_strategy(
                 options_payload.get("shard_strategy"),
                 active_testing,
                 options_payload,
@@ -2011,7 +1949,7 @@ def _apply_auto_sharding_policy(
         options_payload["parallel"] = False
         return False, None
 
-    eligible, reason = _auto_shard_eligibility(active_testing, options_payload)
+    eligible, reason = sharding_policy.auto_shard_eligibility(active_testing, options_payload)
     if not eligible:
         options_payload["parallel"] = False
         return False, None
@@ -2026,13 +1964,13 @@ def _apply_auto_sharding_policy(
         )
         return False, worker_count
 
-    strategy = _resolve_auto_parallel_strategy(
+    strategy = sharding_policy.resolve_auto_parallel_strategy(
         settings.get("auto_sharding_strategy"),
         active_testing,
         options_payload,
     )
     max_shards = _normalize_auto_shard_count(settings.get("auto_sharding_max_shards"), default=4)
-    if _custom_endpoint_count(options_payload) < 2 and active_testing:
+    if sharding_policy.custom_endpoint_count(options_payload) < 2 and active_testing:
         if strategy == "family":
             max_shards = min(max_shards, len(parallel_scan.FAMILY_SHARD_LABELS))
     requested_shards: Any = "auto"
@@ -2065,14 +2003,6 @@ def _has_second_user_auth_context(options: dict[str, Any]) -> bool:
 
 
 
-def _scan_check_family_value(options_payload: dict[str, Any]) -> Any:
-    return (
-        options_payload.get("check_family")
-        or options_payload.get("asm_check_family")
-        or options_payload.get("coverage_attempt_family")
-    )
-
-
 def _apply_scan_check_family_policy(
     options_payload: dict[str, Any],
     *,
@@ -2082,7 +2012,7 @@ def _apply_scan_check_family_policy(
     try:
         opts, family = check_registry.apply_scan_focus(
             options_payload,
-            _scan_check_family_value(options_payload),
+            sharding_policy.scan_check_family_value(options_payload),
         )
         if enforce_preconditions:
             check_registry.enforce_family_preconditions(
@@ -3390,6 +3320,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 scan_options_model,
                 scan_options,
                 active_testing,
+                max_workers=scan_contract.budget.max_workers,
             )
             scan_role = 'parent' if parallel_enabled else 'standalone'
 
@@ -5598,6 +5529,7 @@ configure_findings_router(
 )
 app.include_router(findings_router)
 try:
+    from scan import sharding_policy
     from schedules import router as schedule_ops
     from schedules.router import (
         SCHEDULE_HEALTH_LOOKBACK_DAYS,
@@ -5624,6 +5556,7 @@ try:
         ScheduleTargetSafetyError,
     )
 except ModuleNotFoundError:  # package import in host-side tests
+    from api.scan import sharding_policy
     from api.schedules import router as schedule_ops
     from api.schedules.router import (
         SCHEDULE_HEALTH_LOOKBACK_DAYS,
@@ -11433,6 +11366,7 @@ async def _submit_scan(
             execution_options,
             options_payload,
             scan_contract.policy.active_testing,
+            max_workers=scan_contract.budget.max_workers,
         )
         if parallel_worker_count is not None:
             parallel_worker_count = min(
