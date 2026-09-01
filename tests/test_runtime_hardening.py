@@ -1194,6 +1194,18 @@ def test_trivy_bundle_build_retries_transient_registry_failures():
     assert "Trivy data download failed" in dockerfile
 
 
+def test_api_overlay_retries_partial_docker_cli_download_and_verifies_checksum():
+    dockerfile = (ROOT / "scanner" / "Dockerfile.api").read_text()
+    download = dockerfile.index("https://download.docker.com/linux/static/stable/")
+    checksum = dockerfile.index('echo "${expected}  /tmp/docker.tgz" | sha256sum -c -')
+    extraction = dockerfile.index("tar -xzf /tmp/docker.tgz")
+
+    assert "curl --retry 4 --retry-all-errors --retry-delay 3" in dockerfile
+    assert "--connect-timeout 20" in dockerfile
+    assert "--max-time 300" in dockerfile
+    assert download < checksum < extraction
+
+
 def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     requirements = (ROOT / "scanner" / "requirements.txt").read_text()
