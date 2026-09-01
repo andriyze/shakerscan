@@ -1180,6 +1180,29 @@ class ParallelActionPlanCompiler:
             max(1, available_endpoint_slots // max(1, axis_count)),
             work_count,
         ))
+        # Endpoint count decides how many children there are; candidate count
+        # decides whether more children help. For an active Scan the verifiers
+        # are candidate-driven, and candidates come from parameterised routes --
+        # a fraction of the crawl. Splitting by endpoints alone fragments a small
+        # injectable surface across children AND quarters each child's verifier
+        # ledger, so every child drops to a smaller batch tier at once.
+        #
+        # Measured on the benchmark application: 138 endpoints yielded 9
+        # candidates. Unsharded, those 9 verified at the thorough tier and
+        # produced 13 verified findings. Split four ways they landed 5/4/0/0 --
+        # three children with nothing to do -- each at the fast tier, and the run
+        # produced none. Keep a child only if it can hold enough injectable
+        # surface to fill a verifier batch; below that, fanning out costs depth
+        # and buys nothing.
+        injectable = sum(1 for item in endpoints if "?" in str(item))
+        if parent_execution_plan.policy.active_testing and injectable:
+            candidate_slots = max(1, injectable // _MIN_INJECTABLE_ENDPOINTS_PER_SHARD)
+            if candidate_slots < per_axis_slots:
+                notes.append(
+                    f"endpoint fan-out limited to {candidate_slots} by "
+                    f"{injectable} injectable endpoints"
+                )
+                per_axis_slots = candidate_slots
         expanded_placements: list[ParallelPlacementCapacity] = []
         for placement in placement_lanes:
             expanded_placements.extend([placement] * placement.capacity)
@@ -1877,6 +1900,13 @@ def merge_parallel_action_executions(
         ],
     }
     return {**payload, "merge_digest": _digest(payload)}
+
+
+# The smallest injectable surface worth its own endpoint child. thorough's XSS
+# slice verifies 4 candidates and its SQLi slice 6, so a child holding fewer
+# parameterised routes than one full batch cannot even fill the verifier it was
+# split off to run -- it only takes budget away from the children that can.
+_MIN_INJECTABLE_ENDPOINTS_PER_SHARD = 8
 
 
 def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:

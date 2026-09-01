@@ -3411,8 +3411,26 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
                     "status": "completed",
                     "result": {
                         "active_checks": {"active_worklist": [
-                            "GET /api/a?id=1", "GET /api/b?id=1",
-                            "GET /api/c?id=1", "GET /api/d?id=1",
+                            # Enough injectable surface to warrant fan-out:
+                            # a child that cannot fill one verifier batch is not
+                            # split off, so a 4-endpoint fixture would collapse
+                            # to a single endpoint child and stop exercising it.
+                            "GET /api/a?id=1",
+                            "GET /api/b?id=1",
+                            "GET /api/c?id=1",
+                            "GET /api/d?id=1",
+                            "GET /api/e?id=1",
+                            "GET /api/f?id=1",
+                            "GET /api/g?id=1",
+                            "GET /api/h?id=1",
+                            "GET /api/i?id=1",
+                            "GET /api/j?id=1",
+                            "GET /api/k?id=1",
+                            "GET /api/l?id=1",
+                            "GET /api/m?id=1",
+                            "GET /api/n?id=1",
+                            "GET /api/o?id=1",
+                            "GET /api/p?id=1",
                         ]}
                     },
                     "error_message": None,
@@ -3457,8 +3475,22 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
         for endpoint in json.loads(args[4])["custom_endpoints"]
     ]
     assert sorted(assigned) == sorted([
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     ])
 
 
@@ -5338,8 +5370,22 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
     campaign_id = uuid.UUID("44444444-4444-4444-4444-444444444444")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
@@ -5388,7 +5434,8 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
         assert persisted["zero_rediscovery"] is True
         assert "custom_budget" not in persisted
         assert persisted["parallel_budget_partition"] == job.shard.sub_budget.payload()
-        assert len(persisted["custom_endpoints"]) == 2
+        # 16 injectable endpoints split across two endpoint children.
+        assert len(persisted["custom_endpoints"]) == 8
     assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
     assert redis.sets[0][1] == 3
     parent_update = [
@@ -5411,8 +5458,22 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     target_id = uuid.UUID("34343434-3434-3434-3434-343434343434")
     campaign_id = uuid.UUID("45454545-4545-4545-4545-454545454545")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
@@ -5463,8 +5524,22 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
     target_id = uuid.UUID("35353535-3535-3535-3535-353535353535")
     campaign_id = uuid.UUID("46464646-4646-4646-4646-464646464646")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id,
@@ -5540,8 +5615,22 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
     target_id = uuid.UUID("36363636-3636-3636-3636-363636363636")
     campaign_id = uuid.UUID("47474747-4747-4747-4747-474747474747")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id,
@@ -5610,7 +5699,7 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
     assert parent_options["parallel_strategy"] == "coverage_family"
     assert parent_options["coverage_allocation"] == "static"
     assert parent_options["coverage_check_families"] == ["sqli", "xss"]
-    assert parent_options["coverage_expected_attempts"] == 8
+    assert parent_options["coverage_expected_attempts"] == 32
 
 
 def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypatch):
@@ -5618,8 +5707,22 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     target_id = uuid.UUID("37373737-3737-3737-3737-373737373737")
     campaign_id = uuid.UUID("48484848-4848-4848-4848-484848484848")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id,

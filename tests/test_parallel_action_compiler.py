@@ -1,6 +1,7 @@
 from dataclasses import replace
 import hashlib
 import json
+import uuid
 
 import pytest
 
@@ -1251,3 +1252,48 @@ def test_merged_family_reason_agrees_with_its_counters():
         "coverage_status": "partial",
     })
     assert other["reason"] == "action_incomplete"
+
+
+def test_fan_out_width_is_bounded_by_injectable_surface():
+    """More children only help when there are candidates to give them.
+
+    Endpoint count decides how many children are possible; candidate count
+    decides whether more help. Active verifiers are candidate-driven, and
+    candidates come from parameterised routes -- a fraction of the crawl.
+    Splitting by endpoints alone fragments a small injectable surface AND
+    divides each child's verifier ledger, dropping every child to a smaller
+    batch tier at once.
+
+    Measured on the benchmark application: 138 endpoints yielded 9 candidates.
+    Unsharded those verified at the thorough tier and produced 13 verified
+    findings; split four ways they landed 5/4/0/0 -- three children with nothing
+    to do -- each at the fast tier, and the run produced none.
+    """
+    execution, parent = _endpoint_authority()
+    placements = (ParallelPlacementCapacity("local", 5, {"node_scope": "local"}),)
+
+    def endpoint_children(plan_execution, endpoints):
+        planned = ParallelActionPlanCompiler().plan_parent(
+            parent_execution_plan=plan_execution,
+            parent_action_plan=parent,
+            target_binding=_target(),
+            endpoint_manifest_entries=endpoints,
+            placements=placements,
+            discovery_owned_externally=True,
+        )
+        return [child for child in planned.children if child.role == "endpoint"]
+
+    # A wide crawl with a narrow injectable surface: one child, because a second
+    # could not fill a verifier batch and would only take budget from the first.
+    narrow = [f"GET /page{index}" for index in range(120)]
+    narrow += [f"GET /api/item{index}?id=1" for index in range(9)]
+    assert len(endpoint_children(execution, narrow)) == 1
+
+    # A genuinely wide injectable surface still fans out.
+    wide = [f"GET /api/item{index}?id=1" for index in range(120)]
+    assert len(endpoint_children(execution, wide)) > 1
+
+    # Passive Scans are untouched by construction: the bound sits inside the
+    # active_testing branch, because template breadth scales with endpoints
+    # rather than candidates. Asserting that here would need a passive plan that
+    # carries endpoint-scoped work, which a recon-only plan does not.
