@@ -19,6 +19,7 @@ from api.scan.work_manifests import (
     build_canonical_passive_nuclei_template_manifest,
     build_canonical_scan_nuclei_template_manifest,
 )
+from api.scan.contracts import BUDGET_PROFILES
 from api.scan.execution import ScanExecutionPlan
 
 
@@ -947,3 +948,82 @@ def test_a_small_candidate_manifest_does_not_fail_a_required_family():
         )
         assert slice_size <= 8
         assert len(batches) <= max(1, (entry_count + slice_size - 1) // slice_size) + 1
+
+
+def test_thorough_funds_proof_before_template_breadth():
+    """Proof outranks breadth when the wall budget cannot buy both.
+
+    Dropping the tail of a large candidate manifest is correct triage. Dropping
+    the only stage that can produce deterministic proof is not. Measured on a
+    thorough single-worker Scan: `sqli.prove_batch` and `xss.browser_prove_batch`
+    matched neither the verifier tier nor the breadth tier, so they sorted into
+    the catch-all below a broad template sweep. `prove.xss` was skipped for wall
+    budget while all 1,000 of the profile's browser actions went unspent -- the
+    scan bought coverage it could not prove anything with.
+    """
+    profile = "thorough"
+    budget = BUDGET_PROFILES[profile]
+    execution = ScanExecutionPlan(
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=False,
+            network_discovery=False,
+            subdomain_discovery=False,
+            include_families=(
+                "recon", "nuclei_passive", "nuclei_active",
+                "xss", "sqli", "sensitive_exposure", "nosqli",
+            ),
+            exclude_families=(),
+            scope_receipt_id=_target().scope_receipt_id,
+            approval_receipt_id=str(uuid.UUID("10000000-0000-0000-0000-000000000004")),
+        ),
+        budget_profile=profile,
+        budget=budget,
+    )
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000091",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="e" * 64,
+        entry_count=400,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000092",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="f" * 64,
+        entry_count=1_526,
+        status="complete",
+    ).canonical_dict()
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=build_canonical_scan_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=_target().digest,
+            include_active=True,
+        ).reference().canonical_dict(),
+    )
+    allocation = allocate_scan_action_plan(plan, budget)
+    skipped = set(allocation.skipped_action_ids)
+    funded_breadth = {
+        action.action_id for action in plan.actions
+        if action.capability_name in {
+            "templates.passive_batch", "templates.active_batch",
+        } and action.action_id not in skipped
+    }
+
+    # The first proof action of each family is funded.
+    for proof_action in ("prove.xss", "prove.sqli"):
+        assert proof_action not in skipped, (
+            f"{proof_action} was dropped while breadth {sorted(funded_breadth)} "
+            f"was funded; residual {dict(allocation.residual_scan_execute_budget)}"
+        )
+    # And the browser budget the profile grants is actually reachable.
+    assert int(dict(allocation.allocated).get("browser_actions") or 0) > 0, (
+        "thorough grants browser actions that no funded action can spend"
+    )

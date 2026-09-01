@@ -79,9 +79,21 @@ _PRIMARY_ACTIVE_VERIFIER_IDS = {
 # participates in a canonical Scan action plan.
 _VERIFIER_NAME_SUFFIXES = (".verify", ".verify_batch", ".request_verify", ".request_verify_batch")
 _NON_SCAN_VERIFIER_CAPABILITIES = frozenset({"candidate.verify", "device.service.verify"})
+# Proof capabilities take an existing candidate and produce the deterministic
+# execution evidence that promotes a finding to verified. Only their names differ
+# from the verifier suffixes above, so the same registry-derived treatment applies:
+# written by hand they would drift out again, and they already had. Measured on a
+# thorough Scan, `sqli.prove_batch` and `xss.browser_prove_batch` matched neither
+# the verifier set nor the breadth set, so they fell to the catch-all tier BELOW a
+# broad template sweep. `prove.xss` was then skipped for wall budget while all
+# 1,000 of the profile's browser actions went unspent -- the profile funded
+# breadth it did not need and starved the only stage that can produce proof.
+# Suffixes, not dotted segments: the browser prover is `xss.browser_prove_batch`,
+# so a ".prove_batch" match would have silently covered only half the tier.
+_PROOF_NAME_SUFFIXES = ("prove", "prove_batch")
 
 
-def _derive_active_verifier_capabilities() -> frozenset[str]:
+def _derive_capabilities(suffixes: tuple[str, ...]) -> frozenset[str]:
     try:
         from runtime.capability_registry import CAPABILITY_REGISTRY
     except ModuleNotFoundError:  # package import in host-side tests
@@ -90,12 +102,13 @@ def _derive_active_verifier_capabilities() -> frozenset[str]:
         name for name in (
             str(getattr(spec, "name", spec)) for spec in CAPABILITY_REGISTRY.list()
         )
-        if name.endswith(_VERIFIER_NAME_SUFFIXES)
+        if name.endswith(suffixes)
         and name not in _NON_SCAN_VERIFIER_CAPABILITIES
     )
 
 
-_ACTIVE_VERIFIER_CAPABILITIES = _derive_active_verifier_capabilities()
+_ACTIVE_VERIFIER_CAPABILITIES = _derive_capabilities(_VERIFIER_NAME_SUFFIXES)
+_ACTIVE_PROOF_CAPABILITIES = _derive_capabilities(_PROOF_NAME_SUFFIXES)
 
 # Template sweeps broaden coverage; they never prove anything. Passive batches belong
 # here with the rest -- omitting them left them in the catch-all tier, competing with
@@ -125,11 +138,16 @@ def _allocation_priority(action: ScanAction) -> int:
         return 2
     if action.action_id in _PRIMARY_ACTIVE_VERIFIER_IDS:
         return 3
-    if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
+    # Proving one existing candidate outranks verifying another. Only deterministic
+    # proof promotes a finding to verified, so it is funded before candidate breadth
+    # and well before a template sweep that proves nothing.
+    if action.capability_name in _ACTIVE_PROOF_CAPABILITIES:
         return 4
-    if action.capability_name in _TEMPLATE_BREADTH_CAPABILITIES:
+    if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
         return 5
-    return 6
+    if action.capability_name in _TEMPLATE_BREADTH_CAPABILITIES:
+        return 6
+    return 7
 
 
 def allocate_scan_action_plan(
