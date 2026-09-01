@@ -20,6 +20,8 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -99,6 +101,25 @@ def main() -> int:
         return 1
     manifest = yaml.safe_load(MANIFEST.read_text(encoding="utf-8")) or {}
     surfaces = manifest.get("surfaces") or []
+
+    source_head = str(manifest.get("source_head") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_head):
+        violations.append("source_head must be one full lowercase commit SHA")
+    else:
+        try:
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", source_head, "HEAD"],
+                cwd=REPOSITORY_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            violations.append("source_head is not an ancestor of the current checkout")
+    if manifest.get("release_boundary") != (
+        "canonical_scan_hunt_with_transitional_compatibility_writes"
+    ):
+        violations.append("release_boundary must disclose transitional compatibility writes")
 
     seen_ids: set[str] = set()
     for surface in surfaces:

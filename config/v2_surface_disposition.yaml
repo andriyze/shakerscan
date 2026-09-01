@@ -14,7 +14,11 @@
 #   KEEP_CANONICAL        this is the V2 authority
 #   ARCHIVE_DOC_ONLY      historical context only
 schema_version: v2-surface-disposition/v1
-source_head: 061a6d40106104d17a8983feec01236bc7cf1c05
+# Audited convergence baseline. The checker requires this exact commit to exist
+# and remain an ancestor of the current checkout; later work may only shrink the
+# pending-write backlog unless this baseline is deliberately advanced.
+source_head: 11ecfdd7b29e5259ea07b10649a2c4f5872198ce
+release_boundary: canonical_scan_hunt_with_transitional_compatibility_writes
 
 surfaces:
   # ---------------------------------------------------------------- canonical

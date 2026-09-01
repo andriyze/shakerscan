@@ -47,9 +47,9 @@ ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
 | **SCAN-04** | Coverage distinguishes completed, skipped, blocked, cancelled, failed, partial, and unobserved work. | Parent/shard/ASM rollups and multiple live scan configurations. |
 | **HUNT-01** | One target-kind-aware Hunt runtime exposes only canonical registered capabilities and cannot broaden target/approval scope. | MCP/CLI/UI Hunt smoke across web and device targets, plus fail-closed negative calls. |
 | **DATA-01** | Targets, scans, findings, credentials, collections, evidence, campaigns, and historical rows remain target-bound, redacted, bounded, and navigable. | API cross-checks and multiple real UI detail records from each source. |
-| **DEVICE-01** | Device inventory, positive reachability, service evidence, policies, collections, credentials, and HTTP handoff stay separate from Web DAST metrics. | Current device worker, LG TV scan/Hunt, saved-profile/collection, and policy UI receipts. |
+| **DEVICE-01** | Device inventory, positive reachability, service evidence, policies, collections, credentials, and HTTP handoff stay separate from Web DAST metrics. | Deterministic fixture/worker contracts and device/API/UI separation receipts. Physical-device acceptance is required only when qualifying that hardware support boundary. |
 | **MODEL-01** | Model acquisition, scanners, reports, signing, policy, and Firecracker evidence remain bound to one immutable subject and fail closed. | Full suites, fixture/public-model E2E, artifact cross-checks, and host-readiness UI. |
-| **FLEET-01** | Broker enrollment, leases, placement, credentials, artifacts, cancellation, and build truth fail closed across real Linux hosts. | Automated contracts and exact-SHA real-fleet parity; physical fault acceptance when available. |
+| **FLEET-01** | Broker enrollment, leases, placement, credentials, artifacts, cancellation, and build truth fail closed. | Automated contracts and exact-manifest broker fault acceptance. Real multi-host parity is optional evidence for that deployment boundary and is never recorded as passed when omitted. |
 | **UPGRADE-01** | Clean, repeated dirty upgrades and rollback preserve state; required-schema failures stop startup. | Published-baseline upgrade/rollback receipt and migration-failure tests. |
 | **DEP-01** | Supported runtimes contain no unaccepted high/critical production dependency findings. | Locked Python audit, production npm audit, and candidate image inventory. |
 | **BUILD-01** | UI, API, workers, signer, tools, rules, templates, version, source SHA, and image digests are reproducible and identical where required. | Candidate build self-tests, complete suite, generated inventory, SBOM/provenance, and identity checks. |
@@ -58,6 +58,12 @@ ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
 Do not waive untrustworthy proof, false-clean coverage, unsafe unbounded execution, stale-fleet
 evidence, migration startup after required-schema failure, failed core DAST/Hunt/device acceptance,
 failed Model Intake containment, digest drift, or unaccepted high/critical production dependencies.
+
+The canonical 2.0 Scan/Hunt architecture does not mean every compatibility endpoint has been
+deleted. The machine-checked surface manifest currently discloses 31 research, local-agent, and
+Arsenal investigation writes as `MERGE_THEN_DELETE`. They remain a bounded compatibility backlog,
+not alternate execution engines, and release messaging must retain that qualification until the
+backlog reaches zero.
 
 ## Preliminary preparation evidence
 
@@ -181,8 +187,9 @@ receipts.
   policy/budget/collection configurations on a current fleet.
 - [ ] Saved request collections and exact-target credential profiles are selected where applicable;
   reusable secret values never enter UI, canonical requests, queues, logs, or receipts.
-- [ ] A bounded Web/API Hunt and an LG TV device/Hunt path exercise saved collections/credentials and
-  preserve device/Web namespace separation.
+- [ ] A bounded Web/API Hunt and deterministic device/Hunt fixture exercise saved
+  collections/credentials and preserve device/Web namespace separation. Physical-device evidence
+  belongs to the optional support-boundary qualification below.
 - [ ] Every new submission records its scan/Hunt ID and browser link. Long-running scans are not
   polled as part of the submission turn; results are evaluated in a later acceptance pass.
 
