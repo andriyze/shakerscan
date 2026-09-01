@@ -553,6 +553,8 @@ def prepare_scan_external_capability(
         for name, amount in dict(specification.budget_cost).items()
         if int(amount) > 0
     }
+    if specification.name == "xss.verify" and not normalized.get("deep_domxss"):
+        estimated.pop("browser_actions", None)
     if not estimated:
         raise ScanCapabilityContractError(
             f"{specification.name} has no reservable budget"
