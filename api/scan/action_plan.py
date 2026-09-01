@@ -1341,7 +1341,17 @@ class ScanActionPlanCompiler:
                         0, limits.get(name, 0) - reserved.get(name, 0),
                     )
                     affordable = min(affordable, available_amount // amount)
-            count = max(1, minimum_batches if required else 0, affordable)
+            # ``affordable`` is what this plan's own ledger can actually pay for.
+            # Taking max() with the published minimum discarded that: a parallel
+            # endpoint child holds a fraction of the parent ceiling but inherits the
+            # parent's profile name, so thorough's floor of two XSS batches was
+            # forced onto a child that could fund one. The second slice is required,
+            # so the whole Scan failed closed -- "required Scan action verify.xss.001
+            # exceeds the plan budget: {'http_requests': 48}" -- rather than running
+            # the breadth it could afford. The minimum is a target for planning, not
+            # authority over a budget; ``total_batches`` below still reserves it when
+            # the candidate manifest is not yet materialized.
+            count = max(1, affordable)
             count = min(
                 total_batches,
                 count,
@@ -1354,7 +1364,11 @@ class ScanActionPlanCompiler:
             # yields one batch of candidates has still run the family, and
             # failing there is why no thorough scan could complete. Fail only
             # when the plan cannot fit the batches the work actually needs.
-            if required and count < min(minimum_batches, total_batches):
+            # Budget shortage degrades; only graph capacity fails. Comparing
+            # against the published minimum alone conflated the two once
+            # affordability bounded ``count``: a child that could fund one batch
+            # tripped a check meant for dependency-slot exhaustion.
+            if required and count < min(minimum_batches, total_batches, max(1, affordable)):
                 raise ScanActionPlanError(
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )

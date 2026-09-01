@@ -127,7 +127,11 @@ def test_large_manifest_compiles_to_bounded_batch_graph():
     execution = ScanExecutionPlan(
         policy=base.policy,
         budget_profile="thorough",
-        budget=base.budget,
+        # The profile's real ceiling, not a hand-built one. thorough's published
+        # two-batch intent is only a guarantee when the budget is thorough's:
+        # batch counts are bounded by what the plan can actually reserve, so a
+        # thorough label over a smaller ledger correctly plans fewer.
+        budget=BUDGET_PROFILES["thorough"],
     )
 
     plan = ScanActionPlanCompiler().compile(
@@ -1026,4 +1030,73 @@ def test_thorough_funds_proof_before_template_breadth():
     # And the browser budget the profile grants is actually reachable.
     assert int(dict(allocation.allocated).get("browser_actions") or 0) > 0, (
         "thorough grants browser actions that no funded action can spend"
+    )
+
+
+def test_a_shard_sized_budget_plans_the_batches_it_can_fund():
+    """A child holding a fraction of the parent ceiling must not inherit its floor.
+
+    Parallel endpoint children carry the parent's budget_profile name but a
+    divided ledger. thorough publishes a two-batch XSS minimum, and that floor
+    used to override the affordability calculation directly above it, so a child
+    that could fund one batch was still given two -- both required. Allocation
+    then failed the entire Scan closed: "required Scan action verify.xss.001
+    exceeds the plan budget: {'http_requests': 48}".
+    """
+    base = _execution(include=("xss", "sqli", "nuclei_passive", "nuclei_active"))
+    # A realistic endpoint child's share: thorough's 20,000 requests less what
+    # placed discovery spent, divided across the global child and its siblings.
+    shard_budget = ScanBudget(
+        max_duration_seconds=5_400,
+        max_http_requests=4_700,
+        max_endpoints=30,
+        max_browser_actions=1,
+        max_tcp_ports=1,
+        max_tool_wall_seconds=1_800,
+        max_workers=1,
+        max_state_changing_requests=0,
+        max_hosts=30,
+    )
+    execution = ScanExecutionPlan(
+        policy=base.policy, budget_profile="thorough", budget=shard_budget,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        endpoint_manifest_ref=ScanWorkManifestReference(
+            manifest_id="10000000-0000-4000-8000-000000000093",
+            kind="endpoint",
+            content_schema="endpoint-manifest/v2",
+            manifest_digest="a" * 64,
+            entry_count=30,
+            status="complete",
+        ).canonical_dict(),
+        candidate_manifest_ref=ScanWorkManifestReference(
+            manifest_id="10000000-0000-4000-8000-000000000094",
+            kind="candidate",
+            content_schema="candidate-manifest/v1",
+            manifest_digest="b" * 64,
+            entry_count=60,
+            status="complete",
+        ).canonical_dict(),
+        template_manifest_ref=build_canonical_scan_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=_target().digest,
+            include_active=True,
+        ).reference().canonical_dict(),
+        action_scope="endpoint",
+    )
+
+    # The family is still attempted -- that is what required means.
+    xss = [a for a in plan.actions if a.capability_name == "xss.verify_batch"]
+    assert xss, "an explicitly requested family must still plan a verifier"
+    # And every action the plan compiled is one the shard ledger can reserve.
+    allocation = allocate_scan_action_plan(plan, shard_budget)
+    required_skipped = {
+        action.action_id for action in plan.actions
+        if action.required and action.action_id in set(allocation.skipped_action_ids)
+    }
+    assert not required_skipped, (
+        f"shard plan compiled required work it cannot fund: {sorted(required_skipped)}"
     )
