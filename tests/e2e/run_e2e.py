@@ -361,12 +361,19 @@ def run_model_intake() -> H.Scorecard:
 # validation). Override SHAKERSCAN_E2E_HONEY_HOST on Linux CI (e.g. the compose
 # service name / bridge IP).
 HONEY_HOST = os.environ.get("SHAKERSCAN_E2E_HONEY_HOST", "host.docker.internal")
+# Keep the host-served fixture on its own DNS identity. Web targets intentionally
+# deduplicate by hostname, so sharing HONEY_HOST with a benchmark on another port
+# makes a long-lived acceptance stack bind the fixture Hunt to the benchmark's
+# stored origin. Compose maps this name to the host gateway for every executor.
+FIXTURES_HOST = os.environ.get(
+    "SHAKERSCAN_E2E_FIXTURES_HOST", "shakerscan-fixtures.internal",
+)
 # The local fixtures server (started in main) — worker-reachable, deterministic,
 # and deliberately leaky, so the AI detection/redaction and Model-Intake artifact
 # assertions run without external honey apps. Override SHAKERSCAN_E2E_AI_ENDPOINT
 # to point at a real honey AI app instead.
 FIXTURES_PORT = int(os.environ.get("SHAKERSCAN_E2E_FIXTURES_PORT", "18099"))
-FIXTURES_BASE = f"http://{HONEY_HOST}:{FIXTURES_PORT}"
+FIXTURES_BASE = f"http://{FIXTURES_HOST}:{FIXTURES_PORT}"
 AI_ENDPOINT = os.environ.get("SHAKERSCAN_E2E_AI_ENDPOINT", f"{FIXTURES_BASE}/ai/chat")
 
 
@@ -849,7 +856,7 @@ HUNT_WEB_TARGET = os.environ.get(
 def _dast_fixture_authority(
     fixture_target: str = FIXTURES_BASE,
     *,
-    allowed_host: str = HONEY_HOST,
+    allowed_host: str = FIXTURES_HOST,
 ) -> tuple[str, str, dict[str, dict[str, str]]]:
     """Create target-bound approval plus exact saved-request selections."""
     _, target = H.post("/targets", {
@@ -992,7 +999,7 @@ def _dast_fixture_authority(
 def _hunt_fixture_authority(
     fixture_target: str = FIXTURES_BASE,
     *,
-    allowed_host: str = HONEY_HOST,
+    allowed_host: str = FIXTURES_HOST,
     risk_tier: str = "active",
 ) -> tuple[str, str, str]:
     """Create one reusable, target-bound, bounded Hunt approval."""
@@ -1152,6 +1159,21 @@ def run_hunt() -> H.Scorecard:
     """Exercise canonical Hunt authority through REST, CLI, and MCP clients."""
     sc = H.Scorecard("hunt")
     print("\n== Hunt V2 e2e ==", flush=True)
+
+    def action_result(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        value = payload.get("action_result")
+        return value if isinstance(value, dict) else {}
+
+    def canonical_action_status(payload: object) -> str:
+        return str(action_result(payload).get("status") or "")
+
+    def action_receipt_id(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        result = payload.get("result")
+        return str(result.get("receipt_id") or "") if isinstance(result, dict) else ""
     target_id = scope_id = approval_id = ""
     try:
         hunt_host = urllib.parse.urlsplit(HUNT_WEB_TARGET).hostname or HONEY_HOST
@@ -1200,7 +1222,8 @@ def run_hunt() -> H.Scorecard:
             "H-2 passive action persists receipt and duplicate delivery is idempotent",
             call_status == replay_status == 200
             and bool(first.get("action_id"))
-            and bool(first.get("receipt_id"))
+            and canonical_action_status(first) == "success"
+            and bool(action_receipt_id(first))
             and replay.get("action_id") == first.get("action_id")
             and replay.get("idempotent_replay") is True,
             f"first={first} replay={replay}",
@@ -1274,8 +1297,8 @@ def run_hunt() -> H.Scorecard:
             "H-7 privileged verifier settles a durable action and receipt",
             call_status == 200
             and bool(action.get("action_id"))
-            and bool(action.get("receipt_id"))
-            and action.get("status") in {"completed", "partial"},
+            and bool(action_receipt_id(action))
+            and canonical_action_status(action) in {"success", "partial"},
             f"status={call_status} action={action}",
         )
         revoke_status, revoked = H.post(
@@ -1381,7 +1404,8 @@ def run_hunt() -> H.Scorecard:
             "H-11 installed CLI start and call produce valid V2 authority",
             valid_cli_start.returncode == cli_call.returncode == 0
             and bool(cli_hunt_id)
-            and cli_action.get("response", {}).get("status") == "completed",
+            and canonical_action_status(cli_action.get("response")) == "success"
+            and bool(action_receipt_id(cli_action.get("response"))),
             f"start_exit={valid_cli_start.returncode} call_exit={cli_call.returncode}",
         )
         H.post(f"/hunts/{cli_hunt_id}/finish", {
@@ -1426,10 +1450,11 @@ def run_hunt() -> H.Scorecard:
         sc.check(
             "H-12 MCP start, query, capability, and finish use the real V2 API",
             bool(mcp_hunt_id)
-            and action.get("status") == "completed"
+            and canonical_action_status(action) == "success"
+            and bool(action_receipt_id(action))
             and int(queried.get("count") or 0) >= 1
             and finished.get("status") == "completed",
-            f"hunt={mcp_hunt_id} action={action.get('status')}",
+            f"hunt={mcp_hunt_id} action={canonical_action_status(action)}",
         )
     except Exception as exc:
         sc.error("H-12 MCP real-stack acceptance", exc)
@@ -1487,8 +1512,8 @@ def run_hunt() -> H.Scorecard:
             and bool(api_hunt_id)
             and all(
                 item.get("http_status") == 200
-                and item.get("status") in {"completed", "partial"}
-                and item.get("receipt_id")
+                and canonical_action_status(item) in {"success", "partial"}
+                and action_receipt_id(item)
                 for item in actions
             )
             and {item.get("principal") for item in relevant} >= {"owner", "attacker"}
@@ -1543,12 +1568,12 @@ def run_hunt() -> H.Scorecard:
             "H-14 network Hunt binds registered addresses and cancellation stops new work",
             status == 200
             and action_status == 200
-            and action.get("status") in {"completed", "partial"}
-            and bool(action.get("receipt_id"))
+            and canonical_action_status(action) in {"success", "partial"}
+            and bool(action_receipt_id(action))
             and cancelled.get("status") == "cancelled"
             and after_status == 409,
             (
-                f"start={status} action={action_status}/{action.get('status')} "
+                f"start={status} action={action_status}/{canonical_action_status(action)} "
                 f"cancel={cancelled.get('status')} after={after_status}"
             ),
         )
@@ -1596,8 +1621,8 @@ def run_hunt() -> H.Scorecard:
             device_status == 200
             and status == 200
             and action_status == 200
-            and action.get("status") == "completed"
-            and bool(action.get("receipt_id"))
+            and canonical_action_status(action) == "success"
+            and bool(action_receipt_id(action))
             and isinstance(context.get("device_policy_state"), dict)
             and context.get("device_policy_state", {}).get("schema_version")
                 == "hunt-device-policy/v2"
@@ -1778,13 +1803,17 @@ def run_hunt() -> H.Scorecard:
             )
             proof_path = os.environ.get(
                 "SHAKERSCAN_E2E_HUNT_PROOF_PATH",
-                "/#/track-result?id=shakerscan",
+                "/#/search?q=shakerscan",
             )
             proof_status, proof_action = H.post(
                 f"/hunts/{adaptive_hunt_id}/capabilities/xss.verify",
                 {
                     "idempotency_key": f"e2e-adaptive-xss-{_RUN_NONCE}",
-                    "input": {"path": proof_path, "severity": "high"},
+                    "input": {
+                        "path": proof_path,
+                        "severity": "high",
+                        "deep_domxss": True,
+                    },
                 },
                 timeout=240,
             )
