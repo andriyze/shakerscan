@@ -19,11 +19,13 @@ from api.runtime.http_archive import (
     DEFAULT_MAX_BODY_BYTES,
     MAX_HEADER_BYTES,
     HttpTransaction,
+    bounded_metadata,
     capped_body,
     har_document,
     har_entry,
     hunt_call_recorder,
     normalized_headers,
+    record_archive_stats,
     transaction_rows,
 )
 from api.runtime.http_archive_reader import (
@@ -75,6 +77,11 @@ def test_headers_are_bounded_so_one_call_cannot_dominate_the_archive():
     assert sum(len(k) + len(v) for k, v in stored.items()) <= MAX_HEADER_BYTES + 1_100
 
 
+def test_header_ceiling_counts_encoded_bytes_not_unicode_codepoints():
+    stored = normalized_headers({"x-wide": "\N{SNOWMAN}" * MAX_HEADER_BYTES})
+    assert stored == {}
+
+
 def test_header_names_are_normalized_but_values_are_kept_as_sent():
     stored = normalized_headers({"Content-Type": "TEXT/HTML", "X-Probe": "Value"})
     assert stored == {"content-type": "TEXT/HTML", "x-probe": "Value"}
@@ -82,12 +89,23 @@ def test_header_names_are_normalized_but_values_are_kept_as_sent():
 
 def test_a_transaction_must_name_its_plane_method_and_url():
     for kwargs in (
-        {"plane": "invented", "method": "GET", "url": "https://t/"},
-        {"plane": "scan", "method": "", "url": "https://t/"},
-        {"plane": "scan", "method": "GET", "url": ""},
+        {"plane": "invented", "method": "GET", "url": "https://t/", "scan_id": "s1"},
+        {"plane": "scan", "method": "", "url": "https://t/", "scan_id": "s1"},
+        {"plane": "scan", "method": "GET", "url": "", "scan_id": "s1"},
     ):
         with pytest.raises(ValueError):
             HttpTransaction(**kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"plane": "scan"},
+    {"plane": "scan", "scan_id": "s1", "hunt_run_id": "h1"},
+    {"plane": "scan", "hunt_run_id": "h1"},
+    {"plane": "hunt", "scan_id": "s1"},
+])
+def test_a_transaction_has_exactly_one_plane_appropriate_owner(kwargs):
+    with pytest.raises(ValueError):
+        HttpTransaction(method="GET", url="https://t/", **kwargs)
 
 
 def test_rows_carry_the_identity_of_the_work_that_made_the_call():
@@ -186,6 +204,52 @@ def test_the_export_states_its_redaction_and_fidelity():
     assert empty["fidelity"] == "unavailable", (
         "a run with no archived calls must not look like one that made none"
     )
+
+
+def test_metadata_archive_mode_keeps_body_digest_and_length_without_content(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "metadata")
+    payload = b"credential-bearing-body"
+    stored_blobs = []
+
+    rows = transaction_rows([HttpTransaction(
+        plane="scan", scan_id="s1", method="POST", url="https://t/",
+        request_body=payload,
+    )], store_blob=lambda content: stored_blobs.append(content) or "blob")
+
+    assert rows[0]["request_body_object_id"] is None
+    assert rows[0]["request_body_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert rows[0]["request_body_bytes"] == len(payload)
+    assert stored_blobs == []
+
+
+def test_oversized_metadata_remains_valid_and_declares_truncation():
+    metadata = bounded_metadata({"target_controlled": "x" * 100_000})
+
+    assert metadata["metadata_truncated"] is True
+    assert metadata["original_bytes"] > 100_000
+    assert len(json.dumps(metadata).encode("utf-8")) <= 16 * 1024
+
+
+def test_archive_drop_accounting_accumulates_independent_drains():
+    class Connection:
+        def __init__(self):
+            self.query = None
+
+        async def execute(self, query, *_args):
+            self.query = query
+
+    conn = Connection()
+    asyncio.run(record_archive_stats(
+        conn,
+        owner_kind="scan",
+        owner_id="11111111-1111-4111-8111-111111111111",
+        attempted=10,
+        stored=8,
+        failed=2,
+        dropped=3,
+    ))
+
+    assert "dropped = http_archive_stats.dropped + EXCLUDED.dropped" in conn.query
 
 
 def test_fidelity_is_backed_by_counters_not_by_row_count():

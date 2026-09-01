@@ -44,6 +44,7 @@ DEFAULT_MODE = "full"
 # digest is, and keeping the whole thing would make one scan's archive unbounded.
 DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
+MAX_METADATA_BYTES = 16 * 1024
 # Rows are written in batches; a scan can make tens of thousands of calls and a round trip
 # per request would dominate its runtime.
 DEFAULT_BATCH_SIZE = 100
@@ -116,6 +117,15 @@ class HttpTransaction:
             raise ValueError("an archived transaction needs a method")
         if not str(self.url or "").strip():
             raise ValueError("an archived transaction needs a URL")
+        owner_count = int(bool(self.scan_id)) + int(bool(self.hunt_run_id))
+        if owner_count != 1:
+            raise ValueError(
+                "an archived transaction needs exactly one Scan or Hunt run owner"
+            )
+        if self.plane == "hunt" and not self.hunt_run_id:
+            raise ValueError("a Hunt transaction must name its Hunt run owner")
+        if self.plane != "hunt" and not self.scan_id:
+            raise ValueError(f"a {self.plane} transaction must name its Scan owner")
 
 
 def _digest(payload: bytes) -> str:
@@ -150,11 +160,44 @@ def normalized_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     for raw_name, raw_value in headers.items():
         name = str(raw_name).strip().lower()
         value = str(raw_value)
-        used += len(name) + len(value)
+        used += len(name.encode("utf-8")) + len(value.encode("utf-8"))
         if not name or used > MAX_HEADER_BYTES:
             break
         result[name] = value
     return result
+
+
+def bounded_metadata(
+    metadata: Mapping[str, Any] | None,
+    *,
+    limit: int = MAX_METADATA_BYTES,
+) -> dict[str, Any]:
+    """Return valid bounded JSON metadata without silently losing truncation truth."""
+    value = dict(metadata or {})
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8", errors="replace")
+    ceiling = max(256, int(limit))
+    if len(encoded) <= ceiling:
+        return json.loads(encoded.decode("utf-8"))
+    preview_limit = max(0, ceiling - 512)
+    return {
+        "metadata_truncated": True,
+        "original_bytes": len(encoded),
+        "original_sha256": hashlib.sha256(encoded).hexdigest(),
+        "json_prefix": encoded[:preview_limit].decode("utf-8", errors="replace"),
+    }
+
+
+def _archive_body(payload: bytes | None, *, keep_content: bool) -> dict[str, Any]:
+    """Measure every body even when the configured archive mode omits its content."""
+    body = capped_body(payload)
+    if not keep_content:
+        body["content"] = None
+        # Omission by configured policy is not wire truncation. The digest and
+        # byte count still preserve the body fact without retaining the bytes.
+        body["truncated"] = False
+    return body
 
 
 def transaction_rows(
@@ -170,8 +213,8 @@ def transaction_rows(
     rows: list[dict[str, Any]] = []
     keep_bodies = stores_bodies()
     for item in transactions:
-        request_body = capped_body(item.request_body if keep_bodies else None)
-        response_body = capped_body(item.response_body if keep_bodies else None)
+        request_body = _archive_body(item.request_body, keep_content=keep_bodies)
+        response_body = _archive_body(item.response_body, keep_content=keep_bodies)
         if item.response_body_sha256 is not None:
             response_body["sha256"] = item.response_body_sha256
         if item.response_body_bytes is not None:
@@ -225,7 +268,7 @@ def transaction_rows(
                 or item.response_body_truncated
             ),
             "retention_class": RETENTION_CLASS,
-            "metadata_json": json.dumps(dict(item.metadata or {}))[:16_000],
+            "metadata_json": bounded_metadata(item.metadata),
         })
     return rows
 
@@ -236,10 +279,12 @@ __all__ = [
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_MAX_BODY_BYTES",
     "MAX_HEADER_BYTES",
+    "MAX_METADATA_BYTES",
     "RETENTION_CLASS",
     "HttpTransaction",
     "archive_enabled",
     "archive_mode",
+    "bounded_metadata",
     "capped_body",
     "max_body_bytes",
     "normalized_headers",
@@ -532,8 +577,9 @@ async def archive_http_transactions(
             return key
 
         for item in transactions:
-            body = capped_body(item.request_body if stores_bodies() else None)
-            response = capped_body(item.response_body if stores_bodies() else None)
+            keep_bodies = stores_bodies()
+            body = _archive_body(item.request_body, keep_content=keep_bodies)
+            response = _archive_body(item.response_body, keep_content=keep_bodies)
             if item.response_body_sha256 is not None:
                 response["sha256"] = item.response_body_sha256
             if item.response_body_bytes is not None:
@@ -601,7 +647,7 @@ async def archive_http_transactions(
                 or item.response_body_truncated
             ),
             "retention_class": RETENTION_CLASS,
-            "metadata_json": dict(item.metadata or {}),
+            "metadata_json": bounded_metadata(item.metadata),
         })
     return await persist_transactions(conn, rows)
 
@@ -777,7 +823,7 @@ async def record_archive_stats(
                    attempted = http_archive_stats.attempted + EXCLUDED.attempted,
                    stored = http_archive_stats.stored + EXCLUDED.stored,
                    failed = http_archive_stats.failed + EXCLUDED.failed,
-                   dropped = GREATEST(http_archive_stats.dropped, EXCLUDED.dropped),
+                   dropped = http_archive_stats.dropped + EXCLUDED.dropped,
                    updated_at = NOW()""",
             owner_kind, owner_id, int(attempted), int(stored), int(failed), int(dropped),
         )

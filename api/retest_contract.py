@@ -3241,9 +3241,45 @@ async def _run_schema_migrations_once(pool) -> None:
                     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     CONSTRAINT http_transactions_owner_check CHECK (
-                        scan_id IS NOT NULL OR hunt_run_id IS NOT NULL
+                        num_nonnulls(scan_id, hunt_run_id) = 1
                     )
                 )
+            """)
+            # Earlier schemas allowed a row to name both owner namespaces. Repair
+            # any such row according to its execution plane before tightening the
+            # constraint; retaining both lets one archive appear in two unrelated
+            # exports and gives either retention path authority over the same row.
+            await conn.execute("""
+                DO $migration$
+                DECLARE
+                    owner_constraint TEXT;
+                BEGIN
+                    SELECT pg_get_constraintdef(oid)
+                    INTO owner_constraint
+                    FROM pg_constraint
+                    WHERE conrelid='http_transactions'::regclass
+                      AND conname='http_transactions_owner_check';
+
+                    IF owner_constraint IS NULL
+                       OR position('num_nonnulls' IN owner_constraint) = 0 THEN
+                        UPDATE http_transactions
+                        SET scan_id=NULL
+                        WHERE plane='hunt'
+                          AND scan_id IS NOT NULL AND hunt_run_id IS NOT NULL;
+
+                        UPDATE http_transactions
+                        SET hunt_run_id=NULL
+                        WHERE plane<>'hunt'
+                          AND scan_id IS NOT NULL AND hunt_run_id IS NOT NULL;
+
+                        ALTER TABLE http_transactions
+                        DROP CONSTRAINT IF EXISTS http_transactions_owner_check;
+                        ALTER TABLE http_transactions
+                        ADD CONSTRAINT http_transactions_owner_check
+                        CHECK (num_nonnulls(scan_id, hunt_run_id) = 1);
+                    END IF;
+                END;
+                $migration$
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_http_transactions_scan

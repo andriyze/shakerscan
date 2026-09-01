@@ -2203,7 +2203,7 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT http_transactions_owner_check CHECK (
-        scan_id IS NOT NULL OR hunt_run_id IS NOT NULL
+        num_nonnulls(scan_id, hunt_run_id) = 1
     )
 );
 CREATE INDEX IF NOT EXISTS idx_http_transactions_scan
