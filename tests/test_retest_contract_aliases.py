@@ -18,6 +18,7 @@ from retest_contract import (  # noqa: E402
     infer_retest_inputs,
     infer_type_from_title_tool,
     normalize_retest_type,
+    retest_queue_binding_matches,
     validate_retest_job_payload,
 )
 
@@ -164,3 +165,45 @@ def test_infer_nosqli_routes_to_nosqli_not_sqli():
     assert "nosqli" in SUPPORTED_RETEST_TYPES
     # plain SQLi still routes to sqli (guard didn't break it)
     assert infer_type_from_title_tool("SQL Injection in q", None) == "sqli"
+
+
+def test_retest_queue_binding_requires_the_exact_durable_subject():
+    # The durable finding_verifications row is the authority for which job and
+    # which single subject a retest may mutate. A replayed or hand-written queue
+    # message that names a different job, a different subject, or the other
+    # subject namespace must not be admitted.
+    durable = {
+        "job_id": "job-1",
+        "finding_id": "11111111-1111-4111-8111-111111111111",
+        "candidate_id": None,
+    }
+
+    assert retest_queue_binding_matches(durable, {
+        "job_id": "job-1",
+        "finding_id": "11111111-1111-4111-8111-111111111111",
+    })
+    # An absent key and a stored NULL are the same absence, not a mismatch.
+    assert retest_queue_binding_matches(durable, {
+        "job_id": "job-1",
+        "finding_id": "11111111-1111-4111-8111-111111111111",
+        "candidate_id": None,
+    })
+
+    assert not retest_queue_binding_matches(durable, {
+        "job_id": "job-2",
+        "finding_id": "11111111-1111-4111-8111-111111111111",
+    })
+    assert not retest_queue_binding_matches(durable, {
+        "job_id": "job-1",
+        "finding_id": "22222222-2222-4222-8222-222222222222",
+    })
+    # Crossing namespaces is a mismatch in both directions.
+    assert not retest_queue_binding_matches(durable, {
+        "job_id": "job-1",
+        "candidate_id": "11111111-1111-4111-8111-111111111111",
+    })
+    assert not retest_queue_binding_matches(
+        {"job_id": "job-1", "finding_id": None,
+         "candidate_id": "33333333-3333-4333-8333-333333333333"},
+        {"job_id": "job-1", "finding_id": "33333333-3333-4333-8333-333333333333"},
+    )

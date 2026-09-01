@@ -15,7 +15,7 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.auth_session_store import PostgresAuthSessionStore
@@ -4970,3 +4970,85 @@ def validate_retest_job_payload(payload: Any) -> tuple[bool, str]:
         return False, "invalid_attempt"
 
     return True, ""
+
+
+async def mark_candidate_inconclusive(
+    conn: Any, candidate_id: Any, *, verification_id: Any, error: str,
+) -> None:
+    """Record that a retest ended without a verdict for its candidate subject.
+
+    An abandoned retest must not leave a candidate stuck in a verifying state:
+    it is settled inconclusive with the reason attached, which is distinct from
+    a refutation and never becomes proof.
+    """
+    await conn.execute(
+        """UPDATE investigation_candidates
+           SET status='inconclusive',
+               verification_context=verification_context || jsonb_build_object(
+                   'error',$2::text,'verification_id',$3::text
+               ), updated_at=NOW()
+           WHERE id=$1""",
+        candidate_id, str(error)[:160], str(verification_id),
+    )
+
+
+async def mark_finding_verification_error(conn: Any, finding_id: Any) -> None:
+    """Record an attempted-but-failed verification without changing the finding.
+
+    The attempt is counted and the verdict is 'error', so a retest that never
+    produced evidence can never read as a fix, a refutation, or fresh proof.
+    """
+    await conn.execute(
+        """UPDATE findings
+           SET last_verification_status='error',
+               last_verification_verdict='error',
+               last_verification_confidence=NULL,
+               last_verified_at=NOW(),
+               verification_count=COALESCE(verification_count, 0) + 1,
+               updated_at=NOW()
+           WHERE id=$1""",
+        finding_id,
+    )
+
+
+async def settle_retest_subject_error(
+    conn: Any, subject: Any, *, verification_id: Any, error: str,
+) -> None:
+    """Settle whichever subject a verification row names, after a failed attempt.
+
+    ``subject`` is the row returned by the guarded verification UPDATE, so it
+    names exactly one of finding_id/candidate_id. Passing the row rather than
+    two ids keeps the caller from settling a subject the durable record did not
+    actually claim.
+    """
+    if not subject:
+        return
+    if subject.get("finding_id") is not None:
+        await mark_finding_verification_error(conn, subject["finding_id"])
+    if subject.get("candidate_id") is not None:
+        await mark_candidate_inconclusive(
+            conn, subject["candidate_id"],
+            verification_id=verification_id, error=error,
+        )
+
+
+def retest_queue_binding_matches(
+    verification: Mapping[str, Any] | Any, payload: Mapping[str, Any] | Any,
+) -> bool:
+    """Whether a queued retest names exactly the durable verification's subject.
+
+    A queue message is untrusted input: it can be replayed, hand-written, or
+    left over from an earlier row that reused the verification id. The durable
+    ``finding_verifications`` row is the authority for which job and which
+    single subject this retest belongs to, so every identity must agree before
+    the worker mutates a finding or candidate.
+    """
+    def _text(source: Any, field: str) -> str:
+        getter = getattr(source, "get", None)
+        value = getter(field) if callable(getter) else None
+        return str(value or "").strip()
+
+    return all(
+        _text(verification, field) == _text(payload, field)
+        for field in ("job_id", "finding_id", "candidate_id")
+    )

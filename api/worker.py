@@ -50,9 +50,12 @@ from retest_contract import (
     extract_auth_context,
     get_attempt_ladder,
     infer_retest_inputs,
+    mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    retest_queue_binding_matches,
     run_schema_migrations,
+    settle_retest_subject_error,
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
@@ -6324,12 +6327,10 @@ async def process_finding_retest_job(job_data: dict):
         print(f"[retest:{job_id[:8]}] Invalid job payload: {reason}", flush=True)
         return
 
-    queued_finding_uuid = (
-        uuid.UUID(str(job_data["finding_id"])) if job_data.get("finding_id") else None
-    )
-    queued_candidate_uuid = (
-        uuid.UUID(str(job_data["candidate_id"])) if job_data.get("candidate_id") else None
-    )
+    # validate_retest_job_payload already proved both parse; this only narrows
+    # the exhaustion UPDATE to the exact subject the queue message named.
+    queued_finding_uuid = _optional_uuid(job_data.get("finding_id"))
+    queued_candidate_uuid = _optional_uuid(job_data.get("candidate_id"))
     print(f"[retest:{job_id[:8]}] Starting retest {verification_id}", flush=True)
     now = utc_now()
     if not _try_acquire_retest_slot(r):
@@ -6374,31 +6375,11 @@ async def process_finding_retest_job(job_data: dict):
                         f"Retest slot wait exceeded {RETEST_SLOT_WAIT_MAX_SECONDS}s.",
                         job_id, queued_finding_uuid, queued_candidate_uuid,
                     )
-                    if exhausted and exhausted.get("finding_id") is not None:
-                        await conn.execute(
-                            """
-                            UPDATE findings
-                            SET last_verification_status = 'error',
-                                last_verification_verdict = 'error',
-                                last_verification_confidence = NULL,
-                                last_verified_at = NOW(),
-                                verification_count = COALESCE(verification_count, 0) + 1,
-                                updated_at = NOW()
-                            WHERE id = $1
-                            """,
-                            exhausted["finding_id"],
-                        )
-                    if exhausted and exhausted.get("candidate_id") is not None:
-                        await conn.execute(
-                            """UPDATE investigation_candidates
-                               SET status='inconclusive',
-                                   verification_context=verification_context || jsonb_build_object(
-                                       'error','retest_slot_exhausted',
-                                       'verification_id',$2::text
-                                   ), updated_at=NOW()
-                               WHERE id=$1""",
-                            exhausted["candidate_id"], uuid.UUID(verification_id),
-                        )
+                    await settle_retest_subject_error(
+                        conn, exhausted,
+                        verification_id=verification_id,
+                        error="retest_slot_exhausted",
+                    )
                 except Exception:
                     pass
             print(
@@ -6467,16 +6448,7 @@ async def process_finding_retest_job(job_data: dict):
                 print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
                 return
 
-            durable_job_id = str(verification.get("job_id") or "").strip()
-            durable_finding_id = str(verification.get("finding_id") or "").strip()
-            durable_candidate_id = str(verification.get("candidate_id") or "").strip()
-            queued_finding_id = str(job_data.get("finding_id") or "").strip()
-            queued_candidate_id = str(job_data.get("candidate_id") or "").strip()
-            if (
-                job_id != durable_job_id
-                or queued_finding_id != durable_finding_id
-                or queued_candidate_id != durable_candidate_id
-            ):
+            if not retest_queue_binding_matches(verification, job_data):
                 r.hset(retest_key, mapping={
                     "status": "failed",
                     "error": "invalid_job_binding",
@@ -7038,16 +7010,10 @@ async def process_finding_retest_job(job_data: dict):
         if candidate_value:
             try:
                 async with db_pool.acquire() as conn:
-                    await conn.execute(
-                        """UPDATE investigation_candidates
-                           SET status='inconclusive',
-                               verification_context=verification_context || jsonb_build_object(
-                                   'error',$2::text,'verification_id',$3::text
-                               ), updated_at=NOW()
-                           WHERE id=$1""",
-                        uuid.UUID(str(candidate_value)),
-                        f"worker_error:{type(exc).__name__}"[:160],
-                        verification_id,
+                    await mark_candidate_inconclusive(
+                        conn, uuid.UUID(str(candidate_value)),
+                        verification_id=verification_id,
+                        error=f"worker_error:{type(exc).__name__}",
                     )
             except Exception:
                 pass
