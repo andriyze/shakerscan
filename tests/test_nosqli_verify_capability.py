@@ -98,6 +98,20 @@ class AuthBypassTransport:
         return _result(401, b'{"error":"invalid credentials"}')
 
 
+class SiblingFieldAuthBypassTransport:
+    """Only a non-anchor body field accepts an operator object."""
+
+    async def send(self, request, **_kwargs):
+        document = json.loads(request.body.decode("utf-8"))
+        password = document.get("password")
+        if isinstance(password, dict) and "$ne" in password:
+            return _result(
+                200, b'{"authentication":{"token":"eyJ.session.grant"}}',
+                {"Content-Type": "application/json", "Set-Cookie": "sid=abc"},
+            )
+        return _result(401, b'{"error":"invalid credentials"}')
+
+
 def test_operator_set_differential_promotes_repeatably():
     result = _run(
         _request(url="https://app.example.test/rest/products/search?q=apple"),
@@ -148,6 +162,27 @@ def test_json_body_operator_authentication_bypass_is_critical_class():
     assert proof["technique"] == "operator_auth_bypass_repeated"
     assert proof["session_state_discarded"] is True
     assert proof["secret_values_visible"] is False
+
+
+def test_json_body_candidate_tests_declared_siblings_after_its_anchor():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body=json.dumps({"email": "a@b.test", "password": "guess"}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "d" * 64, "method": "POST",
+            "parameter_name": "email", "body_field_names": ["email", "password"],
+            "request_class": "safe_authentication",
+        },
+        SiblingFieldAuthBypassTransport(),
+    )
+
+    assert [item["field_path"] for item in result.observations] == ["email", "password"]
+    assert [item["proof_state"] for item in result.observations] == ["not_proven", "verified"]
+    assert result.actual_budget["http_requests"] == 8
+    assert result.status == "success"
 
 
 def test_nosqli_is_a_registered_canonical_family():

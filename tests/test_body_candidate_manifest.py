@@ -20,6 +20,7 @@ from api.scan.work_manifests import (
     build_candidate_manifest,
     execution_request_for_manifest_candidate,
 )
+from api.scan.action_adapter import _candidate_for_synthetic_proof
 
 DIGEST = "d" * 64
 SCAN = "10000000-0000-4000-8000-000000000001"
@@ -103,6 +104,15 @@ def test_a_body_candidate_resolves_to_a_request_not_a_url():
     assert request["field_name"] == "email"
     # Every declared field is present so the body is well-formed; only the tested field is marked.
     assert sorted(request["body_field_names"]) == ["email", "password"]
+
+
+def test_synthetic_body_proof_does_not_claim_an_exact_private_request():
+    candidate = {"candidate_id": "a" * 64, "request_ref_id": "private-request-1"}
+
+    proof_candidate = _candidate_for_synthetic_proof(candidate)
+
+    assert proof_candidate["request_ref_id"] is None
+    assert candidate["request_ref_id"] == "private-request-1"
 
 
 def test_a_query_candidate_still_resolves_to_a_url_with_the_parameter():

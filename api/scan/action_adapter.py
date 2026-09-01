@@ -241,6 +241,21 @@ class ObservationBackend(Protocol):
 _BODY_PROOF_PLACEHOLDER = "shakerscan"
 
 
+def _candidate_for_synthetic_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop an exact-request claim when proof uses a reconstructed request.
+
+    Endpoint candidates retain request references as ranking provenance, but the
+    generic candidate lane reconstructs a value-free body from the endpoint
+    manifest. Passing that provenance ref to an exact-request proof adapter made
+    the adapter correctly reject the synthetic request as a different private
+    request. Exact request candidates use their separate private-request lane;
+    this copy prevents the generic lane from claiming that authority.
+    """
+    proof_candidate = dict(candidate)
+    proof_candidate["request_ref_id"] = None
+    return proof_candidate
+
+
 def proof_request_for_candidate(
     endpoint_manifest: Any,
     candidate_manifest: Any,
@@ -1618,6 +1633,7 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
             else:
+                proof_candidate = _candidate_for_synthetic_proof(candidate)
                 # A body candidate mutates, so it needs the same authority the private
                 # request path above demands before it may be replayed.
                 if (
@@ -1989,6 +2005,7 @@ class DatabaseNeutralScanActionDispatcher:
             if self.cancelled():
                 break
             request_class = str(candidate.get("request_class") or "safe_read")
+            proof_candidate = dict(candidate)
             if request_mode:
                 request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
                 if request is None:
@@ -2002,6 +2019,7 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
             else:
+                proof_candidate = _candidate_for_synthetic_proof(candidate)
                 # A body candidate mutates, so it needs the same authority the private
                 # request path above demands before it may be replayed.
                 if (
@@ -2037,7 +2055,7 @@ class DatabaseNeutralScanActionDispatcher:
                 specification=specification,
                 target=self.target,
                 request=request,
-                candidate=candidate,
+                candidate=proof_candidate,
                 transport=PinnedAiohttpReplayTransport(),
                 requested_budget=sub_budget,
             )

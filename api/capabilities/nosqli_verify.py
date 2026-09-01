@@ -192,24 +192,35 @@ class NoSQLiVerifyAdapter:
         field = str(candidate.get("field_path") or candidate.get("parameter_name") or "")
         if not field:
             raise NoSQLiVerifyError("NoSQLi candidate has no exact field")
+        declared_fields = [
+            str(item) for item in candidate.get("body_field_names") or ()
+            if str(item)
+        ]
+        if declared_fields and field not in declared_fields:
+            raise NoSQLiVerifyError(
+                "NoSQLi candidate anchor is absent from its declared body fields"
+            )
         self.specification = specification
         self.target = target
         self.request = request
         self.candidate = dict(candidate)
         self.transport = transport
         self.requested_budget = {str(k): int(v) for k, v in requested_budget.items()}
-        self.field = field
+        # An endpoint-body candidate represents the whole declared body. Its
+        # anchor only supplies stable identity and ranking; try it first, then
+        # its siblings while another bounded four-request differential fits.
+        self.fields = tuple(dict.fromkeys([field, *declared_fields]))
         self.request_mode = bool(request_ref) or request.method not in {"GET", "HEAD"}
 
-    def _literal(self, value: str) -> ReplayRequest:
+    def _literal(self, field: str, value: str) -> ReplayRequest:
         if self.request_mode:
-            return _json_body(self.request, self.field, value)
-        return _query_literal(self.request, self.field, value)
+            return _json_body(self.request, field, value)
+        return _query_literal(self.request, field, value)
 
-    def _operator(self, operator: str, value: str) -> ReplayRequest:
+    def _operator(self, field: str, operator: str, value: str) -> ReplayRequest:
         if self.request_mode:
-            return _json_body(self.request, self.field, {operator: value})
-        return _query_operator(self.request, self.field, operator, value)
+            return _json_body(self.request, field, {operator: value})
+        return _query_operator(self.request, field, operator, value)
 
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
         started = time.monotonic()
@@ -233,47 +244,85 @@ class NoSQLiVerifyAdapter:
             return result
 
         candidate_id = str(self.candidate.get("candidate_id") or "")
-        sentinel = f"shakerscan_nosqli_{candidate_id[:16]}"
         request_class = str(self.candidate.get("request_class") or "safe_read")
+        observations: list[Mapping[str, Any]] = []
+        attempted_fields: list[str] = []
         verified = False
-        technique = None
-        proof_pairs: list[tuple[ReplayTransportResult, ReplayTransportResult]] = []
         try:
-            literal_request = self._literal(sentinel)
-            ne_request = self._operator("$ne", sentinel)
-            pairs = [(await send(literal_request), await send(ne_request)) for _ in range(2)]
-            proof_pairs = pairs
-            if request_class == "safe_authentication":
-                # Auth bypass: the sentinel password never matches; ``$ne`` matches
-                # every stored password, so a resulting session is proof.
-                if all(
-                    not literal.error_code and not payload.error_code
-                    and not _identity_signal(literal) and _identity_signal(payload)
-                    for literal, payload in pairs
-                ):
-                    verified = True
-                    technique = "operator_auth_bypass_repeated"
-            else:
-                literal_prints = [_fingerprint(literal) for literal, _ in pairs]
-                ne_prints = [_fingerprint(payload) for _, payload in pairs]
-                if (
-                    all(not literal.error_code and not payload.error_code for literal, payload in pairs)
-                    # A differential is only proof when the operator was actually
-                    # interpreted as one. ``error_code`` is a transport failure, so
-                    # without this an application that simply crashes on an
-                    # unexpected object -- a SQL backend handed ``key[$ne]=`` returns
-                    # 500 where the literal returns 200 -- produced a stable,
-                    # repeatable difference and was promoted to verified. That
-                    # response proves the opposite: the operator was rejected, not
-                    # honoured. Genuine operator injection widens the match set and
-                    # still answers successfully.
-                    and all(_succeeded(literal) and _succeeded(payload) for literal, payload in pairs)
-                    and literal_prints[0] == literal_prints[1]
-                    and ne_prints[0] == ne_prints[1]
-                    and ne_prints[0] != literal_prints[0]
-                ):
-                    verified = True
-                    technique = "operator_set_differential_repeated"
+            for field in self.fields:
+                if self.requested_budget["http_requests"] - attempted < 4:
+                    break
+                attempted_fields.append(field)
+                field_digest = hashlib.sha256(field.encode("utf-8")).hexdigest()[:8]
+                sentinel = f"shakerscan_nosqli_{candidate_id[:8]}_{field_digest}"
+                literal_request = self._literal(field, sentinel)
+                ne_request = self._operator(field, "$ne", sentinel)
+                pairs = [
+                    (await send(literal_request), await send(ne_request))
+                    for _ in range(2)
+                ]
+                technique = None
+                if request_class == "safe_authentication":
+                    # Auth bypass: the sentinel password never matches; ``$ne``
+                    # matches every stored password, so a resulting session is proof.
+                    if all(
+                        not literal.error_code and not payload.error_code
+                        and not _identity_signal(literal) and _identity_signal(payload)
+                        for literal, payload in pairs
+                    ):
+                        verified = True
+                        technique = "operator_auth_bypass_repeated"
+                else:
+                    literal_prints = [_fingerprint(literal) for literal, _ in pairs]
+                    ne_prints = [_fingerprint(payload) for _, payload in pairs]
+                    if (
+                        all(
+                            not literal.error_code and not payload.error_code
+                            for literal, payload in pairs
+                        )
+                        # A differential is proof only when the operator was
+                        # interpreted and both requests still succeeded.
+                        and all(
+                            _succeeded(literal) and _succeeded(payload)
+                            for literal, payload in pairs
+                        )
+                        and literal_prints[0] == literal_prints[1]
+                        and ne_prints[0] == ne_prints[1]
+                        and ne_prints[0] != literal_prints[0]
+                    ):
+                        verified = True
+                        technique = "operator_set_differential_repeated"
+
+                observations.append({
+                    "kind": "nosqli_proof",
+                    # The route is already value-free immutable manifest content,
+                    # and a verified injection that cannot say where it is is not
+                    # actionable.
+                    "canonical_path": self.candidate.get("canonical_path"),
+                    "candidate_id": self.candidate.get("candidate_id"),
+                    "request_ref_id": self.candidate.get("request_ref_id"),
+                    "method": self.request.method,
+                    "field_path": field,
+                    "request_class": request_class,
+                    "proof_state": "verified" if verified else "not_proven",
+                    "finding_verdict": "verified" if verified else "not_proven",
+                    "proof_contract": (
+                        "nosqli_operator_differential/v1" if verified else None
+                    ),
+                    "technique": technique,
+                    "operator": "$ne",
+                    "repetitions": 2,
+                    "response_pairs": [{
+                        "literal_status": literal.status_code,
+                        "operator_status": payload.status_code,
+                        "literal_response_sha256": _sha256(literal.response_body),
+                        "operator_response_sha256": _sha256(payload.response_body),
+                    } for literal, payload in pairs],
+                    "session_state_discarded": request_class == "safe_authentication",
+                    "secret_values_visible": False,
+                })
+                if verified:
+                    break
         except NoSQLiVerifyError as exc:
             status = "cancelled" if str(exc) == "cancelled" else "blocked"
             return CapabilityAdapterResult(
@@ -285,48 +334,27 @@ class NoSQLiVerifyAdapter:
                 partial=bool(attempted), parser_version=NOSQLI_VERIFY_PARSER_VERSION,
             )
 
-        response_pairs = [{
-            "literal_status": literal.status_code,
-            "operator_status": payload.status_code,
-            "literal_response_sha256": _sha256(literal.response_body),
-            "operator_response_sha256": _sha256(payload.response_body),
-        } for literal, payload in proof_pairs]
-        observation = {
-            "kind": "nosqli_proof",
-            # The route is already value-free immutable manifest content, and a
-            # verified injection that cannot say where it is is not actionable.
-            "canonical_path": self.candidate.get("canonical_path"),
-            "candidate_id": self.candidate.get("candidate_id"),
-            "request_ref_id": self.candidate.get("request_ref_id"),
-            "method": self.request.method,
-            "field_path": self.field,
-            "request_class": request_class,
-            "proof_state": "verified" if verified else "not_proven",
-            "finding_verdict": "verified" if verified else "not_proven",
-            "proof_contract": (
-                "nosqli_operator_differential/v1" if verified else None
-            ),
-            "technique": technique,
-            "operator": "$ne",
-            "repetitions": 2,
-            "response_pairs": response_pairs,
-            "session_state_discarded": request_class == "safe_authentication",
-            "secret_values_visible": False,
-        }
         errors = tuple(item.error_code for item in results if item.error_code)
+        fields_exhausted = not verified and len(attempted_fields) < len(self.fields)
         return CapabilityAdapterResult(
-            status="partial" if errors else "success", observations=(observation,), errors=errors,
+            status="partial" if errors or fields_exhausted else "success",
+            observations=tuple(observations), errors=errors,
             actual_budget={
                 "http_requests": attempted,
                 "tool_wall_seconds": max(1, math.ceil(time.monotonic() - started)),
             },
-            partial=bool(errors), timed_out=any(item.timed_out for item in results),
+            partial=bool(errors or fields_exhausted),
+            timed_out=any(item.timed_out for item in results),
             execution_started=True, parser_version=NOSQLI_VERIFY_PARSER_VERSION,
             redacted_execution={
                 "candidate_id": self.candidate.get("candidate_id"),
                 "request_ref_id": self.candidate.get("request_ref_id"),
-                "method": self.request.method, "field_path": self.field,
-                "proof_contract": observation["proof_contract"],
+                "method": self.request.method,
+                "field_path": attempted_fields[0] if attempted_fields else None,
+                "field_paths": attempted_fields,
+                "proof_contract": (
+                    "nosqli_operator_differential/v1" if verified else None
+                ),
                 "secret_values_visible": False,
             },
         )
