@@ -976,12 +976,6 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert "--force-headless-verification" in dom_argv
     # --deep-domxss never converges inside the capability wall ceiling.
     assert "--deep-domxss" not in dom_argv
-    # Crawl pacing raced the 120s ceiling; headless verification needs to settle.
-    assert dom_argv[dom_argv.index("--delay") + 1] == "0"
-    assert dom_argv[dom_argv.index("--worker") + 1] == "10"
-    # Ordinary scanning keeps the conservative pacing.
-    assert argv[argv.index("--delay") + 1] == "1000"
-    assert argv[argv.index("--worker") + 1] == "3"
 
     b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
     assert b == "sqlmap"

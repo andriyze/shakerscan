@@ -440,18 +440,8 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         ["--force-headless-verification"]
         if opts.get("deep_domxss") is True else ["--skip-headless"]
     )
-    # Headless verification drives a browser against one URL rather than crawling a
-    # site, and it does not terminate on its own. Measured against the same target,
-    # the crawl pacing (delay 1000, 3 workers) never finished inside the capability's
-    # 120s ceiling -- a verified result landed before the cut-off only about three
-    # runs in four -- while 10 workers with no inter-request delay settled in three
-    # seconds, repeatably. Total volume stays bounded by the reserved http_requests
-    # either way; only the rate differs, and only for an explicitly requested,
-    # approval-gated DOM check.
-    deep_domxss = opts.get("deep_domxss") is True
-    delay, workers = ("0", "10") if deep_domxss else ("1000", "3")
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
-             "--timeout", "8", "--delay", delay, "--worker", workers,
+             "--timeout", "8", "--delay", "1000", "--worker", "3",
              "--skip-bav", "--skip-grepping", "--skip-mining-all"]
             + headless_args + severity_args)
     injection = _injection_body(opts)
