@@ -208,6 +208,14 @@ def _credential_capabilities(
         requested = list(_safe_credential_capabilities(
             target_kind=target_kind, auth_kind=auth_kind,
         ))
+    if not requested:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "allowed_capabilities must contain at least one capability when "
+                "this credential kind has no safe default"
+            ),
+        )
     validated: list[str] = []
     for name in requested:
         try:

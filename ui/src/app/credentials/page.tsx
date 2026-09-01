@@ -136,6 +136,9 @@ function needsEndpoint(kind: CredentialAuthKind): boolean {
 function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
   const errors: DraftErrors = {}
   if (!rotating && !draft.name.trim()) errors.name = 'Enter a profile name.'
+  if (!rotating && isSsh(draft.authKind) && !splitValues(draft.capabilities).length) {
+    errors.capabilities = 'Select at least one explicitly approved SSH capability.'
+  }
   if (isSsh(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'
   if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {
     errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'
@@ -576,8 +579,11 @@ export default function CredentialsPage() {
             <div className="sm:col-span-2 rounded-lg border border-gray-800 bg-gray-950 p-3">
               <p className="text-sm font-medium text-gray-200">Allowed capabilities</p>
               <p className="mt-1 text-xs text-gray-500">
-                Selected from the canonical registry. No selection resolves to the server&apos;s safe defaults, never unrestricted access.
+                {isSsh(draft.authKind)
+                  ? 'SSH profiles require an explicit capability selection and target-bound approval.'
+                  : 'Selected from the canonical registry. No selection resolves to the server\'s safe defaults, never unrestricted access.'}
               </p>
+              {draftErrors.capabilities && <p className="mt-2 text-xs text-red-300">{draftErrors.capabilities}</p>}
               {capabilitiesLoading ? (
                 <p className="mt-3 text-xs text-gray-500">Loading canonical capabilities…</p>
               ) : (
