@@ -2056,7 +2056,7 @@ async def get_finding_record(conn, finding_id: str):
         pass
 
     if not finding:
-        finding = await conn.fetchrow("""
+        matches = await conn.fetch("""
             SELECT f.*,
                    COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
                    COALESCE(t.name, ait.name, dt.name) as target_name,
@@ -2081,13 +2081,19 @@ async def get_finding_record(conn, finding_id: str):
                 LIMIT 1
             ) latest_retest ON TRUE
             WHERE f.fingerprint = $1
-            ORDER BY f.last_seen_at DESC
-            LIMIT 1
+            ORDER BY f.last_seen_at DESC NULLS LAST, f.id DESC
+            LIMIT 2
         """, finding_id)
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Finding fingerprint is ambiguous across targets; use the finding UUID",
+            )
+        finding = matches[0] if matches else None
 
     if not finding and ':' in finding_id:
         suffix = finding_id.split(':')[-1]
-        finding = await conn.fetchrow("""
+        matches = await conn.fetch("""
             SELECT f.*,
                    COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
                    COALESCE(t.name, ait.name, dt.name) as target_name,
@@ -2112,9 +2118,15 @@ async def get_finding_record(conn, finding_id: str):
                 LIMIT 1
             ) latest_retest ON TRUE
             WHERE f.fingerprint = $1
-            ORDER BY f.last_seen_at DESC
-            LIMIT 1
+            ORDER BY f.last_seen_at DESC NULLS LAST, f.id DESC
+            LIMIT 2
         """, suffix)
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Finding fingerprint is ambiguous across targets; use the finding UUID",
+            )
+        finding = matches[0] if matches else None
 
     return finding
 def infer_retest_type(finding: dict[str, Any], evidence: dict[str, Any], override_type: str | None = None) -> str | None:
