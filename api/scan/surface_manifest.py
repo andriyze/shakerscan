@@ -71,19 +71,64 @@ def _known_endpoint_url(
         method = "GET"
     content_type: str | None = None
     body_fields: list[str] | None = None
-    marker = text.find(" json:")
-    if marker >= 0:
-        body_text = text[marker + len(" json:"):].strip()
+    json_marker = text.find(" json:")
+    form_marker = text.find(" form:")
+    markers = [
+        (offset, kind)
+        for offset, kind in ((json_marker, "json"), (form_marker, "form"))
+        if offset >= 0
+    ]
+    if markers:
+        marker, body_kind = min(markers)
+        marker_text = f" {body_kind}:"
+        body_text = text[marker + len(marker_text):].strip()
         text = text[:marker].strip()
-        content_type = "application/json"
-        try:
-            decoded = json.loads(body_text)
-        except (TypeError, ValueError):
-            # An unparseable body is dropped rather than left in the URL: a path that cannot be
-            # requested is worse than an endpoint with no declared body.
-            decoded = None
-        if isinstance(decoded, Mapping):
-            body_fields = sorted(str(key)[:200] for key in decoded)
+        if body_kind == "json":
+            content_type = "application/json"
+            try:
+                decoded = json.loads(body_text)
+            except (TypeError, ValueError):
+                # An unparseable body is dropped rather than left in the URL: a path that cannot
+                # be requested is worse than an endpoint with no declared body.
+                decoded = None
+
+            def flatten(value: Any, prefix: str = "") -> set[str]:
+                names: set[str] = set()
+                if isinstance(value, Mapping):
+                    for key, child in value.items():
+                        full = f"{prefix}.{key}" if prefix else str(key)
+                        if isinstance(child, Mapping):
+                            names.update(flatten(child, full))
+                        elif isinstance(child, list):
+                            names.add(full)
+                            if child and isinstance(child[0], Mapping):
+                                names.update(flatten(child[0], full))
+                        else:
+                            names.add(full)
+                elif isinstance(value, list) and value and isinstance(value[0], Mapping):
+                    names.update(flatten(value[0], prefix))
+                return names
+
+            if isinstance(decoded, (Mapping, list)):
+                names = sorted(name[:200] for name in flatten(decoded) if name)
+                body_fields = names or None
+        else:
+            content_type = "application/x-www-form-urlencoded"
+            try:
+                pairs = urllib.parse.parse_qsl(
+                    body_text,
+                    keep_blank_values=True,
+                    strict_parsing=False,
+                    max_num_fields=128,
+                )
+            except ValueError:
+                pairs = []
+            names = sorted({
+                str(name).strip()[:200]
+                for name, _value in pairs
+                if str(name).strip()
+            })
+            body_fields = names or None
     if text.startswith("/") and not text.startswith("//"):
         text = urllib.parse.urljoin(origin + "/", text.lstrip("/"))
     return method, text, content_type, body_fields

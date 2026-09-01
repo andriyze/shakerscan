@@ -45,6 +45,11 @@ _LEDGER_TO_BUDGET = {
 }
 
 
+def _endpoint_has_injection_surface(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return "?" in text or " json:" in text or " form:" in text
+
+
 class ParallelActionPlanError(ValueError):
     """A parent plan cannot be partitioned without widening its authority."""
 
@@ -205,7 +210,8 @@ class ParallelPlannedChild:
         # here divides the existing immutable parent ceiling; it never widens
         # traffic or time authority.
         endpoint_weight = sum(
-            3 if "?" in endpoint else 1 for endpoint in self.endpoints
+            3 if _endpoint_has_injection_surface(endpoint) else 1
+            for endpoint in self.endpoints
         )
         return max(
             1,
@@ -1194,7 +1200,9 @@ class ParallelActionPlanCompiler:
         # produced none. Keep a child only if it can hold enough injectable
         # surface to fill a verifier batch; below that, fanning out costs depth
         # and buys nothing.
-        injectable = sum(1 for item in endpoints if "?" in str(item))
+        injectable = sum(
+            1 for item in endpoints if _endpoint_has_injection_surface(item)
+        )
         if parent_execution_plan.policy.active_testing and injectable:
             candidate_slots = max(1, injectable // _MIN_INJECTABLE_ENDPOINTS_PER_SHARD)
             if candidate_slots < per_axis_slots:

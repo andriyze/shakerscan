@@ -8,6 +8,7 @@ import json
 import re
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
+import urllib.parse
 import uuid
 
 try:
@@ -619,9 +620,9 @@ def endpoint_worklist_from_manifest_entries(entries: Any) -> list[str]:
 
     Shards take a worklist of ``"METHOD /path?a=&b="`` strings and rebuild their
     own manifests from it, so the round trip has to preserve what makes an
-    endpoint testable: its method, its path, and the NAMES of its parameters.
-    Values are deliberately absent -- candidates are built from parameter names,
-    and a discovered value is not authority to replay it.
+    endpoint testable: its method, path, query names, content type, and request-
+    body field names. Values are deliberately absent -- candidates are built
+    from parameter names, and a discovered value is not authority to replay it.
     """
     worklist: list[str] = []
     seen: set[str] = set()
@@ -635,13 +636,52 @@ def endpoint_worklist_from_manifest_entries(entries: Any) -> list[str]:
         if any(last_segment.endswith(ext) for ext in _STATIC_ASSET_EXTENSIONS):
             continue
         method = str(entry.get("method") or "GET").strip().upper() or "GET"
-        names = sorted(dict.fromkeys(
+        query_names = sorted(dict.fromkeys(
             str(name).strip() for name in entry.get("query_parameter_names") or ()
             if str(name).strip()
         ))
-        if names:
-            path = f"{path}?" + "&".join(f"{name}=" for name in names)
-        value = f"{method} {path}"
+        if query_names:
+            path = f"{path}?" + "&".join(f"{name}=" for name in query_names)
+        body_names = sorted(dict.fromkeys(
+            str(name).strip() for name in entry.get("body_field_names") or ()
+            if str(name).strip()
+        ))
+        body_spec = ""
+        if body_names:
+            content_type = str(entry.get("content_type") or "").lower()
+            if "json" in content_type or not content_type:
+                body: dict[str, Any] = {}
+                for raw_name in body_names:
+                    parts = [part for part in raw_name.split(".") if part]
+                    if not parts:
+                        continue
+                    cursor = body
+                    for part in parts[:-1]:
+                        child = cursor.get(part)
+                        if isinstance(child, list):
+                            if not child or not isinstance(child[0], dict):
+                                child[:] = [{}]
+                            cursor = child[0]
+                            continue
+                        if isinstance(child, dict):
+                            cursor = child
+                            continue
+                        nested: dict[str, Any] = {}
+                        # A parent name plus child names is the flattened shape
+                        # emitted for an array of objects (items, items.id).
+                        cursor[part] = [nested] if child is not None else nested
+                        cursor = nested
+                    if not isinstance(cursor.get(parts[-1]), (dict, list)):
+                        cursor[parts[-1]] = "test"
+                if body:
+                    body_spec = " json:" + json.dumps(
+                        body, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                    )
+            elif "x-www-form-urlencoded" in content_type:
+                body_spec = " form:" + urllib.parse.urlencode(
+                    [(name, "1") for name in body_names]
+                )
+        value = f"{method} {path}{body_spec}"
         if value in seen:
             continue
         seen.add(value)

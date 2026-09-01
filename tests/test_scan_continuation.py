@@ -22,6 +22,7 @@ from api.scan.continuation import (
 )
 from api.scan.capability_result import CapabilityResultStatus
 from api.scan.contracts import resolve_scan_contract
+from api.scan.surface_manifest import build_scan_surface_manifest
 from api.scan.work_manifests import (
     ScanWorkManifestReference,
     build_candidate_manifest,
@@ -641,6 +642,20 @@ def test_discovery_shard_worklist_reads_canonical_observations():
                 "method": "GET",
                 "url": "https://evil.test/collect?x=1",
             },
+            {
+                "kind": "discovered_route",
+                "method": "POST",
+                "url": "https://app.example.test/rest/user/login",
+                "content_type": "application/json",
+                "body_field_names": ["email", "password"],
+            },
+            {
+                "kind": "discovered_route",
+                "method": "POST",
+                "url": "https://app.example.test/account/reset",
+                "content_type": "application/x-www-form-urlencoded",
+                "body_field_names": ["email", "csrf"],
+            },
         ],
     }
 
@@ -661,10 +676,64 @@ def test_discovery_shard_worklist_reads_canonical_observations():
     # The browser crawl's parameterised route is what makes xss/sqli testable.
     assert "GET /api/BasketItems?id=" in worklist
     assert "GET /rest/products/search?q=" in worklist
+    assert 'POST /rest/user/login json:{"email":"test","password":"test"}' in worklist
+    assert "POST /account/reset form:csrf=1&email=1" in worklist
     # Parameter names survive the round trip; discovered values do not.
     assert not any("apple" in item for item in worklist)
     assert not any("evil.test" in item for item in worklist)
     assert not any(item.endswith("/main.js") for item in worklist)
+
+    # Fan-out is a value-free serialization boundary, not permission to discard
+    # the body shape. Rebuild the exact child manifests and prove both body
+    # candidates survive the same path used by parallel child compilation.
+    empty = {"status": "success", "observations": []}
+    child_surface = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=target,
+        options={"custom_endpoints": worklist},
+        collection_replay=empty,
+        subdomains=empty,
+        probe=empty,
+        crawl=empty,
+        browser=empty,
+        content=empty,
+        max_endpoints=100,
+    )
+    child_endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000d2",
+        target_binding_digest=target.digest,
+        surface_manifest=child_surface,
+        source_action_ids=("parallel.plan",),
+        auth_lane="anonymous",
+    )
+    child_candidates = build_candidate_manifest(
+        child_endpoints,
+        source_action_ids=("parallel.plan",),
+        allow_state_changing_http=True,
+        maximum=100,
+    )
+    endpoint_shapes = {
+        item["canonical_path"]: (
+            tuple(item["body_field_names"]), item["content_type"],
+        )
+        for item in child_endpoints.entries
+        if item.get("body_field_names")
+    }
+    assert endpoint_shapes["/rest/user/login"] == (
+        ("email", "password"), "application/json",
+    )
+    assert endpoint_shapes["/account/reset"] == (
+        ("csrf", "email"), "application/x-www-form-urlencoded",
+    )
+    body_candidates = {
+        (item["canonical_path"], item["parameter_name"], item["content_type"])
+        for item in child_candidates.entries
+        if item.get("body_field_names")
+    }
+    assert ("/rest/user/login", "email", "application/json") in body_candidates
+    assert (
+        "/account/reset", "email", "application/x-www-form-urlencoded",
+    ) in body_candidates
 
 
 def test_absent_receipt_from_an_enabled_producer_is_failed_not_skipped():

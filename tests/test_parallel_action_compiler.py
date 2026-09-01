@@ -1293,6 +1293,20 @@ def test_fan_out_width_is_bounded_by_injectable_surface():
     wide = [f"GET /api/item{index}?id=1" for index in range(120)]
     assert len(endpoint_children(execution, wide)) > 1
 
+    # JSON/form bodies are injection surfaces too. Counting only '?' silently
+    # treated body-only APIs as non-injectable and fragmented their verifier
+    # budget by the crawl width instead of the actual candidate width.
+    narrow_body = [f"GET /page{index}" for index in range(120)]
+    narrow_body += [
+        f'POST /api/item{index} json:{{"id":1}}' for index in range(9)
+    ]
+    assert len(endpoint_children(execution, narrow_body)) == 1
+
+    wide_body = [
+        f"POST /api/item{index} form:id=1" for index in range(120)
+    ]
+    assert len(endpoint_children(execution, wide_body)) > 1
+
     # Passive Scans are untouched by construction: the bound sits inside the
     # active_testing branch, because template breadth scales with endpoints
     # rather than candidates. Asserting that here would need a passive plan that
