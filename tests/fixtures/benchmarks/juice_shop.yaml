@@ -10,9 +10,12 @@ target_url: http://host.docker.internal:3001
 scan_options:
   parallel: false
   budget_profile: thorough
-# auth: optional bearer tokens minted at runtime (see benchmark_targets.py --auth).
+# auth: bearer tokens minted at runtime (see benchmark_targets.py --auth). BFLA is
+# a cross-principal differential, so qualification requires two fresh accounts.
 auth:
   user1_login: { url: /rest/user/login, email_field: email, password_field: password }
+  user2_login: { url: /rest/user/login, email_field: email, password_field: password }
+  requires_two_users: true
 
 # Per-target pass/fail gates.
 # The standard this benchmark exists to measure against. Evaluated and reported on EVERY run, and
@@ -69,9 +72,9 @@ gates:
       needs: investigation
     - id: bfla-users
       reason: >-
-        BFLA is a cross-principal differential and this fixture mints one principal, so the family
-        is not selected. Measuring it needs a second principal declared here.
-      needs: a user2_login in this fixture, and authenticated state reaching the scan
+        Qualification now mints and validates two distinct principals and selects the BFLA family,
+        but the exact-SHA live benchmark has not yet proven this expectation.
+      needs: exact-SHA live differential proof, then detector investigation if the route still misses
     - id: nosqli-reviews
       reason: >-
         The family now has the state-changing authority it requires, but this route is still not

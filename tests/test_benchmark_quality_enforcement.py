@@ -85,6 +85,18 @@ def test_the_declared_standard_survives_whatever_is_bound():
     assert "release_disposition" not in bar
 
 
+def test_juice_shop_qualification_requires_two_principals():
+    """The BFLA expectation must be structurally runnable in the release lane."""
+    import yaml
+
+    fixture = yaml.safe_load(
+        (ROOT / "tests/fixtures/benchmarks/juice_shop.yaml").read_text()
+    )
+    auth = fixture["auth"]
+    assert auth["requires_two_users"] is True
+    assert auth["user1_login"] == auth["user2_login"]
+
+
 def test_even_perfect_runtime_metrics_cannot_waive_declared_expectation_gaps():
     import yaml
     from scripts.benchmark_targets import apply_quality_bar

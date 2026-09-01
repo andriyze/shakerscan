@@ -271,15 +271,8 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     assert "secret" not in str(receipt)
 
 
-def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
-    minted = []
+def test_two_principal_benchmarks_use_fresh_role_distinct_accounts(monkeypatch):
     monkeypatch.setattr(b.secrets, "token_hex", lambda _size: "run123")
-
-    def fake_mint(_target, _login, email, _password):
-        minted.append(email)
-        return _jwt(email=email)
-
-    monkeypatch.setattr(b, "mint_token", fake_mint)
     monkeypatch.setattr(
         b, "_canonical_benchmark_authority",
         lambda *_args, **_kwargs: ("target-1", "approval-scan", "approval-credential"),
@@ -292,19 +285,27 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
         "scan_id": "scan-unique", "job_id": "job-unique", "status": "queued",
     })
 
-    receipt = b.submit_target("crapi", "http://scanner.test", True)
+    for benchmark in ("crapi", "juice_shop"):
+        minted = []
 
-    assert minted == [
-        "bench.u1.run123@shaker.test",
-        "bench.u2.run123@shaker.test",
-    ]
-    assert receipt["two_user"] is True
-    assert receipt["principal_validation"]["distinct_identity_claims_validated"] is True
-    assert receipt["principal_validation"]["identity_fingerprints"] == [
-        b._principal_identity_fingerprint("email:bench.u1.run123@shaker.test"),
-        b._principal_identity_fingerprint("email:bench.u2.run123@shaker.test"),
-    ]
-    assert "run123" not in str(receipt)
+        def fake_mint(_target, _login, email, _password):
+            minted.append(email)
+            return _jwt(email=email)
+
+        monkeypatch.setattr(b, "mint_token", fake_mint)
+        receipt = b.submit_target(benchmark, "http://scanner.test", True)
+
+        assert minted == [
+            "bench.u1.run123@shaker.test",
+            "bench.u2.run123@shaker.test",
+        ]
+        assert receipt["two_user"] is True
+        assert receipt["principal_validation"]["distinct_identity_claims_validated"] is True
+        assert receipt["principal_validation"]["identity_fingerprints"] == [
+            b._principal_identity_fingerprint("email:bench.u1.run123@shaker.test"),
+            b._principal_identity_fingerprint("email:bench.u2.run123@shaker.test"),
+        ]
+        assert "run123" not in str(receipt)
 
 
 def test_benchmark_profile_retry_reuses_and_rotates_existing_identity(monkeypatch):
