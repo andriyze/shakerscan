@@ -15008,6 +15008,13 @@ def _compile_parallel_child_action_plan(
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=child_job.scan_id,
         execution_plan=child_job.execution_plan,
+        # A child queue payload carries the PARENT execution plan with a shard
+        # block bolted on, so batch shapes were sized to the parent ceiling and
+        # allocation then rejected the result against the shard's own ledger:
+        # "required Scan action verify.xss exceeds the plan budget:
+        # {'http_requests': 483, 'tool_wall_seconds': 145}". Size the plan
+        # against the ledger that will actually reserve it.
+        ledger_limits=child_job.shard.sub_budget.ledger_limits(),
         target_binding=child_job.target,
         credential_profile_refs=credential_profile_action_refs(credential_refs),
         request_collection_refs=request_collection_action_refs(collection_refs),

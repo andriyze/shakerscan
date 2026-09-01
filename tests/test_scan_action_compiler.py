@@ -14,7 +14,10 @@ from api.scan.action_plan import (
     credential_profile_action_refs,
     request_collection_action_refs,
 )
-from api.scan.budget_allocator import allocate_scan_action_plan
+from api.scan.budget_allocator import (
+    ScanBudgetAllocationError,
+    allocate_scan_action_plan,
+)
 from api.scan.work_manifests import (
     ScanWorkManifestReference,
     build_canonical_passive_nuclei_template_manifest,
@@ -1146,3 +1149,99 @@ def test_batch_shape_steps_down_when_siblings_have_claimed_the_ledger():
     assert _affordable_batch_tier(
         "xss.verify_batch", budget_profile="fast", limits=plenty,
     ) == (1, {"http_requests": 120, "tool_wall_seconds": 30})
+
+
+def test_a_plan_is_sized_by_the_ledger_that_will_reserve_it():
+    """Compile-time and allocate-time budgets must be the same ledger.
+
+    A parallel child queue payload carries the PARENT execution plan with a
+    shard block bolted on. The compiler read execution_plan.budget -- thorough's
+    full 20,000-request ceiling -- sized every batch to it, and allocation then
+    rejected the result against shard.sub_budget: "required Scan action
+    verify.xss exceeds the plan budget: {'http_requests': 483,
+    'tool_wall_seconds': 145}". Two ledgers, one plan.
+
+    Sizing against the parent is what made the two previous batch fixes
+    unreachable: both key off the compile-time budget, which was the wrong one.
+    """
+    base = _execution(include=("xss", "sqli", "nuclei_passive", "nuclei_active"))
+    parent = ScanExecutionPlan(
+        policy=base.policy,
+        budget_profile="thorough",
+        budget=BUDGET_PROFILES["thorough"],
+    )
+    # An endpoint child's real ledger: a share of the parent, and legitimately
+    # zero browser/tcp authority, which a ScanBudget cannot even represent.
+    # Measured: at this share the parent-sized plan overruns on
+    # verify.sqli.001 and the shard-sized plan allocates cleanly. Below roughly
+    # 2,000 requests neither fits, because active.templates needs 2,000 even at
+    # the smallest published tier -- that ledger fails closed by design.
+    shard_limits = {
+        "http_requests": 3_000,
+        "state_changing_requests": 0,
+        "browser_actions": 0,
+        "tcp_ports_attempted": 0,
+        "hosts_attempted": 30,
+        "tool_wall_seconds": 1_200,
+    }
+    refs = dict(
+        endpoint_manifest_ref=ScanWorkManifestReference(
+            manifest_id="10000000-0000-4000-8000-000000000095",
+            kind="endpoint",
+            content_schema="endpoint-manifest/v2",
+            manifest_digest="c" * 64,
+            entry_count=30,
+            status="complete",
+        ).canonical_dict(),
+        candidate_manifest_ref=ScanWorkManifestReference(
+            manifest_id="10000000-0000-4000-8000-000000000096",
+            kind="candidate",
+            content_schema="candidate-manifest/v1",
+            manifest_digest="d" * 64,
+            entry_count=60,
+            status="complete",
+        ).canonical_dict(),
+        template_manifest_ref=build_canonical_scan_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=_target().digest,
+            include_active=True,
+        ).reference().canonical_dict(),
+        action_scope="endpoint",
+    )
+
+    parent_sized = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID, execution_plan=parent, target_binding=_target(), **refs,
+    )
+    child_sized = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID, execution_plan=parent, target_binding=_target(),
+        ledger_limits=shard_limits, **refs,
+    )
+
+    def http_for(plan, capability):
+        return [
+            int(action.requested_budget.get("http_requests") or 0)
+            for action in plan.actions if action.capability_name == capability
+        ]
+
+    # The parent ledger keeps thorough's published shape.
+    assert max(http_for(parent_sized, "xss.verify_batch")) == 600
+    # The shard ledger still plans the family it was asked for.
+    assert http_for(child_sized, "xss.verify_batch"), (
+        "an explicitly requested family must still plan a verifier"
+    )
+
+    class _ShardLedger:
+        """The shard's authority, which a ScanBudget cannot represent."""
+
+        def ledger_limits(self):
+            return dict(shard_limits)
+
+    # The failure was aggregate, not per action: allocation sums reservations,
+    # so a plan sized to the parent overruns the shard once its siblings are
+    # counted. Allocating the child plan against the shard ledger must not raise.
+    allocate_scan_action_plan(child_sized, _ShardLedger())
+
+    # And the parent-sized plan is exactly what does raise there -- the two
+    # ledgers disagreeing is the defect, not any single oversized action.
+    with pytest.raises(ScanBudgetAllocationError):
+        allocate_scan_action_plan(parent_sized, _ShardLedger())

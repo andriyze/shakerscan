@@ -711,6 +711,7 @@ class ScanActionPlanCompiler:
         authority_refs: Mapping[str, Any] | None = None,
         shard_authority: Mapping[str, Any] | None = None,
         action_scope: str = "full",
+        ledger_limits: Mapping[str, int] | None = None,
         family_scope: Sequence[str] | None = None,
         defer_manifest_actions: bool = False,
         include_finalizer: bool = True,
@@ -1275,7 +1276,10 @@ class ScanActionPlanCompiler:
                 minimum_reservation_scaled_profile(capability_name)
                 or dict(specification.budget_cost)
             )
-            limits = execution_plan.budget.ledger_limits()
+            limits = (
+                dict(ledger_limits) if ledger_limits is not None
+                else execution_plan.budget.ledger_limits()
+            )
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
                 "finalize.report",
@@ -1346,7 +1350,10 @@ class ScanActionPlanCompiler:
             reserve_dependency_slots: int = 0,
         ) -> None:
             """Compile bounded ranked slices instead of one process per candidate."""
-            limits = execution_plan.budget.ledger_limits()
+            limits = (
+                dict(ledger_limits) if ledger_limits is not None
+                else execution_plan.budget.ledger_limits()
+            )
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
                 "finalize.report",
