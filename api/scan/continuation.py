@@ -594,6 +594,202 @@ def merge_scan_action_continuation(
         raise ScanContinuationError(str(exc)) from exc
 
 
+DISCOVERY_CONTINUATION_ACTION_IDS: tuple[str, ...] = (
+    "discover.web_probe",
+    "discover.web_crawl",
+    "discover.browser_crawl",
+    "discover.web_content",
+    "discover.subdomains",
+)
+
+
+# Extensions whose last path segment is a static asset: discovered surface that
+# is never injectable, so it must not consume an active shard's budget. Held
+# here rather than imported from parallel_scan, which reaches back into the API
+# module and would drag the whole application graph into the Scan domain.
+_STATIC_ASSET_EXTENSIONS = frozenset({
+    ".avif", ".bmp", ".css", ".eot", ".gif", ".ico", ".jpeg", ".jpg",
+    ".js", ".map", ".mp4", ".otf", ".png", ".svg", ".ttf", ".webm", ".webp",
+    ".woff", ".woff2",
+})
+
+
+def endpoint_worklist_from_manifest_entries(entries: Any) -> list[str]:
+    """Render canonical endpoint-manifest entries as the fan-out worklist.
+
+    Shards take a worklist of ``"METHOD /path?a=&b="`` strings and rebuild their
+    own manifests from it, so the round trip has to preserve what makes an
+    endpoint testable: its method, its path, and the NAMES of its parameters.
+    Values are deliberately absent -- candidates are built from parameter names,
+    and a discovered value is not authority to replay it.
+    """
+    worklist: list[str] = []
+    seen: set[str] = set()
+    for entry in entries or ():
+        if not isinstance(entry, Mapping):
+            continue
+        path = str(entry.get("canonical_path") or "").strip()
+        if not path:
+            continue
+        last_segment = path.rsplit("/", 1)[-1].lower()
+        if any(last_segment.endswith(ext) for ext in _STATIC_ASSET_EXTENSIONS):
+            continue
+        method = str(entry.get("method") or "GET").strip().upper() or "GET"
+        names = sorted(dict.fromkeys(
+            str(name).strip() for name in entry.get("query_parameter_names") or ()
+            if str(name).strip()
+        ))
+        if names:
+            path = f"{path}?" + "&".join(f"{name}=" for name in names)
+        value = f"{method} {path}"
+        if value in seen:
+            continue
+        seen.add(value)
+        worklist.append(value)
+    return worklist
+
+
+_ABSENT_RECEIPT_SHAPES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
+    "subdomain": MappingProxyType({
+        "schema_version": "canonical-scan-subdomain-discovery/v1",
+        "network_binding": "root_domain_target_binding",
+        "automatically_scanned_discovered_hosts": False,
+    }),
+    "network": MappingProxyType({
+        "schema_version": "canonical-scan-network-discovery/v1",
+        "addresses": [],
+        "actions": [],
+        "open_ports": [],
+        "services": [],
+        "network_binding": "exact_address_subset",
+    }),
+})
+
+
+def absent_receipt_summary(
+    received: Any,
+    *,
+    kind: str,
+    enabled: bool,
+    error: Any = None,
+    root_domain: str | None = None,
+) -> dict[str, Any] | None:
+    """Record an enabled producer that returned no receipt as failed, not absent.
+
+    Returns the received summary when the shard produced one, an explicit
+    failure record when the stage was enabled and produced nothing, and None
+    when the stage was never enabled -- so a caller can leave its own default in
+    place. Silence from an enabled producer is a failure, never a clean skip.
+    """
+    if isinstance(received, Mapping):
+        return dict(received)
+    if not enabled:
+        return None
+    summary: dict[str, Any] = {
+        **_ABSENT_RECEIPT_SHAPES[kind],
+        "enabled": True,
+        "status": "failed",
+        "observations": [],
+        "observation_count": 0,
+        "partial": False,
+        "timed_out": False,
+        "errors": [str(
+            error or f"placed discovery returned no canonical {kind} receipt"
+        )[:500]],
+        "budget_consumed": {},
+        "durable_budget_settled": False,
+    }
+    if kind == "subdomain":
+        summary["root_domain"] = root_domain
+    return summary
+
+
+async def load_discovery_shard_receipts(
+    conn: Any, *, scan_id: str,
+) -> tuple[dict[str, str], dict[str, list[Mapping[str, Any]]]]:
+    """Read one placed discovery shard's terminal statuses and observations.
+
+    Takes a connection rather than owning a pool so the durable read stays in
+    the Scan domain beside the projection that consumes it.
+    """
+    action_ids = list(DISCOVERY_CONTINUATION_ACTION_IDS)
+    statuses: dict[str, str] = {}
+    observations: dict[str, list[Mapping[str, Any]]] = {}
+    for row in await conn.fetch(
+        """SELECT action_id, status FROM scan_capability_actions
+           WHERE scan_id=$1 AND action_id = ANY($2::text[])""",
+        uuid.UUID(str(scan_id)), action_ids,
+    ):
+        statuses[str(row["action_id"])] = str(row["status"] or "")
+    for row in await conn.fetch(
+        """SELECT action_id, observations_json FROM scan_observation_manifests
+           WHERE scan_id=$1 AND action_id = ANY($2::text[])""",
+        uuid.UUID(str(scan_id)), action_ids,
+    ):
+        raw = row["observations_json"]
+        decoded = json.loads(raw) if isinstance(raw, (str, bytes)) else (raw or [])
+        observations[str(row["action_id"])] = [
+            item for item in decoded if isinstance(item, Mapping)
+        ]
+    return statuses, observations
+
+
+def discovery_shard_endpoint_worklist(
+    *,
+    scan_id: str,
+    target: TargetBinding,
+    target_url: str,
+    options: Mapping[str, Any],
+    action_statuses: Mapping[str, str],
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    max_endpoints: int,
+) -> list[str]:
+    """Render a placed discovery shard's receipts as the fan-out worklist.
+
+    A discovery shard writes canonical V2 output -- durable observation
+    manifests keyed by ``discover.*`` action id. The fan-out harvest read the V1
+    report shape instead (``active_checks.active_worklist`` and a top-level
+    ``discovery`` section), which a canonical shard never emits, so a successful
+    producer yielded an empty worklist. Measured against the benchmark
+    application: the shard recorded 35 browser-crawl and 103 content-discovery
+    observations while fan-out logged "harvested 0 endpoints from recon
+    (0 discovered)", and every endpoint shard then planned against an empty
+    candidate manifest and reported xss, sqli and nosqli as zero_attempts.
+
+    Build the surface from those observations exactly as the same-scan
+    continuation does, so both paths derive endpoints one way.
+    """
+    def summary(action_id: str) -> dict[str, Any]:
+        status = action_statuses.get(action_id)
+        if status is None:
+            return {"status": "skipped", "observations": []}
+        return {
+            "status": status or "skipped",
+            "observations": [dict(item) for item in observations.get(action_id, ())],
+        }
+
+    surface = build_scan_surface_manifest(
+        target_url=target_url,
+        target=target,
+        options=dict(options),
+        collection_replay={"status": "skipped", "observations": []},
+        subdomains=summary("discover.subdomains"),
+        probe=summary("discover.web_probe"),
+        crawl=summary("discover.web_crawl"),
+        browser=summary("discover.browser_crawl"),
+        content=summary("discover.web_content"),
+        max_endpoints=max(1, int(max_endpoints)),
+    )
+    manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=target.digest,
+        surface_manifest=surface,
+        source_action_ids=tuple(sorted(action_statuses)) or ("parallel.discovery",),
+        auth_lane="anonymous",
+    )
+    return endpoint_worklist_from_manifest_entries(manifest.entries)
+
+
 def build_discovery_continuation_manifests(
     *,
     allocation: ScanContinuationAllocation,

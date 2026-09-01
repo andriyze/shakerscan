@@ -2419,6 +2419,17 @@ class _FakePlanConn:
         self.persisted_manifest_rows = []
         self.parent_action_plan = parent_action_plan
         self.continuation_allocation = continuation_allocation
+        # Canonical discovery receipts the fan-out reads. Empty by default so the
+        # existing fixtures keep exercising the legacy report-shape fallback.
+        self.discovery_action_rows = []
+        self.discovery_observation_rows = []
+
+    async def fetch(self, query, *args):
+        if "FROM scan_capability_actions" in query:
+            return list(self.discovery_action_rows)
+        if "FROM scan_observation_manifests" in query:
+            return list(self.discovery_observation_rows)
+        return []
 
     async def fetchrow(self, query, *args):
         if "SELECT target_id, target_url, status FROM scans" in query:
@@ -3449,6 +3460,92 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
         "GET /api/a?id=1", "GET /api/b?id=1",
         "GET /api/c?id=1", "GET /api/d?id=1",
     ])
+
+
+def test_scan_plan_fanout_harvests_canonical_discovery_observations(monkeypatch):
+    """Fan-out must read the discovery shard's canonical receipts.
+
+    The shard writes observation manifests keyed by discover.* action id; the
+    harvest read the V1 report shape, which a canonical shard never emits.
+    Measured on the benchmark application the shard recorded 35 browser-crawl
+    observations and fan-out logged "harvested 0 endpoints from recon
+    (0 discovered)", so every endpoint child planned against an empty candidate
+    manifest and reported xss, sqli and nosqli as zero_attempts.
+    """
+    parent_id = "53535353-5353-4353-8353-535353535353"
+    target_id = "54545454-5454-4454-8454-545454545454"
+    discovery_id = "63636363-6363-4363-8363-636363636363"
+
+    class CanonicalDiscoveryConn(_FakePlanConn):
+        async def fetchrow(self, query, *args):
+            if "SELECT id, status, result, error_message" in query:
+                # Deliberately V2-only: no active_checks, no discovery section.
+                return {
+                    "id": uuid.UUID(discovery_id),
+                    "status": "completed",
+                    "result": {"canonical_action_execution": {"actions": []}},
+                    "error_message": None,
+                }
+            return await super().fetchrow(query, *args)
+
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id,
+        policy={"active_testing": True, "include_families": ["xss"]},
+    )
+    conn = CanonicalDiscoveryConn(
+        parent_id, target_id, uuid.uuid4(), parent_plan,
+    )
+    conn.discovery_action_rows = [
+        {"action_id": "discover.web_probe", "status": "success"},
+        {"action_id": "discover.browser_crawl", "status": "success"},
+    ]
+    conn.discovery_observation_rows = [{
+        "action_id": "discover.browser_crawl",
+        "observations_json": json.dumps([
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://example.test/rest/products/search?q=x",
+            },
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://example.test/api/BasketItems?id=1",
+            },
+            # Static assets are discovered but never injectable surface.
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://example.test/main.js",
+            },
+        ]),
+    }]
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": parent_job.job_id,
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "plan_stage": "fanout",
+        "discovery_scan_id": discovery_id,
+        "parallel_worker_count": 3,
+        "options": options,
+        "_canonical_queue_payload": queue_payload,
+    }))
+
+    assigned = sorted({
+        endpoint
+        for args in conn.inserted_children[1:]
+        for endpoint in json.loads(args[4])["custom_endpoints"]
+    })
+    # The browser crawl's parameterised routes are what make xss testable.
+    assert "GET /rest/products/search?q=" in assigned
+    assert "GET /api/BasketItems?id=" in assigned
+    # Parameter names survive; discovered values and static assets do not.
+    assert not any("=x" in item or "=1" in item for item in assigned)
+    assert not any(item.endswith("/main.js") for item in assigned)
 
 
 def test_scan_plan_failed_discovery_runs_canonical_backbone_with_partial_coverage(monkeypatch):

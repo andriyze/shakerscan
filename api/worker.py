@@ -220,7 +220,10 @@ from scan.continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     amended_scan_plan_revision,
+    absent_receipt_summary,
     build_discovery_continuation_manifests,
+    discovery_shard_endpoint_worklist,
+    load_discovery_shard_receipts,
     merge_scan_action_continuation,
 )
 from scan.manifest_store import PostgresScanManifestStore
@@ -15585,6 +15588,7 @@ async def process_scan_plan_job(job_data: dict):
     recon_result: dict[str, Any] = {}
     placed_subdomain_summary: dict[str, Any] | None = None
     placed_network_summary: dict[str, Any] | None = None
+    harvested = list(submitted_endpoints)
     if discovery_scan_id:
         async with db_pool.acquire() as conn:
             discovery = await conn.fetchrow(
@@ -15606,61 +15610,23 @@ async def process_scan_plan_job(job_data: dict):
             )
             return
         recon_result = _as_report_dict(discovery.get('result')) or {}
-        raw_subdomain_summary = recon_result.get('subdomain_discovery')
-        if isinstance(raw_subdomain_summary, Mapping):
-            placed_subdomain_summary = dict(raw_subdomain_summary)
-        elif canonical_subdomain_discovery:
-            placed_subdomain_summary = {
-                "schema_version": "canonical-scan-subdomain-discovery/v1",
-                "enabled": True,
-                "status": "failed",
-                "root_domain": (
-                    canonical_parent_job.target.allowed_root_domains[0]
-                    if canonical_parent_job.target.allowed_root_domains else None
-                ),
-                "observations": [],
-                "observation_count": 0,
-                "partial": False,
-                "timed_out": False,
-                "errors": [str(
-                    discovery.get('error_message')
-                    or "placed discovery returned no canonical subdomain receipt"
-                )[:500]],
-                "budget_consumed": {},
-                "durable_budget_settled": False,
-                "network_binding": "root_domain_target_binding",
-                "automatically_scanned_discovered_hosts": False,
-            }
-        raw_network_summary = recon_result.get('network_discovery')
-        if isinstance(raw_network_summary, Mapping):
-            placed_network_summary = dict(raw_network_summary)
-        elif canonical_network_discovery:
-            placed_network_summary = {
-                "schema_version": "canonical-scan-network-discovery/v1",
-                "enabled": True,
-                "status": "failed",
-                "addresses": [],
-                "actions": [],
-                "observations": [],
-                "open_ports": [],
-                "services": [],
-                "observation_count": 0,
-                "partial": False,
-                "timed_out": False,
-                "errors": [str(
-                    discovery.get('error_message')
-                    or "placed discovery returned no canonical network receipts"
-                )[:500]],
-                "budget_consumed": {},
-                "durable_budget_settled": False,
-                "network_binding": "exact_address_subset",
-            }
-    harvested = list(submitted_endpoints)
-    if discovery_scan_id:
-        # The placed discovery shard already executed target traffic. This
-        # continuation only reads its durable result and plans self-contained
-        # endpoint shards on the control plane.
         discovery_status = str(discovery.get('status') or '')
+        placed_subdomain_summary = absent_receipt_summary(
+            recon_result.get('subdomain_discovery'),
+            kind="subdomain",
+            enabled=canonical_subdomain_discovery,
+            root_domain=(
+                canonical_parent_job.target.allowed_root_domains[0]
+                if canonical_parent_job.target.allowed_root_domains else None
+            ),
+            error=discovery.get('error_message'),
+        ) or placed_subdomain_summary
+        placed_network_summary = absent_receipt_summary(
+            recon_result.get('network_discovery'),
+            kind="network",
+            enabled=canonical_network_discovery,
+            error=discovery.get('error_message'),
+        ) or placed_network_summary
         if discovery_status == 'failed':
             # A failed producer may still have durable, trustworthy partial output. Harvest it
             # and continue; coverage truth is reported separately from the parent run status.
@@ -15668,10 +15634,41 @@ async def process_scan_plan_job(job_data: dict):
                 discovery.get('error_message') or recon_result.get('error')
                 or 'parallel discovery producer failed after partial output'
             )[:1000]
-        discovered, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
-            recon_result,
-            max_endpoints=canonical_parent_job.execution_plan.budget.max_endpoints,
-        )
+        max_worklist = canonical_parent_job.execution_plan.budget.max_endpoints
+        # The placed discovery shard already executed target traffic. This
+        # continuation only reads its durable result and plans self-contained
+        # endpoint shards on the control plane.
+        # Canonical first: the shard's own durable observations. The legacy report
+        # harvest stays as the fallback for a producer that still emits V1 shape.
+        async with db_pool.acquire() as conn:
+            statuses, discovery_observations = await load_discovery_shard_receipts(
+                conn, scan_id=discovery_scan_id,
+            )
+        # Authority is whether the shard recorded canonical discovery actions at
+        # all -- not whether the render came back non-empty. The projection always
+        # yields at least the bound origin, so keying the fallback off the result
+        # would make the legacy path unreachable and hide a producer that emitted
+        # the old shape behind a worklist of one.
+        if statuses:
+            discovered = discovery_shard_endpoint_worklist(
+                scan_id=discovery_scan_id,
+                target=canonical_parent_job.target,
+                target_url=target_url,
+                options=options,
+                action_statuses=statuses,
+                observations=discovery_observations,
+                max_endpoints=max_worklist,
+            )
+            harvest_meta = {
+                "raw_discovered": len(discovered),
+                "returned": len(discovered),
+                "cap": int(max_worklist),
+                "truncated": False,
+            }
+        else:
+            discovered, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
+                recon_result, max_endpoints=max_worklist,
+            )
         # Surface the worklist cap so "Full Coverage" never reports ~100% over a
         # silently truncated surface: endpoints beyond the cap were discovered but
         # will not be tested. (Recorded on parent_options where it is built below.)

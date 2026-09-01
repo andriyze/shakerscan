@@ -15,7 +15,9 @@ from api.scan.continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     amended_scan_plan_revision,
+    absent_receipt_summary,
     build_discovery_continuation_manifests,
+    discovery_shard_endpoint_worklist,
     merge_scan_action_continuation,
 )
 from api.scan.capability_result import CapabilityResultStatus
@@ -600,3 +602,107 @@ def test_default_passive_scan_allows_its_own_passive_template_capability():
     }
     assert "templates.passive_batch" in allowed
     assert allowed, "a passive Scan must allow at least one continuation capability"
+
+
+def test_discovery_shard_worklist_reads_canonical_observations():
+    """A placed discovery shard's receipts must reach fan-out.
+
+    The shard writes canonical observation manifests keyed by discover.* action
+    id. Fan-out harvested the V1 report shape instead, which a canonical shard
+    never emits, so a successful producer yielded an empty worklist: measured on
+    the benchmark application the shard recorded 35 browser-crawl observations
+    while fan-out logged "harvested 0 endpoints from recon (0 discovered)", and
+    every endpoint shard then reported xss, sqli and nosqli as zero_attempts.
+    """
+    target = _target()
+    observations = {
+        "discover.web_crawl": [
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://app.example.test/rest/products/search?q=apple",
+            },
+        ],
+        "discover.browser_crawl": [
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://app.example.test/api/BasketItems?id=1",
+            },
+            # A static asset is discovered but is not injectable surface.
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://app.example.test/main.js",
+            },
+            # Another origin is out of scope and must never enter the worklist.
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://evil.test/collect?x=1",
+            },
+        ],
+    }
+
+    worklist = discovery_shard_endpoint_worklist(
+        scan_id="00000000-0000-4000-8000-0000000000d1",
+        target=target,
+        target_url="https://app.example.test",
+        options={},
+        action_statuses={
+            "discover.web_probe": "success",
+            "discover.web_crawl": "success",
+            "discover.browser_crawl": "success",
+        },
+        observations=observations,
+        max_endpoints=100,
+    )
+
+    # The browser crawl's parameterised route is what makes xss/sqli testable.
+    assert "GET /api/BasketItems?id=" in worklist
+    assert "GET /rest/products/search?q=" in worklist
+    # Parameter names survive the round trip; discovered values do not.
+    assert not any("apple" in item for item in worklist)
+    assert not any("evil.test" in item for item in worklist)
+    assert not any(item.endswith("/main.js") for item in worklist)
+
+
+def test_absent_receipt_from_an_enabled_producer_is_failed_not_skipped():
+    """Silence from an enabled producer is a failure, and keeps its full shape.
+
+    These records are read downstream by field, so pin the exact key set: an
+    extracted builder that quietly drops one (network_binding did get dropped)
+    changes a durable receipt without failing anything nearer the change.
+    """
+    # Never enabled: the caller keeps its own default rather than inventing one.
+    assert absent_receipt_summary(None, kind="network", enabled=False) is None
+    # A produced summary passes through untouched.
+    assert absent_receipt_summary(
+        {"status": "success"}, kind="network", enabled=True,
+    ) == {"status": "success"}
+
+    subdomain = absent_receipt_summary(
+        None, kind="subdomain", enabled=True, root_domain="example.test",
+    )
+    assert subdomain["status"] == "failed"
+    assert subdomain["root_domain"] == "example.test"
+    assert subdomain["errors"]
+    assert set(subdomain) == {
+        "schema_version", "enabled", "status", "root_domain", "observations",
+        "observation_count", "partial", "timed_out", "errors", "budget_consumed",
+        "durable_budget_settled", "network_binding",
+        "automatically_scanned_discovered_hosts",
+    }
+    assert subdomain["schema_version"] == "canonical-scan-subdomain-discovery/v1"
+    assert subdomain["network_binding"] == "root_domain_target_binding"
+
+    network = absent_receipt_summary(None, kind="network", enabled=True)
+    assert network["status"] == "failed"
+    assert set(network) == {
+        "schema_version", "enabled", "status", "addresses", "actions",
+        "observations", "open_ports", "services", "observation_count",
+        "partial", "timed_out", "errors", "budget_consumed",
+        "durable_budget_settled", "network_binding",
+    }
+    assert network["schema_version"] == "canonical-scan-network-discovery/v1"
+    assert network["network_binding"] == "exact_address_subset"
