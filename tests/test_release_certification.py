@@ -144,11 +144,9 @@ def test_certification_binds_exact_manifests_and_all_acceptance_evidence(tmp_pat
     validate_certification_checks(receipt)
 
 
-def test_optional_physical_boundaries_are_recorded_as_not_run(tmp_path):
+def test_only_model_intake_physical_boundary_may_be_recorded_as_not_run(tmp_path):
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
-    paths["external_evidence"].pop("real_fleet_parity")
     paths["external_evidence"].pop("model_intake_physical")
-    paths["external_evidence"].pop("device_physical")
     receipt = certify_receipt(
         candidate=candidate,
         upgrade=upgrade,
@@ -157,13 +155,21 @@ def test_optional_physical_boundaries_are_recorded_as_not_run(tmp_path):
         source_sha=SOURCE,
         **paths,
     )
-    assert receipt["certification"]["scope_exclusions"] == [
-        "real_fleet_parity", "model_intake_physical", "device_physical",
-    ]
-    assert receipt["certification"]["checks"]["real_fleet_parity"] == (
-        "not_run_optional_boundary"
-    )
+    assert receipt["certification"]["scope_exclusions"] == ["model_intake_physical"]
+    assert receipt["certification"]["checks"]["real_fleet_parity"] == "pass"
+    assert receipt["certification"]["checks"]["device_physical"] == "pass"
     validate_certification_checks(receipt)
+
+
+@pytest.mark.parametrize("missing", ["real_fleet_parity", "device_physical"])
+def test_required_physical_release_boundary_cannot_be_omitted(tmp_path, missing):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    paths["external_evidence"].pop(missing)
+    with pytest.raises(CertificationError, match="required external evidence"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+            source_sha=SOURCE, **paths,
+        )
 
 
 def test_promotion_rejects_unaccepted_or_mismatched_check_states(tmp_path):
@@ -183,7 +189,7 @@ def test_promotion_rejects_optional_not_run_without_matching_scope_exclusion(tmp
         candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
         source_sha=SOURCE, **paths,
     )
-    receipt["certification"]["checks"]["real_fleet_parity"] = (
+    receipt["certification"]["checks"]["model_intake_physical"] = (
         "not_run_optional_boundary"
     )
     with pytest.raises(PromotionReceiptError, match="scope exclusions"):
