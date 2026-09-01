@@ -959,6 +959,14 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert argv[argv.index("--only-poc") + 1] == "v"  # default severity -> verified-only PoCs
     assert argv[argv.index("--format") + 1] == "jsonl"
 
+    _, dom_argv, _ = at.build_scanner_argv(
+        "dalfox", "http://t/#/search?q=1",
+        {"severity": "high", "deep_domxss": True},
+    )
+    assert "--skip-headless" not in dom_argv
+    assert "--deep-domxss" in dom_argv
+    assert "--force-headless-verification" in dom_argv
+
     b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
     assert b == "sqlmap"
     assert argv[argv.index("-u") + 1] == "http://t/item?id=1"
@@ -1095,6 +1103,17 @@ def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
     record = out["records"][0]
     assert record["kind"] == "xss_alert" and record["proof_state"] == "verified"
     assert "alert(1)" not in json.dumps(record) and record["payload_sha256"]
+
+    headless_url = "http://t/#/search?q=%3Csvg%20onload%3Dalert(1)%3E"
+    out = at.parse_scanner_output("dalfox", json.dumps({
+        "type": "V", "inject_type": "headless", "data": headless_url,
+        "param": "", "payload": "", "message_str": "Triggered XSS Payload",
+    }))
+    record = out["records"][0]
+    assert record["proof_state"] == "verified"
+    assert record["url"] == "http://t/"
+    assert record["payload_sha256"]
+    assert "svg" not in json.dumps(record).lower()
 
     out = at.parse_scanner_output("sqlmap", "Parameter 'q' is vulnerable. Do you want to keep testing? [Ny/N]\n[INFO] back-end DBMS: MySQL")
     kinds = {r["kind"] for r in out["records"]}

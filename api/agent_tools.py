@@ -421,8 +421,9 @@ def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
 
 
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
-    # Bounded XSS scan of a single URL. GET-based: no data body, no blind callback, no headless,
-    # no WAF evasion, no parameter mining beyond the URL itself. json output for the typed parser.
+    # Bounded XSS scan of a single URL. GET-based: no blind callback, no WAF evasion,
+    # no parameter mining beyond the URL itself. Headless verification is opt-in and
+    # remains behind the active/browser budget plus the pinned transport.
     severity = str(opts.get("severity") or "").strip().lower()
     severity_args: list[str] = []
     if severity == "low":
@@ -431,10 +432,14 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         severity_args = ["--only-poc", "r,v"]
     else:
         severity_args = ["--only-poc", "v"]
+    headless_args = (
+        ["--deep-domxss", "--force-headless-verification"]
+        if opts.get("deep_domxss") is True else ["--skip-headless"]
+    )
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
              "--timeout", "8", "--delay", "1000", "--worker", "3",
-             "--skip-bav", "--skip-grepping", "--skip-headless",
-             "--skip-mining-all"] + severity_args)
+             "--skip-bav", "--skip-grepping", "--skip-mining-all"]
+            + headless_args + severity_args)
     injection = _injection_body(opts)
     if injection is not None:
         method, body, fields = injection
@@ -1124,6 +1129,7 @@ def build_enforced_scanner_plan(
             )
     elif scanner == "dalfox":
         http = int(reservation.get("http_requests") or 0)
+        deep_domxss = bool(options.get("deep_domxss"))
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
                 http, wall, minimum_seconds=0.05,
@@ -1136,7 +1142,7 @@ def build_enforced_scanner_plan(
                 "profile": "batch_attempt", "targets": 1,
                 "connection_ceiling": affordable, "wall_seconds": wall,
                 "delay_ms": max(1, int(delay_seconds * 1_000)),
-                "workers": 3, "headless": False, "blind_oob": False,
+                "workers": 3, "headless": deep_domxss, "blind_oob": False,
             }
         elif (
             http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
@@ -1148,7 +1154,7 @@ def build_enforced_scanner_plan(
             mode, method = "conservative", "fixed_conservative_profile"
             proof_inputs = {
                 "profile": "full", "targets": 1, "workers": 3,
-                "delay_ms": 1_000, "headless": False,
+                "delay_ms": 1_000, "headless": deep_domxss,
                 "parameter_mining": False, "blind_oob": False,
             }
         else:
@@ -1590,14 +1596,24 @@ def parse_scanner_output(
             })
         elif scanner == "dalfox":
             data = item.get("data") if isinstance(item.get("data"), dict) else item
+            observed_url = (
+                data.get("address") or data.get("url") or data.get("target")
+                or (item.get("data") if isinstance(item.get("data"), str) else None)
+            )
+            payload_material = str(data.get("payload") or "")
+            if not payload_material and str(data.get("type") or "").lower() == "v":
+                # Dalfox 2.13 emits verified headless PoCs with the injected URL in
+                # the top-level `data` string and an empty payload field. Hash that
+                # private URL as the proof receipt while exposing only the redacted URL.
+                payload_material = str(item.get("data") or "")
             message = str(data.get("message") or data.get("poc") or "")[:500] or None
             record = {
                 "kind": "xss_alert",
                 "alert_type": str(data.get("type") or item.get("type") or "")[:40] or None,
-                "url": _public_observed_url(data.get("address") or data.get("url") or data.get("target")),
+                "url": _public_observed_url(observed_url),
                 "param": str(data.get("param") or "")[:200] or None,
                 # Payload text is receipt-side only; hunt reasoning gets its shape, not the body.
-                "payload_sha256": hashlib.sha256(str(data.get("payload") or "").encode()).hexdigest() if data.get("payload") else None,
+                "payload_sha256": hashlib.sha256(payload_material.encode()).hexdigest() if payload_material else None,
                 "message": message,
                 "proof_state": "verified" if str(data.get("type") or "").lower() == "v" else "candidate",
             }

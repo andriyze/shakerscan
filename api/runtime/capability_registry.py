@@ -580,7 +580,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "xss.verify", "Bounded target-bound Dalfox XSS verification.",
             "external_tool", "active", _HTTP_TARGETS, "dalfox", "1",
-            "active_testing", {"http_requests": 400, "tool_wall_seconds": 120},
+            "active_testing", {
+                "http_requests": 400, "tool_wall_seconds": 120,
+                "browser_actions": 1,
+            },
             {"network_reachability": True, "binary": "dalfox"},
             _http_principal_schema({
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
@@ -588,6 +591,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "severity": {
                     "type": "string", "enum": ["low", "medium", "high"],
                 },
+                "deep_domxss": {"type": "boolean"},
             }),
             "dalfox-jsonl/v1", ("xss_reflection_or_browser_proof",),
             "dalfox", "dalfox", 120_000, ("version",), ("/opt/tools/dalfox",),
@@ -597,6 +601,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "severity": {
                     "type": "string", "enum": ["low", "medium", "high"],
                 },
+                "deep_domxss": {"type": "boolean"},
             }),
         ),
         CapabilitySpec(
