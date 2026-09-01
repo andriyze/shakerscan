@@ -7141,7 +7141,11 @@ def test_reconcile_hypothesis_promotes_only_existing_action_proof(monkeypatch):
         "severity": "high",
         "status": "active",
         "url": "https://app.example.com/api/search?q=x",
-        "evidence": {"method": "GET", "parameter": "q"},
+        "evidence": {
+            "method": "GET",
+            "parameter": "q",
+            "proof_of_exploitation": True,
+        },
         "request": {},
         "response": {},
         "last_verification_status": "still_vulnerable",

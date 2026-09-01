@@ -665,6 +665,7 @@ def test_grade_discounts_unverified_suspected_high_findings():
         "cvss_score": 7.5,
         "confidence": 0.9,
         "verified": True,
+        "proof_of_exploitation": True,
     }
 
     suspected_grade = grade(_healthy_grade_report([suspected]))
@@ -807,7 +808,8 @@ def test_grade_only_discounts_trusted_ai_false_positives():
         {**base, "ai_classification_source": "provider"}
     ]))
 
-    assert untrusted["grade"] == "C*"
+    assert untrusted["grade"] == "B*"
+    assert untrusted["score"] < trusted["score"]
     assert untrusted["grade_reliable"] is False
     assert trusted["grade"] == "A"
     assert "likely FP" not in untrusted["summary"]
