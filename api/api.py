@@ -3171,13 +3171,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
     r = get_redis()
     now = utc_now()
 
-    async with pool.acquire() as conn:
-        due_schedules = await conn.fetch("""
-            SELECT s.*, t.url as target_url
-            FROM schedules s
-            JOIN targets t ON s.target_id = t.id
-            WHERE s.is_active = true AND s.next_run_at <= $1
-        """, now)
+    due_schedules = await schedule_ops.fetch_due_schedules(pool, now=now)
 
     for schedule in due_schedules:
         schedule_id = schedule['id']
@@ -3188,25 +3182,19 @@ async def run_due_schedules(pool: asyncpg.Pool):
             schedule_kind = _schedule_kind_from_row(schedule)
         except ValueError as exc:
             async with pool.acquire() as conn:
-                await conn.execute(
-                    """UPDATE schedules
-                       SET is_active=false, next_run_at=NULL, updated_at=NOW()
-                       WHERE id=$1""",
-                    schedule_id,
-                )
-            print(f"[scheduler] Disabled invalid schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                await schedule_ops.deactivate_schedule(conn, schedule_id=schedule_id, reason=str(exc))
             continue
         if schedule_kind == "evidence_retention_sweep":
             async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE schedules SET is_active = false, updated_at = NOW() WHERE id = $1",
-                    schedule_id,
+                await schedule_ops.deactivate_schedule(
+                    conn,
+                    schedule_id=schedule_id,
+                    reason=(
+                        "legacy evidence retention schedule; retention now requires "
+                        "an interactive exact-preview approval"
+                    ),
+                    clear_next_run=False,
                 )
-            print(
-                f"[scheduler] Disabled legacy evidence retention schedule {str(schedule_id)[:8]}; "
-                "retention now requires an interactive exact-preview approval",
-                flush=True,
-            )
             continue
 
         # Re-resolve immediately before dispatch. A saved hostname is not durable
@@ -3219,21 +3207,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
             )
             continue
 
-        # Claim the due occurrence before any queue or database side effect. This
-        # prevents two scheduler processes from dispatching the same row and makes
-        # an operator pause that raced with the due-list read authoritative. The
-        # short lease also makes an interrupted scheduler retry instead of losing
-        # the occurrence permanently.
-        claim_until = now + timedelta(minutes=15)
-        async with pool.acquire() as conn:
-            claimed = await conn.fetchval(
-                """UPDATE schedules
-                   SET next_run_at=$1, updated_at=NOW()
-                   WHERE id=$2 AND is_active=true AND next_run_at <= $3
-                   RETURNING id""",
-                claim_until, schedule_id, now,
-            )
-        if not claimed:
+        if not await schedule_ops.claim_due_schedule(pool, schedule_id=schedule_id, now=now):
             continue
 
         scan_options = dict(_schedule_options_dict(schedule['scan_options']))
@@ -3255,25 +3229,13 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             "action": "none",
                             "reason": "target already has an active scan",
                             "blocked_by": "active_scan",
-                            "next_eligible_at": None,
-                            "daily_cap_remaining": None,
-                            "rate_cap_remaining": None,
-                            "claimable": None,
-                            "tested_today": None,
                         },
                         source="schedule",
                     )
-                # Recalculate next_run_at anyway so we don't keep retrying every 60s
-                next_run = calculate_next_run(
-                    schedule['frequency'],
-                    schedule['day_of_week'],
-                    schedule['time_of_day'] or '02:00',
-                    schedule['timezone'] or 'UTC',
-                    schedule['jitter_minutes'] or 0
+                # Advance anyway so the claim lease does not retry every tick.
+                await schedule_ops.advance_schedule_cadence(
+                    conn, schedule, schedule_id=schedule_id,
                 )
-                await conn.execute("""
-                    UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
-                """, next_run, schedule_id)
                 continue
 
             # Create scan record + queue job (reuse scan submission logic)
@@ -3291,41 +3253,24 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 try:
                     asm_opts = _resolve_asm_schedule_options(scan_options)
                 except (TypeError, ValueError) as exc:
-                    await conn.execute(
-                        """UPDATE schedules
-                           SET is_active=false, next_run_at=NULL, updated_at=NOW()
-                           WHERE id=$1""",
-                        schedule_id,
-                    )
-                    print(
-                        f"[scheduler] Disabled invalid ASM schedule "
-                        f"{str(schedule_id)[:8]}: {exc}",
-                        flush=True,
+                    await schedule_ops.deactivate_schedule(
+                        conn, schedule_id=schedule_id, reason=f"invalid ASM options: {exc}",
                     )
                     continue
                 try:
-                    approval_context = await _validate_approval_receipt_for_action(
+                    # Same authority the create/update path enforces, so a stored
+                    # schedule cannot dispatch active ASM work on weaker terms.
+                    approval_context = await schedule_ops.validate_schedule_asm_approval(
                         conn,
-                        asm_opts.get("approval_receipt_id"),
-                        target_url=str(target_url),
                         target_id=target_id,
-                        action_name="asm.improve",
-                        risk_tier="active",
-                        always_require_receipt=True,
-                        require_target_binding=True,
-                        require_expiry=True,
+                        target_url=str(target_url),
+                        scan_options=asm_opts,
                     )
                 except HTTPException as exc:
-                    await conn.execute(
-                        """UPDATE schedules
-                           SET is_active=false, next_run_at=NULL, updated_at=NOW()
-                           WHERE id=$1""",
-                        schedule_id,
-                    )
-                    print(
-                        f"[scheduler] Disabled unauthorized ASM schedule "
-                        f"{str(schedule_id)[:8]}: {exc.detail}",
-                        flush=True,
+                    await schedule_ops.deactivate_schedule(
+                        conn,
+                        schedule_id=schedule_id,
+                        reason=f"unauthorized ASM schedule: {exc.detail}",
                     )
                     continue
                 if approval_context:
@@ -3373,12 +3318,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         {
                             "action": _asm_kind,
                             "reason": f"scheduled ASM {_asm_kind} queued",
-                            "blocked_by": None,
-                            "next_eligible_at": None,
-                            "daily_cap_remaining": None,
-                            "rate_cap_remaining": None,
                             "claimable": claimable,
-                            "tested_today": None,
                         },
                         source="schedule",
                         active_scan_ids=[str(enq.get("scan_id"))] if enq.get("scan_id") else None,
@@ -3392,31 +3332,21 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             "action": "none",
                             "reason": f"scheduled ASM improve failed: {exc}",
                             "blocked_by": "enqueue_failed",
-                            "next_eligible_at": None,
-                            "daily_cap_remaining": None,
-                            "rate_cap_remaining": None,
-                            "claimable": None,
-                            "tested_today": None,
                         },
                         source="schedule",
                     )
                 if _asm_ok:
                     # Wave queued: advance to the normal cadence and stamp last_run_at.
-                    next_run = calculate_next_run(
-                        schedule["frequency"], schedule["day_of_week"],
-                        schedule["time_of_day"] or "02:00", schedule["timezone"] or "UTC",
-                        schedule["jitter_minutes"] or 0)
-                    await conn.execute(
-                        "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                        next_run, schedule_id)
+                    await schedule_ops.advance_schedule_cadence(
+                        conn, schedule, schedule_id=schedule_id, last_run_at=now,
+                    )
                 else:
-                    # Enqueue failed (no silent skip): retry on the next checker tick
-                    # via a short backoff, and do NOT stamp last_run_at so the missed
-                    # wave is visible and re-attempted instead of waiting a full cycle.
-                    retry_at = now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES)
-                    await conn.execute(
-                        "UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                        retry_at, schedule_id)
+                    # Enqueue failed (no silent skip): retry on the next checker tick.
+                    await schedule_ops.retry_schedule_at(
+                        conn,
+                        schedule_id=schedule_id,
+                        retry_at=now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES),
+                    )
                 continue
 
             # Normal schedules are canonical V2 admission inputs. Startup
@@ -3427,16 +3357,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 LEGACY_SCAN_WRITE_FIELDS.intersection(scan_options)
             )
             if scan_type != "scan" or legacy_schedule_fields:
-                print(
-                    f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
-                    "legacy Scan authority was not migrated",
-                    flush=True,
-                )
-                await conn.execute(
-                    """UPDATE schedules
-                       SET is_active=false, next_run_at=NULL, updated_at=NOW()
-                       WHERE id=$1""",
-                    schedule_id,
+                await schedule_ops.deactivate_schedule(
+                    conn,
+                    schedule_id=schedule_id,
+                    reason="legacy Scan authority was not migrated",
                 )
                 continue
             try:
@@ -3447,26 +3371,15 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 scan_options["active"] = scan_contract.policy.active_testing
                 scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
             except (TypeError, ValueError, ValidationError) as exc:
-                await conn.execute(
-                    """UPDATE schedules
-                       SET is_active=false, next_run_at=NULL, updated_at=NOW()
-                       WHERE id=$1""",
-                    schedule_id,
-                )
-                print(f"[scheduler] Disabled invalid schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                await schedule_ops.deactivate_schedule(conn, schedule_id=schedule_id, reason=str(exc))
                 continue
             active_testing = scan_contract.policy.active_testing
             if active_testing and scan_options_model.public:
-                print(
-                    f"[scheduler] Disabling schedule {str(schedule_id)[:8]}: "
-                    "public option is incompatible with active testing",
-                    flush=True,
+                await schedule_ops.deactivate_schedule(
+                    conn,
+                    schedule_id=schedule_id,
+                    reason="public option is incompatible with active testing",
                 )
-                await conn.execute("""
-                    UPDATE schedules
-                    SET is_active=false, next_run_at=NULL, updated_at=NOW()
-                    WHERE id=$1
-                """, schedule_id)
                 continue
             scan_options = _build_canonical_scan_options_payload(
                 scan_options_model,
@@ -3749,18 +3662,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 flush=True,
             )
 
-        next_run = calculate_next_run(
-            schedule['frequency'],
-            schedule['day_of_week'],
-            schedule['time_of_day'] or '02:00',
-            schedule['timezone'] or 'UTC',
-            schedule['jitter_minutes'] or 0
-        )
         async with pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
-                WHERE id = $3
-            """, now, next_run, schedule_id)
+            await schedule_ops.advance_schedule_cadence(
+                conn, schedule, schedule_id=schedule_id, last_run_at=now,
+            )
 
         print(f"[scheduler] Triggered Scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url})", flush=True)
 
@@ -5693,6 +5598,7 @@ configure_findings_router(
 )
 app.include_router(findings_router)
 try:
+    from schedules import router as schedule_ops
     from schedules.router import (
         SCHEDULE_HEALTH_LOOKBACK_DAYS,
         ScheduleCreate,
@@ -5705,7 +5611,6 @@ try:
         _schedule_health_map_for_schedules,
         _schedule_kind_from_row,
         _schedule_options_dict,
-        calculate_next_run,
         configure_schedule_router,
         create_schedule,
         delete_schedule,
@@ -5719,6 +5624,7 @@ try:
         ScheduleTargetSafetyError,
     )
 except ModuleNotFoundError:  # package import in host-side tests
+    from api.schedules import router as schedule_ops
     from api.schedules.router import (
         SCHEDULE_HEALTH_LOOKBACK_DAYS,
         ScheduleCreate,
@@ -5731,7 +5637,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         _schedule_health_map_for_schedules,
         _schedule_kind_from_row,
         _schedule_options_dict,
-        calculate_next_run,
         configure_schedule_router,
         create_schedule,
         delete_schedule,

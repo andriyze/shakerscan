@@ -343,7 +343,7 @@ def _resolve_asm_schedule_options(scan_options: Mapping[str, Any]) -> dict[str, 
     return normalized
 
 
-async def _validate_schedule_asm_approval(
+async def validate_schedule_asm_approval(
     conn: Any,
     *,
     target_id: Any,
@@ -445,6 +445,128 @@ async def handle_schedule_target_failure(
         f"[scheduler] {disposition} schedule {str(schedule_id)[:8]}: {error}",
         flush=True,
     )
+
+
+async def deactivate_schedule(
+    conn: Any,
+    *,
+    schedule_id: Any,
+    reason: str,
+    clear_next_run: bool = True,
+) -> None:
+    """Stop a recurring job whose stored authority is no longer dispatchable.
+
+    The row is deactivated rather than deleted so an operator can see why the
+    cadence stopped and repair it. ``clear_next_run`` is False only for a
+    retired schedule kind, whose recorded next occurrence stays readable as
+    history instead of being erased. The log line matches
+    ``handle_schedule_target_failure`` so every scheduler disposition reads the
+    same way.
+    """
+    if clear_next_run:
+        await conn.execute(
+            """UPDATE schedules
+               SET is_active=false, next_run_at=NULL, updated_at=NOW()
+               WHERE id=$1""",
+            schedule_id,
+        )
+    else:
+        await conn.execute(
+            "UPDATE schedules SET is_active=false, updated_at=NOW() WHERE id=$1",
+            schedule_id,
+        )
+    print(f"[scheduler] Disabled schedule {str(schedule_id)[:8]}: {reason}", flush=True)
+
+
+def schedule_next_run_at(schedule: Any) -> datetime:
+    """Next occurrence for a stored row, applying that row's own cadence fields."""
+    return calculate_next_run(
+        schedule["frequency"],
+        schedule["day_of_week"],
+        schedule["time_of_day"] or "02:00",
+        schedule["timezone"] or "UTC",
+        schedule["jitter_minutes"] or 0,
+    )
+
+
+async def advance_schedule_cadence(
+    conn: Any,
+    schedule: Any,
+    *,
+    schedule_id: Any,
+    last_run_at: datetime | None = None,
+) -> None:
+    """Move a dispatched occurrence to the next one on the schedule's cadence.
+
+    ``last_run_at`` is stamped only when the occurrence actually produced work.
+    A skipped or failed dispatch still advances the cadence -- otherwise the
+    claim lease would make it retry every tick -- but does not claim a run, so
+    the missed wave stays visible in the schedule's history.
+    """
+    next_run = schedule_next_run_at(schedule)
+    if last_run_at is None:
+        await conn.execute(
+            "UPDATE schedules SET next_run_at=$1, updated_at=NOW() WHERE id=$2",
+            next_run, schedule_id,
+        )
+        return
+    await conn.execute(
+        """UPDATE schedules
+           SET last_run_at=$1, next_run_at=$2, updated_at=NOW() WHERE id=$3""",
+        last_run_at, next_run, schedule_id,
+    )
+
+
+async def retry_schedule_at(
+    conn: Any, *, schedule_id: Any, retry_at: datetime,
+) -> None:
+    """Back off a due occurrence that failed to dispatch, without claiming a run.
+
+    last_run_at is deliberately not stamped: the missed wave stays visible and
+    is re-attempted, rather than being recorded as if it had run.
+    """
+    await conn.execute(
+        "UPDATE schedules SET next_run_at=$1, updated_at=NOW() WHERE id=$2",
+        retry_at, schedule_id,
+    )
+
+
+async def fetch_due_schedules(pool: Any, *, now: datetime) -> list[Any]:
+    """Read the due occurrences without pinning a connection across dispatch."""
+    async with pool.acquire() as conn:
+        return list(await conn.fetch(
+            """SELECT s.*, t.url as target_url
+               FROM schedules s
+               JOIN targets t ON s.target_id = t.id
+               WHERE s.is_active = true AND s.next_run_at <= $1""",
+            now,
+        ))
+
+
+async def claim_due_schedule(
+    pool: Any,
+    *,
+    schedule_id: Any,
+    now: datetime,
+    lease_minutes: int = 15,
+) -> bool:
+    """Take the due occurrence before any queue or database side effect.
+
+    This prevents two scheduler processes from dispatching the same row and
+    makes an operator pause that raced with the due-list read authoritative.
+    The short lease also makes an interrupted scheduler retry the occurrence
+    instead of losing it permanently.
+    """
+    claim_until = now + timedelta(minutes=max(1, int(lease_minutes)))
+    async with pool.acquire() as conn:
+        claimed = await conn.fetchval(
+            """UPDATE schedules
+               SET next_run_at=$1, updated_at=NOW()
+               WHERE id=$2 AND is_active=true AND next_run_at <= $3
+               RETURNING id""",
+            claim_until, schedule_id, now,
+        )
+    return claimed is not None
 
 
 async def _default_schedule_resolver(host: str, port: int) -> list[Any]:
@@ -725,7 +847,7 @@ async def create_schedule(request: ScheduleCreate):
         except ScheduleTargetSafetyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if schedule_kind == "asm_improve":
-            await _validate_schedule_asm_approval(
+            await validate_schedule_asm_approval(
                 conn,
                 target_id=target_uuid,
                 target_url=str(target["url"]),
@@ -960,7 +1082,7 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
                 )
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            await _validate_schedule_asm_approval(
+            await validate_schedule_asm_approval(
                 conn,
                 target_id=existing["target_id"],
                 target_url=str(existing["target_url"]),

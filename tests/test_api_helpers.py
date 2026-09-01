@@ -1347,6 +1347,11 @@ from scan_verification_state import scan_time_verification_fields  # noqa: E402
 sys.path.pop(0)
 
 
+def _squeeze(sql: str) -> str:
+    """Collapse SQL whitespace so an assertion pins behavior, not formatting."""
+    return " ".join(str(sql).split())
+
+
 def _fleet_request(
     *, host: str, scheme: str = "https", authorization: str = "", headers: dict | None = None
 ):
@@ -3804,7 +3809,7 @@ def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatc
     assert "INSERT INTO scans" in executed_sql
     assert "UPDATE scans" in executed_sql
     assert "scheduled enqueue failed" in str(conn.executes)
-    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" not in _squeeze(executed_sql)
     assert redis_client.rpush_calls
 
 
@@ -3867,7 +3872,7 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" in executed_sql
-    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" in _squeeze(executed_sql)
     assert "UPDATE scans" not in executed_sql
     assert len(redis_client.rpush_calls) == 1
     assert len(redis_client.hset_calls) == 1
@@ -3988,8 +3993,8 @@ def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET is_active = false" in executed_sql
-    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert "UPDATE schedules SET is_active=false, updated_at=NOW()" in _squeeze(executed_sql)
+    assert "last_run_at=$1, next_run_at=$2" not in _squeeze(executed_sql)
     assert redis_client.rpush_calls == []
     assert redis_client.hset_calls == []
 
@@ -4006,9 +4011,9 @@ def test_run_due_schedules_disables_legacy_destructive_retention_schedule(monkey
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET is_active = false" in executed_sql
+    assert "UPDATE schedules SET is_active=false, updated_at=NOW()" in _squeeze(executed_sql)
     assert "UPDATE schedules SET next_run_at" not in executed_sql
-    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" not in _squeeze(executed_sql)
 
 
 def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
@@ -4082,7 +4087,7 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" in _squeeze(executed_sql)
     assert queued["triggered_by"] == "schedule"
     assert queued["claimable_kwargs"] == {
         "stale_days": 7,
