@@ -31,7 +31,14 @@ test('Scan credential selection is disabled for batches and requires explicit au
 test('new generic profiles use canonical least-privilege capability selections', () => {
   assert.match(credentials, /listCredentialCapabilities/)
   assert.match(credentials, /safe_defaults/)
-  assert.match(credentials, /No selection resolves to the server&apos;s safe defaults, never unrestricted access/)
+  // The copy moved from JSX text into a conditional string literal, so the
+  // apostrophe is escaped rather than entity-encoded. Accept either form: the
+  // claim being asserted is the wording, not its quoting.
+  assert.match(credentials, /No selection resolves to the server(?:&apos;|\\')s safe defaults, never unrestricted access/)
+  // SSH profiles have no safe default, so the UI must refuse an empty selection
+  // rather than let the server reject it after submission.
+  assert.match(credentials, /Select at least one explicitly approved SSH capability/)
+  assert.match(credentials, /SSH profiles require an explicit capability selection and target-bound approval/)
   assert.match(credentials, /no capabilities · legacy profile is unusable until narrowed explicitly/)
   assert.match(credentials, /allow_active_capabilities: draft\.allowActiveCapabilities/)
   assert.doesNotMatch(credentials, /blank permits any worker capability/)
