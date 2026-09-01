@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 168,
+  "component_schema_count": 167,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -140,7 +140,6 @@
     "ResearchDecisionRequest": "6ccace09061b81b1d1159e502090a0c82936450b2f3cf4726a9aaf22244452ce",
     "ResearchEpisodeRequest": "1c34ee434486e37d45d5f074602ec73d47e0c264d11e7b66b956172209ad3ab3",
     "ResearchObservationRequest": "df21e818632dea54ab50599fbc2928875f1031f4745ad94b0d6dd3f412040095",
-    "ResearchPlannerStepRequest": "69fe2b0170d208127e8dacffb680482a8631472d0d9874b6ad62153f86564b6b",
     "ScanAdvancedLimits": "fa65891f9d6c4246fd33f557a45842cc04624d02998fc4ddcec07d3f49b97469",
     "ScanExecutionSettingsUpdate": "8c4659d76962d531391fe7e9631bc1fe46106aeb0e1b9b39aa05b1bede9ae5a6",
     "ScanFamilyPreviewRequest": "a55203c1dc8757ada57f4ccf950ced3f14a94c465bd9b274a195b0e485a13c18",
@@ -174,9 +173,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "a35c6af41d789b33d729f32480d051b36bc90c85fc138f49ef94473b43119cdc",
+  "contract_sha256": "38c3c3add2c95faa937415ae4a93605a9eb134f3d1374a75d3888c5536f5e983",
   "openapi": "3.1.0",
-  "operation_count": 394,
+  "operation_count": 393,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -4807,19 +4806,6 @@
       "operation_id": "refresh_research_observation_research_episodes__episode_id__observe_post",
       "parameters_sha256": "da1f04759180a91ab52da21e44dc0a19e83cd1e5376ab9da782fc8a5174b066e",
       "request_schema_sha256": "f8e31d78c1066b65f0f8ebcc16b51ba226b762c5aa97108bda000013cef63cfc",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "POST /research/episodes/{episode_id}/plan-step": {
-      "deprecated": false,
-      "operation_id": "plan_research_episode_step_research_episodes__episode_id__plan_step_post",
-      "parameters_sha256": "da1f04759180a91ab52da21e44dc0a19e83cd1e5376ab9da782fc8a5174b066e",
-      "request_schema_sha256": "0307c89617bfb206821b2b40917586bcf2d1d7490ba4d8b2897c0f4b4e3d1b26",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"

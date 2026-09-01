@@ -117,6 +117,18 @@ def test_deleted_research_launch_alias_keeps_internal_campaign_launcher():
     assert "async def launch_research_episode" in source
 
 
+def test_deleted_research_plan_step_keeps_internal_autopilot_planner():
+    """Only the server-owned autopilot may invoke configured-provider planning."""
+    tree = api_tree_source()
+
+    assert not route_is_declared(
+        "POST", "/research/episodes/{episode_id}/plan-step",
+    )
+    assert "async def plan_research_episode_step" not in tree
+    assert "async def _plan_research_episode_step" in tree
+    assert "await _plan_research_episode_step(" in tree
+
+
 def test_no_non_cancel_write_exists_under_the_legacy_agent_hunt_surface():
     """The legacy write handlers are deleted, not merely blocked.
 

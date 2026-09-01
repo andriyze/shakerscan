@@ -131,7 +131,6 @@ surfaces:
       - POST /research/episodes/{episode_id}/cancel
       - POST /research/episodes/{episode_id}/decisions
       - POST /research/episodes/{episode_id}/observe
-      - POST /research/episodes/{episode_id}/plan-step
       - POST /research/episodes/{episode_id}/settle
       - PUT /research/episodes/{episode_id}/autopilot
     routes: ["/research", "/research/*"]

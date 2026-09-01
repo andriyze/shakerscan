@@ -3916,21 +3916,6 @@ export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTw
   return res.json()
 }
 
-export async function planResearchEpisodeStep(episodeId: string, payload: {
-  execute?: boolean
-  timeout_seconds?: number
-  max_tokens?: number
-  created_by?: string
-} = {}): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/plan-step`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to run research planner step'))
-  return res.json()
-}
-
 export async function setResearchEpisodeAutopilot(
   episodeId: string,
   enabled: boolean,

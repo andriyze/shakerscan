@@ -1122,8 +1122,7 @@ Hypothesis proof reconciliation is separately approval-gated and can only link a
 never creates or verifies a finding from lead context.
 
 **Bounded Research Agent**: `GET /research/readiness` · `POST|GET /research/episodes` ·
-`GET /research/episodes/{id}` ·
-`POST /research/episodes/{id}/plan-step` · `POST /research/episodes/{id}/decisions` ·
+`GET /research/episodes/{id}` · `POST /research/episodes/{id}/decisions` ·
 `POST /research/episodes/{id}/observe` · `POST /research/episodes/{id}/settle` ·
 `POST /research/episodes/{id}/cancel`. An episode is a target-bound state machine over immutable,
 redacted `ObservationPack` rows and exactly-one-action `DecisionEpisode` rows. Decisions are bound to
@@ -1494,8 +1493,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 404 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 338 | `api/**/*.py` |
+| Public REST operations | 403 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 337 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1826,7 +1825,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/research/episodes/{episode_id}/cancel` | `cancel_research_episode` |
 | `POST` | `/research/episodes/{episode_id}/decisions` | `submit_research_decision` |
 | `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |
-| `POST` | `/research/episodes/{episode_id}/plan-step` | `plan_research_episode_step` |
 | `POST` | `/research/episodes/{episode_id}/settle` | `settle_research_episode` |
 | `GET` | `/research/readiness` | `research_readiness` |
 | `GET` | `/results` | `list_results` |

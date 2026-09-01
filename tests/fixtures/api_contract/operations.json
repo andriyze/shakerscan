@@ -1495,11 +1495,6 @@
     "operation_id": "refresh_research_observation_research_episodes__episode_id__observe_post"
   },
   {
-    "path": "/research/episodes/{episode_id}/plan-step",
-    "method": "post",
-    "operation_id": "plan_research_episode_step_research_episodes__episode_id__plan_step_post"
-  },
-  {
     "path": "/research/episodes/{episode_id}/settle",
     "method": "post",
     "operation_id": "settle_research_episode_research_episodes__episode_id__settle_post"

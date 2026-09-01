@@ -2132,13 +2132,6 @@
     "name": "refresh_research_observation"
   },
   {
-    "path": "/research/episodes/{episode_id}/plan-step",
-    "methods": [
-      "POST"
-    ],
-    "name": "plan_research_episode_step"
-  },
-  {
     "path": "/research/episodes/{episode_id}/settle",
     "methods": [
       "POST"
