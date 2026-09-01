@@ -617,6 +617,15 @@ def test_worker_scanner_target_revalidation_is_same_host_and_http_only():
         at.validate_scanner_execution_target("https://example.test", "https://evil.test/")
     with pytest.raises(at.AgentToolError, match=r"HTTP\(S\)"):
         at.validate_scanner_execution_target("https://example.test", "file:///etc/passwd")
+    # A fragment is client-side only: it cannot move the destination, and a browser
+    # DOM check needs it, so it must survive revalidation.
+    assert at.validate_scanner_execution_target(
+        "http://example.test:3000", "http://example.test:3000/#/search?q=1"
+    ) == "http://example.test:3000/#/search?q=1"
+    with pytest.raises(at.AgentToolError, match="selected target host"):
+        at.validate_scanner_execution_target(
+            "http://example.test:3000", "http://evil.test:3000/#/search?q=1"
+        )
 
 
 def test_scanner_execution_is_address_pinned_with_original_host_and_sni():

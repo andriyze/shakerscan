@@ -1351,9 +1351,14 @@ def validate_scanner_execution_target(registered_target: str, execution_target: 
         raise AgentToolError("scanner execution target must not contain user information")
     if execution_host != registered_host:
         raise AgentToolError("scanner execution target must use the selected target host")
-    return urllib.parse.urlunsplit(
-        (execution.scheme.lower(), execution.netloc, execution.path or "/", execution.query, "")
-    )
+    # The fragment is retained deliberately. It never reaches a server and cannot
+    # change the validated destination, but for a browser-driven DOM check it *is*
+    # the vulnerable surface: dropping it reduced every SPA route to the origin
+    # root, so a fragment-routed DOM XSS could not be verified at all.
+    return urllib.parse.urlunsplit((
+        execution.scheme.lower(), execution.netloc,
+        execution.path or "/", execution.query, execution.fragment,
+    ))
 
 
 def validate_pinned_scanner_address(pinned_address: Any, authorized_addresses: Any) -> str:
