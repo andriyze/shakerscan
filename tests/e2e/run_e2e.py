@@ -1134,9 +1134,25 @@ def _hunt_api_collection_fixture(
         "target_id": target_id,
         "allowed_origins": [FIXTURES_BASE],
     })
-    if not (bound.get("binding") or {}).get("id"):
+    binding_id = str((bound.get("binding") or {}).get("id") or "")
+    if not binding_id:
         raise RuntimeError(f"Hunt API collection binding rejected: {bound}")
-    return collection_id, profile_ids[0], profile_ids[1]
+    # Safe replay resolves a saved selection, not a bare collection: the server
+    # refuses to replay requests an operator never explicitly selected.
+    status, selected = H.post(
+        f"/request-collections/{collection_id}/selections",
+        {
+            "name": f"Hunt API replay selection {_RUN_NONCE}",
+            "binding_id": binding_id,
+            "replay_policy": "safe_reads",
+            "methods": ["GET"],
+            "safe_methods_only": True,
+        },
+    )
+    selection_id = str((selected.get("selection") or selected).get("id") or "")
+    if status != 200 or not selection_id:
+        raise RuntimeError(f"Hunt API collection selection rejected: {selected}")
+    return selection_id, profile_ids[0], profile_ids[1]
 
 
 def _load_real_mcp_adapter():
@@ -1466,7 +1482,7 @@ def run_hunt() -> H.Scorecard:
         api_target_id, api_scope_id, api_approval_id = _hunt_fixture_authority(
             risk_tier="credential",
         )
-        collection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
+        selection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
             api_target_id,
         )
         FX.reset_parity_traffic()
@@ -1480,7 +1496,7 @@ def run_hunt() -> H.Scorecard:
                 "primary_credential_profile_id": primary_id,
                 "secondary_credential_profile_id": secondary_id,
             },
-            request_collection_ids=[collection_id],
+            request_collection_ids=[selection_id],
             capabilities=["collections.inspect", "collections.replay_safe"],
         ))
         api_hunt_id = str(api_hunt.get("hunt_id") or "")
