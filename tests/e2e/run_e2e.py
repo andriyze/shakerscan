@@ -1063,7 +1063,10 @@ def _hunt_start_payload(
         "budgets": {
             "max_active_actions": 4 if privileged else 0,
             "max_state_changing_requests": 0,
-            "max_hosts": 1 if network_discovery else 0,
+            # One host is exactly the first action's charge, so a single call exhausted
+        # the hunt and cancellation could never be the stopping reason. Address
+        # binding is still asserted from the receipt, not from this ceiling.
+        "max_hosts": 2 if network_discovery else 0,
             "max_tcp_ports": 100 if network_discovery else 0,
             "max_udp_ports": 0,
             "max_oob_interactions": 0,
@@ -1738,7 +1741,11 @@ def run_hunt() -> H.Scorecard:
             and finding_status == 200
             and str(finding_row.get("last_verification_verdict")) == "exploited"
             and str(finding_row.get("severity")) in {"critical", "high"},
-            f"verification={proof} finding_status={finding_status} finding={finding_row}",
+            (
+                f"probe={exposed['probe_status']} candidate={exposed['candidate_status']} "
+                f"verify={exposed['verify_status']} action_id={exposed['action_id']} "
+                f"verification={proof} finding_status={finding_status} finding={finding_row}"
+            ),
         )
 
         control = _candidate_verdict(
