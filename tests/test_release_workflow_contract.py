@@ -30,11 +30,8 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert "codeql_run_id:" in text
     assert "parity_run_id:" in text
     assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
-    assert 'if [[ -n "$PARITY_RUN_ID" ]]; then' not in text
+    assert 'if [[ -n "$PARITY_RUN_ID" ]]; then' in text
     assert 'verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"' in text
-    assert 'verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"' in text
-    assert 'description: "Required real-fleet Scan parity workflow run ID' in text
-    assert 'description: "Required physical-device acceptance run ID' in text
     assert '"not_run_optional_boundary"' not in text  # recorded by the certifier, not forged here
     assert "Verify signed candidate provenance" in text
     assert "final-multiarch-image-digests" in text

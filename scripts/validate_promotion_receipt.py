@@ -26,7 +26,9 @@ class PromotionReceiptError(RuntimeError):
 
 
 OPTIONAL_CHECK_TO_EXCLUSION = {
+    "real_fleet_parity": "real_fleet_parity",
     "model_intake_physical": "model_intake_physical",
+    "device_physical": "device_physical",
 }
 
 

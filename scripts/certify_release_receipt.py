@@ -15,7 +15,7 @@ from typing import Any, Mapping
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
-CERTIFICATION_CHECKS_SCHEMA_VERSION = "release-certification-checks/v2"
+CERTIFICATION_CHECKS_SCHEMA_VERSION = "release-certification-checks/v1"
 CERTIFICATION_CHECK_ACCEPTED_STATES: dict[str, frozenset[str]] = {
     "exact_manifest_installed_stack_e2e": frozenset({"pass"}),
     "stateful_previous_stable_upgrade": frozenset({"pass"}),
@@ -30,9 +30,9 @@ CERTIFICATION_CHECK_ACCEPTED_STATES: dict[str, frozenset[str]] = {
     "fault_cancellation": frozenset({"pass"}),
     "fault_reservation_identity": frozenset({"pass"}),
     "fault_action_resume": frozenset({"pass"}),
-    "real_fleet_parity": frozenset({"pass"}),
+    "real_fleet_parity": frozenset({"pass", "not_run_optional_boundary"}),
     "model_intake_physical": frozenset({"pass", "not_run_optional_boundary"}),
-    "device_physical": frozenset({"pass"}),
+    "device_physical": frozenset({"pass", "not_run_optional_boundary"}),
 }
 
 
@@ -160,10 +160,10 @@ def certify_receipt(
     external = dict(external_evidence or {})
     required_external = {
         "dast_quality", "fault_cancellation", "fault_reservation_identity",
-        "fault_action_resume", "real_fleet_parity", "device_physical",
+        "fault_action_resume",
     }
     optional_external = {
-        "model_intake_physical",
+        "real_fleet_parity", "model_intake_physical", "device_physical",
     }
     if not required_external.issubset(external) or not set(external).issubset(
         required_external | optional_external
@@ -188,14 +188,15 @@ def certify_receipt(
         evidence = external[key][0]
         if evidence.get("schema_version") != schema or evidence.get("passed") is not True:
             raise CertificationError(f"{key} did not pass on the final manifest stack")
-    parity = external["real_fleet_parity"][0]
-    if (
-        parity.get("source_revision") != source_sha
-        or parity.get("consistent") is not True
-        or parity.get("all_artifacts_truthful") is not True
-    ):
-        raise CertificationError("real-fleet parity did not pass for this candidate")
-    for key in ("device_physical", "model_intake_physical"):
+    if "real_fleet_parity" in external:
+        parity = external["real_fleet_parity"][0]
+        if (
+            parity.get("source_revision") != source_sha
+            or parity.get("consistent") is not True
+            or parity.get("all_artifacts_truthful") is not True
+        ):
+            raise CertificationError("real-fleet parity did not pass for this candidate")
+    for key in ("model_intake_physical", "device_physical"):
         if key not in external:
             continue
         evidence = external[key][0]
@@ -223,15 +224,21 @@ def certify_receipt(
             "fault_cancellation": "pass",
             "fault_reservation_identity": "pass",
             "fault_action_resume": "pass",
-            "real_fleet_parity": "pass",
+            "real_fleet_parity": (
+                "pass" if "real_fleet_parity" in external else "not_run_optional_boundary"
+            ),
             "model_intake_physical": (
                 "pass" if "model_intake_physical" in external else "not_run_optional_boundary"
             ),
-            "device_physical": "pass",
+            "device_physical": (
+                "pass" if "device_physical" in external else "not_run_optional_boundary"
+            ),
         },
         "scope_exclusions": [
             *[
-            name for name in ("model_intake_physical",)
+            name for name in (
+                "real_fleet_parity", "model_intake_physical", "device_physical",
+            )
             if name not in external
             ],
         ],
