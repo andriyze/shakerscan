@@ -1050,6 +1050,7 @@ def _hunt_start_payload(
     credential_refs: dict[str, str] | None = None,
     request_collection_ids: list[str] | None = None,
     capabilities: list[str] | None = None,
+    budget_profile: str = "fast",
 ) -> dict:
     credentials_requested = bool(credential_refs)
     privileged = active or network_discovery or credentials_requested
@@ -1058,7 +1059,7 @@ def _hunt_start_payload(
         "target_id": target_id,
         "target_kind": target_kind,
         "goal": goal,
-        "budget_profile": "fast",
+        "budget_profile": budget_profile,
         "budgets": {
             "max_active_actions": 4 if privileged else 0,
             "max_state_changing_requests": 0,
@@ -1085,7 +1086,7 @@ def _hunt_start_payload(
 
 def _hunt_api_collection_fixture(
     target_id: str,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Create two exact principals and one API-bound safe request collection."""
     profile_ids: list[str] = []
     for slot, token in (("primary", "parity-owner"), ("secondary", "parity-attacker")):
@@ -1152,7 +1153,7 @@ def _hunt_api_collection_fixture(
     selection_id = str((selected.get("selection") or selected).get("id") or "")
     if status != 200 or not selection_id:
         raise RuntimeError(f"Hunt API collection selection rejected: {selected}")
-    return selection_id, profile_ids[0], profile_ids[1]
+    return collection_id, selection_id, profile_ids[0], profile_ids[1]
 
 
 def _load_real_mcp_adapter():
@@ -1482,7 +1483,7 @@ def run_hunt() -> H.Scorecard:
         api_target_id, api_scope_id, api_approval_id = _hunt_fixture_authority(
             risk_tier="credential",
         )
-        selection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
+        collection_id, selection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
             api_target_id,
         )
         FX.reset_parity_traffic()
@@ -1558,6 +1559,9 @@ def run_hunt() -> H.Scorecard:
             network_target_id,
             goal="Registered-address network service acceptance.",
             target_kind="network",
+            # Cancellation is the subject; the hunt must survive long enough to be
+            # cancelled rather than stopping at budget_exhausted first.
+            budget_profile="balanced",
             network_discovery=True,
             approval_id=network_approval_id,
             scope_id=network_scope_id,
@@ -1674,6 +1678,11 @@ def run_hunt() -> H.Scorecard:
             active=True,
             scope_id=verify_scope_id,
             approval_id=verify_approval_id,
+            # Each candidate verification charges 12 browser actions and this check
+            # runs the positive and negative case, so the fast profile's 20 cannot
+            # fund both. The subject here is the candidate-to-finding bridge, not
+            # budget enforcement, which H-1 and H-6 already cover.
+            budget_profile="balanced",
         ))
         verify_hunt_id = str(run.get("hunt_id") or "")
 
