@@ -3758,7 +3758,9 @@ def test_run_due_schedules_retries_transient_dns_without_consuming_run(monkeypat
     assert redis_client.rpush_calls == []
     assert len(conn.executes) == 1
     query, args = conn.executes[0]
-    assert "is_active=($1::timestamptz IS NOT NULL)" in query
+    assert "WHERE id=$2 AND is_active=true" in query
+    assert "SET next_run_at=$1" in query
+    assert "SET is_active" not in query
     assert "last_run_at" not in query
     assert args[1] == schedule["id"]
     assert before + timedelta(minutes=14) < args[0] < after + timedelta(minutes=16)
@@ -3781,8 +3783,8 @@ def test_run_due_schedules_disables_unsafe_dns_destination(monkeypatch):
 
     assert redis_client.rpush_calls == []
     query, args = conn.executes[0]
-    assert "is_active=($1::timestamptz IS NOT NULL)" in query
-    assert args == (None, schedule["id"])
+    assert "SET is_active=false, next_run_at=NULL" in query
+    assert args == (schedule["id"],)
 
 
 def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatch):

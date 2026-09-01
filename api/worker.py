@@ -20837,7 +20837,7 @@ async def process_canonical_scanner_capability_job(
                         finished_at.replace("Z", "+00:00")
                     ),
                 )
-                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, observations)
+                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, capability_input, observations)
                 persisted = await store.persist_terminal(
                     conn,
                     previous=latest,

@@ -22,6 +22,8 @@ _JWT_RE = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{5,}$
 _HEX_SECRET_RE = re.compile(r"^[0-9a-fA-F]{32,}$")
 _OPAQUE_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{28,}$")
 _KEY_VALUE_RE = re.compile(r"^([^=:]{1,80})([:=])(.*)$")
+_CLIENT_ROUTE_PATH_RE = re.compile(r"^/[A-Za-z0-9/_.~-]*$")
+_CLIENT_ROUTE_FIELD_RE = re.compile(r"^[A-Za-z0-9_.\[\]-]{1,200}$")
 
 
 def _label(value: str) -> str:
@@ -100,3 +102,64 @@ def redact_url(
     else:
         result = urllib.parse.urlunsplit(("", "", path, query, ""))
     return result[:max_length]
+
+
+def redact_client_route(value: str, *, max_length: int = 1_000) -> str | None:
+    """Return a value-free SPA fragment route, or ``None`` when it is unsafe.
+
+    Browser proof URLs commonly use ``#/route?field=<payload>``. Public evidence
+    needs the route and field names to remain actionable, but must never retain
+    the fragment values because that is where the injected proof payload lives.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        return None
+    raw = parsed.fragment if parsed.fragment else text.lstrip("#")
+    if (
+        not raw
+        or len(raw.encode("utf-8", "replace")) > max_length
+        or any(ord(char) < 0x20 or ord(char) == 0x7f for char in raw)
+    ):
+        return None
+    raw_path, separator, raw_query = raw.partition("?")
+    bang = raw_path.startswith("!/")
+    path_value = raw_path[1:] if bang else raw_path
+    try:
+        decoded_path = urllib.parse.unquote(path_value)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not path_value.startswith("/")
+        or path_value.startswith("//")
+        or not _CLIENT_ROUTE_PATH_RE.fullmatch(decoded_path)
+    ):
+        return None
+    try:
+        pairs = urllib.parse.parse_qsl(
+            raw_query,
+            keep_blank_values=True,
+            strict_parsing=False,
+            max_num_fields=64,
+        ) if separator else []
+    except ValueError:
+        return None
+    names: list[str] = []
+    for raw_name, _raw_value in pairs:
+        name = str(raw_name or "").strip()
+        if (
+            not name
+            or len(name) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in name)
+            or not _CLIENT_ROUTE_FIELD_RE.fullmatch(name)
+        ):
+            continue
+        if name not in names:
+            names.append(name)
+    path = redact_path(path_value)
+    query = urllib.parse.urlencode([(name, "") for name in sorted(names)])
+    route = urllib.parse.urlunsplit(("", "", path, query, ""))
+    return ("!" if bang else "") + route

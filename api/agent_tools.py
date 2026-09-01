@@ -41,9 +41,9 @@ from scan.work_manifests import (
 from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
 
 try:
-    from scanner_tools.url_redaction import redact_url
+    from scanner_tools.url_redaction import redact_client_route, redact_url
 except ModuleNotFoundError:  # package import in host-side tests
-    from scanner.scanner_tools.url_redaction import redact_url
+    from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -440,8 +440,15 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         ["--force-headless-verification"]
         if opts.get("deep_domxss") is True else ["--skip-headless"]
     )
+    # Browser verification is a single-URL proof attempt, not a crawl. The
+    # ordinary 1s/3-worker crawl profile repeatedly reaches the 120s supervisor
+    # wall before Dalfox settles. The pinned proxy still enforces the reserved
+    # request ceiling, while this measured profile lets the browser terminate
+    # and return its verdict inside that reservation.
+    headless = opts.get("deep_domxss") is True
+    delay_ms, workers = ("0", "10") if headless else ("1000", "3")
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
-             "--timeout", "8", "--delay", "1000", "--worker", "3",
+             "--timeout", "8", "--delay", delay_ms, "--worker", workers,
              "--skip-bav", "--skip-grepping", "--skip-mining-all"]
             + headless_args + severity_args)
     injection = _injection_body(opts)
@@ -1134,6 +1141,7 @@ def build_enforced_scanner_plan(
     elif scanner == "dalfox":
         http = int(reservation.get("http_requests") or 0)
         deep_domxss = bool(options.get("deep_domxss"))
+        dalfox_workers = 10 if deep_domxss else 3
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
                 http, wall, minimum_seconds=0.05,
@@ -1146,7 +1154,8 @@ def build_enforced_scanner_plan(
                 "profile": "batch_attempt", "targets": 1,
                 "connection_ceiling": affordable, "wall_seconds": wall,
                 "delay_ms": max(1, int(delay_seconds * 1_000)),
-                "workers": 3, "headless": deep_domxss, "blind_oob": False,
+                "workers": dalfox_workers, "headless": deep_domxss,
+                "blind_oob": False,
             }
         elif (
             http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
@@ -1157,8 +1166,9 @@ def build_enforced_scanner_plan(
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             proof_inputs = {
-                "profile": "full", "targets": 1, "workers": 3,
-                "delay_ms": 1_000, "headless": deep_domxss,
+                "profile": "full", "targets": 1, "workers": dalfox_workers,
+                "delay_ms": 0 if deep_domxss else 1_000,
+                "headless": deep_domxss,
                 "parameter_mining": False, "blind_oob": False,
             }
         else:
@@ -1531,7 +1541,9 @@ def parse_scanner_output(
                     decoded.append({"url": candidate, "method": "GET"})
 
     records: list[dict[str, Any]] = []
-    seen_katana_requests: set[tuple[str, str, tuple[str, ...]]] = set()
+    seen_katana_requests: set[
+        tuple[str, str, str | None, tuple[str, ...]]
+    ] = set()
     for item in decoded[:MAX_TOOL_RECORDS]:
         if scanner == "nuclei":
             info = item.get("info") if isinstance(item.get("info"), dict) else {}
@@ -1569,7 +1581,9 @@ def parse_scanner_output(
             content_type, body_field_names = public_request_body_shape(
                 request.get("body")
             )
-            request_identity = (observed_url, method, body_field_names)
+            request_identity = (
+                observed_url, method, content_type, body_field_names,
+            )
             if request_identity in seen_katana_requests:
                 continue
             seen_katana_requests.add(request_identity)
@@ -1626,6 +1640,9 @@ def parse_scanner_output(
                 "message": message,
                 "proof_state": "verified" if str(data.get("type") or "").lower() == "v" else "candidate",
             }
+            client_route = redact_client_route(observed_url)
+            if client_route:
+                record["client_route"] = client_route
             records.append(record)
         elif scanner == "naabu":
             # JSON lines: {"host":"10.0.0.4","port":8443,"protocol":"tcp"} (port may be a

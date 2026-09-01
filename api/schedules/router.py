@@ -222,12 +222,24 @@ async def handle_schedule_target_failure(
         if isinstance(error, ScheduleTargetResolutionError) else None
     )
     async with pool.acquire() as conn:
-        await conn.execute(
-            """UPDATE schedules
-               SET is_active=($1::timestamptz IS NOT NULL), next_run_at=$1,
-                   updated_at=NOW() WHERE id=$2""",
-            retry_at, schedule_id,
-        )
+        if retry_at is not None:
+            # A due row was read before DNS resolution began. The operator may
+            # pause it while that lookup is in flight, so a transient failure
+            # may postpone only a schedule that is still active; it must never
+            # turn a later pause back into an active recurring job.
+            await conn.execute(
+                """UPDATE schedules
+                   SET next_run_at=$1, updated_at=NOW()
+                   WHERE id=$2 AND is_active=true""",
+                retry_at, schedule_id,
+            )
+        else:
+            await conn.execute(
+                """UPDATE schedules
+                   SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                   WHERE id=$1""",
+                schedule_id,
+            )
     disposition = "Retrying" if retry_at is not None else "Disabled"
     print(
         f"[scheduler] {disposition} schedule {str(schedule_id)[:8]}: {error}",

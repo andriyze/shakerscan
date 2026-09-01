@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scanner.manifests import DiscoveryRecoverySink, EndpointManifest, normalize_endpoint
-from scanner_tools.url_redaction import redact_path, redact_url
+from scanner_tools.url_redaction import redact_client_route, redact_path, redact_url
 
 
 def test_redact_url_removes_query_userinfo_and_secret_path_segments():
@@ -21,6 +21,14 @@ def test_redact_url_removes_query_userinfo_and_secret_path_segments():
     assert "wire-secret" not in value
     assert "/reset/<redacted>" in value
     assert "signature=%3Credacted%3E" in value
+
+
+def test_client_route_keeps_only_route_shape_and_field_names():
+    proof = "https://app.test/#/search?q=%3Csvg%20onload%3Dalert(1)%3E&sort=recent"
+
+    assert redact_client_route(proof) == "/search?q=&sort="
+    assert redact_client_route("https://app.test/#/<svg/onload=alert(1)>") is None
+    assert redact_client_route("https://app.test/#//evil.test/path") is None
 
 
 def test_recovery_manifest_never_persists_or_fans_out_secret_bearing_paths(tmp_path):

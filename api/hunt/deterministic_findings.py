@@ -13,6 +13,60 @@ from typing import Any, Mapping
 import urllib.parse
 import uuid
 
+try:
+    from findings import template_path, templated_finding_identity
+except ModuleNotFoundError:
+    from scanner.findings import template_path, templated_finding_identity
+
+try:
+    from scanner_tools.url_redaction import redact_client_route
+except ModuleNotFoundError:
+    from scanner.scanner_tools.url_redaction import redact_client_route
+
+
+def _origin(value: urllib.parse.SplitResult) -> tuple[str, str | None, int | None]:
+    scheme = value.scheme.lower()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, value.hostname, value.port or default_port
+
+
+def _verified_xss_fingerprint(proof: Mapping[str, Any], *, method: str) -> str:
+    """Use Scan's canonical endpoint identity, extended for client-side routes."""
+    normalized_method = str(method or "GET").strip().upper()
+    if not normalized_method.isalpha() or not 3 <= len(normalized_method) <= 12:
+        normalized_method = "GET"
+    client_route = str(proof.get("client_route") or "")
+    if client_route:
+        parsed_route = urllib.parse.urlsplit(client_route.lstrip("!"))
+        parameters = {
+            str(name).strip()
+            for name, _value in urllib.parse.parse_qsl(
+                parsed_route.query, keep_blank_values=True,
+            )
+            if str(name).strip()
+        }
+        if proof.get("param"):
+            parameters.add(str(proof["param"]))
+        identity = (
+            f"CWE-79|{normalized_method}|"
+            f"{template_path(str(proof.get('path') or '/'))}#"
+            f"{template_path(parsed_route.path or '/')}|"
+            f"{','.join(sorted(parameters))}"
+        )
+    else:
+        identity = templated_finding_identity({
+            "cwe": "CWE-79",
+            "tool": "dalfox",
+            "url": proof.get("url"),
+            "evidence": {
+                "method": normalized_method,
+                "param": proof.get("param"),
+            },
+        })
+        if not identity:
+            raise ValueError("verified XSS proof has no canonical endpoint identity")
+    return "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+
 
 def verified_xss_observations(
     observations: Any, *, target_url: str,
@@ -20,7 +74,7 @@ def verified_xss_observations(
     """Return bounded, content-free XSS proof records on the bound origin."""
     try:
         target = urllib.parse.urlsplit(target_url)
-        target_origin = (target.scheme.lower(), target.hostname, target.port)
+        target_origin = _origin(target)
     except ValueError:
         return []
     accepted: list[dict[str, Any]] = []
@@ -35,9 +89,7 @@ def verified_xss_observations(
             continue
         try:
             observed = urllib.parse.urlsplit(str(raw["url"]))
-            observed_origin = (
-                observed.scheme.lower(), observed.hostname, observed.port,
-            )
+            observed_origin = _origin(observed)
         except ValueError:
             continue
         if observed_origin != target_origin:
@@ -45,16 +97,21 @@ def verified_xss_observations(
         parameter = str(raw.get("param") or "").strip()[:200] or None
         # Store the vulnerable operation, never Dalfox's proof payload.
         query = urllib.parse.urlencode([(parameter, "")]) if parameter else ""
+        client_route = redact_client_route(raw.get("client_route"))
         public_url = urllib.parse.urlunsplit((
-            observed.scheme, observed.netloc, observed.path or "/", query, "",
+            observed.scheme, observed.netloc, observed.path or "/", query,
+            client_route or "",
         ))
-        accepted.append({
+        proof = {
             "url": public_url,
             "path": observed.path or "/",
             "param": parameter,
             "payload_sha256": str(raw["payload_sha256"])[:64],
             "alert_type": str(raw.get("alert_type") or "")[:40] or None,
-        })
+        }
+        if client_route:
+            proof["client_route"] = client_route
+        accepted.append(proof)
         if len(accepted) >= 20:
             break
     return accepted
@@ -68,20 +125,18 @@ async def materialize_verified_hunt_findings(
     target_url: str,
     capability_name: str,
     receipt_id: uuid.UUID,
+    capability_input: Mapping[str, Any],
     observations: Any,
 ) -> list[str]:
     """Persist proof-bearing capability output without trusting planner fields."""
     if capability_name != "xss.verify":
         return []
     findings: list[str] = []
+    method = str(capability_input.get("method") or "GET").strip().upper()
+    if not method.isalpha() or not 3 <= len(method) <= 12:
+        method = "GET"
     for proof in verified_xss_observations(observations, target_url=target_url):
-        identity = json.dumps({
-            "family": "xss",
-            "target_id": str(target_id),
-            "path": proof["path"],
-            "param": proof["param"],
-        }, sort_keys=True, separators=(",", ":"))
-        fingerprint = "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+        fingerprint = _verified_xss_fingerprint(proof, method=method)
         evidence = {
             "schema_version": "hunt-deterministic-finding/v1",
             "authoritative": True,
@@ -92,6 +147,7 @@ async def materialize_verified_hunt_findings(
             "hunt_id": str(hunt_id),
             "source_action_id": str(action_id),
             "tool_receipt_id": str(receipt_id),
+            "method": method,
             **proof,
         }
         finding_id = await conn.fetchval(

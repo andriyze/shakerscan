@@ -1,8 +1,10 @@
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
 from schedules.router import (
+    handle_schedule_target_failure,
     ScheduleTargetResolutionError,
     ScheduleTargetSafetyError,
     validate_schedule_target_destination,
@@ -65,3 +67,42 @@ def test_schedule_distinguishes_retryable_dns_failure_from_unsafe_destination():
 
     assert exc.value.retryable is True
     assert ScheduleTargetSafetyError("unsafe").retryable is False
+
+
+def test_transient_dns_retry_does_not_reactivate_a_concurrently_paused_schedule():
+    state = {"is_active": False, "next_run_at": None}
+
+    class Connection:
+        async def execute(self, query, *args):
+            if "AND is_active=true" in query:
+                if state["is_active"]:
+                    state["next_run_at"] = args[0]
+                return "UPDATE 0"
+            # Model the former unconditional retry update so this behavioral
+            # test fails if it is ever reintroduced.
+            if "is_active=($1::timestamptz IS NOT NULL)" in query:
+                state["is_active"] = args[0] is not None
+                state["next_run_at"] = args[0]
+                return "UPDATE 1"
+            raise AssertionError(query)
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Pool:
+        @staticmethod
+        def acquire():
+            return Acquire()
+
+    asyncio.run(handle_schedule_target_failure(
+        Pool(),
+        schedule_id="schedule-1",
+        error=ScheduleTargetResolutionError("temporary DNS outage"),
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    ))
+
+    assert state == {"is_active": False, "next_run_at": None}

@@ -537,6 +537,26 @@ def test_katana_argv_is_bounded_and_same_host():
         assert unsafe not in argv
 
 
+def test_katana_preserves_distinct_body_encodings_for_the_same_fields():
+    output = at.parse_scanner_output("katana", "\n".join((
+        json.dumps({"request": {
+            "endpoint": "https://app.test/api/search",
+            "method": "POST",
+            "body": '{"q":"json-value"}',
+        }}),
+        json.dumps({"request": {
+            "endpoint": "https://app.test/api/search",
+            "method": "POST",
+            "body": "q=form-value",
+        }}),
+    )))
+
+    assert output["record_count"] == 2
+    assert {record["content_type"] for record in output["records"]} == {
+        "application/json", "application/x-www-form-urlencoded",
+    }
+
+
 def test_external_scanner_output_is_typed_and_query_values_are_redacted():
     secret = "AbCdEf0123456789AbCdEf0123456789"
     output = at.parse_scanner_output("nuclei", json.dumps({
@@ -976,6 +996,23 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert "--force-headless-verification" in dom_argv
     # --deep-domxss never converges inside the capability wall ceiling.
     assert "--deep-domxss" not in dom_argv
+    assert dom_argv[dom_argv.index("--delay") + 1] == "0"
+    assert dom_argv[dom_argv.index("--worker") + 1] == "10"
+    assert argv[argv.index("--delay") + 1] == "1000"
+    assert argv[argv.index("--worker") + 1] == "3"
+
+    plan = at.build_enforced_scanner_plan(
+        "dalfox", "http://t/#/search?q=1", {"deep_domxss": True},
+        reserved_budget={"http_requests": 400, "tool_wall_seconds": 120},
+        pinned_address="127.0.0.1",
+        pinned_proxy_url="socks5://127.0.0.1:1080",
+    )
+    proof_inputs = plan.budget_proof["inputs"]
+    assert proof_inputs["headless"] is True
+    assert proof_inputs["delay_ms"] == 0
+    assert proof_inputs["workers"] == 10
+    assert plan.argv[plan.argv.index("--delay") + 1] == "0"
+    assert plan.argv[plan.argv.index("--worker") + 1] == "10"
 
     b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
     assert b == "sqlmap"
@@ -1122,6 +1159,7 @@ def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
     record = out["records"][0]
     assert record["proof_state"] == "verified"
     assert record["url"] == "http://t/"
+    assert record["client_route"] == "/search?q="
     assert record["payload_sha256"]
     assert "svg" not in json.dumps(record).lower()
 
