@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 167,
+  "component_schema_count": 168,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -26,8 +26,9 @@
     "ApprovalReceiptRequest": "3126e2c8534118b4bf15e9ae1d5c5fd56ca78de37a1d51952e1162b7f4d6899a",
     "ApprovalReceiptRevocationRequest": "91e484f43354b7f71485f4f76db798b5955cf22f7c8902a6229e670877d24d42",
     "ArsenalExecuteRequest": "81fc0dca36c6a663d85a7ad9879303051cce5726bdef56a4269a167e5757c07a",
+    "AsmConfigUpdate": "70a05c73be1128dd530eb4cd2aab8d1a93ad9c9f7be759511d29ea1248157d43",
     "AsmImproveRequest": "b0c4d8bd2cc2c334fd07d5e894664ef7cb13495c559fc0feb4cbfab80039ff24",
-    "AsmPolicyUpdate": "d5ea3ebc256174b89f12a3513e1a6588a66c0eb58e4bb81805bcc63354df7226",
+    "AsmPolicyUpdate": "de9793773babd22b931fe8e9b774e47117b76da5e07ec221ae5e3a73c2ca15b5",
     "AsmPruneRequest": "9069ec31f55d97689b07c0c4135cd48ac235b6bff92fba8f422924563f13bad0",
     "AsmReconRequest": "5a5c108b0e4b68823adc89dd6095ea5a81b05b0899f1e14b72dd49db86c64b3a",
     "AsmTestRequest": "7c309e5682705ac5bbff27aa194643efe32f903055bdb8cf91805d60a0c51270",
@@ -173,7 +174,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "38c3c3add2c95faa937415ae4a93605a9eb134f3d1374a75d3888c5536f5e983",
+  "contract_sha256": "657abf9790c8c62edbbb9e7520ee3ce60813cbd1257a9e6eeb268abbb9b9e3e1",
   "openapi": "3.1.0",
   "operation_count": 393,
   "operations": {
@@ -286,7 +287,7 @@
     "DELETE /findings/{finding_id}": {
       "deprecated": false,
       "operation_id": "delete_finding_findings__finding_id__delete",
-      "parameters_sha256": "64278587856204abcb4e7f1b265aa905bce48767d843e92a2f8f20eebabb8ac0",
+      "parameters_sha256": "2e47456b776b91b053c129dce5d7faa12c7b8bc292a30bac0ba9b2d3035d691f",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
