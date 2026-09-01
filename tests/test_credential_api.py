@@ -225,6 +225,16 @@ def test_capability_registry_defaults_validate_names_and_require_active_elevatio
     assert defaulted.status_code == 201, defaulted.text
     assert defaulted.json()["profile"]["allowed_capabilities"] == ["http.request"]
 
+    inert_ssh = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="device", auth_kind="ssh_password",
+            principal_slot="ssh", username="root", allowed_capabilities=[],
+        ),
+    )
+    assert inert_ssh.status_code == 422
+    assert "has no safe default" in inert_ssh.text
+
     unknown = http.post(
         "/credential-profiles",
         json=_create_payload(name="Unknown", allowed_capabilities=["made.up.capability"]),
@@ -389,7 +399,9 @@ def test_migrated_device_profile_rotation_stays_synchronized_with_legacy_executi
             principal_slot="ssh",
             username="root",
             secret="original-password",
-            allowed_capabilities=[],
+            allowed_capabilities=["device.ssh.propose"],
+            allow_active_capabilities=True,
+            approval_receipt_id="11111111-1111-4111-8111-111111111111",
         ),
     )
     assert created.status_code == 201, created.text
