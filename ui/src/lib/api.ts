@@ -5596,6 +5596,7 @@ export interface AsmConfig {
   window_end_hour: number | null
   window_days: number[] | null
   max_requests_per_hour_per_domain: number
+  approval_receipt_id: string | null
 }
 
 export interface AsmPolicy {

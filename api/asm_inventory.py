@@ -2132,6 +2132,9 @@ DEFAULT_ASM_CONFIG: dict[str, Any] = {
     "window_end_hour": None,               # int 0-23 UTC (exclusive); wraps midnight if < start
     "window_days": None,                   # list[int] 0=Mon..6=Sun, None = all days
     "max_requests_per_hour_per_domain": _DEFAULT_DOMAIN_RATE_PER_HOUR, # per-root-domain rate cap; 0 = unlimited (set via ASM_DEFAULT_DOMAIN_RATE_PER_HOUR)
+    # Opaque, expiring target-bound authority for active dispatcher batches.
+    # Revalidated immediately before every dispatch; never grants recon authority.
+    "approval_receipt_id": None,
 }
 
 _INT_BOUNDS = {
@@ -2181,6 +2184,10 @@ def merge_asm_config(config: Any) -> dict[str, Any]:
             cfg["window_days"] = sorted(valid) or None
         else:
             cfg["window_days"] = None
+    if "approval_receipt_id" in config:
+        cfg["approval_receipt_id"] = (
+            str(config.get("approval_receipt_id") or "").strip() or None
+        )
     return cfg
 
 

@@ -71,6 +71,7 @@ import {
   TableSkeleton,
   useToast,
 } from '@/components/ui'
+import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 
 interface AsmFilters {
   [key: string]: string | number | undefined
@@ -456,7 +457,7 @@ function toAsmCheckFamilyOptions(
   return options.length ? options : FALLBACK_ASM_CHECK_FAMILY_OPTIONS
 }
 
-function ContinuousCard({ targetId }: { targetId: string }) {
+function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: string }) {
   const toast = useToast()
   const [policy, setPolicy] = useState<AsmPolicy | null>(null)
   const [cfg, setCfg] = useState<AsmConfig | null>(null)
@@ -464,6 +465,7 @@ function ContinuousCard({ targetId }: { targetId: string }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
 
   const load = useCallback(() => {
     setError(false)
@@ -480,6 +482,10 @@ function ContinuousCard({ targetId }: { targetId: string }) {
 
   const save = async () => {
     if (!cfg) return
+    if (enabled && !cfg.approval_receipt_id?.trim()) {
+      toast.error('A current target-bound approval receipt is required to enable active background batches.')
+      return
+    }
     setSaving(true)
     try {
       const updated = await updateAsmPolicy(targetId, { enabled, config: cfg })
@@ -528,8 +534,33 @@ function ContinuousCard({ targetId }: { targetId: string }) {
 
       <p className="text-xs text-gray-500">
         When enabled, ShakerScan refreshes discovery and tests untested/stale endpoints in small
-        background batches. It chooses one action at a time and respects the caps below.
+        background batches. It chooses one action at a time and respects the caps below. Active
+        batches stop when their saved approval expires; recon remains passive.
       </p>
+
+      {(enabled || Boolean(cfg.approval_receipt_id)) && (
+        <div className="space-y-3">
+          <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+            <input
+              className="mt-1"
+              type="checkbox"
+              checked={authorizationConfirmed}
+              onChange={(event) => setAuthorizationConfirmed(event.target.checked)}
+            />
+            <span>I own or have explicit authorization to run recurring active checks against this target.</span>
+          </label>
+          <ApprovalReceiptField
+            targetId={targetId}
+            targetUrl={targetUrl}
+            authorizationConfirmed={authorizationConfirmed}
+            receiptId={cfg.approval_receipt_id || ''}
+            onReceiptIdChange={(approval_receipt_id) => set({ approval_receipt_id: approval_receipt_id || null })}
+            ttlMinutes={7 * 24 * 60}
+            riskTier="active"
+            required
+          />
+        </div>
+      )}
 
       <div className="grid gap-2 sm:grid-cols-3">
         {ASM_PRESETS.map((preset) => (
@@ -693,14 +724,24 @@ function NewSurfaceCard({ targetId }: { targetId: string }) {
 
 function CoverageAdvisorCard({
   targetId,
+  targetUrl,
   coverage,
   gaps,
   onRefresh,
+  authorizationConfirmed,
+  approvalReceiptId,
+  onAuthorizationConfirmedChange,
+  onApprovalReceiptIdChange,
 }: {
   targetId: string
+  targetUrl: string
   coverage: AsmCoverage | null
   gaps: AsmGaps | null
   onRefresh: () => void
+  authorizationConfirmed: boolean
+  approvalReceiptId: string
+  onAuthorizationConfirmedChange: (confirmed: boolean) => void
+  onApprovalReceiptIdChange: (receiptId: string) => void
 }) {
   const toast = useToast()
   const [busy, setBusy] = useState<'improve' | 'recon' | 'prune' | null>(null)
@@ -728,9 +769,10 @@ function CoverageAdvisorCard({
   const queueImprove = async () => {
     setBusy('improve')
     try {
-      const opts: { check_family?: string; endpoint_filter?: string } = {}
+      const opts: { check_family?: string; endpoint_filter?: string; approval_receipt_id?: string } = {}
       if (checkFamily !== 'all') opts.check_family = checkFamily
       if (endpointFilter) opts.endpoint_filter = endpointFilter
+      if (next === 'test' && approvalReceiptId) opts.approval_receipt_id = approvalReceiptId
       const res = await improveAsmTarget(targetId, Object.keys(opts).length ? opts : undefined)
       if (res.action === 'wait') {
         toast.success(res.reason || 'ASM work is already active for this target')
@@ -810,9 +852,33 @@ function CoverageAdvisorCard({
   const decision = scheduler?.decision
   const lastDecision = scheduler?.last_decision
   const activeScanId = decision?.active_scan_id || scheduler?.active_scan_ids?.[0] || lastDecision?.active_scan_id
+  const activeApprovalMissing = next === 'test' && !approvalReceiptId.trim()
 
   return (
     <Card className="p-4 space-y-4">
+      {next === 'test' && (
+        <div className="space-y-3">
+          <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+            <input
+              className="mt-1"
+              type="checkbox"
+              checked={authorizationConfirmed}
+              onChange={(event) => onAuthorizationConfirmedChange(event.target.checked)}
+            />
+            <span>I own or have explicit authorization to run active endpoint checks against this target.</span>
+          </label>
+          <ApprovalReceiptField
+            targetId={targetId}
+            targetUrl={targetUrl}
+            authorizationConfirmed={authorizationConfirmed}
+            receiptId={approvalReceiptId}
+            onReceiptIdChange={onApprovalReceiptIdChange}
+            ttlMinutes={120}
+            riskTier={checkFamily === 'auth' || checkFamily === 'bola' ? 'credential' : 'active'}
+            required
+          />
+        </div>
+      )}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="space-y-3">
           <div className="flex items-center gap-2">
@@ -959,7 +1025,7 @@ function CoverageAdvisorCard({
         </div>
 
         <div className="flex flex-col gap-2">
-          <Button onClick={queueImprove} disabled={!!busy || next === 'wait'}>
+          <Button onClick={queueImprove} disabled={!!busy || next === 'wait' || activeApprovalMissing}>
             <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
           </Button>
           <details className="rounded-lg border border-gray-800 bg-gray-950/40">
@@ -1143,12 +1209,14 @@ function ActivityCard({
   schedulerState,
   timeline,
   onRefresh,
+  approvalReceiptId,
 }: {
   targetId: string
   activity: AsmActivity[]
   schedulerState?: AsmSchedulerState | null
   timeline?: AsmTimelineEvent[]
   onRefresh: () => void
+  approvalReceiptId: string
 }) {
   const toast = useToast()
   const [improving, setImproving] = useState(false)
@@ -1162,7 +1230,12 @@ function ActivityCard({
   async function improveFromTimeline() {
     setImproving(true)
     try {
-      const result = await improveAsmTarget(targetId)
+      const needsActiveApproval = decision?.action === 'test'
+      const result = await improveAsmTarget(targetId, (
+        needsActiveApproval && approvalReceiptId
+          ? { approval_receipt_id: approvalReceiptId }
+          : undefined
+      ))
       toast.success(result.action === 'wait' ? (result.reason || 'ASM work is already active') : 'Queued ASM coverage work', {
         link: result.scan_id ? { href: `/scans/${result.scan_id}`, label: 'View activity' } : undefined,
       })
@@ -1399,6 +1472,13 @@ function TargetView({ targetId }: { targetId: string }) {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [testing, setTesting] = useState(false)
   const [workerCount, setWorkerCount] = useState<number | null>(null)
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
+  const [approvalReceiptId, setApprovalReceiptId] = useState('')
+
+  useEffect(() => {
+    setAuthorizationConfirmed(false)
+    setApprovalReceiptId('')
+  }, [targetId])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -1443,9 +1523,17 @@ function TargetView({ targetId }: { targetId: string }) {
   }, [targetId])
 
   const runTest = async () => {
+    if (!approvalReceiptId.trim()) {
+      toast.error('A current target-bound approval receipt is required for active ASM testing.')
+      return
+    }
     setTesting(true)
     try {
-      const res = await testAsmTarget(targetId, { batch_size: 100, stale_days: 30 })
+      const res = await testAsmTarget(targetId, {
+        batch_size: 100,
+        stale_days: 30,
+        approval_receipt_id: approvalReceiptId,
+      })
       toast.success(`Queued ASM test batch over ${res.batch_size} endpoints`, {
         link: { href: `/scans/${res.scan_id}`, label: 'View batch scan' },
       })
@@ -1503,7 +1591,17 @@ function TargetView({ targetId }: { targetId: string }) {
         </div>
       </div>
 
-      <CoverageAdvisorCard targetId={targetId} coverage={coverage} gaps={gaps} onRefresh={load} />
+      <CoverageAdvisorCard
+        targetId={targetId}
+        targetUrl={target?.url || ''}
+        coverage={coverage}
+        gaps={gaps}
+        onRefresh={load}
+        authorizationConfirmed={authorizationConfirmed}
+        approvalReceiptId={approvalReceiptId}
+        onAuthorizationConfirmedChange={setAuthorizationConfirmed}
+        onApprovalReceiptIdChange={setApprovalReceiptId}
+      />
 
       {coverage && (
         <Card className="p-4 space-y-3">
@@ -1550,6 +1648,7 @@ function TargetView({ targetId }: { targetId: string }) {
           schedulerState={activitySchedulerState}
           timeline={timeline}
           onRefresh={load}
+          approvalReceiptId={approvalReceiptId}
         />
       </div>
 
@@ -1560,7 +1659,7 @@ function TargetView({ targetId }: { targetId: string }) {
         <div className="space-y-4 border-t border-gray-800 p-4">
           <HypothesisLeadsCard report={hypothesisSituation} targetId={targetId} />
           <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-            <ContinuousCard targetId={targetId} />
+            <ContinuousCard targetId={targetId} targetUrl={target?.url || ''} />
             <NewSurfaceCard targetId={targetId} />
           </div>
         </div>
@@ -1677,6 +1776,25 @@ function TargetView({ targetId }: { targetId: string }) {
                 No workers are running — the batch will stay pending until you scale workers up.
               </p>
             )}
+            <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+              <input
+                className="mt-1"
+                type="checkbox"
+                checked={authorizationConfirmed}
+                onChange={(event) => setAuthorizationConfirmed(event.target.checked)}
+              />
+              <span>I own or have explicit authorization to run these active checks.</span>
+            </label>
+            <ApprovalReceiptField
+              targetId={targetId}
+              targetUrl={target?.url || ''}
+              authorizationConfirmed={authorizationConfirmed}
+              receiptId={approvalReceiptId}
+              onReceiptIdChange={setApprovalReceiptId}
+              ttlMinutes={120}
+              riskTier="active"
+              required
+            />
           </div>
         }
         onConfirm={runTest}

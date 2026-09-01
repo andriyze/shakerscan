@@ -2165,13 +2165,24 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
-        base_opts = _decode_target_scan_options(target["scan_options"])
+        base_opts = _clear_asm_approval_context(
+            _decode_target_scan_options(target["scan_options"])
+        )
+        risk_tier = (
+            "credential"
+            if _normalize_asm_check_family(request.check_family) in {"auth", "bola"}
+            else "active"
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=target["url"],
             target_id=target_id,
             action_name="asm.test",
+            risk_tier=risk_tier,
+            always_require_receipt=True,
+            require_target_binding=True,
+            require_expiry=True,
         )
         if approval_context:
             base_opts.update(approval_context)
@@ -2186,7 +2197,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             conn,
             command="asm.test",
             status="queued",
-            risk_tier="credential" if _normalize_asm_check_family(request.check_family) in {"auth", "bola"} else "active",
+            risk_tier=risk_tier,
             campaign_id=enq.get("campaign_id"),
             scan_id=enq.get("scan_id"),
             scope_receipt_id=base_opts.get("scope_receipt_id"),
@@ -2234,7 +2245,9 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
                     "'Show ASM/internal scans' on the Scans page."
                 ),
             )
-        base_opts = _decode_target_scan_options(target["scan_options"])
+        base_opts = _clear_asm_approval_context(
+            _decode_target_scan_options(target["scan_options"])
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
@@ -2373,17 +2386,19 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "scheduler_state": scheduler_state,
             }
 
-        base_opts = _decode_target_scan_options(target["scan_options"])
-        approval_context = await _validate_approval_receipt_for_action(
-            conn,
-            request.approval_receipt_id,
-            target_url=target["url"],
-            target_id=target_id,
-            action_name="asm.improve",
+        base_opts = _clear_asm_approval_context(
+            _decode_target_scan_options(target["scan_options"])
         )
-        if approval_context:
-            base_opts.update(approval_context)
         if rec["next_action"] == "recon":
+            approval_context = await _validate_approval_receipt_for_action(
+                conn,
+                request.approval_receipt_id,
+                target_url=target["url"],
+                target_id=target_id,
+                action_name="asm.improve",
+            )
+            if approval_context:
+                base_opts.update(approval_context)
             enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
             await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
             command_result = await _record_command_result(
@@ -2417,6 +2432,24 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "operation_id": command_result["id"],
             }
 
+        risk_tier = (
+            "credential"
+            if _normalize_asm_check_family(request.check_family) in {"auth", "bola"}
+            else "active"
+        )
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target["url"],
+            target_id=target_id,
+            action_name="asm.improve",
+            risk_tier=risk_tier,
+            always_require_receipt=True,
+            require_target_binding=True,
+            require_expiry=True,
+        )
+        if approval_context:
+            base_opts.update(approval_context)
         batch_size = request.batch_size if request.batch_size is not None else cfg["batch_size"]
         if claimable > 0:
             batch_size = min(batch_size, claimable)
@@ -2433,7 +2466,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             conn,
             command="asm.improve",
             status="queued",
-            risk_tier="credential" if _normalize_asm_check_family(request.check_family) in {"auth", "bola"} else "active",
+            risk_tier=risk_tier,
             campaign_id=enq.get("campaign_id"),
             scan_id=enq.get("scan_id"),
             scope_receipt_id=base_opts.get("scope_receipt_id"),
@@ -2491,17 +2524,40 @@ async def asm_get_policy(target_id: str):
 
 @router.put("/targets/{target_id}/asm/policy")
 async def asm_set_policy(target_id: str, body: AsmPolicyUpdate):
-    """Enable/disable continuous ASM and update the per-target policy (validated
-    + clamped to safe bounds)."""
+    """Enable/disable continuous ASM and update its validated target policy."""
     r = get_redis()
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
+        row = await conn.fetchrow(
+            "SELECT url, asm_enabled, asm_config FROM targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
         if not row:
             raise HTTPException(status_code=404, detail="Target not found")
         current = _decode_asm_config(row["asm_config"])
-        new_config = asm_inventory.merge_asm_config(
-            {**current, **body.config} if isinstance(body.config, dict) else current
+        config_patch = (
+            body.config.model_dump(mode="python", exclude_unset=True)
+            if body.config is not None
+            else {}
         )
+        new_config = asm_inventory.merge_asm_config(
+            {**current, **config_patch}
+        )
+        resulting_enabled = (
+            bool(body.enabled) if body.enabled is not None else bool(row["asm_enabled"])
+        )
+        receipt_id = new_config.get("approval_receipt_id")
+        if resulting_enabled:
+            await _validate_approval_receipt_for_action(
+                conn,
+                receipt_id,
+                target_url=row["url"],
+                target_id=target_id,
+                action_name="asm.continuous",
+                risk_tier="active",
+                always_require_receipt=True,
+                require_target_binding=True,
+                require_expiry=True,
+            )
         await conn.execute(
             """UPDATE targets
                SET asm_enabled = COALESCE($1, asm_enabled), asm_config = $2, updated_at = NOW()
@@ -3781,10 +3837,74 @@ class AsmImproveRequest(BaseModel):
         return _validate_asm_endpoint_filter_value(value)
 
 
+class AsmConfigUpdate(BaseModel):
+    """Typed partial Continuous ASM policy; omitted fields retain current values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_size: Optional[int] = Field(default=None, ge=1, le=1000, strict=True)
+    stale_days: Optional[int] = Field(default=None, ge=0, le=3650, strict=True)
+    min_interval_minutes: Optional[int] = Field(default=None, ge=5, le=10080, strict=True)
+    daily_endpoint_cap: Optional[int] = Field(default=None, ge=0, le=1_000_000, strict=True)
+    recon_interval_hours: Optional[int] = Field(default=None, ge=0, le=8760, strict=True)
+    exploit_depth: Optional[bool] = Field(default=None, strict=True)
+    window_start_hour: Optional[int] = Field(default=None, ge=0, le=23, strict=True)
+    window_end_hour: Optional[int] = Field(default=None, ge=0, le=23, strict=True)
+    window_days: Optional[list[int]] = None
+    max_requests_per_hour_per_domain: Optional[int] = Field(
+        default=None, ge=0, le=1_000_000, strict=True,
+    )
+    approval_receipt_id: Optional[str] = None
+
+    @field_validator("window_days", mode="before")
+    @classmethod
+    def validate_window_days(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(
+            isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6
+            for day in value
+        ):
+            raise ValueError("window_days must be a list of weekdays 0-6")
+        return sorted(set(value)) or None
+
+    @field_validator("approval_receipt_id")
+    @classmethod
+    def validate_approval_receipt_id(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            return str(uuid.UUID(str(value)))
+        except ValueError as exc:
+            raise ValueError("approval_receipt_id must be a UUID") from exc
+
+
 class AsmPolicyUpdate(BaseModel):
     """Per-target Continuous ASM policy (docs §16 Phase 3/4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     enabled: Optional[bool] = None
-    config: Optional[dict] = None
+    config: Optional[AsmConfigUpdate] = None
+
+
+_ASM_APPROVAL_CONTEXT_KEYS = {
+    "approval_receipt_id", "scope_receipt_id", "approved_by", "approval_confirmations",
+}
+
+
+def _clear_asm_approval_context(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Never inherit a receipt from generic target options into a new ASM action."""
+    cleaned = dict(options or {})
+    for key in _ASM_APPROVAL_CONTEXT_KEYS:
+        cleaned.pop(key, None)
+    policy = cleaned.get("scan_policy")
+    if isinstance(policy, Mapping):
+        cleaned["scan_policy"] = {
+            key: value for key, value in policy.items()
+            if key not in _ASM_APPROVAL_CONTEXT_KEYS
+        }
+    return cleaned
 
 
 def _decode_target_scan_options(raw) -> dict:
@@ -4211,6 +4331,10 @@ async def _enqueue_asm_exploit_batch(
         base_options=opts,
         check_family=family,
     )
+    if not scan_contract.policy.approval_receipt_id:
+        raise ScanActionPlanError(
+            "Active ASM batches require a validated approval receipt"
+        )
     opts["run_kind"] = "asm_batch"
     endpoint_filter = _validate_asm_endpoint_filter_value(endpoint_filter)
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)

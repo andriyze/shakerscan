@@ -3840,9 +3840,10 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     )
                     continue
 
-                base_opts = _decode_json_value(t['scan_options']) or {}
-                if not isinstance(base_opts, dict):
-                    base_opts = {}
+                decoded_opts = _decode_json_value(t['scan_options']) or {}
+                base_opts = _clear_asm_approval_context(
+                    decoded_opts if isinstance(decoded_opts, dict) else {}
+                )
                 if action == 'recon':
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
                     await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
@@ -3855,6 +3856,34 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     )
                     print(f"[asm] recon queued for {target_url} -> scan {enq['scan_id'][:8]}", flush=True)
                 elif action == 'test':
+                    try:
+                        approval_context = await _validate_approval_receipt_for_action(
+                            conn,
+                            cfg.get("approval_receipt_id"),
+                            target_url=target_url,
+                            target_id=target_id,
+                            action_name="asm.continuous",
+                            risk_tier="active",
+                            record_blocked=False,
+                            always_require_receipt=True,
+                            require_target_binding=True,
+                            require_expiry=True,
+                        )
+                    except HTTPException as exc:
+                        await _persist_asm_decision(
+                            conn,
+                            target_id,
+                            {
+                                **decision,
+                                "action": "none",
+                                "reason": str(exc.detail),
+                                "blocked_by": "approval_required_or_invalid",
+                            },
+                            source="dispatcher",
+                        )
+                        continue
+                    if approval_context:
+                        base_opts.update(approval_context)
                     dispatch_batch_size = min(cfg['batch_size'], claimable)
                     daily_cap = cfg['daily_endpoint_cap']
                     if daily_cap > 0:
@@ -5213,6 +5242,7 @@ try:
         _canonical_asm_scan_options,
         _compile_asm_scan_authority,
         _confirm_asm_queue_handoff,
+        _clear_asm_approval_context,
         _current_research_dispatch_correlation,
         _decode_asm_config,
         _decode_target_scan_options,
@@ -5357,6 +5387,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _canonical_asm_scan_options,
         _compile_asm_scan_authority,
         _confirm_asm_queue_handoff,
+        _clear_asm_approval_context,
         _current_research_dispatch_correlation,
         _decode_asm_config,
         _decode_target_scan_options,
