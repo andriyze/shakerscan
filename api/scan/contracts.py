@@ -29,10 +29,19 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 from .execution import ScanExecutionPlan
+# A profile must be able to fund the plan it compiles. Measured on a thorough
+# single-worker Scan of the benchmark application: reservations totalled 3,514
+# tool-wall seconds against a 3,600 ceiling, so the plan spent 98% of its wall
+# allowance before reaching its own tail and skipped five actions --
+# passive.templates.001/.002, active.templates.001/.002, and prove.xss -- as
+# insufficient_plan_budget while holding 10,256 unused HTTP requests. Wall, not
+# traffic, is the binding dimension for thorough, and the profile was starving
+# the proof stage it exists to reach. test_thorough_profile_funds_its_own_plan
+# keeps the two in step.
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
     "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 200, 25),
     "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4, 800, 100),
-    "thorough": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 3_600, 8, 2_000, 500),
+    "thorough": ScanBudget(5_400, 20_000, 10_000, 1_000, 20_000, 7_200, 8, 2_000, 500),
 }
 
 # These are the only family names with concrete canonical action-graph semantics.

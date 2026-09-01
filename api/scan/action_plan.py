@@ -120,10 +120,14 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
             "http_requests": 1_280, "state_changing_requests": 480,
             "tool_wall_seconds": 780,
         }),
-        # All five passive batches hit their 60-second slice exactly and timed out. 120
-        # lets a 50-template sweep finish; breadth still ranks below proof for budget.
-        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 120}),
-        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
+        # Raised from 60 to 120 when every passive batch hit its slice exactly, and
+        # measured again at 120: the sweep still consumed 350/350 requests and
+        # 120/120 seconds and timed out, so 120 was the ceiling and not the cost.
+        # 240 lets a 50-template sweep finish; breadth still ranks below proof.
+        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 240}),
+        # Same measurement: 3,392 of 4,000 requests but 300 of 300 seconds, so this
+        # batch was wall-bound rather than traffic-bound and left templates unrun.
+        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 600}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
