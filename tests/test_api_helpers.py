@@ -2574,7 +2574,7 @@ def test_normalize_scan_result_preserves_legacy_score_with_visible_provenance():
 def test_normalize_scan_result_leaves_current_score_projection_untouched():
     report = {
         "result": {
-            "score_policy": "risk_and_assurance/v5",
+            "score_policy": "risk_and_assurance/v8",
             "score": 73,
             "grade": "C",
         },
@@ -7680,7 +7680,7 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
             "source": "scan",
             "tool": "smart_sqli",
             "last_verification_verdict": "exploited",
-            "evidence": json.dumps({}),
+            "evidence": json.dumps({"proof_of_exploitation": True}),
         },
     ]
     reviews = [{"subject_type": "finding", "subject_id": str(weak_id)}]

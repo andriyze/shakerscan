@@ -185,7 +185,7 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
         encoding="utf-8",
     )
     assert 'SHAKERSCAN_E2E_SCAN_TARGET="http://juice-shop:3000"' in installed_smoke
-    assert "SHAKERSCAN_E2E_HUNT_TARGET" not in installed_smoke
+    assert 'SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000"' in installed_smoke
 
 
 def test_full_release_e2e_accepts_only_exact_v2_candidates():
