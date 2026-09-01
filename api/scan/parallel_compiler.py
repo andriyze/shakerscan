@@ -14,6 +14,11 @@ try:
 except ModuleNotFoundError:
     from ..runtime.models import ScanBudget, TargetBinding
 
+try:
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+except ImportError:  # package import in host-side tests
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY
+
 from .action_plan import ScanActionPlan
 from .continuation import ScanContinuationAllocation
 from .execution import ScanExecutionPlan
@@ -933,21 +938,65 @@ class ParallelActionPlanCompiler:
         return "coverage" if execution_plan.policy.active_testing else "family"
 
     @staticmethod
+    def discovery_stage_cost(*, include_network: bool, include_subdomains: bool) -> dict[str, int]:
+        """Sum the registry cost of every capability the discovery stage can plan.
+
+        Derived from the registry rather than written down here, so adding a
+        discovery capability cannot silently shrink the stage's budget below
+        what its own plan costs.
+        """
+        names = [
+            "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
+        ]
+        if include_subdomains:
+            names.append("subdomains.discover")
+        if include_network:
+            names.extend(("ports.discover", "service.fingerprint"))
+        totals: dict[str, int] = {}
+        for name in names:
+            try:
+                specification = CAPABILITY_REGISTRY.require(name)
+            except Exception:  # an unregistered capability simply cannot be planned
+                continue
+            for dimension, amount in dict(specification.budget_cost).items():
+                totals[str(dimension)] = totals.get(str(dimension), 0) + int(amount)
+        return totals
+
+    @staticmethod
     def discovery_budget(
         execution_plan: ScanExecutionPlan,
         *,
         include_network: bool,
     ) -> ScanShardBudget:
-        """Reserve a small typed producer budget before endpoint fan-out."""
+        """Reserve a typed producer budget that funds the whole discovery stage.
+
+        This shard is the only owner of ``discover.*`` once fan-out happens, so
+        a ceiling below its own plan cost does not merely slow it down -- it
+        drops actions. A flat 180-second wall funded only probe plus the static
+        crawl, so ``discover.browser_crawl`` was skipped as
+        ``insufficient_plan_budget`` on every sharded scan. A single-page
+        application builds its API calls in JavaScript, and candidates are only
+        made from observed parameters, so losing the browser crawl left xss,
+        sqli and nosqli with zero candidates and a truthful but empty
+        ``zero_attempts`` result. Size the floor from the registry instead, and
+        keep the parent ceiling as the upper bound.
+        """
         parent = execution_plan.budget
         endpoints = min(parent.max_endpoints, 500)
+        cost = ParallelActionPlanCompiler.discovery_stage_cost(
+            include_network=include_network,
+            include_subdomains=bool(execution_plan.policy.subdomain_discovery),
+        )
+        # Headroom for per-action reservation rounding; never above the parent.
+        wall = min(parent.max_tool_wall_seconds, max(180, int(cost.get("tool_wall_seconds", 0) * 1.2)))
+        http = min(parent.max_http_requests, max(1_000, int(cost.get("http_requests", 0) * 1.2)))
         return ScanShardBudget(
-            max_duration_seconds=min(parent.max_duration_seconds, 180),
-            max_http_requests=min(parent.max_http_requests, 1_000),
+            max_duration_seconds=min(parent.max_duration_seconds, max(180, wall)),
+            max_http_requests=http,
             max_endpoints=endpoints,
-            max_browser_actions=0,
+            max_browser_actions=min(parent.max_browser_actions, cost.get("browser_actions", 0)),
             max_tcp_ports=parent.max_tcp_ports if include_network else 0,
-            max_tool_wall_seconds=min(parent.max_tool_wall_seconds, 180),
+            max_tool_wall_seconds=wall,
             max_workers=1,
             max_state_changing_requests=0,
             max_hosts=min(int(parent.max_hosts or endpoints), endpoints),
