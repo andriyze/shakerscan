@@ -377,7 +377,7 @@ max_depth: 6
 
 **Support: supported.** Every adapter this skill requires maps to a planner-visible capability, so it can be bound to a hunt.
 
-Bindable capabilities: `web.crawl`, `browser.navigate`, `browser.interact`, `http.request`.
+Bindable capabilities: `web.crawl`, `browser.navigate`, `browser.interact`, `http.request`. Optional when the hunt already holds them: `templates.scan`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

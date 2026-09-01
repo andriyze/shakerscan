@@ -385,7 +385,7 @@ allowed_effect: console_canary
 
 **Support: supported.** Every adapter this skill requires maps to a planner-visible capability, so it can be bound to a hunt.
 
-Bindable capabilities: `http.request`, `authz.verify`, `browser.navigate`, `browser.interact`.
+Bindable capabilities: `http.request`, `authz.verify`, `browser.navigate`, `browser.interact`. Optional when the hunt already holds them: `xss.verify`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

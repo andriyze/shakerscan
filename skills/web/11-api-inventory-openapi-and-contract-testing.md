@@ -390,7 +390,7 @@ mutation_profile: safe_schema_boundaries
 
 **Support: supported.** Every adapter this skill requires maps to a planner-visible capability, so it can be bound to a hunt.
 
-Bindable capabilities: `collections.inspect`, `http.request`, `authz.verify`, `candidate.verify`.
+Bindable capabilities: `collections.inspect`, `http.request`, `authz.verify`, `candidate.verify`. Optional when the hunt already holds them: `web.crawl`, `templates.scan`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

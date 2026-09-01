@@ -376,7 +376,7 @@ secret_validation: metadata_only
 
 **Support: supported.** Hunt can read bounded redacted windows with `artifact.inspect` and run structured `javascript.analyze` extraction for routes, source-map references, client sinks, Supabase origins, and decoded JWT claims. Token values remain worker-private.
 
-Bindable capabilities: `http.request`, `browser.navigate`, `artifact.inspect`, `javascript.analyze`.
+Bindable capabilities: `http.request`, `browser.navigate`, `artifact.inspect`, `javascript.analyze`. Optional when the hunt already holds them: `templates.scan`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

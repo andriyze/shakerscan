@@ -383,7 +383,7 @@ allowed_state_changes: 3
 
 **Support: supported.** Every adapter this skill requires maps to a planner-visible capability, so it can be bound to a hunt.
 
-Bindable capabilities: `browser.navigate`, `browser.interact`, `http.request`, `candidate.verify`.
+Bindable capabilities: `browser.navigate`, `browser.interact`, `http.request`, `candidate.verify`. Optional when the hunt already holds them: `auth.session.establish`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

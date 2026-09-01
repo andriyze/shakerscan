@@ -392,7 +392,7 @@ property_candidates: [owner_id, tenant_id, role, status]
 
 **Support: supported.** Every adapter this skill requires maps to a planner-visible capability, so it can be bound to a hunt.
 
-Bindable capabilities: `http.request`, `authz.verify`, `browser.navigate`, `candidate.verify`.
+Bindable capabilities: `http.request`, `authz.verify`, `browser.navigate`, `candidate.verify`. Optional when the hunt already holds them: `collections.inspect`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

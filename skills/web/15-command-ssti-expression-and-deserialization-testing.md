@@ -390,7 +390,7 @@ max_delay_seconds: 2
 
 **Support: partial.** ShakerScan has no capability for `oob.allocate`, `oob.observe`, so this skill cannot be bound to a hunt yet. It is published so the gap is visible rather than discovered mid-run.
 
-Bindable capabilities: `http.request`, `authz.verify`.
+Bindable capabilities: `http.request`, `authz.verify`. Optional when the hunt already holds them: `templates.scan`, `candidate.verify`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

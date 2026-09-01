@@ -385,7 +385,7 @@ authoritative_state: account_credit_api
 
 **Support: partial.** ShakerScan has no capability for `http.concurrent_batch`, so this skill cannot be bound to a hunt yet. It is published so the gap is visible rather than discovered mid-run.
 
-Bindable capabilities: `http.request`, `candidate.verify`.
+Bindable capabilities: `http.request`, `candidate.verify`. Optional when the hunt already holds them: `browser.navigate`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 

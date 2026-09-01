@@ -391,7 +391,7 @@ log_canary_prefix: AISEC_LOG_42
 
 **Support: partial.** ShakerScan has no capability for `log.observe`, so this skill cannot be bound to a hunt yet. It is published so the gap is visible rather than discovered mid-run.
 
-Bindable capabilities: `http.request`, `authz.verify`, `browser.navigate`.
+Bindable capabilities: `http.request`, `authz.verify`, `browser.navigate`. Optional when the hunt already holds them: `templates.scan`, `tls.inspect`, `candidate.verify`.
 
 Enforced by the server on every action, not requested by the planner: `policy.evaluate` (runtime target binding and scope validation).
 
