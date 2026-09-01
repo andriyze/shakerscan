@@ -1673,7 +1673,10 @@ def run_hunt() -> H.Scorecard:
         )
         proof = exposed["verification"]
         finding_id = str(proof.get("verified_finding_id") or "")
-        finding_status, finding = (H.get(f"/findings/{finding_id}") if finding_id else (0, {}))
+        finding_status, finding = (
+            H._req("GET", f"/findings/{finding_id}")
+            if finding_id else (0, {})
+        )
         finding_row = finding.get("finding") if isinstance(finding.get("finding"), dict) else finding
         sc.check(
             "H-16 a Hunt candidate is verified into a materialized finding",
@@ -1707,6 +1710,146 @@ def run_hunt() -> H.Scorecard:
         })
     except Exception as exc:
         sc.error("H-16 through H-17 candidate verification acceptance", exc)
+
+    # Exact-manifest release acceptance must also prove the planner-facing loop
+    # against the real benchmark application: evidence -> compact suggestion ->
+    # one methodology read/bind -> canonical verifier -> persisted finding.
+    if HUNT_WEB_TARGET == FIXTURES_BASE:
+        sc.skip(
+            "H-18 adaptive real-target methodology produces a verified finding",
+            "SHAKERSCAN_E2E_HUNT_TARGET does not name the real benchmark target",
+        )
+    else:
+        adaptive_hunt_id = ""
+        try:
+            adaptive_target_id, adaptive_scope_id, adaptive_approval_id = (
+                _hunt_fixture_authority(
+                    HUNT_WEB_TARGET,
+                    allowed_host=(
+                        urllib.parse.urlsplit(HUNT_WEB_TARGET).hostname
+                        or HONEY_HOST
+                    ),
+                )
+            )
+            status, adaptive = H.post("/hunts", _hunt_start_payload(
+                adaptive_target_id,
+                goal=(
+                    "Investigate an Angular client template with a reflected DOM "
+                    "source/sink path and obtain deterministic XSS execution proof."
+                ),
+                active=True,
+                scope_id=adaptive_scope_id,
+                approval_id=adaptive_approval_id,
+            ))
+            adaptive_hunt_id = str(adaptive.get("hunt_id") or "")
+            baseline_status, baseline = H.post(
+                f"/hunts/{adaptive_hunt_id}/capabilities/http.request",
+                {
+                    "idempotency_key": f"e2e-adaptive-baseline-{_RUN_NONCE}",
+                    "input": {"method": "GET", "path": "/"},
+                },
+                timeout=120,
+            )
+            suggestion_status, suggested = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/suggestions",
+                {
+                    "signals": [
+                        "Angular client_template",
+                        "DOM_source_sink_path",
+                        "URL_or_postMessage_input",
+                    ],
+                },
+            )
+            xss_skill_id = "skill.web.xss-dom-and-client-side-injection-testing"
+            suggestions = suggested.get("suggestions") or []
+            chosen = next((
+                item for item in suggestions
+                if item.get("skill_id") == xss_skill_id
+            ), None)
+            read_status, methodology = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/{xss_skill_id}/read", {},
+            )
+            bind_status, bound = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/{xss_skill_id}/bind",
+                {
+                    "reason": "Angular DOM source/sink evidence matched the XSS router",
+                    "evidence_refs": [str(baseline.get("action_id") or "")],
+                },
+            )
+            proof_path = os.environ.get(
+                "SHAKERSCAN_E2E_HUNT_PROOF_PATH",
+                "/#/track-result?id=shakerscan",
+            )
+            proof_status, proof_action = H.post(
+                f"/hunts/{adaptive_hunt_id}/capabilities/xss.verify",
+                {
+                    "idempotency_key": f"e2e-adaptive-xss-{_RUN_NONCE}",
+                    "input": {"path": proof_path, "severity": "high"},
+                },
+                timeout=240,
+            )
+            proof_result = (
+                proof_action.get("result")
+                if isinstance(proof_action.get("result"), dict) else {}
+            )
+            verified_ids = [
+                str(value) for value in proof_result.get("verified_finding_ids") or []
+                if str(value)
+            ]
+            finding_status, finding = (
+                H._req("GET", f"/findings/{verified_ids[0]}")
+                if verified_ids else (0, {})
+            )
+            finding_row = (
+                finding.get("finding")
+                if isinstance(finding.get("finding"), dict) else finding
+            )
+            usage_status, usage = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/{xss_skill_id}/usage",
+                {
+                    "state": "completed",
+                    "action_id": str(proof_action.get("action_id") or ""),
+                    "reason": "Canonical verifier produced deterministic execution proof",
+                },
+            )
+            skill_events = usage.get("skill_activity") or []
+            sc.check(
+                "H-18 adaptive real-target methodology produces a verified finding",
+                status == baseline_status == suggestion_status == 200
+                and read_status == bind_status == proof_status == usage_status == 200
+                and bool(adaptive_hunt_id)
+                and len(suggestions) <= 3
+                and chosen is not None
+                and methodology.get("methodology")
+                and any(
+                    item.get("skill_id") == xss_skill_id
+                    for item in (bound.get("skills") or [])
+                )
+                and bool(verified_ids)
+                and finding_status == 200
+                and finding_row.get("last_verification_verdict") == "exploited"
+                and any(
+                    event.get("skill_id") == xss_skill_id
+                    and event.get("event_type") == "completed"
+                    for event in skill_events
+                ),
+                (
+                    f"suggestions={[item.get('skill_id') for item in suggestions]} "
+                    f"proof={proof_result.get('status')} findings={verified_ids} "
+                    f"finding_status={finding_status}"
+                ),
+            )
+        except Exception as exc:
+            sc.error(
+                "H-18 adaptive real-target methodology produces a verified finding",
+                exc,
+            )
+        finally:
+            if adaptive_hunt_id:
+                H.post(f"/hunts/{adaptive_hunt_id}/finish", {
+                    "summary": "Adaptive real-target acceptance completed.",
+                    "next_actions": [],
+                })
 
     return sc
 

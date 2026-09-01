@@ -109,6 +109,7 @@ from hunt.capability_reservations import (
     terminalize_hunt_capability,
 )
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+from hunt.deterministic_findings import materialize_verified_hunt_findings
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.auth_session_store import (
     AuthSessionStoreError,
@@ -20836,6 +20837,7 @@ async def process_canonical_scanner_capability_job(
                         finished_at.replace("Z", "+00:00")
                     ),
                 )
+                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, observations)
                 persisted = await store.persist_terminal(
                     conn,
                     previous=latest,
@@ -20857,7 +20859,7 @@ async def process_canonical_scanner_capability_job(
                     "observation_count": len(observations),
                     "error": error,
                     "record_count": len(observations),
-                    "parser_errors": parser_errors,
+                    "parser_errors": parser_errors, "verified_finding_ids": verified_finding_ids,
                     "budget_consumed": dict(terminal.actual),
                     "budget_accounting": _worker_hunt_budget_accounting(
                         latest.record.requested,
@@ -20896,7 +20898,7 @@ async def process_canonical_scanner_capability_job(
             "budget_reservation_id": reservation_id,
             "budget_reservation_state": terminal.status,
             "receipt_id": str(receipt_id),
-            "receipt": capability_receipt.public_dict(),
+            "receipt": capability_receipt.public_dict(), "verified_finding_ids": verified_finding_ids,
             "durable_budget_settled": True,
         }
     except asyncio.CancelledError:

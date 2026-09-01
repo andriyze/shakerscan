@@ -17,7 +17,8 @@ capabilities:
 - authz.verify
 - browser.navigate
 - browser.interact
-optional_capabilities: []
+optional_capabilities:
+- xss.verify
 missing_capabilities: []
 server_enforced:
 - policy.evaluate

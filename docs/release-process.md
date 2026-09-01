@@ -29,7 +29,10 @@ bakes version plus source revision into `/opt/shakerscan/release-manifest.json`,
 `release-candidate-receipt.json`. Each platform build publishes BuildKit provenance and an SBOM;
 the final multi-architecture scanner, API, UI, and signer digests receive GitHub/Sigstore build
 attestations that are verified immediately and recorded in the receipt. The final four manifest
-digests are scanned for unwaived high/critical vulnerabilities before certification.
+digests are scanned for unwaived high/critical vulnerabilities before certification. The
+exact-manifest installed-stack run includes deterministic Model Intake fixture acceptance, and the
+preservation receipt must cover the Model Intake program; only physical KVM qualification remains
+optional.
 
 Never deploy by a mutable version or `latest` during acceptance. Use the candidate tag or, for the
 strongest binding, the digests in the receipt.
