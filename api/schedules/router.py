@@ -17,20 +17,25 @@ import ipaddress
 import json
 import random
 import socket
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 import urllib.parse
 import uuid
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 try:
+    import asm_inventory
+    import check_registry
     from api_utils import LEGACY_SCAN_WRITE_FIELDS, _optional_uuid, _record_map, _uuid_or_400, utc_now, utc_now_iso
+    from request_models import ScanOptions, ScanPublicCompatibilityOptions
     from scan.contracts import raw_scan_authentication_keys, resolve_scan_contract
     from serialization import _decode_json_value, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
+    from .. import asm_inventory, check_registry
     from ..api_utils import LEGACY_SCAN_WRITE_FIELDS, _optional_uuid, _record_map, _uuid_or_400, utc_now, utc_now_iso
+    from ..request_models import ScanOptions, ScanPublicCompatibilityOptions
     from ..scan.contracts import raw_scan_authentication_keys, resolve_scan_contract
     from ..serialization import _decode_json_value, row_to_dict
 
@@ -38,12 +43,18 @@ except ModuleNotFoundError:  # package import in host-side tests
 router = APIRouter()
 
 _pool_provider: Callable[[], Any] | None = None
+_approval_validator: Callable[..., Any] | None = None
 
 
-def configure_schedule_router(pool_provider: Callable[[], Any]) -> None:
+def configure_schedule_router(
+    pool_provider: Callable[[], Any],
+    *,
+    approval_validator: Callable[..., Any] | None = None,
+) -> None:
     """Bind the application database pool without importing the app module."""
-    global _pool_provider
+    global _pool_provider, _approval_validator
     _pool_provider = pool_provider
+    _approval_validator = approval_validator
 
 
 def _pool():
@@ -94,6 +105,16 @@ def _schedule_kind_from_row(row: Any) -> str:
     )
 
 
+def _parse_time_of_day(value: str) -> tuple[int, int]:
+    parts = str(value).split(":")
+    if len(parts) != 2 or any(len(part) != 2 or not part.isdigit() for part in parts):
+        raise ValueError("time_of_day must be HH:MM")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("time_of_day must be HH:MM")
+    return hour, minute
+
+
 def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str, timezone: str, jitter_minutes: int = 0) -> datetime:
     """Calculate the next UTC datetime for a scheduled run.
 
@@ -117,9 +138,8 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
 
     hour, minute = 2, 0
     try:
-        parts = time_of_day.split(':')
-        hour, minute = int(parts[0]), int(parts[1])
-    except (ValueError, IndexError):
+        hour, minute = _parse_time_of_day(time_of_day)
+    except ValueError:
         pass
 
     # Start with today at the specified time
@@ -141,6 +161,8 @@ def calculate_next_run(frequency: str, day_of_week: int | None, time_of_day: str
     if jitter_minutes > 0:
         jitter = random.randint(-jitter_minutes, jitter_minutes)
         candidate = candidate + timedelta(minutes=jitter)
+    if candidate <= now_local:
+        candidate += timedelta(days=7 if frequency == "weekly" else 1)
 
     # Convert to UTC
     return candidate.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
@@ -162,10 +184,188 @@ def _refuse_raw_schedule_authentication(scan_options: dict) -> None:
             detail=(
                 "scheduled Scans reject raw authentication ("
                 + ", ".join(raw_keys)
-                + "); create an encrypted credential profile and pass "
-                "credential_profile_ids with a target-bound approval receipt"
+                + "); submit an explicit Scan with credential_profile_ids and "
+                "a target-bound approval receipt instead"
             ),
         )
+
+
+_NORMAL_SCHEDULE_CONTROL_FIELDS = {
+    "budget_profile", "policy", "advanced", "approval_receipt_id", "scan_generation",
+}
+_NORMAL_SCHEDULE_UNSUPPORTED_SELECTION_FIELDS = {
+    "credential_profile_ids",
+    "credential_profile_refs",
+    "request_collections",
+}
+
+
+def _resolve_normal_schedule_options(
+    scan_options: Mapping[str, Any],
+) -> tuple[Any, ScanOptions]:
+    """Validate the exact passive option surface recurring Scans can preserve.
+
+    A durable schedule cannot safely retain an expiring approval as indefinite
+    future authority. Credential profiles and request selections also require
+    the direct Scan admission flow to freeze current versions, exact target
+    bindings, and approval context. Until a schedule has an equivalent
+    per-occurrence admission record, those inputs fail closed instead of being
+    silently discarded by ``ScanOptions`` normalization.
+    """
+    options = dict(scan_options)
+    legacy_kind = str(options.pop("kind", "") or "").strip().lower()
+    if legacy_kind and legacy_kind not in {"scan", "normal", "normal_scan"}:
+        raise ValueError("scan_options.kind conflicts with a normal Scan schedule")
+    raw_keys = raw_scan_authentication_keys(options)
+    if raw_keys:
+        raise ValueError(
+            "scheduled Scans reject raw authentication: " + ", ".join(raw_keys)
+        )
+    unsupported = sorted(
+        key for key in _NORMAL_SCHEDULE_UNSUPPORTED_SELECTION_FIELDS
+        if key in options
+    )
+    if unsupported:
+        raise ValueError(
+            "recurring Scans do not support durable credential or request-selection "
+            "authority; submit an explicit Scan instead: " + ", ".join(unsupported)
+        )
+    approval_receipt_id = str(options.get("approval_receipt_id") or "").strip()
+    if approval_receipt_id:
+        raise ValueError(
+            "recurring Scans cannot reuse an expiring approval receipt; "
+            "submit an explicit Scan for active work"
+        )
+    generation = str(options.get("scan_generation") or "v2").strip().lower()
+    if generation != "v2":
+        raise ValueError("normal schedules support only scan_generation=v2")
+    allowed = (
+        set(ScanPublicCompatibilityOptions.model_fields)
+        | _NORMAL_SCHEDULE_CONTROL_FIELDS
+    )
+    unknown = sorted(set(options) - allowed)
+    if unknown:
+        raise ValueError(
+            "unsupported recurring Scan option fields: " + ", ".join(unknown)
+        )
+    policy = options.get("policy")
+    advanced = options.get("advanced")
+    if policy is not None and not isinstance(policy, Mapping):
+        raise ValueError("scheduled Scan policy must be an object")
+    if advanced is not None and not isinstance(advanced, Mapping):
+        raise ValueError("scheduled Scan advanced limits must be an object")
+    contract = resolve_scan_contract(
+        budget_profile=options.get("budget_profile"),
+        policy=policy,
+        advanced=advanced,
+        approval_receipt_id=None,
+    )
+    if contract.policy.active_testing:
+        raise ValueError(
+            "recurring normal Scans must be passive; submit an explicit Scan "
+            "with current target-bound approval for active testing"
+        )
+    compatibility_values = {
+        key: value for key, value in options.items()
+        if key in ScanPublicCompatibilityOptions.model_fields
+    }
+    try:
+        public_options = ScanPublicCompatibilityOptions(**compatibility_values)
+        execution_options = ScanOptions(
+            **public_options.model_dump(mode="python", exclude_none=True),
+            budget_profile=contract.budget_profile,
+        )
+    except ValidationError as exc:
+        raise ValueError(f"invalid recurring Scan options: {exc}") from exc
+    return contract, execution_options
+
+
+_ASM_SCHEDULE_OPTION_FIELDS = {
+    "batch_size", "stale_days", "exploit_depth", "check_family", "endpoint_filter",
+    "approval_receipt_id",
+}
+
+
+def _resolve_asm_schedule_options(scan_options: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize the bounded option surface consumed by scheduled ASM waves."""
+    options = dict(scan_options)
+    legacy_kind = str(options.pop("kind", "") or "").strip().lower()
+    if legacy_kind and legacy_kind != "asm_improve":
+        raise ValueError("scan_options.kind conflicts with an ASM schedule")
+    unknown = sorted(set(options) - _ASM_SCHEDULE_OPTION_FIELDS)
+    if unknown:
+        raise ValueError(
+            "unsupported scheduled ASM option fields: " + ", ".join(unknown)
+        )
+    normalized: dict[str, Any] = {}
+    for key, lower, upper in (
+        ("batch_size", 1, 1000),
+        ("stale_days", 0, 3650),
+    ):
+        if key not in options:
+            continue
+        value = options[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"scheduled ASM {key} must be an integer")
+        if not lower <= value <= upper:
+            raise ValueError(
+                f"scheduled ASM {key} must be between {lower} and {upper}"
+            )
+        normalized[key] = value
+    if "exploit_depth" in options:
+        if not isinstance(options["exploit_depth"], bool):
+            raise ValueError("scheduled ASM exploit_depth must be a boolean")
+        normalized["exploit_depth"] = options["exploit_depth"]
+    if "check_family" in options:
+        family = check_registry.validate_asm_focus_family(options["check_family"])
+        if family in {"auth", "bola"}:
+            raise ValueError(
+                "scheduled ASM does not support credential-dependent auth or BOLA "
+                "families; use an explicit ASM run with current principal authority"
+            )
+        if family is not None:
+            normalized["check_family"] = family
+    if "endpoint_filter" in options:
+        endpoint_filter = asm_inventory.normalize_endpoint_filter(
+            options["endpoint_filter"]
+        )
+        if endpoint_filter is not None:
+            normalized["endpoint_filter"] = endpoint_filter
+    approval_receipt_id = str(options.get("approval_receipt_id") or "").strip()
+    if not approval_receipt_id:
+        raise ValueError(
+            "scheduled ASM requires a current target-bound asm.improve approval receipt"
+        )
+    try:
+        normalized["approval_receipt_id"] = str(uuid.UUID(approval_receipt_id))
+    except ValueError as exc:
+        raise ValueError("scheduled ASM approval_receipt_id must be a UUID") from exc
+    return normalized
+
+
+async def _validate_schedule_asm_approval(
+    conn: Any,
+    *,
+    target_id: Any,
+    target_url: str,
+    scan_options: Mapping[str, Any],
+) -> dict[str, Any]:
+    if _approval_validator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="schedule approval validation is not configured",
+        )
+    return await _approval_validator(
+        conn,
+        str(scan_options.get("approval_receipt_id") or "") or None,
+        target_url=target_url,
+        target_id=target_id,
+        action_name="asm.improve",
+        risk_tier="active",
+        always_require_receipt=True,
+        require_target_binding=True,
+        require_expiry=True,
+    )
 
 
 class ScheduleCreate(BaseModel):
@@ -475,11 +675,8 @@ async def create_schedule(request: ScheduleCreate):
 
     # Validate time_of_day format
     try:
-        parts = request.time_of_day.split(':')
-        h, m = int(parts[0]), int(parts[1])
-        if not (0 <= h <= 23 and 0 <= m <= 59):
-            raise ValueError
-    except (ValueError, IndexError):
+        _parse_time_of_day(request.time_of_day)
+    except ValueError:
         raise HTTPException(status_code=400, detail="time_of_day must be in HH:MM format (00:00 - 23:59)")
 
     # Validate day_of_week for weekly
@@ -502,13 +699,13 @@ async def create_schedule(request: ScheduleCreate):
                 ),
             )
         try:
-            resolve_scan_contract(
-                budget_profile=scan_options.get("budget_profile"),
-                policy=scan_options.get("policy"),
-                advanced=scan_options.get("advanced"),
-                approval_receipt_id=scan_options.get("approval_receipt_id"),
-            )
-        except ValueError as exc:
+            _resolve_normal_schedule_options(scan_options)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif schedule_kind == "asm_improve":
+        try:
+            scan_options = _resolve_asm_schedule_options(scan_options)
+        except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Validate timezone
@@ -527,6 +724,13 @@ async def create_schedule(request: ScheduleCreate):
             await validate_schedule_target_destination(str(target["url"]))
         except ScheduleTargetSafetyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if schedule_kind == "asm_improve":
+            await _validate_schedule_asm_approval(
+                conn,
+                target_id=target_uuid,
+                target_url=str(target["url"]),
+                scan_options=scan_options,
+            )
 
         next_run = calculate_next_run(
             request.frequency,
@@ -595,10 +799,11 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
         )
         if not existing:
             raise HTTPException(status_code=404, detail="Schedule not found")
-        try:
-            await validate_schedule_target_destination(str(existing["target_url"]))
-        except ScheduleTargetSafetyError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if request.is_active is not False:
+            try:
+                await validate_schedule_target_destination(str(existing["target_url"]))
+            except ScheduleTargetSafetyError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         updates = []
         params = []
@@ -626,13 +831,21 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
             param_idx += 1
             timing_changed = True
 
+        effective_frequency = request.frequency or existing["frequency"]
+        effective_day_of_week = (
+            request.day_of_week
+            if request.day_of_week is not None else existing["day_of_week"]
+        )
+        if effective_frequency == "weekly" and effective_day_of_week is None:
+            raise HTTPException(
+                status_code=400,
+                detail="day_of_week is required for weekly schedules (0=Monday, 6=Sunday)",
+            )
+
         if request.time_of_day is not None:
             try:
-                parts = request.time_of_day.split(':')
-                h, m = int(parts[0]), int(parts[1])
-                if not (0 <= h <= 23 and 0 <= m <= 59):
-                    raise ValueError
-            except (ValueError, IndexError):
+                _parse_time_of_day(request.time_of_day)
+            except ValueError:
                 raise HTTPException(status_code=400, detail="time_of_day must be HH:MM")
             updates.append(f"time_of_day = ${param_idx}")
             params.append(request.time_of_day)
@@ -678,10 +891,13 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
             param_idx += 1
 
         effective_schedule_kind = normalized_schedule_kind or _schedule_kind_from_row(existing)
+        effective_scan_options = _schedule_options_dict(existing["scan_options"])
+        effective_scan_options.pop("kind", None)
 
         if request.scan_options is not None:
             scan_options = _schedule_options_dict(request.scan_options)
             scan_options.pop("kind", None)
+            effective_scan_options = scan_options
             _refuse_raw_schedule_authentication(scan_options)
             if effective_schedule_kind == "evidence_retention_sweep":
                 raise HTTPException(
@@ -698,21 +914,16 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
                             + ", ".join(legacy_fields)
                         ),
                     )
+            elif effective_schedule_kind == "asm_improve":
                 try:
-                    resolve_scan_contract(
-                        budget_profile=scan_options.get("budget_profile"),
-                        policy=scan_options.get("policy"),
-                        advanced=scan_options.get("advanced"),
-                        approval_receipt_id=scan_options.get("approval_receipt_id"),
-                    )
-                except ValueError as exc:
+                    scan_options = _resolve_asm_schedule_options(scan_options)
+                except (TypeError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
+                effective_scan_options = scan_options
             updates.append(f"scan_options = ${param_idx}")
             params.append(json.dumps(scan_options))
             param_idx += 1
         elif explicit_kind_update:
-            existing_options = _schedule_options_dict(existing["scan_options"])
-            existing_options.pop("kind", None)
             if (
                 _schedule_kind_from_row(existing) == "evidence_retention_sweep"
                 and effective_schedule_kind != "evidence_retention_sweep"
@@ -727,11 +938,34 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
                     "preview_id",
                     "target_id",
                 ):
-                    existing_options.pop(legacy_key, None)
-            if existing_options != _schedule_options_dict(existing["scan_options"]):
+                    effective_scan_options.pop(legacy_key, None)
+            if effective_scan_options != _schedule_options_dict(existing["scan_options"]):
                 updates.append(f"scan_options = ${param_idx}")
-                params.append(json.dumps(existing_options))
+                params.append(json.dumps(effective_scan_options))
                 param_idx += 1
+
+        # Always validate the effective payload when a normal schedule remains
+        # runnable. This covers enable/name/timing updates and kind migrations,
+        # not only requests that happened to replace scan_options. Pausing stays
+        # available even for an invalid legacy row.
+        if effective_schedule_kind == "normal_scan" and request.is_active is not False:
+            try:
+                _resolve_normal_schedule_options(effective_scan_options)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        elif effective_schedule_kind == "asm_improve" and request.is_active is not False:
+            try:
+                effective_scan_options = _resolve_asm_schedule_options(
+                    effective_scan_options
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            await _validate_schedule_asm_approval(
+                conn,
+                target_id=existing["target_id"],
+                target_url=str(existing["target_url"]),
+                scan_options=effective_scan_options,
+            )
 
         if request.jitter_minutes is not None:
             updates.append(f"jitter_minutes = ${param_idx}")

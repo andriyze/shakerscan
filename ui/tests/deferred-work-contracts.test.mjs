@@ -30,30 +30,34 @@ const contracts = require(path.join(outDir, 'deferredWorkContracts.js'))
 test.after(() => rmSync(outDir, { recursive: true, force: true }))
 
 test('ASM schedule create and edit share one bounded option contract', () => {
+  const approvalReceiptId = '11111111-1111-4111-8111-111111111111'
   const options = contracts.buildAsmScheduleOptions({
     batchSize: 5000,
     staleDays: -4,
     endpointFilter: 'api',
-    family: 'bola',
+    family: 'xss',
     exploitDepth: true,
+    approvalReceiptId,
   })
   assert.deepEqual(options, {
     batch_size: 1000,
     stale_days: 0,
     endpoint_filter: 'api',
-    check_family: 'bola',
+    check_family: 'xss',
     exploit_depth: true,
+    approval_receipt_id: approvalReceiptId,
   })
   assert.deepEqual(contracts.readAsmScheduleOptions(options), {
     batchSize: 1000,
     staleDays: 0,
     endpointFilter: 'api',
-    family: 'bola',
+    family: 'xss',
     exploitDepth: true,
+    approvalReceiptId,
   })
 
   const mutation = contracts.buildScheduleMutation({
-    name: 'BOLA wave',
+    name: 'XSS wave',
     frequency: 'weekly',
     dayOfWeek: 3,
     timeOfDay: '02:00',

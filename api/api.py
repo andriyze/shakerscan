@@ -3187,7 +3187,14 @@ async def run_due_schedules(pool: asyncpg.Pool):
         try:
             schedule_kind = _schedule_kind_from_row(schedule)
         except ValueError as exc:
-            print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE schedules
+                       SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                       WHERE id=$1""",
+                    schedule_id,
+                )
+            print(f"[scheduler] Disabled invalid schedule {str(schedule_id)[:8]}: {exc}", flush=True)
             continue
         if schedule_kind == "evidence_retention_sweep":
             async with pool.acquire() as conn:
@@ -3210,6 +3217,23 @@ async def run_due_schedules(pool: asyncpg.Pool):
             await handle_schedule_target_failure(
                 pool, schedule_id=schedule_id, error=exc, now=now,
             )
+            continue
+
+        # Claim the due occurrence before any queue or database side effect. This
+        # prevents two scheduler processes from dispatching the same row and makes
+        # an operator pause that raced with the due-list read authoritative. The
+        # short lease also makes an interrupted scheduler retry instead of losing
+        # the occurrence permanently.
+        claim_until = now + timedelta(minutes=15)
+        async with pool.acquire() as conn:
+            claimed = await conn.fetchval(
+                """UPDATE schedules
+                   SET next_run_at=$1, updated_at=NOW()
+                   WHERE id=$2 AND is_active=true AND next_run_at <= $3
+                   RETURNING id""",
+                claim_until, schedule_id, now,
+            )
+        if not claimed:
             continue
 
         scan_options = dict(_schedule_options_dict(schedule['scan_options']))
@@ -3264,7 +3288,48 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # "keep this target covered" cadence, spread across the schedule. Legacy
             # rows that still carry scan_options.kind are normalized before this point.
             if schedule_kind == 'asm_improve':
-                asm_opts = {k: v for k, v in scan_options.items() if k != 'kind'}
+                try:
+                    asm_opts = _resolve_asm_schedule_options(scan_options)
+                except (TypeError, ValueError) as exc:
+                    await conn.execute(
+                        """UPDATE schedules
+                           SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                           WHERE id=$1""",
+                        schedule_id,
+                    )
+                    print(
+                        f"[scheduler] Disabled invalid ASM schedule "
+                        f"{str(schedule_id)[:8]}: {exc}",
+                        flush=True,
+                    )
+                    continue
+                try:
+                    approval_context = await _validate_approval_receipt_for_action(
+                        conn,
+                        asm_opts.get("approval_receipt_id"),
+                        target_url=str(target_url),
+                        target_id=target_id,
+                        action_name="asm.improve",
+                        risk_tier="active",
+                        always_require_receipt=True,
+                        require_target_binding=True,
+                        require_expiry=True,
+                    )
+                except HTTPException as exc:
+                    await conn.execute(
+                        """UPDATE schedules
+                           SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                           WHERE id=$1""",
+                        schedule_id,
+                    )
+                    print(
+                        f"[scheduler] Disabled unauthorized ASM schedule "
+                        f"{str(schedule_id)[:8]}: {exc.detail}",
+                        flush=True,
+                    )
+                    continue
+                if approval_context:
+                    asm_opts.update(approval_context)
                 _asm_ok = False
                 try:
                     cfg_row = await conn.fetchrow(
@@ -3368,41 +3433,40 @@ async def run_due_schedules(pool: asyncpg.Pool):
                     flush=True,
                 )
                 await conn.execute(
-                    "UPDATE schedules SET is_active=false, updated_at=NOW() WHERE id=$1",
+                    """UPDATE schedules
+                       SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                       WHERE id=$1""",
                     schedule_id,
                 )
                 continue
             try:
-                scan_contract = resolve_scan_contract(
-                    budget_profile=scan_options.get("budget_profile"),
-                    policy=scan_options.pop("policy", None),
-                    advanced=scan_options.pop("advanced", None),
-                    approval_receipt_id=scan_options.get("approval_receipt_id"),
+                scan_contract, scan_options_model = (
+                    _resolve_normal_schedule_options(scan_options)
                 )
-            except ValueError as exc:
-                print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                scan_options["budget_profile"] = scan_contract.budget_profile
+                scan_options["active"] = scan_contract.policy.active_testing
+                scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
+            except (TypeError, ValueError, ValidationError) as exc:
+                await conn.execute(
+                    """UPDATE schedules
+                       SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                       WHERE id=$1""",
+                    schedule_id,
+                )
+                print(f"[scheduler] Disabled invalid schedule {str(schedule_id)[:8]}: {exc}", flush=True)
                 continue
-            scan_options["budget_profile"] = scan_contract.budget_profile
-            scan_options["active"] = scan_contract.policy.active_testing
-            scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
-            scan_options_model = ScanOptions(**scan_options)
             active_testing = scan_contract.policy.active_testing
             if active_testing and scan_options_model.public:
                 print(
-                    f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
+                    f"[scheduler] Disabling schedule {str(schedule_id)[:8]}: "
                     "public option is incompatible with active testing",
                     flush=True,
                 )
-                next_run = calculate_next_run(
-                    schedule['frequency'],
-                    schedule['day_of_week'],
-                    schedule['time_of_day'] or '02:00',
-                    schedule['timezone'] or 'UTC',
-                    schedule['jitter_minutes'] or 0
-                )
                 await conn.execute("""
-                    UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
-                """, next_run, schedule_id)
+                    UPDATE schedules
+                    SET is_active=false, next_run_at=NULL, updated_at=NOW()
+                    WHERE id=$1
+                """, schedule_id)
                 continue
             scan_options = _build_canonical_scan_options_payload(
                 scan_options_model,
@@ -5602,6 +5666,8 @@ try:
         ScheduleUpdate,
         VALID_SCHEDULE_KINDS,
         _normalize_schedule_kind,
+        _resolve_asm_schedule_options,
+        _resolve_normal_schedule_options,
         _schedule_health_from_failures,
         _schedule_health_map_for_schedules,
         _schedule_kind_from_row,
@@ -5626,6 +5692,8 @@ except ModuleNotFoundError:  # package import in host-side tests
         ScheduleUpdate,
         VALID_SCHEDULE_KINDS,
         _normalize_schedule_kind,
+        _resolve_asm_schedule_options,
+        _resolve_normal_schedule_options,
         _schedule_health_from_failures,
         _schedule_health_map_for_schedules,
         _schedule_kind_from_row,
@@ -5643,7 +5711,10 @@ except ModuleNotFoundError:  # package import in host-side tests
         ScheduleTargetResolutionError,
         ScheduleTargetSafetyError,
     )
-configure_schedule_router(lambda: db_pool)
+configure_schedule_router(
+    lambda: db_pool,
+    approval_validator=lambda *a, **k: _validate_approval_receipt_for_action(*a, **k),
+)
 app.include_router(schedule_router)
 try:
     from finding_exceptions.router import (

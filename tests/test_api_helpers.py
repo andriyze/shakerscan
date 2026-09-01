@@ -3236,6 +3236,8 @@ class _FakeConn:
     def __init__(self, schedules):
         self.schedules = schedules
         self.executes = []
+        self.fetchvals = []
+        self.claim_result = True
 
     async def fetch(self, query, *args):
         if "FROM schedules" in query:
@@ -3243,6 +3245,9 @@ class _FakeConn:
         return []
 
     async def fetchval(self, query, *args):
+        self.fetchvals.append((query, args))
+        if "UPDATE schedules" in query and "RETURNING id" in query:
+            return args[1] if self.claim_result else None
         return 0
 
     async def fetchrow(self, query, *args):
@@ -3803,6 +3808,26 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
     assert len(redis_client.hset_calls) == 1
 
 
+def test_run_due_schedules_requires_atomic_due_occurrence_claim(monkeypatch):
+    conn = _FakeConn([_due_schedule()])
+    conn.claim_result = False
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    _freeze_test_asm_target(monkeypatch)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    claim_query, claim_args = next(
+        item for item in conn.fetchvals
+        if "UPDATE schedules" in item[0] and "RETURNING id" in item[0]
+    )
+    assert "is_active=true" in claim_query
+    assert "next_run_at <=" in claim_query
+    assert claim_args[1] is not None
+    assert redis_client.rpush_calls == []
+    assert not any("INSERT INTO scans" in query for query, _args in conn.executes)
+
+
 def test_canonical_schedule_queues_scan_job_v2_without_legacy_identity(monkeypatch):
     schedule = _due_schedule()
     schedule["scan_type"] = "scan"
@@ -3923,6 +3948,8 @@ def test_run_due_schedules_disables_legacy_destructive_retention_schedule(monkey
 
 def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
     _freeze_test_asm_target(monkeypatch)
+    approval_receipt_id = str(uuid.uuid4())
+    scope_receipt_id = str(uuid.uuid4())
     schedule = _due_schedule()
     schedule["schedule_kind"] = "asm_improve"
     schedule["scan_options"] = {
@@ -3931,6 +3958,7 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
         "check_family": "sqli",
         "endpoint_filter": "api",
         "exploit_depth": True,
+        "approval_receipt_id": approval_receipt_id,
     }
     conn = _FakeConn([schedule])
     redis_client = _RecordingRedis()
@@ -3966,7 +3994,17 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
         }
         return {"scan_id": "11111111-1111-4111-8111-111111111111"}
 
+    async def validate_approval(_conn, receipt_id, **_kwargs):
+        assert receipt_id == approval_receipt_id
+        return {
+            "approval_receipt_id": approval_receipt_id,
+            "scope_receipt_id": scope_receipt_id,
+        }
+
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(
+        api_module, "_validate_approval_receipt_for_action", validate_approval,
+    )
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable_count)
     # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "_enqueue_asm_exploit_batch", fake_enqueue_asm_exploit_batch)
@@ -3992,6 +4030,8 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
         "check_family": "sqli",
         "endpoint_filter": "api",
         "exploit_depth": True,
+        "approval_receipt_id": approval_receipt_id,
+        "scope_receipt_id": scope_receipt_id,
     }
     assert queued["batch_size"] == 3
     assert queued["stale_days"] == 7

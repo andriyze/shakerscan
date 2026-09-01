@@ -64,11 +64,9 @@ function getScheduleKind(schedule: Schedule): ScheduleKind {
 }
 
 const ASM_FAMILIES: Array<{ value: AsmFamily; label: string; detail: string }> = [
-  { value: 'all', label: 'All runnable checks', detail: 'Balanced SQLi/XSS/auth mix' },
+  { value: 'all', label: 'All runnable checks', detail: 'Balanced SQLi/XSS mix' },
   { value: 'sqli', label: 'SQLi', detail: 'Focused injection coverage' },
   { value: 'xss', label: 'XSS', detail: 'Focused browser/client coverage' },
-  { value: 'auth', label: 'Authz/BFLA', detail: 'Requires primary credentials' },
-  { value: 'bola', label: 'BOLA/IDOR', detail: 'Requires Lab/deep and two users' },
 ]
 
 function scheduleOptions(schedule: Schedule): Record<string, unknown> {
@@ -129,6 +127,7 @@ function SchedulesContent() {
   const [formAsmEndpointFilter, setFormAsmEndpointFilter] = useState<AsmEndpointFilter>('all')
   const [formAsmFamily, setFormAsmFamily] = useState<AsmFamily>('all')
   const [formAsmExploitDepth, setFormAsmExploitDepth] = useState(false)
+  const [formAsmApprovalReceiptId, setFormAsmApprovalReceiptId] = useState('')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
@@ -187,6 +186,10 @@ function SchedulesContent() {
       setError('Choose a scan or ASM schedule to migrate this retired retention schedule.')
       return
     }
+    if (formKind === 'asm_improve' && !formAsmApprovalReceiptId.trim()) {
+      setError('A current target-bound asm.improve approval receipt is required.')
+      return
+    }
 
     setCreating(true)
     setError('')
@@ -221,13 +224,14 @@ function SchedulesContent() {
   }
 
   function buildScheduleOptions(): Record<string, unknown> | undefined {
-    if (formKind === 'normal_scan') return { budget_profile: formBudgetProfile, scan_generation: 'v2' }
+    if (formKind === 'normal_scan') return { budget_profile: formBudgetProfile }
     return buildAsmScheduleOptions({
       batchSize: formAsmBatchSize,
       staleDays: formAsmStaleDays,
       endpointFilter: formAsmEndpointFilter,
       family: formAsmFamily,
       exploitDepth: formAsmExploitDepth,
+      approvalReceiptId: formAsmApprovalReceiptId,
     })
   }
 
@@ -245,8 +249,9 @@ function SchedulesContent() {
     setFormAsmBatchSize(asmOptions.batchSize)
     setFormAsmStaleDays(asmOptions.staleDays)
     setFormAsmEndpointFilter(asmOptions.endpointFilter)
-    setFormAsmFamily(asmOptions.family)
+    setFormAsmFamily(['all', 'sqli', 'xss'].includes(asmOptions.family) ? asmOptions.family : 'all')
     setFormAsmExploitDepth(asmOptions.exploitDepth)
+    setFormAsmApprovalReceiptId(asmOptions.approvalReceiptId)
     setError('')
     setShowCreateModal(true)
   }
@@ -294,6 +299,7 @@ function SchedulesContent() {
     setFormAsmEndpointFilter('all')
     setFormAsmFamily('all')
     setFormAsmExploitDepth(false)
+    setFormAsmApprovalReceiptId('')
     setEditingSchedule(null)
     setError('')
   }
@@ -303,7 +309,6 @@ function SchedulesContent() {
   }
 
   const formLocalTime = utcTimeToLocalLabel(formTime)
-  const asmNeedsLabDepth = formKind === 'asm_improve' && formAsmFamily === 'bola' && !formAsmExploitDepth
   const visibleSchedules = healthFilter
     ? schedules.filter(schedule => ['attention', 'warning'].includes(schedule.schedule_health?.status || ''))
     : schedules
@@ -740,9 +745,27 @@ function SchedulesContent() {
                     />
                     <span>
                       <span className="block text-sm font-medium text-gray-200">Enable Lab/deep checks</span>
-                      <span className="block text-xs text-gray-500">Required for BOLA/write-side depth and still subject to credential preconditions.</span>
+                      <span className="block text-xs text-gray-500">Raises proof depth within the selected SQLi/XSS family and remains budget bounded.</span>
                     </span>
                   </label>
+                  <div className="sm:col-span-2">
+                    <label htmlFor="schedule-asm-approval" className="block text-sm font-medium text-gray-400 mb-1">
+                      asm.improve approval receipt
+                    </label>
+                    <input
+                      id="schedule-asm-approval"
+                      type="text"
+                      value={formAsmApprovalReceiptId}
+                      onChange={(e) => setFormAsmApprovalReceiptId(e.target.value)}
+                      required
+                      placeholder="Target-bound approval receipt UUID"
+                      autoComplete="off"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white font-mono text-sm focus:outline-none focus:border-blue-500"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      Revalidated before every wave. Expired or revoked receipts disable the schedule.
+                    </p>
+                  </div>
                 </div>
               )}
 
@@ -763,10 +786,6 @@ function SchedulesContent() {
                 </div>
               )}
 
-              {asmNeedsLabDepth && (
-                <p className="text-sm text-amber-300">BOLA/IDOR waves require Lab/deep checks before they can be scheduled.</p>
-              )}
-
               <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
                 <p className="font-medium text-gray-200">Effective execution policy</p>
                 {formKind === 'normal_scan' ? (
@@ -780,7 +799,8 @@ function SchedulesContent() {
                   <ul className="mt-2 space-y-1">
                     <li>Wave: {formAsmFamily === 'all' ? 'Server-selected eligible families' : formAsmFamily.toUpperCase()}</li>
                     <li>Lab/deep eligibility: {formAsmExploitDepth ? 'Enabled' : 'Disabled'}</li>
-                    <li>Credentials and active authority: None; checks that require them remain blocked</li>
+                    <li>Credentials: None; credential-dependent auth/BOLA families are not schedulable</li>
+                    <li>Active authority: Current target-bound asm.improve receipt, revalidated per wave</li>
                     <li>Dispatch: {formTime} UTC with ±{editingSchedule?.jitter_minutes ?? 30} minute jitter</li>
                   </ul>
                 )}
@@ -802,7 +822,7 @@ function SchedulesContent() {
                 <Button
                   type="submit"
                   loading={creating}
-                  disabled={(!formTargetId && !editingSchedule) || asmNeedsLabDepth || formKind === 'evidence_retention_sweep'}
+                  disabled={(!formTargetId && !editingSchedule) || formKind === 'evidence_retention_sweep'}
                   className="flex-1"
                 >
                   {creating ? 'Saving…' : editingSchedule ? 'Save Schedule' : 'Create Schedule'}
