@@ -13,14 +13,14 @@ on:
         description: "Successful CodeQL workflow run ID for this exact SHA"
         required: true
       parity_run_id:
-        description: "Optional real-fleet Scan parity workflow run ID for this exact SHA"
-        required: false
+        description: "Required real-fleet Scan parity workflow run ID for this exact SHA"
+        required: true
       model_intake_physical_run_id:
         description: "Optional real Hugging Face/KVM acceptance run ID for this exact SHA"
         required: false
       device_physical_run_id:
-        description: "Optional physical-device acceptance run ID for this exact SHA"
-        required: false
+        description: "Required physical-device acceptance run ID for this exact SHA"
+        required: true
 
 # Serialize candidate construction. This workflow never publishes a version,
 # `latest`, an installer channel, a Git tag, or a GitHub Release.
@@ -160,23 +160,18 @@ jobs:
           # metadata, but can return the immutable workflow path for the same
           # successful run. Accept only these two identities for CodeQL.
           verify_run "$CODEQL_RUN_ID" "CodeQL" ".github/workflows/codeql.yml"
-          if [[ -n "$PARITY_RUN_ID" ]]; then
-            verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
-          fi
+          verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"
           if [[ -n "$MODEL_INTAKE_PHYSICAL_RUN_ID" ]]; then
             verify_run "$MODEL_INTAKE_PHYSICAL_RUN_ID" "Model Intake physical acceptance"
           fi
-          if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
-            verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"
-          fi
+          verify_run "$DEVICE_PHYSICAL_RUN_ID" "Device physical acceptance"
 
           # headSha only proves where the run was dispatched; the identity
           # receipt proves which commit the parity fleet actually checked out.
-          if [[ -n "$PARITY_RUN_ID" ]]; then
-            rm -rf /tmp/parity-identity
-            gh run download "$PARITY_RUN_ID" \
-              -n "parity-identity-$CANDIDATE_SHA" -D /tmp/parity-identity
-            python3 - <<'PY'
+          rm -rf /tmp/parity-identity
+          gh run download "$PARITY_RUN_ID" \
+            -n "parity-identity-$CANDIDATE_SHA" -D /tmp/parity-identity
+          python3 - <<'PY'
           import json, os, sys
           with open('/tmp/parity-identity/parity-identity.json', encoding='utf-8') as fh:
               identity = json.load(fh)
@@ -188,7 +183,6 @@ jobs:
                   f"checked_out={identity.get('resolved_head_sha')} expected={expected}"
               )
           PY
-          fi
 
       - name: Smoke-test frozen-source installer
         run: make installer-smoke
@@ -890,21 +884,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts/certification/external
-          if [[ -n "$PARITY_RUN_ID" ]]; then
-            mkdir -p artifacts/certification/external/parity
-            gh run download "$PARITY_RUN_ID" -n "v2-scan-parity-${CANDIDATE_SHA}" \
-              -D artifacts/certification/external/parity
-          fi
+          mkdir -p artifacts/certification/external/parity
+          gh run download "$PARITY_RUN_ID" -n "v2-scan-parity-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/parity
           if [[ -n "$MODEL_INTAKE_PHYSICAL_RUN_ID" ]]; then
             mkdir -p artifacts/certification/external/model-intake
             gh run download "$MODEL_INTAKE_PHYSICAL_RUN_ID" -n "model-intake-physical-${CANDIDATE_SHA}" \
               -D artifacts/certification/external/model-intake
           fi
-          if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
-            mkdir -p artifacts/certification/external/device
-            gh run download "$DEVICE_PHYSICAL_RUN_ID" -n "device-physical-${CANDIDATE_SHA}" \
-              -D artifacts/certification/external/device
-          fi
+          mkdir -p artifacts/certification/external/device
+          gh run download "$DEVICE_PHYSICAL_RUN_ID" -n "device-physical-${CANDIDATE_SHA}" \
+            -D artifacts/certification/external/device
 
       - name: Pull and identify exact final manifests
         env:
@@ -1018,17 +1008,13 @@ jobs:
             --fault-cancellation artifacts/certification/fault/scan-cancellation-race.json \
             --fault-reservation-identity artifacts/certification/fault/scan-reservation-identity.json \
             --fault-action-resume artifacts/certification/fault/scan-action-resume.json \
+            --real-fleet-parity artifacts/certification/external/parity/v2-scan-parity.json \
+            --device-physical artifacts/certification/external/device/device-physical-acceptance.json \
             --source-sha "$CANDIDATE_SHA" \
             --output release-candidate-receipt.json
           )
-          if [[ -n "$PARITY_RUN_ID" ]]; then
-            certification_args+=(--real-fleet-parity artifacts/certification/external/parity/v2-scan-parity.json)
-          fi
           if [[ -n "$MODEL_INTAKE_PHYSICAL_RUN_ID" ]]; then
             certification_args+=(--model-intake-physical artifacts/certification/external/model-intake/model-intake-physical-acceptance.json)
-          fi
-          if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
-            certification_args+=(--device-physical artifacts/certification/external/device/device-physical-acceptance.json)
           fi
           python3 scripts/certify_release_receipt.py "${certification_args[@]}"
           test "$(jq -r '.schema_version' release-candidate-receipt.json)" = shakerscan-release-candidate/v2
