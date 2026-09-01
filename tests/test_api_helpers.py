@@ -1706,7 +1706,7 @@ def test_broker_drops_scan_job_without_a_valid_durable_owner(monkeypatch):
     response = asyncio.run(fleet_router_module.lease_broker_job(
         "00000000-0000-4000-8000-000000000031",
         fleet_router_module.BrokerLeaseRequest(worker_id="worker-1", wait_seconds=0),
-        _fleet_request(),
+        _fleet_request(host="127.0.0.1", scheme="http"),
     ))
 
     assert response.status_code == 204
