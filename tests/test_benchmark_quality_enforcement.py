@@ -52,17 +52,14 @@ def test_the_artifact_separates_the_verdicts():
         assert f'"{field}"' in SOURCE, f"the scorecard does not record {field}"
 
 
-def test_enforce_quality_binds_an_explicit_non_vacuous_release_contract():
-    """Binding the whole bar makes release qualification fail on an aspirational target
-    and stop before any downstream receipt is produced, which certifies nothing."""
+def test_enforce_quality_binds_the_complete_non_vacuous_release_contract():
+    """Release qualification must fail before certification when the bar fails."""
     decision = SOURCE[SOURCE.index("quality_ok = "):]
-    assert "quality_release_contract_passed" in decision[:500], (
-        "the release decision does not require the explicit shortfall contract"
-    )
+    assert "quality_ok = full_bar_ok" in decision[:500]
     assert "release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))" in SOURCE
-    # The full bar must still be computed and reported either way.
     assert "full_bar_ok" in SOURCE
     assert '"quality_bar_passed": full_bar_ok' in SOURCE
+    assert '"accepted_shortfall"' not in SOURCE
 
 
 def test_an_unknown_enforced_name_is_rejected():
@@ -73,11 +70,8 @@ def test_an_unknown_enforced_name_is_rejected():
 def test_the_declared_standard_survives_whatever_is_bound():
     """Shrinking the bar to what the engine proves would destroy the measurement.
 
-    `enforced` says which checks decide the outcome; the standard itself never moves.
-    For 2.0.0 nothing from the quality bar is bound -- `grade_reliable` needs every
-    selected family complete and no unproven critical/high, which a thorough scan cannot
-    fund inside its wall ceiling -- so the regression gates carry the release and the
-    whole bar is reported as the declared shortfall.
+    `enforced` is only an incremental developer signal; the standard itself never
+    moves and the release invocation binds every check.
     """
     import yaml
     bar = yaml.safe_load(
@@ -88,10 +82,31 @@ def test_the_declared_standard_survives_whatever_is_bound():
     assert bar["require_reliable_grade"] is True
     assert bar["max_known_expectation_gaps"] == 0
     assert isinstance(bar["enforced"], list)
-    disposition = bar["release_disposition"]
-    assert disposition["status"] == "accepted_shortfall"
-    assert disposition["release"] == "2.0.0"
-    assert disposition["accepted_failed_gates"]
+    assert "release_disposition" not in bar
+
+
+def test_even_perfect_runtime_metrics_cannot_waive_declared_expectation_gaps():
+    import yaml
+    from scripts.benchmark_targets import apply_quality_bar
+
+    fixture = yaml.safe_load(
+        (ROOT / "tests/fixtures/benchmarks/juice_shop.yaml").read_text()
+    )
+    card = {
+        "expected_recall": 1.0,
+        "browser_proven_high_critical_families": ["xss"],
+        "grade_reliable": True,
+    }
+    apply_quality_bar(card, fixture)
+
+    assert card["quality_passed"] is False
+    assert card["quality_release_contract_passed"] is False
+    assert card["quality_release_contract"] == {
+        "status": "unaccepted_shortfall",
+        "accepted_failed_gates": [],
+        "observed_failed_gates": ["quality:max_known_expectation_gaps"],
+        "valid": False,
+    }
 
 
 def _release_ok(overall_ok, quality_ok, enforce):
@@ -118,7 +133,7 @@ def test_release_qualification_measures_recall():
     workflow = (ROOT / ".github" / "workflows" / "e2e.yml").read_text(encoding="utf-8")
     assert "scripts/benchmark_targets.py juice_shop" in workflow
     assert "--enforce-quality" in workflow, (
-        "release qualification must fail on the enforced subset, not merely report it"
+        "release qualification must fail on the complete bar, not merely report it"
     )
     assert "artifacts/dast-recall.json" in workflow
     # The scorecard has to leave the runner, or the measurement dies with the job.

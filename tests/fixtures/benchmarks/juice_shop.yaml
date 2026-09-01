@@ -24,8 +24,8 @@ quality_bar:
   require_browser_proven_xss: true   # Juice Shop's DOM XSS should be browser-proven
   require_reliable_grade: true       # coverage complete enough to trust the grade
   max_known_expectation_gaps: 0      # every declared gap is a debt against this bar
-  # Incremental binding remains empty for 2.0.0, but that is not permission for a
-  # vacuous pass. The release disposition below explicitly bounds the known debt.
+  # This subset is a developer progress signal only. Release qualification uses
+  # --enforce-quality, which always binds every check in the complete bar.
   # `grade_reliable` requires every selected
   # family complete AND no unproven critical/high, and a thorough scan cannot fund that
   # inside its 3,600-second wall ceiling -- funding the proof families enough time to
@@ -33,23 +33,9 @@ quality_bar:
   # into `insufficient_plan_budget`. That trade is correct (proof outranks breadth) and it
   # puts the check out of reach of budget tuning.
   #
-  # So the binding contract for 2.0.0 is the regression gates below, which catch DECAY,
-  # and the whole quality bar is reported as the declared shortfall. Moving a check back
-  # into this list is how a later release tightens the promise.
+  # The known shortfall therefore blocks 2.0.0 until the engine and evidence close it.
+  # Regression gates below still catch decay during ordinary development runs.
   enforced: []
-  release_disposition:
-    status: accepted_shortfall
-    release: 2.0.0
-    rationale: >-
-      The deterministic V2 runtime and regression floor are release-ready, while the
-      complete DAST quality target remains the published post-2.0 improvement backlog.
-      This exception accepts only the four named failures; any additional failed quality
-      check blocks release qualification.
-    accepted_failed_gates:
-      - quality:min_expected_recall
-      - quality:require_browser_proven_xss
-      - quality:grade_reliable
-      - quality:max_known_expectation_gaps
 
 # The expectations below are NOT reduced to what the engine currently proves: they describe what a
 # competent DAST should find on this app, and shrinking them would destroy the measurement. The

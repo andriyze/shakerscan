@@ -920,45 +920,15 @@ def apply_quality_bar(card, fixture):
     card["quality_enforced_gates"] = [item["gate"] for item in enforced]
     card["quality_enforced_passed"] = all(item["pass"] for item in enforced)
 
-    # A release must never turn an empty enforced list into a vacuous pass.  When a
-    # version intentionally ships below the complete quality bar, the fixture has to
-    # name every failed check it accepts. A newly failing check is therefore blocking,
-    # while a fixed check can disappear from the observed debt without weakening the
-    # contract.
+    # Release qualification is the complete bar. The optional `enforced` subset is
+    # retained only as a developer progress signal; it is never a publication waiver.
     failed_names = sorted(item["gate"] for item in results if not item["pass"])
-    disposition = bar.get("release_disposition")
     contract = {
         "status": "full_bar" if not failed_names else "unaccepted_shortfall",
         "accepted_failed_gates": [],
         "observed_failed_gates": failed_names,
         "valid": not failed_names,
     }
-    if failed_names and isinstance(disposition, dict):
-        accepted = sorted({
-            str(name) for name in disposition.get("accepted_failed_gates") or ()
-        })
-        unknown_accepted = set(accepted) - {item["gate"] for item in results}
-        if unknown_accepted:
-            raise SystemExit(
-                "quality_bar.release_disposition accepts checks that do not exist: "
-                f"{sorted(unknown_accepted)}"
-            )
-        valid = (
-            disposition.get("status") == "accepted_shortfall"
-            and str(disposition.get("release") or "").strip()
-            == open(os.path.join(REPO, "VERSION"), encoding="utf-8").read().strip()
-            and bool(str(disposition.get("rationale") or "").strip())
-            and bool(accepted)
-            and set(failed_names).issubset(set(accepted))
-        )
-        contract = {
-            "status": "accepted_shortfall" if valid else "invalid_shortfall",
-            "release": str(disposition.get("release") or ""),
-            "rationale": str(disposition.get("rationale") or ""),
-            "accepted_failed_gates": accepted,
-            "observed_failed_gates": failed_names,
-            "valid": valid,
-        }
     card["quality_release_contract"] = contract
     card["quality_release_contract_passed"] = contract["valid"]
     return results
@@ -1491,25 +1461,18 @@ def main():
     # gates only hold the line where the engine already is. Reporting them separately is
     # honest, but it also made the bar unenforceable: nothing could ever fail on it.
     # `--enforce-quality` makes it decide the exit status, so a release can require it.
-    full_bar_ok = all(
-        card.get("quality_passed", True) for card in cards if card.get("quality_gates")
+    quality_cards = [card for card in cards if card.get("quality_gates")]
+    full_bar_ok = bool(quality_cards) and all(
+        card.get("quality_passed") is True for card in quality_cards
     )
-    # A release gate cannot call the declared bar advisory.  The named subset remains useful in
-    # developer scorecards as an incremental progress signal, but --enforce-quality means the
-    # complete standard, including recall and proof quality, decides publication.
-    # `--enforce-quality` binds the subset the fixture names in `quality_bar.enforced`,
-    # not the whole bar. Binding the whole bar makes release qualification fail on an
-    # aspirational target and stop before any downstream receipt is produced, which
-    # certifies nothing. The full bar stays reported either way, so the shortfall is
-    # declared rather than hidden.
+    # The named subset remains useful as an incremental developer signal, but
+    # --enforce-quality always binds the complete standard. A release invocation
+    # with no quality-bearing target is not a pass.
     enforced_subset_ok = all(
         card.get("quality_enforced_passed", False)
-        for card in cards if card.get("quality_gates")
+        for card in quality_cards
     )
-    quality_ok = all(
-        card.get("quality_release_contract_passed", False)
-        for card in cards if card.get("quality_gates")
-    )
+    quality_ok = full_bar_ok
     release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
     run = {
         **artifact_metadata(release_ok),
@@ -1532,7 +1495,7 @@ def main():
         binding = "; full bar FAILED" if args.enforce_quality else ""
         print(
             "\nquality bar NOT MET" + binding
-            + ("" if args.enforce_quality else " (advisory: pass --enforce-quality to fail on the enforced subset)")
+            + ("" if args.enforce_quality else " (advisory: pass --enforce-quality to bind the complete bar)")
         )
     # Latest-pointer (stable name) plus a timestamped, git-trackable record so a
     # passing/failing run is visible in history (§10 — scorecards committed).

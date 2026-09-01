@@ -104,8 +104,8 @@ jobs:
       # remembered to run the benchmark by hand, so release qualification never saw it.
       # The stack and target are already up here, so the measurement costs one step.
       #
-      # `--enforce-quality` requires either the complete bar or the explicit bounded
-      # release disposition. An empty incremental gate list cannot pass by itself.
+      # `--enforce-quality` binds the complete bar. Known or newly introduced
+      # shortfalls fail; release qualification has no accepted-debt path.
       - name: Measure DAST recall against the Juice Shop answer key
         run: |
           python3 scripts/benchmark_targets.py juice_shop --auth --enforce-quality \
