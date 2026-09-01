@@ -1352,6 +1352,55 @@ async def _refresh_finding_owner_counts(conn: Any, rows: Sequence[Any]) -> None:
     )
 
 
+async def _resolve_finding_mutation_id(
+    conn: Any,
+    identifier: str,
+    *,
+    scan_id: uuid.UUID | None = None,
+) -> uuid.UUID | None:
+    """Resolve legacy fingerprints without guessing across target owners."""
+    try:
+        return uuid.UUID(identifier)
+    except ValueError:
+        pass
+
+    fingerprints = [identifier]
+    if ":" in identifier:
+        suffix = identifier.rsplit(":", 1)[-1]
+        if suffix and suffix != identifier:
+            fingerprints.append(suffix)
+
+    for fingerprint in fingerprints:
+        if scan_id is not None:
+            rows = await conn.fetch(
+                """SELECT id FROM findings
+                   WHERE fingerprint=$1 AND scan_id=$2
+                   ORDER BY last_seen_at DESC NULLS LAST, id DESC
+                   LIMIT 2""",
+                fingerprint,
+                scan_id,
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT id FROM findings
+                   WHERE fingerprint=$1
+                   ORDER BY last_seen_at DESC NULLS LAST, id DESC
+                   LIMIT 2""",
+                fingerprint,
+            )
+        if len(rows) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Finding fingerprint is ambiguous across targets; use the finding UUID "
+                    "or provide scan_id"
+                ),
+            )
+        if rows:
+            return uuid.UUID(str(rows[0]["id"]))
+    return None
+
+
 @router.patch("/findings/{finding_id:path}")
 async def update_finding(
     finding_id: str,
@@ -1366,172 +1415,73 @@ async def update_finding(
     3. Suffix-only fingerprint (backward compat)
     4. Legacy computed fingerprint (pre-change findings)
 
-    Pass scan_id to scope updates to a specific scan and prevent cross-target collisions.
+    Fingerprint mutations fail on cross-target ambiguity unless scan_id scopes them.
     """
     async with _pool().acquire() as conn:
-        updated_id = None
         scan_uuid = None
         if scan_id:
             try:
                 scan_uuid = uuid.UUID(scan_id)
-            except ValueError:
-                pass
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="scan_id must be a UUID") from exc
 
-        # Try UUID first
-        try:
-            finding_uuid = uuid.UUID(finding_id)
-            result = await conn.fetchrow("""
-                UPDATE findings
-                SET status = $1,
-                    resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                       WHEN $1 = 'active' THEN NULL
-                                       ELSE resolved_at END,
-                    notes = COALESCE($2, notes),
-                    analyst_verdict = COALESCE($3, analyst_verdict),
-                    analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
-                    analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
-                    updated_at = NOW()
-                WHERE id = $4
-                RETURNING id, target_id, device_target_id
-            """, request.status, request.notes, request.analyst_verdict, finding_uuid)
-            if result:
-                updated_id = result['id']
-        except ValueError:
-            pass
-
-        # Try full scanner ID as fingerprint (new format: "tool:hash")
-        if not updated_id:
-            if scan_uuid:
-                result = await conn.fetchrow("""
-                    UPDATE findings
-                    SET status = $1,
-                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                           WHEN $1 = 'active' THEN NULL
-                                           ELSE resolved_at END,
-                        notes = COALESCE($2, notes),
-                        analyst_verdict = COALESCE($3, analyst_verdict),
-                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
-                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
-                        updated_at = NOW()
-                    WHERE fingerprint = $4 AND scan_id = $5
-                    RETURNING id, target_id, device_target_id
-                """, request.status, request.notes, request.analyst_verdict, finding_id, scan_uuid)
-            else:
-                result = await conn.fetchrow("""
-                    UPDATE findings
-                    SET status = $1,
-                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                           WHEN $1 = 'active' THEN NULL
-                                           ELSE resolved_at END,
-                        notes = COALESCE($2, notes),
-                        analyst_verdict = COALESCE($3, analyst_verdict),
-                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
-                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
-                        updated_at = NOW()
-                    WHERE id = (
-                        SELECT id FROM findings WHERE fingerprint = $4
-                        ORDER BY last_seen_at DESC LIMIT 1
-                    )
-                    RETURNING id, target_id, device_target_id
-                """, request.status, request.notes, request.analyst_verdict, finding_id)
-            if result:
-                updated_id = result['id']
-
-        # Backward compat: try suffix-only for old findings
-        if not updated_id and ':' in finding_id:
-            suffix = finding_id.split(':')[-1]
-            if scan_uuid:
-                result = await conn.fetchrow("""
-                    UPDATE findings
-                    SET status = $1,
-                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                           WHEN $1 = 'active' THEN NULL
-                                           ELSE resolved_at END,
-                        notes = COALESCE($2, notes),
-                        analyst_verdict = COALESCE($3, analyst_verdict),
-                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
-                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
-                        updated_at = NOW()
-                    WHERE fingerprint = $4 AND scan_id = $5
-                    RETURNING id, target_id, device_target_id
-                """, request.status, request.notes, request.analyst_verdict, suffix, scan_uuid)
-            else:
-                result = await conn.fetchrow("""
-                    UPDATE findings
-                    SET status = $1,
-                        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                           WHEN $1 = 'active' THEN NULL
-                                           ELSE resolved_at END,
-                        notes = COALESCE($2, notes),
-                        analyst_verdict = COALESCE($3, analyst_verdict),
-                        analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
-                        analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
-                        updated_at = NOW()
-                    WHERE id = (
-                        SELECT id FROM findings WHERE fingerprint = $4
-                        ORDER BY last_seen_at DESC LIMIT 1
-                    )
-                    RETURNING id, target_id, device_target_id
-                """, request.status, request.notes, request.analyst_verdict, suffix)
-            if result:
-                updated_id = result['id']
-
-        if not updated_id:
+        resolved_id = await _resolve_finding_mutation_id(
+            conn,
+            finding_id,
+            scan_id=scan_uuid,
+        )
+        if resolved_id is None:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        result = await conn.fetchrow("""
+            UPDATE findings
+            SET status = $1,
+                resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
+                                   WHEN $1 = 'active' THEN NULL
+                                   ELSE resolved_at END,
+                notes = COALESCE($2, notes),
+                analyst_verdict = COALESCE($3, analyst_verdict),
+                analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
+                analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
+                updated_at = NOW()
+            WHERE id = $4
+            RETURNING id, target_id, device_target_id
+        """, request.status, request.notes, request.analyst_verdict, resolved_id)
+        if not result:
             raise HTTPException(status_code=404, detail="Finding not found")
         await _refresh_finding_owner_counts(conn, [result])
 
-    return {'id': str(updated_id), 'status': request.status, 'analyst_verdict': request.analyst_verdict}
+    return {'id': str(result['id']), 'status': request.status, 'analyst_verdict': request.analyst_verdict}
 
 
 @router.delete("/findings/{finding_id:path}")
-async def delete_finding(finding_id: str):
+async def delete_finding(
+    finding_id: str,
+    scan_id: Optional[str] = Query(None, description="Scope fingerprint deletion to a specific scan"),
+):
     """Delete a finding by ID or fingerprint."""
     async with _pool().acquire() as conn:
-        deleted_id = None
-
-        # Try UUID first
-        try:
-            finding_uuid = uuid.UUID(finding_id)
-            result = await conn.fetchrow(
-                "DELETE FROM findings WHERE id = $1 RETURNING id, target_id, device_target_id", finding_uuid
-            )
-            if result:
-                deleted_id = result['id']
-        except ValueError:
-            pass
-
-        # Try fingerprint
-        if not deleted_id:
-            result = await conn.fetchrow("""
-                DELETE FROM findings
-                WHERE id = (
-                    SELECT id FROM findings WHERE fingerprint = $1
-                    ORDER BY last_seen_at DESC LIMIT 1
-                )
-                RETURNING id, target_id, device_target_id
-            """, finding_id)
-            if result:
-                deleted_id = result['id']
-
-        # Backward compat: suffix-only
-        if not deleted_id and ':' in finding_id:
-            suffix = finding_id.split(':')[-1]
-            result = await conn.fetchrow("""
-                DELETE FROM findings
-                WHERE id = (
-                    SELECT id FROM findings WHERE fingerprint = $1
-                    ORDER BY last_seen_at DESC LIMIT 1
-                )
-                RETURNING id, target_id, device_target_id
-            """, suffix)
-            if result:
-                deleted_id = result['id']
-
-        if not deleted_id:
+        scan_uuid = None
+        if scan_id:
+            try:
+                scan_uuid = uuid.UUID(scan_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="scan_id must be a UUID") from exc
+        resolved_id = await _resolve_finding_mutation_id(
+            conn,
+            finding_id,
+            scan_id=scan_uuid,
+        )
+        if resolved_id is None:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        result = await conn.fetchrow(
+            "DELETE FROM findings WHERE id = $1 RETURNING id, target_id, device_target_id",
+            resolved_id,
+        )
+        if not result:
             raise HTTPException(status_code=404, detail="Finding not found")
         await _refresh_finding_owner_counts(conn, [result])
 
-    return {'id': str(deleted_id), 'status': 'deleted'}
+    return {'id': str(result['id']), 'status': 'deleted'}
 
 
 class FindingsCleanup(BaseModel):

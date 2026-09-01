@@ -20535,6 +20535,47 @@ def test_finding_owner_count_refreshes_web_and_device_namespaces():
     assert calls[1][1] == [device_id]
 
 
+def test_finding_fingerprint_mutation_rejects_cross_target_ambiguity():
+    class Conn:
+        async def fetch(self, query, fingerprint, *args):
+            assert "LIMIT 2" in query
+            assert fingerprint == "scanner:shared"
+            assert args == ()
+            return [
+                {"id": uuid.UUID("00000000-0000-4000-8000-000000000021")},
+                {"id": uuid.UUID("00000000-0000-4000-8000-000000000022")},
+            ]
+
+    with pytest.raises(api_module.HTTPException) as excinfo:
+        asyncio.run(api_module._resolve_finding_mutation_id(
+            Conn(),
+            "scanner:shared",
+        ))
+
+    assert excinfo.value.status_code == 409
+    assert "ambiguous across targets" in excinfo.value.detail
+
+
+def test_finding_fingerprint_mutation_honors_exact_scan_scope():
+    finding_id = uuid.UUID("00000000-0000-4000-8000-000000000023")
+    scan_id = uuid.UUID("00000000-0000-4000-8000-000000000024")
+
+    class Conn:
+        async def fetch(self, query, fingerprint, query_scan_id):
+            assert "fingerprint=$1 AND scan_id=$2" in query
+            assert fingerprint == "scanner:scoped"
+            assert query_scan_id == scan_id
+            return [{"id": finding_id}]
+
+    resolved = asyncio.run(api_module._resolve_finding_mutation_id(
+        Conn(),
+        "scanner:scoped",
+        scan_id=scan_id,
+    ))
+
+    assert resolved == finding_id
+
+
 def test_all_public_limit_parameters_have_explicit_lower_bounds():
     # Routes now live across the api package; read the whole tree so an extracted
     # route cannot slip past this bound check by leaving api.py.
