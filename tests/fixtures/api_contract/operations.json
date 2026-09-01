@@ -1505,11 +1505,6 @@
     "operation_id": "settle_research_episode_research_episodes__episode_id__settle_post"
   },
   {
-    "path": "/research/launch",
-    "method": "post",
-    "operation_id": "launch_research_episode_research_launch_post"
-  },
-  {
     "path": "/research/readiness",
     "method": "get",
     "operation_id": "research_readiness_research_readiness_get"

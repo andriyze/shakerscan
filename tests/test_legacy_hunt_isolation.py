@@ -89,7 +89,7 @@ def test_quarantine_preserves_cancel_with_deprecation_headers():
     assert headers[b"link"] == b'</hunts>; rel="successor-version"'
 
 
-def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
+def test_legacy_hunt_routes_are_isolated_and_research_launch_alias_is_deleted():
     root = Path(__file__).resolve().parents[1]
     api = (root / "api" / "api.py").read_text()
     product = (root / "docs" / "product-model.md").read_text()
@@ -102,9 +102,19 @@ def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
     # middleware remains for the surfaces still pending removal (Research).
     assert not route_is_declared("POST", "/agent/hunt/{target_id}")
     assert not route_is_declared("POST", "/devices/{device_id}/agent/session")
-    assert route_is_declared("POST", "/research/launch")
+    assert not route_is_declared("POST", "/research/launch")
+    assert route_is_declared("POST", "/research/campaigns/launch")
     assert "It is not a Hunt launcher" in product
     assert "A Hunt request creates one `/hunts` run" in product
+
+
+def test_deleted_research_launch_alias_keeps_internal_campaign_launcher():
+    """Campaign supervision still reuses the launcher without exposing its alias."""
+    tree = api_tree_source()
+    source = definition_source("launch_research_episode")
+
+    assert '@router.post("/research/launch")' not in tree
+    assert "async def launch_research_episode" in source
 
 
 def test_no_non_cancel_write_exists_under_the_legacy_agent_hunt_surface():

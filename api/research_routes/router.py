@@ -543,9 +543,8 @@ async def research_episode_benchmark(
     }
 
 
-@router.post("/research/launch")
 async def launch_research_episode(req: ResearchLaunchRequest):
-    """Launch or reopen a server-defined, subject-bound autonomous mission."""
+    """Launch or reopen a server-defined, subject-bound mission internally."""
     expected_subject_types = {
         "target_hunt": {"target"},
         "verify_finding": {"finding"},

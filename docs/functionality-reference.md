@@ -1121,16 +1121,16 @@ Hypothesis proof reconciliation is separately approval-gated and can only link a
 `exploited` canonical finding with exact campaign-action, target, family, and route dimensions; it
 never creates or verifies a finding from lead context.
 
-**Bounded Research Agent**: `GET /research/readiness` · `POST /research/launch` ·
-`POST|GET /research/episodes` · `GET /research/episodes/{id}` ·
+**Bounded Research Agent**: `GET /research/readiness` · `POST|GET /research/episodes` ·
+`GET /research/episodes/{id}` ·
 `POST /research/episodes/{id}/plan-step` · `POST /research/episodes/{id}/decisions` ·
 `POST /research/episodes/{id}/observe` · `POST /research/episodes/{id}/settle` ·
 `POST /research/episodes/{id}/cancel`. An episode is a target-bound state machine over immutable,
 redacted `ObservationPack` rows and exactly-one-action `DecisionEpisode` rows. Decisions are bound to
 the current observation ID/hash, cannot carry receipts or credentials, must declare an expected
-signal and falsifier, and consume bounded step/action/time/request/model-token budgets. The launch
-API supplies server-owned target-hunt, exact-finding, and ASM-gap missions, deduplicates concurrent
-one-click launches, and reserves a final synthesis step. The UI launches these missions from Finding
+signal and falsifier, and consume bounded step/action/time/request/model-token budgets. The campaign
+and episode APIs supply server-owned target-hunt, exact-finding, and ASM-gap missions, deduplicate
+concurrent one-click launches, and reserve a final synthesis step. The UI launches these missions from Finding
 Detail, Continuous ASM, and registered web assets in Exposure as well as from the main Autonomous
 Hunt page. Linked scans and finding retests must settle
 before exactly one result-bearing observation is attached. No-progress duplicate actions are rejected
@@ -1494,8 +1494,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 405 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 339 | `api/**/*.py` |
+| Public REST operations | 404 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 338 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1828,7 +1828,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |
 | `POST` | `/research/episodes/{episode_id}/plan-step` | `plan_research_episode_step` |
 | `POST` | `/research/episodes/{episode_id}/settle` | `settle_research_episode` |
-| `POST` | `/research/launch` | `launch_research_episode` |
 | `GET` | `/research/readiness` | `research_readiness` |
 | `GET` | `/results` | `list_results` |
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |

@@ -133,7 +133,6 @@ surfaces:
       - POST /research/episodes/{episode_id}/observe
       - POST /research/episodes/{episode_id}/plan-step
       - POST /research/episodes/{episode_id}/settle
-      - POST /research/launch
       - PUT /research/episodes/{episode_id}/autopilot
     routes: ["/research", "/research/*"]
     files: ["api/research_routes/router.py"]
