@@ -1648,6 +1648,71 @@ def test_broker_canonical_queue_retries_never_serialize_materialized_options():
     )
 
 
+def test_broker_drops_scan_job_without_a_valid_durable_owner(monkeypatch):
+    class Conn:
+        async def execute(self, *_args):
+            return "UPDATE 0"
+
+        async def fetchval(self, *_args):
+            return False
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    lease = types.SimpleNamespace(
+        legacy=False,
+        payload=json.dumps({
+            "type": "scan",
+            "scan_id": "not-a-uuid",
+            "job_id": "job-1",
+            "target": "https://example.test",
+        }),
+        delivery_attempts=1,
+        queue_name="scan_jobs",
+        stream_key="queue:scan_jobs",
+        message_id="1-0",
+    )
+    acknowledgements = []
+
+    async def authenticated(*_args, **_kwargs):
+        return {"id": uuid.uuid4(), "labels": {"transport": "broker"}}
+
+    monkeypatch.setattr(fleet_router_module, "_broker_authenticated_node", authenticated)
+    monkeypatch.setattr(fleet_router_module, "_pool", lambda: Pool())
+    monkeypatch.setattr(fleet_router_module, "get_redis", object)
+    monkeypatch.setattr(fleet_router_module, "qualified_route_queues", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(fleet_router_module, "lease_job", lambda *_args, **_kwargs: lease)
+    monkeypatch.setattr(
+        fleet_router_module,
+        "acknowledge_lease",
+        lambda _redis, acknowledged: acknowledgements.append(acknowledged) or True,
+    )
+    monkeypatch.setattr(
+        fleet_router_module,
+        "_broker_take_or_refresh_slot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("malformed work must not allocate a broker slot")
+        ),
+    )
+
+    response = asyncio.run(fleet_router_module.lease_broker_job(
+        "00000000-0000-4000-8000-000000000031",
+        fleet_router_module.BrokerLeaseRequest(worker_id="worker-1", wait_seconds=0),
+        _fleet_request(),
+    ))
+
+    assert response.status_code == 204
+    assert acknowledgements == [lease]
+
+
 def test_json_object_decodes_jsonb_strings_for_execution_context():
     context = {"transport": "broker", "node_id": str(uuid.uuid4())}
 
