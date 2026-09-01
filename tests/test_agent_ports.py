@@ -557,6 +557,22 @@ def test_katana_preserves_distinct_body_encodings_for_the_same_fields():
     }
 
 
+def test_katana_preserves_only_spa_fragment_route_shape_and_field_names():
+    output = at.parse_scanner_output(
+        "katana_headless",
+        "https://app.test/#/search?q=private-browser-value&sort=recent",
+        allowed_host="app.test",
+    )
+
+    assert output["records"] == [{
+        "kind": "discovered_route",
+        "url": "https://app.test/#/search?q=&sort=",
+        "method": "GET",
+        "source": None,
+    }]
+    assert "private-browser-value" not in json.dumps(output)
+
+
 def test_external_scanner_output_is_typed_and_query_values_are_redacted():
     secret = "AbCdEf0123456789AbCdEf0123456789"
     output = at.parse_scanner_output("nuclei", json.dumps({

@@ -27,9 +27,9 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.target_bound_socket import FrozenTargetSocketFactory
 
 try:
-    from scanner_tools.url_redaction import redact_url
+    from scanner_tools.url_redaction import redact_client_route, redact_url
 except ModuleNotFoundError:  # package imports in host-side tests
-    from scanner.scanner_tools.url_redaction import redact_url
+    from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -133,6 +133,7 @@ class PreparedXSSBrowserProof:
     payload_sha256: str
     candidate_id: str
     parameter_name: str
+    injection_location: str
     method: str
     body: bytes
     content_type: str | None
@@ -213,20 +214,42 @@ class XSSBrowserProofAdapter:
             pairs = urllib.parse.parse_qsl(
                 parsed.query, keep_blank_values=True, max_num_fields=50,
             )
-            matches = [
+            query_matches = [
                 index for index, (name, _value) in enumerate(pairs)
                 if name == parameter_name
             ]
-            if len(matches) != 1:
+            fragment_parts = urllib.parse.urlsplit(parsed.fragment)
+            if fragment_parts.scheme or fragment_parts.netloc or fragment_parts.fragment:
+                raise BrowserCapabilityInputError("XSS proof fragment route is invalid")
+            fragment_pairs = urllib.parse.parse_qsl(
+                fragment_parts.query, keep_blank_values=True, max_num_fields=50,
+            )
+            fragment_matches = [
+                index for index, (name, _value) in enumerate(fragment_pairs)
+                if name == parameter_name
+            ]
+            if len(query_matches) + len(fragment_matches) != 1:
                 raise BrowserCapabilityInputError(
                     "XSS proof parameter authority is ambiguous"
                 )
-            index = matches[0]
-            pairs[index] = (pairs[index][0], payload)
+            injection_location = "fragment" if fragment_matches else "query"
+            if fragment_matches:
+                index = fragment_matches[0]
+                fragment_pairs[index] = (fragment_pairs[index][0], payload)
+                fragment = urllib.parse.urlunsplit((
+                    "", "", fragment_parts.path,
+                    urllib.parse.urlencode(fragment_pairs, doseq=True), "",
+                ))
+            else:
+                index = query_matches[0]
+                pairs[index] = (pairs[index][0], payload)
+                fragment = parsed.fragment
             url = urllib.parse.urlunsplit((
                 parsed.scheme, parsed.netloc, parsed.path,
-                urllib.parse.urlencode(pairs, doseq=True), parsed.fragment,
+                urllib.parse.urlencode(pairs, doseq=True), fragment,
             ))
+        if body:
+            injection_location = "body"
         if _origin_key(url) != _origin_key(origin):
             raise BrowserCapabilityInputError("XSS proof URL escaped target origin")
         socket_factory = FrozenTargetSocketFactory(
@@ -237,6 +260,7 @@ class XSSBrowserProofAdapter:
         normalized = {
             "target_id": target.target_id, "candidate_id": candidate_id,
             "parameter_name": parameter_name, "method": normalized_method,
+            "injection_location": injection_location,
             "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
             "body_sha256": hashlib.sha256(body).hexdigest() if body else None,
         }
@@ -249,6 +273,7 @@ class XSSBrowserProofAdapter:
             marker=marker, marker_sha256=hashlib.sha256(marker.encode()).hexdigest(),
             payload_sha256=hashlib.sha256(payload.encode()).hexdigest(),
             candidate_id=candidate_id, parameter_name=parameter_name,
+            injection_location=injection_location,
             method=normalized_method, body=body,
             content_type=normalized_content_type,
             input_digest=PreparedExecution.digest_input(normalized),
@@ -259,7 +284,9 @@ class XSSBrowserProofAdapter:
             },
             redacted_execution={
                 "candidate_id": candidate_id, "parameter_name": parameter_name,
+                "injection_location": injection_location,
                 "method": normalized_method,
+                "request_url": _proof_request_url(url),
                 "body_sha256": hashlib.sha256(body).hexdigest() if body else None,
                 "payload_sha256": hashlib.sha256(payload.encode()).hexdigest(),
                 "marker_sha256": hashlib.sha256(marker.encode()).hexdigest(),
@@ -607,6 +634,7 @@ async def _execute_browser_action(
     browser_actions = 0
     blocked: list[dict[str, Any]] = []
     responses: list[dict[str, Any]] = []
+    related_request_urls: list[str] = []
     playwright = None
     browser = None
     context = None
@@ -745,10 +773,18 @@ async def _execute_browser_action(
             try:
                 if _origin_key(response.url) != _origin_key(prepared.origin):
                     return
+                public_url = _observation_url(response.url)
+                if (
+                    isinstance(prepared, PreparedXSSBrowserProof)
+                    and prepared.marker in urllib.parse.unquote(response.url)
+                    and public_url not in related_request_urls
+                    and len(related_request_urls) < 20
+                ):
+                    related_request_urls.append(public_url)
                 responses.append({
                     "kind": "browser_http_response",
                     "method": response.request.method.upper(),
-                    "url": _observation_url(response.url),
+                    "url": public_url,
                     "status_code": int(response.status),
                     "content_type": _safe_content_type(
                         response.headers.get("content-type")
@@ -848,6 +884,9 @@ async def _execute_browser_action(
                 "kind": "xss_browser_proof",
                 "candidate_id": prepared.candidate_id,
                 "parameter_name": prepared.parameter_name,
+                "injection_location": prepared.injection_location,
+                "request_url": _proof_request_url(prepared.url),
+                "related_request_urls": related_request_urls,
                 "proof_state": "verified" if proven else "not_proven",
                 "finding_verdict": "verified" if proven else "not_proven",
                 "proof_producer": "shakerscan",
@@ -1094,6 +1133,16 @@ def _is_ip_literal(value: str | None) -> bool:
 
 def _observation_url(value: str) -> str:
     return redact_url(str(value or ""), max_length=2_000)
+
+
+def _proof_request_url(value: str) -> str:
+    """Retain a value-free SPA route while applying the normal URL redaction contract."""
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    base = redact_url(urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, parsed.path, parsed.query, "",
+    )), max_length=2_000)
+    client_route = redact_client_route(value)
+    return f"{base}#{client_route}" if client_route else base
 
 
 def _safe_content_type(value: Any) -> str:

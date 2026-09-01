@@ -634,6 +634,11 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
         "dom_marker_executed": True,
         "sanitized_screenshot_sha256": "e" * 64,
         "browser_build": "Chromium test",
+        "injection_location": "fragment",
+        "request_url": "https://app.example.test/#/search?q=",
+        "related_request_urls": [
+            "https://app.example.test/rest/products/search?q=%3Credacted%3E",
+        ],
     },)}
     report = finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
@@ -642,6 +647,10 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
     finding = report["findings"][0]
     assert finding["tool"] == "shakerscan_browser_proof"
     assert finding["verified"] is True
+    assert finding["url"] == "https://app.example.test/#/search?q="
+    assert finding["evidence"]["related_request_urls"] == [
+        "https://app.example.test/rest/products/search?q=%3Credacted%3E",
+    ]
     assert finding["evidence"]["proof_producer"] == "shakerscan"
     assert finding["evidence"]["sanitized_screenshot_sha256"] == "e" * 64
     assert finding["evidence"]["browser_proof"] == {

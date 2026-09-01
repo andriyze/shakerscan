@@ -1500,6 +1500,15 @@ def _public_observed_url(value: Any) -> str | None:
         return None
 
 
+def _public_discovered_url(value: Any) -> str | None:
+    """Retain a value-free SPA route for discovery while applying normal URL redaction."""
+    public_url = _public_observed_url(value)
+    if public_url is None:
+        return None
+    client_route = redact_client_route(value)
+    return f"{public_url}#{client_route}" if client_route else public_url
+
+
 def parse_scanner_output(
     name: str, stdout: str, *, allowed_host: str | None = None,
 ) -> dict[str, Any]:
@@ -1565,7 +1574,7 @@ def parse_scanner_output(
             })
         elif scanner in KATANA_TOOLS:
             request = item.get("request") if isinstance(item.get("request"), dict) else {}
-            observed_url = _public_observed_url(
+            observed_url = _public_discovered_url(
                 item.get("url") or item.get("endpoint") or request.get("endpoint")
             )
             if not observed_url:

@@ -702,8 +702,22 @@ def collect_scorecard(report, fixture):
     findings = report.get("findings") or []
     enriched = []
     for f in findings:
-        hay = " ".join(str(f.get(k, "")) for k in
-                       ("title", "url", "category", "type", "cwe", "description", "name")).lower()
+        evidence = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
+        # Route matching may use only the explicit, redacted browser-proof route fields. Arbitrary
+        # evidence is deliberately excluded: it may contain unrelated text or private material.
+        related_routes = evidence.get("related_request_urls")
+        if not isinstance(related_routes, (list, tuple)):
+            related_routes = []
+        proof_routes = [
+            evidence.get("request_url"), evidence.get("canonical_path"),
+            *related_routes,
+        ]
+        hay = " ".join([
+            *(str(f.get(k, "")) for k in (
+                "title", "url", "category", "type", "cwe", "description", "name",
+            )),
+            *(str(item or "") for item in proof_routes),
+        ]).lower()
         sev = (f.get("severity") or "").lower()
         enriched.append((
             f,

@@ -21,9 +21,9 @@ from typing import Any, Mapping
 import urllib.parse
 
 try:
-    from scanner_tools.url_redaction import redact_path, redact_url
+    from scanner_tools.url_redaction import redact_client_route, redact_path, redact_url
 except ModuleNotFoundError:  # package import through scanner.manifests
-    from .scanner_tools.url_redaction import redact_path, redact_url
+    from .scanner_tools.url_redaction import redact_client_route, redact_path, redact_url
 
 
 _UUID_SEGMENT = re.compile(r"^[0-9a-f]{8}-[0-9a-f-]{20,}$", re.I)
@@ -61,10 +61,14 @@ class EndpointRecord:
     # become a candidate. Names only -- values never enter a manifest.
     content_type: str | None = None
     body_field_names: tuple[str, ...] = ()
+    # SPA routes live after ``#`` and never reach the HTTP server. Preserve only their path shape
+    # and parameter names so a later browser verifier can test them without retaining values.
+    browser_fragment_path: str | None = None
+    browser_fragment_query_keys: tuple[str, ...] = ()
 
     @property
     def identity(self) -> str:
-        return "|".join((
+        parts = (
             self.method,
             self.scheme,
             self.host,
@@ -72,7 +76,13 @@ class EndpointRecord:
             self.normalized_path,
             ",".join(self.query_keys),
             self.content_fingerprint or "",
-        ))
+        )
+        if self.browser_fragment_path:
+            parts += (
+                self.browser_fragment_path,
+                ",".join(self.browser_fragment_query_keys),
+            )
+        return "|".join(parts)
 
     @property
     def has_sensitive_path_material(self) -> bool:
@@ -92,7 +102,15 @@ class EndpointRecord:
     @property
     def work_item(self) -> str:
         suffix = f"?{self.redacted_query}" if self.redacted_query else ""
-        return f"{self.method} {redact_path(self.concrete_path)}{suffix}"
+        fragment_query = urllib.parse.urlencode([
+            (key, "1") for key in self.browser_fragment_query_keys
+        ])
+        fragment = (
+            f"#{self.browser_fragment_path}"
+            f"{'?' + fragment_query if fragment_query else ''}"
+            if self.browser_fragment_path else ""
+        )
+        return f"{self.method} {redact_path(self.concrete_path)}{suffix}{fragment}"
 
     @property
     def redacted_url(self) -> str:
@@ -100,10 +118,19 @@ class EndpointRecord:
         default_port = 443 if self.scheme == "https" else 80
         authority = host if self.port == default_port else f"{host}:{self.port}"
         suffix = f"?{self.redacted_query}" if self.redacted_query else ""
-        return redact_url(f"{self.scheme}://{authority}{self.concrete_path}{suffix}")
+        base = redact_url(f"{self.scheme}://{authority}{self.concrete_path}{suffix}")
+        fragment_query = urllib.parse.urlencode([
+            (key, "<redacted>") for key in self.browser_fragment_query_keys
+        ])
+        fragment = (
+            f"#{self.browser_fragment_path}"
+            f"{'?' + fragment_query if fragment_query else ''}"
+            if self.browser_fragment_path else ""
+        )
+        return f"{base}{fragment}"
 
     def public_dict(self) -> dict[str, Any]:
-        return {
+        public = {
             "method": self.method,
             "scheme": self.scheme,
             "host": self.host,
@@ -117,6 +144,25 @@ class EndpointRecord:
             "source": self.source,
             "sensitive_path_redacted": self.has_sensitive_path_material,
         }
+        if self.browser_fragment_path:
+            public.update({
+                "browser_fragment_path": self.browser_fragment_path,
+                "browser_fragment_query_keys": list(self.browser_fragment_query_keys),
+            })
+        return public
+
+
+def _normalized_route_path(path: str) -> str:
+    normalized_segments: list[str] = []
+    for segment in path.split("/"):
+        decoded = urllib.parse.unquote(segment)
+        if _INTEGER_SEGMENT.fullmatch(decoded):
+            normalized_segments.append("{int}")
+        elif _UUID_SEGMENT.fullmatch(decoded):
+            normalized_segments.append("{uuid}")
+        else:
+            normalized_segments.append(segment)
+    return "/".join(normalized_segments) or "/"
 
 
 def normalize_endpoint(
@@ -141,16 +187,7 @@ def normalize_endpoint(
     except ValueError as exc:
         raise ValueError("endpoint URL contains an invalid port") from exc
     concrete = parsed.path or "/"
-    normalized_segments: list[str] = []
-    for segment in concrete.split("/"):
-        decoded = urllib.parse.unquote(segment)
-        if _INTEGER_SEGMENT.fullmatch(decoded):
-            normalized_segments.append("{int}")
-        elif _UUID_SEGMENT.fullmatch(decoded):
-            normalized_segments.append("{uuid}")
-        else:
-            normalized_segments.append(segment)
-    normalized = "/".join(normalized_segments) or "/"
+    normalized = _normalized_route_path(concrete)
     query_keys = tuple(sorted({
         str(key).strip()[:200]
         for key, _value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -168,6 +205,22 @@ def normalize_endpoint(
         declared_body_fields = tuple(sorted(str(key)[:200] for key in body_schema))
     elif isinstance(body_schema, (list, tuple)):
         declared_body_fields = tuple(sorted(str(item)[:200] for item in body_schema))
+    browser_fragment_path = None
+    browser_fragment_query_keys: tuple[str, ...] = ()
+    client_route = redact_client_route(url)
+    # A redacted fragment path is display-only and must never become executable authority.
+    if client_route and "<redacted>" not in client_route:
+        raw_fragment_path, _separator, raw_fragment_query = client_route.partition("?")
+        bang = raw_fragment_path.startswith("!/")
+        route_path = raw_fragment_path[1:] if bang else raw_fragment_path
+        browser_fragment_path = ("!" if bang else "") + _normalized_route_path(route_path)
+        browser_fragment_query_keys = tuple(sorted({
+            str(key).strip()[:200]
+            for key, _value in urllib.parse.parse_qsl(
+                raw_fragment_query, keep_blank_values=True,
+            )
+            if str(key).strip()
+        }))[:64]
     return EndpointRecord(
         method,
         scheme,
@@ -180,6 +233,8 @@ def normalize_endpoint(
         str(source or "unknown")[:80],
         str(content_type).lower()[:120] if content_type else None,
         declared_body_fields[:128],
+        browser_fragment_path,
+        browser_fragment_query_keys,
     )
 
 

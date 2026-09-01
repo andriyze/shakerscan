@@ -712,6 +712,77 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
+def test_browser_proof_attempts_fragment_candidate_without_server_signal(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/", "concrete_path": "/",
+                "query_keys": [], "browser_fragment_path": "/search",
+                "browser_fragment_query_keys": ["q"],
+                "source": "web.browser_crawl",
+            }],
+        },
+        source_action_ids=("discover.browser_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest,
+        source_action_ids=("discover.browser_crawl",),
+        maximum=10,
+    )
+    action = _action(
+        "prove.xss", "xss.browser_prove_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 1},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    attempted = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        attempted.append(adapter.prepared)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={
+                "browser_actions": 2, "http_requests": 1, "tool_wall_seconds": 1,
+            },
+            observations=({
+                "kind": "xss_browser_proof", "proof_state": "not_proven",
+            },),
+            execution_started=True,
+            parser_version="xss-browser-proof/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    receipt = asyncio.run(_dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert len(attempted) == 1
+    assert attempted[0].injection_location == "fragment"
+    assert "#/search?q=" in attempted[0].url
+
+
 def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monkeypatch):
     scan_id = str(uuid.uuid4())
     endpoint_manifest = build_endpoint_manifest(

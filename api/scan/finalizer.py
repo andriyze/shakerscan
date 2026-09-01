@@ -297,10 +297,15 @@ def _findings_for_action(
                 title="Verified cross-site scripting",
                 severity="high",
                 cwe="CWE-79",
-                url=None,
+                url=item.get("request_url"),
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "parameter_name": item.get("parameter_name"),
+                    "injection_location": item.get("injection_location"),
+                    "request_url": item.get("request_url"),
+                    "related_request_urls": list(
+                        item.get("related_request_urls") or ()
+                    ),
                     "payload_sha256": item.get("payload_sha256"),
                     "marker_sha256": item.get("marker_sha256"),
                     "proof_producer": "shakerscan",

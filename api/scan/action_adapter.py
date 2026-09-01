@@ -1400,6 +1400,17 @@ class DatabaseNeutralScanActionDispatcher:
                     not in {"not_proven", "unproven", ""}
                 ):
                     candidate_signals.add(str(item["candidate_id"]))
+        # A URL fragment never reaches a server-side verifier, so requiring an upstream reflection
+        # signal makes DOM-only XSS impossible to prove. The immutable fragment candidate itself is
+        # sufficient authority for a bounded same-origin browser attempt.
+        candidate_signals.update(
+            str(candidate.get("candidate_id") or "")
+            for _index, candidate in rows
+            if candidate.get("browser_fragment_query_parameter_names")
+            and str(candidate.get("parameter_name") or "")
+            in candidate.get("browser_fragment_query_parameter_names", ())
+        )
+        candidate_signals.discard("")
         if not candidate_signals:
             return self._skip(action, "no_xss_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
