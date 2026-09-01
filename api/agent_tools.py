@@ -432,8 +432,12 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         severity_args = ["--only-poc", "r,v"]
     else:
         severity_args = ["--only-poc", "v"]
+    # --force-headless-verification alone drives the real browser and settles a
+    # DOM-based finding in seconds. --deep-domxss additionally crawls the DOM
+    # exhaustively and does not converge inside this capability's wall ceiling,
+    # so the tool was cut off before emitting any verdict at all.
     headless_args = (
-        ["--deep-domxss", "--force-headless-verification"]
+        ["--force-headless-verification"]
         if opts.get("deep_domxss") is True else ["--skip-headless"]
     )
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",

@@ -964,8 +964,9 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
         {"severity": "high", "deep_domxss": True},
     )
     assert "--skip-headless" not in dom_argv
-    assert "--deep-domxss" in dom_argv
     assert "--force-headless-verification" in dom_argv
+    # --deep-domxss never converges inside the capability wall ceiling.
+    assert "--deep-domxss" not in dom_argv
 
     b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
     assert b == "sqlmap"
