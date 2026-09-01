@@ -51,7 +51,7 @@ def test_release_gate_selector_resolution_is_ordered_and_rejects_unknown():
         raise AssertionError("unknown gate should raise")
 
 
-def test_release_gate_runner_loads_canonical_api_packages(monkeypatch):
+def test_release_gate_runner_loads_the_complete_canonical_source_layout(monkeypatch):
     calls = []
 
     def fake_call(command, *, cwd, env):
@@ -59,10 +59,23 @@ def test_release_gate_runner_loads_canonical_api_packages(monkeypatch):
         return 0
 
     monkeypatch.setattr(release_gates.subprocess, "call", fake_call)
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        release_gates.os.pathsep.join((
+            "/existing/tools", str(release_gates.REPO_ROOT / "api"),
+        )),
+    )
 
     assert release_gates.run_gates(["test:v2-fault-injection"]) == 0
     assert len(calls) == 1
     command, cwd, env = calls[0]
     assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
     assert cwd == release_gates.REPO_ROOT
-    assert env["PYTHONPATH"].split(release_gates.os.pathsep)[0] == str(release_gates.REPO_ROOT / "api")
+    paths = env["PYTHONPATH"].split(release_gates.os.pathsep)
+    assert paths[:3] == [
+        str(release_gates.REPO_ROOT / "api"),
+        str(release_gates.REPO_ROOT / "scanner"),
+        str(release_gates.REPO_ROOT),
+    ]
+    assert paths[-1] == "/existing/tools"
+    assert len(paths) == len(set(paths))
