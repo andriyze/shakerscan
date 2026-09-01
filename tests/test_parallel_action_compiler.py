@@ -254,7 +254,12 @@ def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():
     assert sum(child.budget.max_browser_actions for child in first.children) == (
         execution.budget.max_browser_actions
     )
-    assert first.children[1].budget.max_browser_actions == 0
+    # Browser proof runs against candidates, which live on the endpoint
+    # children. Pinning them to zero made xss.browser_prove_batch structurally
+    # unrunnable in every sharded Scan while the backbone held the whole
+    # allowance and had nothing to prove.
+    assert first.children[1].budget.max_browser_actions > 0
+    # tcp stays backbone-only: ports.discover is a target-wide producer.
     assert first.children[2].budget.max_tcp_ports == 0
     assert first.parent_owned_action_ids == ("finalize.report",)
     assert "finalize.report" not in first.globally_assigned_action_ids
@@ -1206,3 +1211,43 @@ def test_partition_rejects_a_backbone_that_still_carries_stage_owned_discovery()
         )
     with pytest.raises(ParallelActionPlanError):
         partition.record(plans)
+
+
+def test_merged_family_reason_agrees_with_its_counters():
+    """A family the merged run attempted is incomplete, not unattempted.
+
+    Child reasons merge first-wins, and candidates cluster on whichever shard
+    owns the parameterised routes, so a shard with none for a family stamped its
+    own zero_attempts onto the parent. Measured on the benchmark application:
+    two of four shards ran sqli to success on 854 and 1,067 requests and the
+    parent still reported sqli as zero_attempts -- understating work that
+    demonstrably happened, which is the one thing coverage must never do.
+    """
+    from api.scan.parallel_compiler import _reconciled_family_coverage
+
+    # A shard that never attempted contributed the reason, but siblings did.
+    attempted = _reconciled_family_coverage({
+        "family": "sqli",
+        "reason": "zero_attempts",
+        "attempted_candidates": 9,
+        "coverage_status": "partial",
+    })
+    assert attempted["reason"] == "child_family_incomplete"
+
+    # Genuinely unattempted across every shard keeps the honest reason.
+    untouched = _reconciled_family_coverage({
+        "family": "sqli",
+        "reason": "zero_attempts",
+        "attempted_candidates": 0,
+        "coverage_status": "partial",
+    })
+    assert untouched["reason"] == "zero_attempts"
+
+    # Any other reason is left exactly as the children reported it.
+    other = _reconciled_family_coverage({
+        "family": "xss",
+        "reason": "action_incomplete",
+        "attempted_candidates": 9,
+        "coverage_status": "partial",
+    })
+    assert other["reason"] == "action_incomplete"

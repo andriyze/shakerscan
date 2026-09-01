@@ -1349,8 +1349,16 @@ class ParallelActionPlanCompiler:
             # minimum wall-time before distributing the remaining tool budget.
             remaining["tool_wall_seconds"], weights, minimum=1,
         )
-        browser = [0] * len(child_specs)
-        browser[global_index] = remaining["browser_actions"]
+        # Browser proof runs against candidates, and candidates live on the
+        # endpoint children -- the backbone holds none by construction. Giving the
+        # whole browser allowance to the backbone made xss.browser_prove_batch
+        # structurally unrunnable in every sharded Scan: measured, prove.xss was
+        # skipped as insufficient_plan_budget on all four endpoint children while
+        # the backbone sat on the entire 1,000-action ceiling and had nothing to
+        # prove. Share it the way every other executable dimension is shared.
+        # tcp stays backbone-only: ports.discover is a target-wide producer, not
+        # per-endpoint work.
+        browser = _weighted_shares(remaining["browser_actions"], weights, minimum=0)
         tcp = [0] * len(child_specs)
         tcp[global_index] = remaining["tcp_ports_attempted"]
 
@@ -1863,9 +1871,34 @@ def merge_parallel_action_executions(
         "candidate_coverage": {
             key: candidate_coverage[key] for key in sorted(candidate_coverage)
         },
-        "family_coverage": [family_coverage[key] for key in sorted(family_coverage)],
+        "family_coverage": [
+            _reconciled_family_coverage(family_coverage[key])
+            for key in sorted(family_coverage)
+        ],
     }
     return {**payload, "merge_digest": _digest(payload)}
+
+
+def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
+    """Make a merged family's reason agree with the counters merged beside it.
+
+    Child reasons are inherited first-wins, so a shard holding no candidates for
+    a family -- a normal outcome, since candidates cluster on whichever shard
+    owns the parameterised routes -- stamped its own ``zero_attempts`` onto the
+    parent. Measured: two of four shards ran sqli to success on 854 and 1,067
+    requests and the parent still reported the family as ``zero_attempts``,
+    understating work that demonstrably happened.
+
+    The counters are summed correctly, so read the reason back off them. A
+    family the merged run did attempt is incomplete, not unattempted.
+    """
+    row = dict(aggregate)
+    if (
+        str(row.get("reason") or "") == "zero_attempts"
+        and int(row.get("attempted_candidates") or 0) > 0
+    ):
+        row["reason"] = "child_family_incomplete"
+    return row
 
 
 def summarize_parallel_action_coverage(
