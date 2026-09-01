@@ -4948,7 +4948,7 @@ def validate_retest_job_payload(payload: Any) -> tuple[bool, str]:
         return False, "missing_retest_subject"
     if payload.get("finding_id") and payload.get("candidate_id"):
         return False, "ambiguous_retest_subject"
-    for field in ("verification_id", "finding_id", "candidate_id"):
+    for field in ("job_id", "verification_id", "finding_id", "candidate_id"):
         if not payload.get(field):
             continue
         try:

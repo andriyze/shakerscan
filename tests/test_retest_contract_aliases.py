@@ -30,7 +30,7 @@ def test_auto_fp_policy_is_off_by_default():
 
 def test_retest_queue_contract_accepts_exactly_one_subject_kind():
     candidate = build_retest_job_payload(
-        job_id="job-1",
+        job_id="00000000-0000-4000-8000-000000000001",
         verification_id="11111111-1111-4111-8111-111111111111",
         candidate_id="22222222-2222-4222-8222-222222222222",
         submitted_at="2026-08-16T00:00:00+00:00",
@@ -39,6 +39,8 @@ def test_retest_queue_contract_accepts_exactly_one_subject_kind():
     assert "finding_id" not in candidate
     ambiguous = {**candidate, "finding_id": "33333333-3333-4333-8333-333333333333"}
     assert validate_retest_job_payload(ambiguous) == (False, "ambiguous_retest_subject")
+    invalid_job = {**candidate, "job_id": "job-1"}
+    assert validate_retest_job_payload(invalid_job) == (False, "invalid_job_id")
 
 
 def test_auto_fp_policy_reads_overrides_and_clamps_confidence():

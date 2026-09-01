@@ -6324,6 +6324,12 @@ async def process_finding_retest_job(job_data: dict):
         print(f"[retest:{job_id[:8]}] Invalid job payload: {reason}", flush=True)
         return
 
+    queued_finding_uuid = (
+        uuid.UUID(str(job_data["finding_id"])) if job_data.get("finding_id") else None
+    )
+    queued_candidate_uuid = (
+        uuid.UUID(str(job_data["candidate_id"])) if job_data.get("candidate_id") else None
+    )
     print(f"[retest:{job_id[:8]}] Starting retest {verification_id}", flush=True)
     now = utc_now()
     if not _try_acquire_retest_slot(r):
@@ -6343,15 +6349,7 @@ async def process_finding_retest_job(job_data: dict):
             r.expire(retest_key, 86400)
             async with db_pool.acquire() as conn:
                 try:
-                    finding_uuid = uuid.UUID(str(job_data.get("finding_id")))
-                except Exception:
-                    finding_uuid = None
-                try:
-                    candidate_uuid = uuid.UUID(str(job_data.get("candidate_id")))
-                except Exception:
-                    candidate_uuid = None
-                try:
-                    await conn.execute("""
+                    exhausted = await conn.fetchrow("""
                         UPDATE finding_verifications
                         SET status = 'failed',
                             result_status = 'error',
@@ -6364,9 +6362,19 @@ async def process_finding_retest_job(job_data: dict):
                             error_message = $3,
                             completed_at = NOW(),
                             updated_at = NOW()
-                        WHERE id = $1
-                    """, uuid.UUID(verification_id), attempt, f"Retest slot wait exceeded {RETEST_SLOT_WAIT_MAX_SECONDS}s.")
-                    if finding_uuid is not None:
+                        WHERE id = $1 AND job_id = $4
+                          AND (
+                            ($5::uuid IS NOT NULL AND finding_id=$5 AND candidate_id IS NULL)
+                            OR
+                            ($6::uuid IS NOT NULL AND candidate_id=$6 AND finding_id IS NULL)
+                          )
+                        RETURNING finding_id, candidate_id
+                    """,
+                        uuid.UUID(verification_id), attempt,
+                        f"Retest slot wait exceeded {RETEST_SLOT_WAIT_MAX_SECONDS}s.",
+                        job_id, queued_finding_uuid, queued_candidate_uuid,
+                    )
+                    if exhausted and exhausted.get("finding_id") is not None:
                         await conn.execute(
                             """
                             UPDATE findings
@@ -6378,9 +6386,9 @@ async def process_finding_retest_job(job_data: dict):
                                 updated_at = NOW()
                             WHERE id = $1
                             """,
-                            finding_uuid,
+                            exhausted["finding_id"],
                         )
-                    if candidate_uuid is not None:
+                    if exhausted and exhausted.get("candidate_id") is not None:
                         await conn.execute(
                             """UPDATE investigation_candidates
                                SET status='inconclusive',
@@ -6389,7 +6397,7 @@ async def process_finding_retest_job(job_data: dict):
                                        'verification_id',$2::text
                                    ), updated_at=NOW()
                                WHERE id=$1""",
-                            candidate_uuid, uuid.UUID(verification_id),
+                            exhausted["candidate_id"], uuid.UUID(verification_id),
                         )
                 except Exception:
                     pass
@@ -6457,6 +6465,28 @@ async def process_finding_retest_job(job_data: dict):
                 })
                 r.expire(retest_key, 86400)
                 print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
+                return
+
+            durable_job_id = str(verification.get("job_id") or "").strip()
+            durable_finding_id = str(verification.get("finding_id") or "").strip()
+            durable_candidate_id = str(verification.get("candidate_id") or "").strip()
+            queued_finding_id = str(job_data.get("finding_id") or "").strip()
+            queued_candidate_id = str(job_data.get("candidate_id") or "").strip()
+            if (
+                job_id != durable_job_id
+                or queued_finding_id != durable_finding_id
+                or queued_candidate_id != durable_candidate_id
+            ):
+                r.hset(retest_key, mapping={
+                    "status": "failed",
+                    "error": "invalid_job_binding",
+                    "verification_id": verification_id,
+                })
+                r.expire(retest_key, 86400)
+                print(
+                    f"[retest:{job_id[:8]}] Queue identity does not match durable verification",
+                    flush=True,
+                )
                 return
 
             claimed = await conn.fetchrow("""

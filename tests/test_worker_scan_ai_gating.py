@@ -1344,13 +1344,66 @@ class _LostRetestClaimPool:
         return False
 
 
+def test_finding_retest_slot_exhaustion_updates_only_durable_bound_subject(monkeypatch):
+    verification_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    job_id = str(uuid.uuid4())
+    payload = worker.build_retest_job_payload(
+        job_id=job_id,
+        verification_id=str(verification_id),
+        finding_id=str(finding_id),
+        submitted_at=datetime.now(timezone.utc).isoformat(),
+        trigger="unit_test",
+    )
+
+    class Conn:
+        def __init__(self):
+            self.fetchrow_calls = []
+            self.execute_calls = []
+
+        async def fetchrow(self, query, *args):
+            self.fetchrow_calls.append((query, args))
+            return None
+
+        async def execute(self, query, *args):
+            self.execute_calls.append((query, args))
+            raise AssertionError("an unbound queue payload must not update a subject")
+
+    conn = Conn()
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _LostRetestClaimPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_try_acquire_retest_slot", lambda _redis: False)
+    monkeypatch.setattr(
+        worker,
+        "_slot_wait_state",
+        lambda *_args: (
+            datetime.now(timezone.utc),
+            1,
+            worker.RETEST_SLOT_WAIT_MAX_SECONDS,
+        ),
+    )
+
+    asyncio.run(worker.process_finding_retest_job(payload))
+
+    assert len(conn.fetchrow_calls) == 1
+    query, args = conn.fetchrow_calls[0]
+    assert "job_id = $4" in query
+    assert "finding_id=$5" in query
+    assert args[0] == verification_id
+    assert args[3:] == (job_id, finding_id, None)
+    assert conn.execute_calls == []
+
+
 def test_finding_retest_lost_atomic_claim_never_runs_provers(monkeypatch):
     verification_id = uuid.uuid4()
     finding_id = uuid.uuid4()
-    job_id = "lost-retest-claim"
+    job_id = str(uuid.uuid4())
     verification = {
         "id": verification_id,
         "finding_id": finding_id,
+        "candidate_id": None,
+        "job_id": job_id,
         "finding_type": "xss",
     }
     payload = worker.build_retest_job_payload(
@@ -1420,10 +1473,34 @@ def test_finding_retest_lost_atomic_claim_never_runs_provers(monkeypatch):
         )
         assert redis.expired[-1] == (f"retest_job:{job_id}", 86400)
 
+    mismatched = {**verification, "job_id": str(uuid.uuid4())}
+    conn = _LostRetestClaimConnection(
+        verification=mismatched,
+        current_status="queued",
+    )
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _LostRetestClaimPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_finding_retest_job(payload))
+
+    assert len(conn.fetchrow_calls) == 1
+    assert conn.fetchval_calls == []
+    assert conn.execute_calls == []
+    assert redis.hashes[-1] == (
+        f"retest_job:{job_id}",
+        (),
+        {
+            "status": "failed",
+            "error": "invalid_job_binding",
+            "verification_id": str(verification_id),
+        },
+    )
+
     assert work_calls == {
         "runtime_settings": 0,
         "deterministic": 0,
-        "slot_releases": 2,
+        "slot_releases": 3,
     }
 
 
