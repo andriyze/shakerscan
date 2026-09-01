@@ -483,6 +483,24 @@ def test_scan_external_capability_requires_frozen_binding_and_active_approval():
         )
 
 
+def test_scan_xss_reserves_browser_budget_only_for_headless_proof():
+    specification = CAPABILITY_REGISTRY.require("xss.verify")
+    policy = ScanPolicy(active_testing=True, approval_receipt_id="approval-1")
+
+    reflected = prepare_scan_external_capability(
+        specification=specification, target=_target(), args={}, policy=policy,
+    )
+    headless = prepare_scan_external_capability(
+        specification=specification,
+        target=_target(),
+        args={"deep_domxss": True},
+        policy=policy,
+    )
+
+    assert "browser_actions" not in reflected.estimated_budget
+    assert headless.estimated_budget["browser_actions"] == 1
+
+
 def test_scan_session_capability_requires_approval_but_not_active_testing():
     specification = CAPABILITY_REGISTRY.require("auth.session.establish")
     args = {
