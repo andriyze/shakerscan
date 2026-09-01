@@ -137,6 +137,47 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "authz_surface.verify_batch": (40, {"http_requests": 400, "tool_wall_seconds": 180}),
     },
 }
+_BATCH_TIER_ORDER: tuple[str, ...] = ("thorough", "balanced", "fast")
+
+
+def _affordable_batch_tier(
+    capability_name: str,
+    *,
+    budget_profile: str,
+    limits: Mapping[str, int],
+) -> tuple[int, Mapping[str, int]]:
+    """Pick the largest published batch shape this ledger can actually reserve.
+
+    Batch reservations are absolute per-profile numbers, but a parallel endpoint
+    child carries the parent's profile NAME over a divided ledger. thorough
+    reserves 600 requests for one XSS slice; a child holding roughly a fifth of
+    the parent ceiling cannot pay that, and a required verifier then failed the
+    whole Scan closed -- "required Scan action verify.xss exceeds the plan
+    budget: {'http_requests': 483, 'tool_wall_seconds': 145}".
+
+    Step down through the published tiers instead of inventing a scale factor:
+    each one is already calibrated so its reservation funds its slice size, and
+    fast's single-candidate slice is the smallest shape that still verifies.
+    A child too small even for that keeps fast's shape and fails admission
+    honestly rather than silently planning work it cannot run.
+    """
+    tiers = _BATCH_TIER_ORDER
+    start = tiers.index(budget_profile) if budget_profile in tiers else tiers.index("balanced")
+    for name in tiers[start:]:
+        candidate = _BATCH_PROFILES[name].get(capability_name)
+        if candidate is None:
+            continue
+        _, reservation = candidate
+        if all(
+            int(limits.get(dimension, 0)) >= int(amount)
+            for dimension, amount in reservation.items()
+            if int(amount) > 0
+        ):
+            return candidate
+    smallest = _BATCH_PROFILES[tiers[-1]].get(capability_name)
+    return smallest if smallest is not None else _BATCH_PROFILES["balanced"][capability_name]
+
+
 _FORBIDDEN_ACTION_KEYS = frozenset({
     "password", "passwd", "secret", "token", "authorization", "cookie", "cookies",
     "private_key", "client_secret", "api_key", "auth_header", "auth_cookies",
@@ -1305,22 +1346,6 @@ class ScanActionPlanCompiler:
             reserve_dependency_slots: int = 0,
         ) -> None:
             """Compile bounded ranked slices instead of one process per candidate."""
-            profile = _BATCH_PROFILES.get(
-                execution_plan.budget_profile, _BATCH_PROFILES["balanced"],
-            )
-            batch_size, batch_budget = profile[capability_name]
-            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
-            if entry_count:
-                total_batches = max(1, (entry_count + batch_size - 1) // batch_size)
-            else:
-                # The candidate manifest is not materialized at admission: its
-                # entries arrive through the discovery continuation. Assuming a
-                # single batch here capped `count` at 1, so any profile whose
-                # published minimum is higher -- thorough requires two XSS
-                # batches -- failed to compile at all with
-                # "required batch action verify.xss exceeds plan graph capacity".
-                # Reserve the published minimum instead of guessing one.
-                total_batches = max(1, minimum_batches)
             limits = execution_plan.budget.ledger_limits()
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
@@ -1334,6 +1359,30 @@ class ScanActionPlanCompiler:
                     continue
                 for name, amount in blueprint_budget(blueprint).items():
                     reserved[name] = reserved.get(name, 0) + amount
+            # Choose the batch shape against what is LEFT after the required work
+            # already planned, not the raw ceiling: the shortfall that failed a
+            # sharded Scan was 483 requests of a 600-request slice, i.e. the ledger
+            # was large enough until its siblings were counted.
+            batch_size, batch_budget = _affordable_batch_tier(
+                capability_name,
+                budget_profile=execution_plan.budget_profile,
+                limits={
+                    name: max(0, int(limit) - int(reserved.get(name, 0)))
+                    for name, limit in limits.items()
+                },
+            )
+            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
+            if entry_count:
+                total_batches = max(1, (entry_count + batch_size - 1) // batch_size)
+            else:
+                # The candidate manifest is not materialized at admission: its
+                # entries arrive through the discovery continuation. Assuming a
+                # single batch here capped `count` at 1, so any profile whose
+                # published minimum is higher -- thorough requires two XSS
+                # batches -- failed to compile at all with
+                # "required batch action verify.xss exceeds plan graph capacity".
+                # Reserve the published minimum instead of guessing one.
+                total_batches = max(1, minimum_batches)
             affordable = total_batches
             for name, amount in batch_budget.items():
                 if amount > 0:

@@ -7,6 +7,7 @@ import pytest
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import (
+    _affordable_batch_tier,
     ScanActionPlacementError,
     ScanActionPlanCompiler,
     ScanActionPlanError,
@@ -1091,6 +1092,8 @@ def test_a_shard_sized_budget_plans_the_batches_it_can_fund():
     # The family is still attempted -- that is what required means.
     xss = [a for a in plan.actions if a.capability_name == "xss.verify_batch"]
     assert xss, "an explicitly requested family must still plan a verifier"
+    # And it used a shape this ledger can pay for, not thorough's published one.
+    assert xss[0].requested_budget["http_requests"] <= shard_budget.max_http_requests
     # And every action the plan compiled is one the shard ledger can reserve.
     allocation = allocate_scan_action_plan(plan, shard_budget)
     required_skipped = {
@@ -1100,3 +1103,46 @@ def test_a_shard_sized_budget_plans_the_batches_it_can_fund():
     assert not required_skipped, (
         f"shard plan compiled required work it cannot fund: {sorted(required_skipped)}"
     )
+
+
+def test_batch_shape_steps_down_when_siblings_have_claimed_the_ledger():
+    """The batch shape is chosen against what is left, not the raw ceiling.
+
+    A parallel endpoint child carries the parent's profile name over a divided
+    ledger. thorough reserves 600 requests for one XSS slice; the measured
+    failure was 483 requests short of that, so the ledger looked large enough
+    until the required work already planned was counted. Step down through the
+    published tiers rather than failing the whole Scan closed.
+    """
+    plenty = {
+        "http_requests": 20_000, "tool_wall_seconds": 7_200,
+        "state_changing_requests": 2_000, "browser_actions": 1_000,
+    }
+    assert _affordable_batch_tier(
+        "xss.verify_batch", budget_profile="thorough", limits=plenty,
+    ) == (4, {"http_requests": 600, "tool_wall_seconds": 480})
+
+    # Left with less than thorough's slice: take the largest tier that fits.
+    squeezed = {
+        "http_requests": 400, "tool_wall_seconds": 200,
+        "state_changing_requests": 0, "browser_actions": 0,
+    }
+    size, reservation = _affordable_batch_tier(
+        "xss.verify_batch", budget_profile="thorough", limits=squeezed,
+    )
+    assert reservation["http_requests"] <= squeezed["http_requests"]
+    assert reservation["tool_wall_seconds"] <= squeezed["tool_wall_seconds"]
+    assert size >= 1
+
+    # A ledger too small even for the smallest published shape keeps that shape
+    # and fails admission honestly rather than planning work it cannot run.
+    assert _affordable_batch_tier(
+        "xss.verify_batch",
+        budget_profile="thorough",
+        limits={"http_requests": 10, "tool_wall_seconds": 5},
+    ) == (1, {"http_requests": 120, "tool_wall_seconds": 30})
+
+    # A profile never steps UP: fast stays fast on a large ledger.
+    assert _affordable_batch_tier(
+        "xss.verify_batch", budget_profile="fast", limits=plenty,
+    ) == (1, {"http_requests": 120, "tool_wall_seconds": 30})
