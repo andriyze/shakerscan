@@ -1097,7 +1097,7 @@ def _hunt_api_collection_fixture(
             "principal_slot": slot,
             "principal_label": f"e2e-{slot}",
             "secret": f"Bearer {token}",
-            "allowed_capabilities": ["http.request", "request.replay"],
+            "allowed_capabilities": ["http.request", "collections.replay_safe"],
             "created_by": "hunt-e2e",
         })
         profile_id = str((created.get("profile") or {}).get("id") or "")
