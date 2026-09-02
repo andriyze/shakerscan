@@ -22,11 +22,14 @@ def test_e2e_runner_writes_machine_readable_scorecard(monkeypatch, tmp_path):
 
     # A real run reads the deployment it exercised from the live stack; stand that in, because a
     # scorecard that cannot identify its subject is refused (see the test below).
+    # H.get returns the response BODY directly (H._req(...)[1]), not a (status, body)
+    # tuple; the subject reader must consume it the same way.
     monkeypatch.setattr(
         run_e2e.H, "get",
-        lambda path, timeout=60, headers=None: (
-            200, {"source_revision": "a" * 40, "build_fingerprint": "abc123", "scanner_version": "2.0.0"},
-        ),
+        lambda path, timeout=60, headers=None: {
+            "source_revision": "a" * 40, "build_fingerprint": "abc123",
+            "scanner_version": "2.0.0",
+        },
     )
 
     assert run_e2e.main() == 0
