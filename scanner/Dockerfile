@@ -53,7 +53,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
         golang.org/x/mod@v0.40.0 \
         golang.org/x/net@v0.58.0 \
         golang.org/x/text@v0.41.0 \
-        github.com/jackc/pgx/v5@v5.9.0 || return 1; \
+        github.com/jackc/pgx/v5@v5.9.0 \
+        google.golang.org/grpc@v1.83.1 || return 1; \
       go build -mod=mod -trimpath -o "/go/bin/${tool_name}" "${tool_package}" || return 1; \
       cd /; \
       rm -rf "${tool_dir}"; \
