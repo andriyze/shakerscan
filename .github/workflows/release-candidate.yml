@@ -368,7 +368,7 @@ jobs:
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-scanner
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.vendor=ShakerScan
           provenance: mode=max
           sbom: true
@@ -395,7 +395,7 @@ jobs:
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-api
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.vendor=ShakerScan
           provenance: mode=max
           sbom: true
@@ -506,7 +506,7 @@ jobs:
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-ui
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.vendor=ShakerScan
           provenance: mode=max
           sbom: true
@@ -584,7 +584,7 @@ jobs:
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-model-intake-signer
             org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=AGPL-3.0-only
             org.opencontainers.image.vendor=ShakerScan
           provenance: mode=max
           sbom: true
