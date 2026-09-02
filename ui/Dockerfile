@@ -6,7 +6,7 @@ WORKDIR /app
 # The immutable Node image can lag Alpine's security repository by a few days.
 # Pin the small security delta so a candidate cannot silently resolve different
 # package revisions, and retry only this network-bound repository operation.
-ARG APK_TOOLS_VERSION=3.0.7-r0
+ARG APK_TOOLS_VERSION=3.0.8-r0
 ARG OPENSSL_VERSION=3.5.8-r0
 RUN set -eu; \
     attempt=1; \
@@ -50,7 +50,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-ARG APK_TOOLS_VERSION=3.0.7-r0
+ARG APK_TOOLS_VERSION=3.0.8-r0
 ARG OPENSSL_VERSION=3.5.8-r0
 RUN set -eu; \
     attempt=1; \
