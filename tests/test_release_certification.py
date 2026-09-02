@@ -352,3 +352,78 @@ def test_the_certification_records_the_subject_binding_as_a_check(tmp_path):
         source_sha=SOURCE, **paths,
     )
     assert result["certification"]["checks"]["e2e_subject_binding"] == "pass"
+
+
+def _add_xfail_row(e2e: dict, area: str, name: str, reason: str) -> None:
+    """Append a declared-debt XFAIL row (loud, non-gating) to one area."""
+    row = {
+        "name": name, "passed": True, "skipped": False,
+        "xfail": True, "xpass": False, "reason": reason, "detail": "attempted=0",
+    }
+    next(item for item in e2e["areas"] if item["area"] == area)["rows"].append(row)
+
+
+def test_an_unauthorized_e2e_xfail_row_fails_certification(tmp_path):
+    # An XFAIL keeps its area gate green (passed=True), so certification must reject
+    # it explicitly unless the release authorized the debt -- otherwise a debt marker
+    # would silently mask a red check.
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    _add_xfail_row(e2e, "dast", "D-2 SQLi attempted real candidates", "bounded body-injection debt")
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError, match="declared-debt xfails"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation,
+            e2e=e2e, source_sha=SOURCE, **paths,
+        )
+
+
+def test_release_owner_can_waive_named_e2e_debt_and_it_is_recorded(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    _add_xfail_row(e2e, "dast", "D-2 SQLi attempted real candidates", "bounded body-injection debt")
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation,
+        e2e=e2e, source_sha=SOURCE, waive_e2e_declared_debt=True, **paths,
+    )
+    assert receipt["certification"]["status"] == "pass"
+    debt = next(
+        item for item in receipt["certification"]["scope_exclusions"]
+        if isinstance(item, dict)
+        and item.get("boundary") == "installed_stack_e2e_declared_debt"
+    )
+    assert debt["state"] == "waived_declared_debt"
+    names = {row["check"] for row in debt["checks"]}
+    assert "D-2 SQLi attempted real candidates" in names
+    assert all(row["reason"] for row in debt["checks"])
+
+
+def test_an_xfail_h18_row_is_not_genuine_proof_without_the_waiver(tmp_path):
+    # H-18 as a declared-debt XFAIL carries passed=True but is NOT the adaptive
+    # verified-finding proof. Unwaived, certification must still demand a genuine pass.
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    hunt = next(item for item in e2e["areas"] if item["area"] == "hunt")
+    hunt["rows"][0].update({"xfail": True, "xpass": False, "reason": "adaptive xss debt"})
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError, match="adaptive real-target"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation,
+            e2e=e2e, source_sha=SOURCE, **paths,
+        )
+
+
+def test_waived_h18_debt_certifies_and_is_recorded(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    hunt = next(item for item in e2e["areas"] if item["area"] == "hunt")
+    hunt["rows"][0].update({"xfail": True, "xpass": False, "reason": "adaptive xss debt"})
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation,
+        e2e=e2e, source_sha=SOURCE, waive_e2e_declared_debt=True, **paths,
+    )
+    assert receipt["certification"]["status"] == "pass"
+    debt = next(
+        item for item in receipt["certification"]["scope_exclusions"]
+        if isinstance(item, dict)
+        and item.get("boundary") == "installed_stack_e2e_declared_debt"
+    )
+    assert any("H-18" in row["check"] for row in debt["checks"])
