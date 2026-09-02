@@ -2273,7 +2273,11 @@ def _tested_subject() -> dict[str, object]:
     """
     subject: dict[str, object] = {"schema_version": "shakerscan-e2e-subject/v1"}
     try:
-        _, health = H.get("/health", timeout=30)
+        # H.get returns the response body directly (not a (status, body) tuple), so
+        # unpacking it raised ValueError on the many-keyed /health payload -- the
+        # bare except then swallowed it and the subject was always empty. That only
+        # mattered once every area passed and this binding actually had to resolve.
+        health = H.get("/health", timeout=30)
     except Exception:  # noqa: BLE001 - an unreachable stack is simply unidentified
         health = {}
     if isinstance(health, dict):
