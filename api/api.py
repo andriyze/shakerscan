@@ -590,9 +590,11 @@ try:
         work_manifest_references_in,
     )
     from scan.budget_allocator import (
+        MANDATORY_ACTION_IDS,
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
     )
+    from scan.external_process import fit_reservation_scaled_profile
     from scan.continuation import (
         ContinuationBudgetCeiling,
         ScanContinuationAllocation,
@@ -716,9 +718,11 @@ except ModuleNotFoundError:
         work_manifest_references_in,
     )
     from api.scan.budget_allocator import (
+        MANDATORY_ACTION_IDS,
         ScanBudgetAllocationError,
         allocate_scan_action_plan,
     )
+    from api.scan.external_process import fit_reservation_scaled_profile
     from api.scan.continuation import (
         ContinuationBudgetCeiling,
         ScanContinuationAllocation,
@@ -10793,13 +10797,6 @@ def _compile_scan_admission_action_authority(
         for capability in scan_family_capabilities(family)
     }
     required_holds = (*required_capabilities, "scan.finalize")
-    # Hold room for the LARGEST single required capability, capped at what this profile
-    # owns -- not the sum of them all. See scan_submission_hold_budget for why.
-    reserved_budget = scan_submission_hold_budget(
-        agent_tools.CAPABILITY_REGISTRY, required_holds,
-        allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
-        limits=scan_contract.budget.ledger_limits(),
-    )
 
     raw_parent = ScanActionPlanCompiler().compile(
         scan_id=scan_id,
@@ -10817,6 +10814,36 @@ def _compile_scan_admission_action_authority(
         defer_manifest_actions=True,
         include_finalizer=False,
     )
+
+    ledger_limits = scan_contract.budget.ledger_limits()
+    # Room that mandatory parent-admission traffic MUST run in -- an operator's
+    # request-collection replay, a required credential login, the baseline probes --
+    # is not available to hold back for the deferred continuation. Subtract it before
+    # sizing the hold so a required admission action is never starved by the hold kept
+    # for a later verifier (which itself degrades gracefully to a smaller reviewed tier).
+    required_admission_cost: dict[str, int] = {}
+    for action in raw_parent.actions:
+        if action.required or action.action_id in MANDATORY_ACTION_IDS:
+            for name, amount in action.requested_budget.items():
+                required_admission_cost[name] = (
+                    required_admission_cost.get(name, 0) + int(amount)
+                )
+
+    # Hold room for the LARGEST single required capability, capped at what this profile
+    # owns AFTER mandatory admission traffic -- not the sum of them all. See
+    # scan_submission_hold_budget for why the per-capability cap matters.
+    reserved_hold = scan_submission_hold_budget(
+        agent_tools.CAPABILITY_REGISTRY, required_holds,
+        allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
+        limits=ledger_limits,
+    )
+    reserved_budget = {
+        name: min(
+            amount,
+            max(0, ledger_limits.get(name, 0) - required_admission_cost.get(name, 0)),
+        )
+        for name, amount in reserved_hold.items()
+    }
     parent_allocation = allocate_scan_action_plan(
         raw_parent,
         scan_contract.budget,
@@ -10830,9 +10857,17 @@ def _compile_scan_admission_action_authority(
             agent_tools.CAPABILITY_REGISTRY, capability_name,
             allow_state_changing_http=scan_contract.policy.allow_state_changing_http,
         )
+        # A required verifier whose full registry cost exceeds this profile still runs
+        # if a reviewed scaled tier fits the residual -- the same graceful degradation
+        # the allocator performs mid-plan. Reject only when not even that tier fits, so
+        # a bounded active scan (small state_changing ceiling) is not refused for a
+        # verifier that can execute its query-only tier.
+        effective_hold = fit_reservation_scaled_profile(
+            capability_name, requested=hold_budget, available=remaining,
+        ) or hold_budget
         shortages = {
             name: amount - remaining.get(name, 0)
-            for name, amount in hold_budget.items()
+            for name, amount in effective_hold.items()
             if amount > remaining.get(name, 0)
         }
         if shortages:

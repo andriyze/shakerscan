@@ -119,3 +119,103 @@ def test_a_costly_new_capability_cannot_make_a_profile_unsubmittable():
             for name in required
         )
         assert min(largest, ceiling) <= ceiling, profile
+
+
+# --- A bounded active scan that also replays a request collection ---------------
+#
+# The hold kept for the deferred verifier (sqli/xss.verify_batch) is the whole
+# state-changing budget on a small profile. A request-collection replay is a
+# REQUIRED admission action that runs in the parent plan, not the continuation, so
+# the hold must leave room for it -- otherwise `inputs.collection_00 exceeds the
+# plan budget: {'state_changing_requests': 1}` rejects the scan. And the deferred
+# verifier's own registry cost (1,800) exceeds every bounded ceiling, so the
+# continuation check must accept the reviewed scaled tier instead of the full cost.
+
+
+def test_a_bounded_active_verifier_is_satisfied_by_its_reviewed_scaled_tier():
+    """sqli.verify_batch costs 1,800 state-changing; no bounded profile owns that.
+
+    The continuation check must accept the reviewed query-only tier (zero
+    state-changing) so a bounded active scan is not rejected for a verifier it can
+    still run at reduced breadth. Without that, every active sqli/xss scan under a
+    ceiling below 1,800 is refused at submission.
+    """
+    from scan.external_process import fit_reservation_scaled_profile
+
+    cost = dict(CAPABILITY_REGISTRY.require("sqli.verify_batch").budget_cost)
+    assert int(cost.get("state_changing_requests", 0)) > 200, (
+        "the premise is a verifier cost larger than any bounded ceiling"
+    )
+    # A tight residual: one state-changing request already spent by a required
+    # collection replay, with http headroom intact.
+    residual = {
+        "http_requests": 1_990,
+        "state_changing_requests": 9,
+        "tool_wall_seconds": 800,
+    }
+    tier = fit_reservation_scaled_profile(
+        "sqli.verify_batch", requested=cost, available=residual,
+    )
+    assert tier is not None, "no reviewed tier fits the bounded residual"
+    assert int(tier.get("state_changing_requests", 0)) == 0, (
+        "the query-only tier must not require state-changing budget"
+    )
+    assert all(int(tier[d]) <= int(residual.get(d, 0)) for d in tier)
+
+
+def test_the_continuation_check_admits_a_scaled_tier_not_only_the_full_cost():
+    """The check compared the full registry cost to the residual; on a small profile
+    that is always short, so it must first try a reviewed scaled tier."""
+    block = API[API.index('for capability_name in required_holds:'):]
+    block = block[:block.index("parent_plan = parent_allocation.plan")]
+    assert "fit_reservation_scaled_profile(" in block, (
+        "the continuation check rejects any bounded active verifier because it does "
+        "not fall back to the reviewed scaled tier"
+    )
+    assert "effective_hold" in block
+
+
+def test_the_hold_is_reduced_by_required_parent_admission_traffic():
+    """The reserve must subtract the required admission cost so a required
+    request-collection replay is never starved by the deferred verifier hold."""
+    authority = API[API.index("def _compile_scan_admission_action_authority"):]
+    authority = authority[:authority.index("parent_plan = parent_allocation.plan")]
+    assert "required_admission_cost" in authority
+    assert "MANDATORY_ACTION_IDS" in authority
+    # The reserve is capped at ledger room AFTER required admission, not the raw hold.
+    assert "ledger_limits.get(name, 0) - required_admission_cost.get(name, 0)" in authority
+
+
+def test_reserve_arithmetic_leaves_room_for_a_required_collection_replay():
+    """Demonstrate the reduction: a capped 10/10 hold minus a 1-request replay
+    admission leaves 9 reserved, and 9 + 1 fits the 10-request ceiling."""
+    import scan.continuation as continuation
+
+    original = continuation.policy_constrained_hold_budget
+    try:
+        continuation.policy_constrained_hold_budget = (
+            lambda registry, name, **kw: {
+                "state_changing_requests": 1_800, "http_requests": 1_800,
+            }
+        )
+        limits = {"state_changing_requests": 10, "http_requests": 2_000}
+        hold = continuation.scan_submission_hold_budget(
+            object(), ("sqli.verify_batch",),
+            allow_state_changing_http=True, limits=limits,
+        )
+        assert hold["state_changing_requests"] == 10  # the whole bounded budget
+        required_admission = {"state_changing_requests": 1, "http_requests": 3}
+        reserved = {
+            name: min(
+                amount,
+                max(0, limits.get(name, 0) - required_admission.get(name, 0)),
+            )
+            for name, amount in hold.items()
+        }
+        assert reserved["state_changing_requests"] == 9
+        assert (
+            reserved["state_changing_requests"]
+            + required_admission["state_changing_requests"]
+        ) <= limits["state_changing_requests"]
+    finally:
+        continuation.policy_constrained_hold_budget = original
