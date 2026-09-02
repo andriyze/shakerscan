@@ -1386,10 +1386,28 @@ class ParallelActionPlanCompiler:
         # structurally unrunnable in every sharded Scan: measured, prove.xss was
         # skipped as insufficient_plan_budget on all four endpoint children while
         # the backbone sat on the entire 1,000-action ceiling and had nothing to
-        # prove. Share it the way every other executable dimension is shared.
-        # tcp stays backbone-only: ports.discover is a target-wide producer, not
-        # per-endpoint work.
-        browser = _weighted_shares(remaining["browser_actions"], weights, minimum=0)
+        # prove. Share it across the ENDPOINT children only: _weighted_shares
+        # floors every weight at 1, so including the candidate-free backbone would
+        # hand it a proportional slice of dead budget and, under a reduced or
+        # custom ceiling, push endpoint shards below their minimum browser-proof
+        # reservation. tcp stays backbone-only: ports.discover is a target-wide
+        # producer, not per-endpoint work.
+        endpoint_indices = [i for i in range(len(child_specs)) if i != global_index]
+        browser = [0] * len(child_specs)
+        if endpoint_indices and remaining["browser_actions"] > 0:
+            endpoint_browser = _weighted_shares(
+                remaining["browser_actions"],
+                [weights[i] for i in endpoint_indices],
+                minimum=0,
+            )
+            for slot, child_index in enumerate(endpoint_indices):
+                browser[child_index] = endpoint_browser[slot]
+        elif not endpoint_indices:
+            # Degenerate global-only plan: the backbone is the only child, so it
+            # keeps the browser allowance for any discovery-phase browser crawl.
+            browser = list(
+                _weighted_shares(remaining["browser_actions"], weights, minimum=0)
+            )
         tcp = [0] * len(child_specs)
         tcp[global_index] = remaining["tcp_ports_attempted"]
 

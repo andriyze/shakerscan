@@ -260,6 +260,14 @@ def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():
     # unrunnable in every sharded Scan while the backbone held the whole
     # allowance and had nothing to prove.
     assert first.children[1].budget.max_browser_actions > 0
+    # The candidate-free backbone must own no browser budget: a weighted slice to
+    # it is dead allowance that, under a reduced ceiling, starves endpoint shards.
+    assert first.children[0].role == "global"
+    assert first.children[0].budget.max_browser_actions == 0
+    assert sum(
+        child.budget.max_browser_actions
+        for child in first.children if child.role == "endpoint"
+    ) == execution.budget.max_browser_actions
     # tcp stays backbone-only: ports.discover is a target-wide producer.
     assert first.children[2].budget.max_tcp_ports == 0
     assert first.parent_owned_action_ids == ("finalize.report",)
