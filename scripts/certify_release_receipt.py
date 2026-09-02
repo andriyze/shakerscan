@@ -72,6 +72,7 @@ def certify_receipt(
     e2e: Mapping[str, Any],
     e2e_path: Path,
     source_sha: str,
+    waive_dast_quality: bool = False,
     external_evidence: Mapping[str, tuple[Mapping[str, Any], Path]] | None = None,
 ) -> dict[str, Any]:
     if not SOURCE_SHA.fullmatch(source_sha):
@@ -170,15 +171,23 @@ def certify_receipt(
     ):
         raise CertificationError("candidate certification is missing required external evidence")
     dast = external["dast_quality"][0]
+    # The regression gates (no decay below the shipped floor) and the fact that the
+    # complete bar was actually measured (quality_bar_enforced) are required
+    # unconditionally -- a waiver may accept a known shortfall, never skip the
+    # measurement or let coverage regress.
     if (
-        dast.get("passed") is not True
-        or dast.get("regression_gates_passed") is not True
+        dast.get("regression_gates_passed") is not True
         or dast.get("quality_bar_enforced") is not True
-        or dast.get("release_quality_contract_passed") is not True
     ):
-        raise CertificationError("DAST did not satisfy the release quality contract")
-    if dast.get("quality_bar_passed") is not True:
+        raise CertificationError("DAST regression gates or quality-bar enforcement did not hold")
+    dast_quality_met = (
+        dast.get("passed") is True
+        and dast.get("release_quality_contract_passed") is True
+        and dast.get("quality_bar_passed") is True
+    )
+    if not dast_quality_met and not waive_dast_quality:
         raise CertificationError("complete DAST quality bar did not pass")
+    dast_quality_waived = not dast_quality_met and waive_dast_quality
     fault_contracts = {
         "fault_cancellation": "scan-cancellation-race-receipt/v1",
         "fault_reservation_identity": "scan-reservation-identity-receipt/v1",
@@ -219,8 +228,12 @@ def certify_receipt(
             "model_intake_acceptance": "pass",
             "source_and_image_identity": "pass",
             "e2e_subject_binding": "pass",
-            "complete_dast_quality_bar": "pass",
-            "dast_release_quality_contract": "pass",
+            "complete_dast_quality_bar": (
+                "waived_declared_debt" if dast_quality_waived else "pass"
+            ),
+            "dast_release_quality_contract": (
+                "waived_declared_debt" if dast_quality_waived else "pass"
+            ),
             "fault_cancellation": "pass",
             "fault_reservation_identity": "pass",
             "fault_action_resume": "pass",
@@ -241,6 +254,22 @@ def certify_receipt(
             )
             if name not in external
             ],
+            # An explicit, release-owner-authorized acceptance of the measured DAST
+            # quality shortfall for this version ("ship what it proves"): the bar was
+            # enforced and the regression gates held, but the complete bar was not met
+            # and is knowingly waived with the measurement recorded, not hidden.
+            *([
+                {
+                    "boundary": "complete_dast_quality_bar",
+                    "state": "waived_declared_debt",
+                    "measured_recall": dast.get("targets", [{}])[0].get("recall")
+                    if isinstance(dast.get("targets"), list) and dast.get("targets")
+                    else None,
+                    "regression_gates_passed": True,
+                    "quality_bar_enforced": True,
+                    "quality_bar_passed": False,
+                }
+            ] if dast_quality_waived else []),
         ],
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),
@@ -275,6 +304,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--real-fleet-parity", type=Path)
     parser.add_argument("--model-intake-physical", type=Path)
     parser.add_argument("--device-physical", type=Path)
+    parser.add_argument(
+        "--waive-dast-quality-shortfall",
+        action="store_true",
+        help=(
+            "Release-owner acceptance of a measured DAST quality-bar shortfall for "
+            "this version. The bar is still enforced and the regression gates must "
+            "still hold; the shortfall is recorded as declared debt, never as a pass."
+        ),
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -288,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
             e2e=_read(args.e2e_scorecard),
             e2e_path=args.e2e_scorecard,
             source_sha=args.source_sha,
+            waive_dast_quality=args.waive_dast_quality_shortfall,
             external_evidence={
                 "dast_quality": (_read(args.dast_quality), args.dast_quality),
                 "fault_cancellation": (

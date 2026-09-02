@@ -21,6 +21,10 @@ on:
       device_physical_run_id:
         description: "Optional physical-device acceptance run ID for this exact SHA"
         required: false
+      waive_dast_quality:
+        description: "Release-owner acceptance of a measured DAST quality-bar shortfall (recorded as declared debt, not a pass). Regression gates still enforced."
+        type: boolean
+        default: false
 
 # Serialize candidate construction. This workflow never publishes a version,
 # `latest`, an installer channel, a Git tag, or a GitHub Release.
@@ -978,6 +982,10 @@ jobs:
           INSTALLED_STACK_SMOKE_BROWSER_JSON: ${{ github.workspace }}/artifacts/certification/playwright.json
           INSTALLED_STACK_SMOKE_DAST_RECALL_JSON: ${{ github.workspace }}/artifacts/certification/dast-recall.json
           INSTALLED_STACK_SMOKE_FAULT_DIR: ${{ github.workspace }}/artifacts/certification/fault
+          # Authorized acceptance of a measured DAST quality-bar shortfall: the
+          # benchmark still runs with --enforce-quality and produces the measured
+          # card, but the enforced non-zero exit no longer fails the smoke.
+          SHAKERSCAN_RELEASE_WAIVE_DAST_QUALITY: ${{ inputs.waive_dast_quality && '1' || '' }}
         run: |
           npm --prefix ui ci
           npx --prefix ui playwright install --with-deps chromium
@@ -1007,6 +1015,7 @@ jobs:
           PARITY_RUN_ID: ${{ inputs.parity_run_id }}
           MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
           DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
+          WAIVE_DAST_QUALITY: ${{ inputs.waive_dast_quality }}
         shell: bash
         run: |
           certification_args=(
@@ -1029,6 +1038,9 @@ jobs:
           fi
           if [[ -n "$DEVICE_PHYSICAL_RUN_ID" ]]; then
             certification_args+=(--device-physical artifacts/certification/external/device/device-physical-acceptance.json)
+          fi
+          if [[ "$WAIVE_DAST_QUALITY" == "true" ]]; then
+            certification_args+=(--waive-dast-quality-shortfall)
           fi
           python3 scripts/certify_release_receipt.py "${certification_args[@]}"
           test "$(jq -r '.schema_version' release-candidate-receipt.json)" = shakerscan-release-candidate/v2

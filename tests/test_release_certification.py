@@ -214,6 +214,65 @@ def test_a_dast_shortfall_cannot_certify(tmp_path):
         )
 
 
+def test_release_owner_can_waive_a_measured_quality_shortfall_as_declared_debt(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    dast, dast_path = paths["external_evidence"]["dast_quality"]
+    # The shape --enforce-quality produces on a real shortfall: the bar was measured
+    # and the regression gates held, but passed/contract/full-bar are all False.
+    dast["passed"] = False
+    dast["release_quality_contract_passed"] = False
+    dast["quality_bar_passed"] = False
+    dast["regression_gates_passed"] = True
+    dast["quality_bar_enforced"] = True
+    dast["targets"] = [{"recall": 0.44}]
+    paths["external_evidence"]["dast_quality"] = (
+        dast, _write(tmp_path, dast_path.name, dast),
+    )
+    receipt = certify_receipt(
+        candidate=candidate,
+        upgrade=upgrade,
+        preservation=preservation,
+        e2e=e2e,
+        source_sha=SOURCE,
+        waive_dast_quality=True,
+        **paths,
+    )
+    checks = receipt["certification"]["checks"]
+    assert receipt["certification"]["status"] == "pass"
+    assert checks["complete_dast_quality_bar"] == "waived_declared_debt"
+    assert checks["dast_release_quality_contract"] == "waived_declared_debt"
+    waiver = next(
+        item for item in receipt["certification"]["scope_exclusions"]
+        if isinstance(item, dict) and item.get("boundary") == "complete_dast_quality_bar"
+    )
+    assert waiver["state"] == "waived_declared_debt"
+    assert waiver["measured_recall"] == 0.44
+    assert waiver["quality_bar_enforced"] is True
+
+
+def test_a_waiver_still_requires_the_regression_gates_and_enforcement(tmp_path):
+    # A waiver accepts a shortfall against the complete bar; it must never let the
+    # regression floor decay or the bar go unmeasured.
+    for defect in ("regression_gates_passed", "quality_bar_enforced"):
+        candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+        dast, dast_path = paths["external_evidence"]["dast_quality"]
+        dast["quality_bar_passed"] = False
+        dast[defect] = False
+        paths["external_evidence"]["dast_quality"] = (
+            dast, _write(tmp_path, dast_path.name, dast),
+        )
+        with pytest.raises(CertificationError, match="regression gates or quality-bar enforcement"):
+            certify_receipt(
+                candidate=candidate,
+                upgrade=upgrade,
+                preservation=preservation,
+                e2e=e2e,
+                source_sha=SOURCE,
+                waive_dast_quality=True,
+                **paths,
+            )
+
+
 @pytest.mark.parametrize("defect", ("scanner_digest", "source", "e2e", "preservation"))
 def test_certification_fails_closed_on_cross_candidate_or_failed_evidence(tmp_path, defect):
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
