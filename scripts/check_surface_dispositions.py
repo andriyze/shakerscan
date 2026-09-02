@@ -107,15 +107,33 @@ def main() -> int:
         violations.append("source_head must be one full lowercase commit SHA")
     else:
         try:
-            subprocess.run(
-                ["git", "merge-base", "--is-ancestor", source_head, "HEAD"],
+            probe = subprocess.run(
+                # safe.directory=* keeps a container that runs as a different UID than
+                # the checkout owner (the candidate image over a mounted read-only
+                # tree in CI) from tripping git's dubious-ownership refusal and
+                # mis-reading a real ancestor as absent.
+                [
+                    "git", "-c", "safe.directory=*",
+                    "merge-base", "--is-ancestor", source_head, "HEAD",
+                ],
                 cwd=REPOSITORY_ROOT,
-                check=True,
+                check=False,
                 capture_output=True,
                 text=True,
             )
-        except (OSError, subprocess.CalledProcessError):
-            violations.append("source_head is not an ancestor of the current checkout")
+        except OSError as exc:
+            violations.append(f"could not run git to check source_head ancestry: {exc}")
+        else:
+            # `--is-ancestor` returns 1 for a genuine non-ancestor and a higher code
+            # (e.g. 128) for an environment/git error; only the former is a real
+            # disposition violation, and a git error must surface, not masquerade.
+            if probe.returncode == 1:
+                violations.append("source_head is not an ancestor of the current checkout")
+            elif probe.returncode != 0:
+                violations.append(
+                    "git could not evaluate source_head ancestry: "
+                    + (probe.stderr.strip() or f"exit {probe.returncode}")
+                )
     if manifest.get("release_boundary") != (
         "canonical_scan_hunt_with_transitional_compatibility_writes"
     ):
