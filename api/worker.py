@@ -15657,7 +15657,7 @@ async def process_scan_plan_job(job_data: dict):
         # would make the legacy path unreachable and hide a producer that emitted
         # the old shape behind a worklist of one.
         if statuses:
-            discovered = discovery_shard_endpoint_worklist(
+            discovered, harvest_meta = discovery_shard_endpoint_worklist(
                 scan_id=discovery_scan_id,
                 target=canonical_parent_job.target,
                 target_url=target_url,
@@ -15666,12 +15666,6 @@ async def process_scan_plan_job(job_data: dict):
                 observations=discovery_observations,
                 max_endpoints=max_worklist,
             )
-            harvest_meta = {
-                "raw_discovered": len(discovered),
-                "returned": len(discovered),
-                "cap": int(max_worklist),
-                "truncated": False,
-            }
         else:
             discovered, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
                 recon_result, max_endpoints=max_worklist,

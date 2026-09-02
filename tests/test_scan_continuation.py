@@ -18,6 +18,7 @@ from api.scan.continuation import (
     absent_receipt_summary,
     build_discovery_continuation_manifests,
     discovery_shard_endpoint_worklist,
+    endpoint_worklist_from_manifest_entries,
     merge_scan_action_continuation,
 )
 from api.scan.capability_result import CapabilityResultStatus
@@ -659,7 +660,7 @@ def test_discovery_shard_worklist_reads_canonical_observations():
         ],
     }
 
-    worklist = discovery_shard_endpoint_worklist(
+    worklist, meta = discovery_shard_endpoint_worklist(
         scan_id="00000000-0000-4000-8000-0000000000d1",
         target=target,
         target_url="https://app.example.test",
@@ -673,6 +674,10 @@ def test_discovery_shard_worklist_reads_canonical_observations():
         max_endpoints=100,
     )
 
+    # A surface within the cap reports honest, non-truncated meta.
+    assert meta["truncated"] is False
+    assert meta["returned"] == len(worklist)
+    assert meta["raw_discovered"] >= len(worklist)
     # The browser crawl's parameterised route is what makes xss/sqli testable.
     assert "GET /api/BasketItems?id=" in worklist
     assert "GET /rest/products/search?q=" in worklist
@@ -734,6 +739,115 @@ def test_discovery_shard_worklist_reads_canonical_observations():
     assert (
         "/account/reset", "email", "application/x-www-form-urlencoded",
     ) in body_candidates
+
+
+def test_discovery_shard_worklist_reports_truncation_honestly():
+    """A capped surface must not report the capped list as the whole surface.
+
+    The canonical shard path once hard-coded truncated=false and raw_discovered =
+    returned, so coverage/assurance overstated examination whenever discovery
+    exceeded the cap. The meta now carries the real pre-cap count and flag.
+    """
+    target = _target()
+    observations = {
+        "discover.web_crawl": [
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": f"https://app.example.test/rest/item{n}?id=1",
+            }
+            for n in range(6)
+        ],
+    }
+    worklist, meta = discovery_shard_endpoint_worklist(
+        scan_id="00000000-0000-4000-8000-0000000000d3",
+        target=target,
+        target_url="https://app.example.test",
+        options={},
+        action_statuses={"discover.web_crawl": "success"},
+        observations=observations,
+        max_endpoints=2,
+    )
+    assert meta["truncated"] is True
+    assert meta["returned"] == len(worklist) <= 2
+    assert meta["raw_discovered"] > meta["returned"]
+    assert meta["cap"] == 2
+
+
+def test_fan_out_worklist_preserves_spa_fragment_routes():
+    """A fragment-routed DOM-XSS candidate must survive the parallel fan-out.
+
+    The worklist renderer serialized only the server path/query/body, so a SPA
+    hash route (#/search?q=) was dropped before endpoint shards were built and
+    the DOM-XSS candidate disappeared. The fragment now round-trips.
+    """
+    try:
+        from scanner.manifests import normalize_endpoint
+    except ModuleNotFoundError:  # flat runtime layout
+        from manifests import normalize_endpoint
+
+    target = _target()
+    record = normalize_endpoint(
+        method="GET",
+        url="https://app.example.test/#/search?q=private-discovery-value",
+        source="web.browser_crawl",
+    )
+    assert record.browser_fragment_path == "/search"
+    surface = {
+        "schema_version": "endpoint-manifest/v1",
+        "status": "complete",
+        "reason": None,
+        "endpoints": [record.public_dict()],
+    }
+    endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000e1",
+        target_binding_digest=target.digest,
+        surface_manifest=surface,
+        source_action_ids=("discover.browser_crawl",),
+        auth_lane="anonymous",
+    )
+    worklist = endpoint_worklist_from_manifest_entries(endpoints.entries)
+    assert any("#/search?q=" in item for item in worklist)
+    # No discovered value ever survives the fan-out boundary.
+    assert not any("private-discovery-value" in item for item in worklist)
+
+    # Feed the worklist back through the exact child-shard pipeline and prove the
+    # fragment survives all the way to a browser XSS candidate.
+    empty = {"status": "success", "observations": []}
+    child_surface = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=target,
+        options={"custom_endpoints": worklist},
+        collection_replay=empty,
+        subdomains=empty,
+        probe=empty,
+        crawl=empty,
+        browser=empty,
+        content=empty,
+        max_endpoints=100,
+    )
+    child_endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000e2",
+        target_binding_digest=target.digest,
+        surface_manifest=child_surface,
+        source_action_ids=("parallel.plan",),
+        auth_lane="anonymous",
+    )
+    assert any(
+        item.get("browser_fragment_path") == "/search"
+        for item in child_endpoints.entries
+    )
+    child_candidates = build_candidate_manifest(
+        child_endpoints,
+        source_action_ids=("parallel.plan",),
+        maximum=100,
+    )
+    fragment_candidates = [
+        item for item in child_candidates.entries
+        if item.get("browser_fragment_path") == "/search"
+    ]
+    assert fragment_candidates
+    assert tuple(fragment_candidates[0]["family_hints"]) == ("xss",)
 
 
 def test_absent_receipt_from_an_enabled_producer_is_failed_not_skipped():

@@ -642,6 +642,23 @@ def endpoint_worklist_from_manifest_entries(entries: Any) -> list[str]:
         ))
         if query_names:
             path = f"{path}?" + "&".join(f"{name}=" for name in query_names)
+        # A SPA hash route never reaches the server, so its shape lives only in the
+        # fragment. Serialize it as "#/route?a=" so the shard's known-endpoint parser
+        # rebuilds a "/#/route?a=" URL and normalize_endpoint re-derives the fragment
+        # -- without this, fragment-routed DOM-XSS candidates vanish in the fan-out.
+        fragment_path = str(entry.get("browser_fragment_path") or "").strip()
+        if fragment_path:
+            fragment_query_names = sorted(dict.fromkeys(
+                str(name).strip()
+                for name in entry.get("browser_fragment_query_parameter_names") or ()
+                if str(name).strip()
+            ))
+            fragment = fragment_path
+            if fragment_query_names:
+                fragment = f"{fragment_path}?" + "&".join(
+                    f"{name}=" for name in fragment_query_names
+                )
+            path = f"{path}#{fragment}"
         body_names = sorted(dict.fromkeys(
             str(name).strip() for name in entry.get("body_field_names") or ()
             if str(name).strip()
@@ -783,8 +800,11 @@ def discovery_shard_endpoint_worklist(
     action_statuses: Mapping[str, str],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     max_endpoints: int,
-) -> list[str]:
+) -> tuple[list[str], dict[str, Any]]:
     """Render a placed discovery shard's receipts as the fan-out worklist.
+
+    Returns ``(worklist, meta)`` where ``meta`` carries the honest raw discovered
+    count, the returned count, the cap, and whether the surface was truncated.
 
     A discovery shard writes canonical V2 output -- durable observation
     manifests keyed by ``discover.*`` action id. The fan-out harvest read the V1
@@ -827,7 +847,29 @@ def discovery_shard_endpoint_worklist(
         source_action_ids=tuple(sorted(action_statuses)) or ("parallel.discovery",),
         auth_lane="anonymous",
     )
-    return endpoint_worklist_from_manifest_entries(manifest.entries)
+    worklist = endpoint_worklist_from_manifest_entries(manifest.entries)
+    # The surface caps endpoints at max_endpoints and records what it dropped in
+    # each producer's reason as ``endpoint_limit_reached:N``. Report the true
+    # pre-cap count and a real truncated flag so coverage and assurance cannot
+    # overstate examination by treating the capped list as the whole surface.
+    truncated_total = 0
+    for state in (surface.get("producers") or {}).values():
+        reason = str((state or {}).get("reason") or "")
+        for token in reason.split(";"):
+            token = token.strip()
+            if token.startswith("endpoint_limit_reached:"):
+                try:
+                    truncated_total += int(token.split(":", 1)[1])
+                except ValueError:
+                    continue
+    raw_discovered = int(surface.get("endpoint_count") or len(worklist)) + truncated_total
+    meta = {
+        "raw_discovered": raw_discovered,
+        "returned": len(worklist),
+        "cap": int(max_endpoints),
+        "truncated": truncated_total > 0,
+    }
+    return worklist, meta
 
 
 def build_discovery_continuation_manifests(
