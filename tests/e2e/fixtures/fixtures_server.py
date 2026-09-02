@@ -218,11 +218,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 <a href="/safe-template">template fixture</a>
 </body></html>""", "text/html")
             return
-        if p == "/leaked-cloud-credentials":
+        if p == "/leaked-cloud-credentials" or p.startswith("/leaked-cloud-credentials/"):
             # Provider-format credential material for the Hunt candidate-verification acceptance.
             # The format has to be real so the server's own classifier engages; the values are
             # random and correspond to no account anywhere. Keeping them here, rather than
             # pointing the acceptance at an external target, is what makes that check deterministic.
+            # A trailing /<suffix> is accepted so each acceptance run can probe a distinct route
+            # and never collide with an earlier run's immutable verified candidate.
             self._send(200, {
                 "instance-id": "i-0fixture0acceptance",
                 "iam/security-credentials/fixture-role": {
@@ -232,10 +234,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 },
             })
             return
-        if p == "/public-service-directory":
+        if p == "/public-service-directory" or p.startswith("/public-service-directory/"):
             # The negative control for the same acceptance: a successful anonymous read carrying
             # nothing sensitive must not promote, or the check above proves only that the pipeline
-            # runs, not that it discriminates.
+            # runs, not that it discriminates. A trailing /<suffix> keeps each run's route distinct,
+            # mirroring the positive control above.
             self._send(200, {
                 "services": [{"name": "catalog", "status": "ok"},
                              {"name": "search", "status": "ok"}],

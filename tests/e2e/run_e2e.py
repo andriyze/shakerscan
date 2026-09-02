@@ -1674,7 +1674,14 @@ def run_hunt() -> H.Scorecard:
         # reason: nothing was promoted because nothing was found. The pair tests the
         # candidate-to-finding bridge, so it is bound to the fixture that actually serves
         # the evidence, exactly as the API and network Hunt areas already are.
-        verify_target_id, verify_scope_id, verify_approval_id = _hunt_fixture_authority()
+        # Candidate verification re-executes through the family-proof workflow, which the
+        # server gates at the "credential" risk tier (it may replay with principal
+        # credentials). A default "active" approval does not cover that action, so the
+        # verify returns 400 "risk tier does not cover the requested action"; mint the
+        # tier the bridge actually requires, as the collection-replay acceptance does.
+        verify_target_id, verify_scope_id, verify_approval_id = _hunt_fixture_authority(
+            risk_tier="credential",
+        )
         status, run = H.post("/hunts", _hunt_start_payload(
             verify_target_id,
             goal="Verify an anonymous credential exposure end to end.",
@@ -1689,8 +1696,16 @@ def run_hunt() -> H.Scorecard:
         ))
         verify_hunt_id = str(run.get("hunt_id") or "")
 
-        def _candidate_verdict(route: str, title: str, claim: str) -> dict:
+        def _candidate_verdict(base_route: str, title: str, claim: str) -> dict:
             """Probe one route, raise a candidate from that observation, and verify it."""
+            # A candidate fingerprint is (plane, target, family, locus). Verified rows
+            # are immutable by design, so a fixed route collides with an earlier run's
+            # verified candidate against the same durable DB and verify returns 409 --
+            # the acceptance would then fail on its own prior success. The fixture
+            # serves this content under any /<base>/<suffix>, so a per-run route
+            # segment makes the locus unique while the probe and the re-executed
+            # verification still reach the same evidence.
+            route = f"{base_route}/{_RUN_NONCE}"
             probe_status, probe = H.post(
                 f"/hunts/{verify_hunt_id}/capabilities/http.request",
                 {
@@ -1734,6 +1749,7 @@ def run_hunt() -> H.Scorecard:
         sc.check(
             "H-16 a Hunt candidate is verified into a materialized finding",
             exposed["probe_status"] == exposed["candidate_status"] == 200
+            and exposed["verify_status"] == 200
             and bool(exposed["candidate_id"])
             and proof.get("proof_state") == "verified"
             and (proof.get("family_proof") or {}).get("promotable") is True
@@ -1757,10 +1773,15 @@ def run_hunt() -> H.Scorecard:
         sc.check(
             "H-17 a candidate with no sensitive evidence is not promoted",
             control["candidate_status"] == 200
+            # The verifier must actually have run and returned a verdict: a 409
+            # replay or a suspended turn yields an empty verification, which would
+            # satisfy "not verified" for the wrong reason and hide a broken bridge.
+            and control["verify_status"] == 200
+            and bool(control_proof)
             and control_proof.get("proof_state") != "verified"
             and (control_proof.get("family_proof") or {}).get("promotable") is not True
             and not control_proof.get("verified_finding_id"),
-            f"verification={control_proof}",
+            f"verify_status={control['verify_status']} verification={control_proof}",
         )
         H.post(f"/hunts/{verify_hunt_id}/finish", {
             "summary": "Candidate verification acceptance completed.", "next_actions": [],

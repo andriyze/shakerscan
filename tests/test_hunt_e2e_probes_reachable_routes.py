@@ -29,8 +29,13 @@ def test_the_verification_pair_runs_against_the_fixture_target():
     assert "/leaked-cloud-credentials" in SOURCE
     block = SOURCE[SOURCE.index("Verify an anonymous credential exposure end to end.") - 900:]
     block = block[:block.index("H-17") if "H-17" in block else len(block)]
-    assert "_hunt_fixture_authority()" in block, (
+    assert "_hunt_fixture_authority(" in block, (
         "the verification Hunt is not bound to the fixture server that serves its routes"
+    )
+    assert 'risk_tier="credential"' in block, (
+        "the verification Hunt must mint a credential-tier approval: the family-proof "
+        "bridge gates candidate verification at that tier and rejects a lower one with "
+        "'Approval receipt risk tier does not cover the requested action'"
     )
     assert "verify_target_id" in block
 
