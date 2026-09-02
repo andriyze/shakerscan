@@ -19988,7 +19988,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             "budget_consumed": dict(execution.actual_budget),
             "used_after_reconciliation": settled_ledger,
             "reservation_id": reservation_id,
-            "receipt": public_receipt,
+            "receipt_id": public_receipt.get("receipt_id"), "receipt": public_receipt,
             "safe_methods_only": True,
             "secret_values_visible": False,
             "durable_budget_settled": True,
