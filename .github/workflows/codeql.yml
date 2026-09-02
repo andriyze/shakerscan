@@ -37,6 +37,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
+          # Scoped, justified exclusions for rules that fire on this DAST
+          # scanner's intended behavior; every other security-extended rule runs.
+          config-file: ./.github/codeql/codeql-config.yml
 
       # No build step: CodeQL extracts Python and JavaScript/TypeScript from
       # source. Running autobuild made the javascript-typescript matrix leg try

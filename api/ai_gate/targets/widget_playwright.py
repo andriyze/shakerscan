@@ -172,9 +172,10 @@ def _split_cookie_pairs(cookie_header: str) -> list[tuple[str, str]]:
     for raw_pair in cookie_header.split(";"):
         name, sep, value = raw_pair.strip().partition("=")
         if not sep or not name.strip():
-            malformed = raw_pair.strip()
-            if malformed:
-                logger.warning("Skipping malformed widget cookie pair: %s", malformed)
+            # A cookie pair can carry a session secret, so never log its value --
+            # record only that one malformed pair was skipped.
+            if raw_pair.strip():
+                logger.warning("Skipping a malformed widget cookie pair")
             continue
         pairs.append((name.strip(), value.strip()))
     return pairs
