@@ -235,6 +235,7 @@ jobs:
           trap cleanup EXIT
           docker run -d --name "$worker_name" \
             --add-host host.docker.internal:host-gateway \
+            --add-host shakerscan-fixtures.internal:host-gateway \
             --entrypoint sleep shakerscan-scanner:release-candidate infinity
           image_id="$(docker image inspect --format '{{.Id}}' shakerscan-scanner:release-candidate)"
           python tests/e2e/run_external_wire_acceptance.py \
