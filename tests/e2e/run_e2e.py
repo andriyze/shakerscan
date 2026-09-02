@@ -533,9 +533,29 @@ def run_platform() -> H.Scorecard:
             ),
         )
 
+        # Enabling continuous ASM schedules active recon, so the server requires a
+        # target-bound, active-tier, expiring approval receipt (asm.continuous). Mint
+        # one the way the Hunt lane does and pass it in the policy config. The target
+        # is non-public (.invalid), so no recon this enables can reach a real host.
+        asm_host = urllib.parse.urlsplit(target_url).hostname or ""
+        _, asm_scope = H.post("/arsenal/scope/preview", {
+            "url": target_url, "target_id": target_id,
+            "allowed_hosts": [asm_host], "environment": "lab",
+        })
+        asm_scope_id = str((asm_scope.get("scope_receipt") or {}).get("receipt_id") or "")
+        _, asm_approval = H.post("/arsenal/approvals", {
+            "scope_receipt_id": asm_scope_id,
+            "risk_tier": "active",
+            "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+            "approved_by": "platform-e2e",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        })
+        asm_approval_id = str((asm_approval.get("approval_receipt") or {}).get("id") or "")
         enable_status, enabled_policy = H.put(
             f"/targets/{target_id}/asm/policy",
-            {"enabled": True, "config": {"recon_interval_hours": 24}},
+            {"enabled": True, "config": {
+                "recon_interval_hours": 24, "approval_receipt_id": asm_approval_id,
+            }},
         )
         disable_status, disabled_policy = H.put(
             f"/targets/{target_id}/asm/policy",
@@ -553,6 +573,13 @@ def run_platform() -> H.Scorecard:
             ),
         )
 
+        # A recurring scan schedule resolves its target at create time and refuses any
+        # destination that is not globally routable -- the SSRF-class protection this
+        # E2E should prove against the real deployed guard. The disposable target is
+        # deliberately non-public (.invalid), so it must be refused. (The create /
+        # disable / read lifecycle is covered by the schedules unit suite with an
+        # injected resolver; a resolvable target here cannot be used because the 60s
+        # ASM dispatcher would recon it.)
         future = datetime.now(timezone.utc) + timedelta(hours=6)
         schedule_status, schedule = H.post("/schedules", {
             "target_id": target_id,
@@ -565,18 +592,13 @@ def run_platform() -> H.Scorecard:
             "jitter_minutes": 0,
         })
         schedule_id = str(schedule.get("id") or "")
-        if schedule_status not in {200, 201} or not schedule_id:
-            raise RuntimeError(f"schedule creation failed: status={schedule_status} body={schedule}")
-        update_status, updated = H.patch(
-            f"/schedules/{schedule_id}", {"is_active": False},
-        )
-        stored_schedule = H.get(f"/schedules/{schedule_id}")
+        schedule_detail = str(schedule.get("detail") or "").lower()
         sc.check(
-            "P-7 schedule create, disable, and read lifecycle works",
-            update_status == 200
-            and updated.get("status") == "updated"
-            and stored_schedule.get("is_active") is False,
-            f"update_status={update_status} active={stored_schedule.get('is_active')}",
+            "P-7 recurring-scan scheduling refuses a non-public destination",
+            schedule_status == 422
+            and not schedule_id
+            and "resol" in schedule_detail,
+            f"schedule_status={schedule_status} detail={schedule.get('detail')}",
         )
 
         finding_status, finding = H.post("/findings/manual", {
