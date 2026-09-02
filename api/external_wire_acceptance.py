@@ -22,7 +22,12 @@ CONTROL_HEADER = {"X-Parity-Control": "shakerscan-parity-fixture-v1"}
 
 TOOL_CASES: tuple[dict[str, Any], ...] = (
     {"tool": "httpx", "path": "/", "budget": {"http_requests": 1, "tool_wall_seconds": 10}},
-    {"tool": "katana", "path": "/", "budget": {"http_requests": 3, "tool_wall_seconds": 2}},
+    # katana is a JS-aware crawler with the heaviest cold start of the fleet; a
+    # 2s wall was not enough for it to reach even its first request in a cold CI
+    # container, so it observed no traffic. Give it the same headroom the other
+    # HTTP tools get. The http_requests ceiling (the actual wire assertion) is
+    # runtime-enforced and unchanged, so it still cannot exceed three requests.
+    {"tool": "katana", "path": "/", "budget": {"http_requests": 3, "tool_wall_seconds": 15}},
     {"tool": "ffuf", "path": "/", "budget": {"http_requests": 3, "tool_wall_seconds": 10}},
     {
         "tool": "nuclei",
