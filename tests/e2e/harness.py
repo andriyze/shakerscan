@@ -175,6 +175,27 @@ class Scorecard:
         self.rows.append({"name": name, "passed": True, "skipped": True, "detail": reason})
         print(f"  [SKIP] {name} — {reason}", flush=True)
 
+    def xfail(self, name: str, passed: bool, reason: str, detail: str = "") -> bool:
+        """Record a KNOWN, DECLARED-DEBT assertion accepted for this release.
+
+        Unlike skip (a missing prerequisite), an xfail is a limitation we have
+        deliberately accepted and tracked as debt for the shipping version. It is
+        loud, counted, and carries its reason so it can never be a silent pass, and
+        it does NOT fail the gate. The real assertion still runs: if it unexpectedly
+        PASSES the row is recorded as an XPASS so the debt marker can be removed. A
+        released debt row is emitted into the scorecard (xfail=True) so the
+        certification receipt records exactly what was accepted, by name and reason.
+        """
+        ok = bool(passed)
+        self.rows.append({
+            "name": name, "passed": True, "skipped": False, "xfail": True,
+            "xpass": ok, "reason": reason, "detail": detail,
+        })
+        tag = "XPASS" if ok else "XFAIL"
+        note = f" ({detail})" if detail else ""
+        print(f"  [{tag}] {name} — DECLARED DEBT: {reason}{note}", flush=True)
+        return ok
+
     def error(self, name: str, exc: Exception) -> None:
         self.rows.append({"name": name, "passed": False, "skipped": False, "detail": f"ERROR: {exc}"})
         print(f"  [FAIL] {name} — ERROR: {exc}", flush=True)
@@ -184,9 +205,14 @@ class Scorecard:
         return bool(self.rows) and all(r["passed"] for r in self.rows)
 
     def summary(self) -> dict:
-        ok = sum(1 for r in self.rows if r["passed"] and not r["skipped"])
+        xdebt = sum(1 for r in self.rows if r.get("xfail"))
+        ok = sum(
+            1 for r in self.rows
+            if r["passed"] and not r["skipped"] and not r.get("xfail")
+        )
         skipped = sum(1 for r in self.rows if r["skipped"])
-        return {"area": self.area, "passed": ok, "skipped": skipped, "total": len(self.rows),
+        return {"area": self.area, "passed": ok, "skipped": skipped,
+                "declared_debt": xdebt, "total": len(self.rows),
                 "gate": "pass" if self.passed else "fail", "rows": self.rows}
 
 

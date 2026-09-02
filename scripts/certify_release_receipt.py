@@ -73,6 +73,7 @@ def certify_receipt(
     e2e_path: Path,
     source_sha: str,
     waive_dast_quality: bool = False,
+    waive_e2e_declared_debt: bool = False,
     external_evidence: Mapping[str, tuple[Mapping[str, Any], Path]] | None = None,
 ) -> dict[str, Any]:
     if not SOURCE_SHA.fullmatch(source_sha):
@@ -136,15 +137,46 @@ def certify_receipt(
         if isinstance(item, Mapping) and item.get("area") == "hunt"
     )
     hunt_rows = hunt_area.get("rows")
-    if not isinstance(hunt_rows, list) or not any(
-        isinstance(row, Mapping)
-        and str(row.get("name") or "").startswith("H-18 ")
-        and row.get("passed") is True
+    if not isinstance(hunt_rows, list):
+        raise CertificationError("exact-manifest Hunt E2E has no rows")
+    h18_rows = [
+        row for row in hunt_rows
+        if isinstance(row, Mapping) and str(row.get("name") or "").startswith("H-18 ")
+    ]
+    # A genuine pass is the real proof: passed, not skipped, and NOT a declared-debt
+    # xfail. An xfail row also carries passed=True (it does not fail the area gate),
+    # so this predicate must reject it explicitly or a debt marker would silently
+    # satisfy the Hunt engine's flagship real-target verification requirement.
+    h18_genuine = any(
+        row.get("passed") is True
         and row.get("skipped") is False
-        for row in hunt_rows
-    ):
+        and not row.get("xfail")
+        for row in h18_rows
+    )
+    h18_debt = any(row.get("xfail") is True for row in h18_rows)
+    if not h18_genuine and not (waive_e2e_declared_debt and h18_debt):
         raise CertificationError(
             "exact-manifest Hunt E2E lacks adaptive real-target verified-finding proof"
+        )
+
+    # Declared-debt xfails may appear only in an explicitly authorized debt release.
+    # Anywhere else they are treated as hard failures: a debt marker can never mask a
+    # red check unless this release deliberately accepted that debt.
+    declared_debt_rows = [
+        {
+            "area": str(area.get("area")),
+            "check": str(row.get("name")),
+            "reason": str(row.get("reason") or ""),
+        }
+        for area in areas
+        if isinstance(area, Mapping)
+        for row in (area.get("rows") or [])
+        if isinstance(row, Mapping) and row.get("xfail") is True
+    ]
+    if declared_debt_rows and not waive_e2e_declared_debt:
+        raise CertificationError(
+            "E2E scorecard carries declared-debt xfails, but this release did not "
+            "authorize installed-stack E2E debt"
         )
     # The other three receipts each bind the source they ran against; the E2E scorecard did not,
     # so a run that exercised a different deployment could certify this candidate. Require it to
@@ -270,6 +302,17 @@ def certify_receipt(
                     "quality_bar_passed": False,
                 }
             ] if dast_quality_waived else []),
+            # Named, release-owner-authorized acceptance of specific installed-stack
+            # E2E checks that ran and did not pass. Each is recorded by area, check
+            # name, and reason -- the measurement is preserved, not hidden, and the
+            # rest of every area stayed a hard gate.
+            *([
+                {
+                    "boundary": "installed_stack_e2e_declared_debt",
+                    "state": "waived_declared_debt",
+                    "checks": declared_debt_rows,
+                }
+            ] if declared_debt_rows else []),
         ],
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),
@@ -313,6 +356,16 @@ def main(argv: list[str] | None = None) -> int:
             "still hold; the shortfall is recorded as declared debt, never as a pass."
         ),
     )
+    parser.add_argument(
+        "--waive-e2e-declared-debt",
+        action="store_true",
+        help=(
+            "Release-owner acceptance of the named installed-stack E2E checks that "
+            "ran as declared-debt XFAILs in the scorecard. Each is recorded by area, "
+            "check, and reason in scope_exclusions; without this flag any XFAIL row "
+            "(and any non-genuine H-18 proof) fails certification."
+        ),
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -327,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
             e2e_path=args.e2e_scorecard,
             source_sha=args.source_sha,
             waive_dast_quality=args.waive_dast_quality_shortfall,
+            waive_e2e_declared_debt=args.waive_e2e_declared_debt,
             external_evidence={
                 "dast_quality": (_read(args.dast_quality), args.dast_quality),
                 "fault_cancellation": (

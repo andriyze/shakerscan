@@ -25,6 +25,10 @@ on:
         description: "Release-owner acceptance of a measured DAST quality-bar shortfall (recorded as declared debt, not a pass). Regression gates still enforced."
         type: boolean
         default: false
+      waive_e2e_debt:
+        description: "Release-owner acceptance of the named installed-stack E2E declared-debt checks (recorded by area/check/reason in scope_exclusions, not a pass). Every other check stays a hard gate."
+        type: boolean
+        default: false
 
 # Serialize candidate construction. This workflow never publishes a version,
 # `latest`, an installer channel, a Git tag, or a GitHub Release.
@@ -987,6 +991,10 @@ jobs:
           # benchmark still runs with --enforce-quality and produces the measured
           # card, but the enforced non-zero exit no longer fails the smoke.
           SHAKERSCAN_RELEASE_WAIVE_DAST_QUALITY: ${{ inputs.waive_dast_quality && '1' || '' }}
+          # Authorized acceptance of the named installed-stack E2E declared-debt
+          # checks: those checks run as tracked XFAILs (loud, counted, recorded),
+          # every other check stays a hard gate.
+          SHAKERSCAN_RELEASE_DECLARED_DEBT: ${{ inputs.waive_e2e_debt && '1' || '' }}
         run: |
           npm --prefix ui ci
           npx --prefix ui playwright install --with-deps chromium
@@ -1017,6 +1025,7 @@ jobs:
           MODEL_INTAKE_PHYSICAL_RUN_ID: ${{ inputs.model_intake_physical_run_id }}
           DEVICE_PHYSICAL_RUN_ID: ${{ inputs.device_physical_run_id }}
           WAIVE_DAST_QUALITY: ${{ inputs.waive_dast_quality }}
+          WAIVE_E2E_DEBT: ${{ inputs.waive_e2e_debt }}
         shell: bash
         run: |
           certification_args=(
@@ -1042,6 +1051,9 @@ jobs:
           fi
           if [[ "$WAIVE_DAST_QUALITY" == "true" ]]; then
             certification_args+=(--waive-dast-quality-shortfall)
+          fi
+          if [[ "$WAIVE_E2E_DEBT" == "true" ]]; then
+            certification_args+=(--waive-e2e-declared-debt)
           fi
           python3 scripts/certify_release_receipt.py "${certification_args[@]}"
           test "$(jq -r '.schema_version' release-candidate-receipt.json)" = shakerscan-release-candidate/v2
