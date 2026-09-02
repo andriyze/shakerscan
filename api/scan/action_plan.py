@@ -87,7 +87,11 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
         "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
         "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
-        "nosqli.verify_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
+        # The NoSQL verifier spends four requests per declared body field, so the
+        # earlier 8/candidate funded only two fields and marked ordinary larger
+        # bodies partial. Fund four fields per candidate (16 requests); the value
+        # sits far under the 1,000/200 fast ceiling.
+        "nosqli.verify_batch": (5, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
         "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
     },
     "balanced": {
@@ -100,7 +104,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
         "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
         "exposure.verify_batch": (60, {"http_requests": 400, "tool_wall_seconds": 180}),
-        "nosqli.verify_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
+        # Four requests per field, four fields per candidate (see fast), under the 5,000/800 ceiling.
+        "nosqli.verify_batch": (10, {"http_requests": 160, "state_changing_requests": 160, "tool_wall_seconds": 150}),
         "authz_surface.verify_batch": (20, {"http_requests": 200, "tool_wall_seconds": 150}),
     },
     "thorough": {
@@ -133,7 +138,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
         "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
         "exposure.verify_batch": (80, {"http_requests": 600, "tool_wall_seconds": 240}),
-        "nosqli.verify_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
+        # Four requests per field, four fields per candidate (see fast), under the 20,000/2,000 ceiling.
+        "nosqli.verify_batch": (25, {"http_requests": 400, "state_changing_requests": 400, "tool_wall_seconds": 240}),
         "authz_surface.verify_batch": (40, {"http_requests": 400, "tool_wall_seconds": 180}),
     },
 }
