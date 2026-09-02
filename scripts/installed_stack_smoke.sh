@@ -137,11 +137,20 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
     if [ -n "${INSTALLED_STACK_SMOKE_DAST_RECALL_JSON:-}" ]; then
         recall_path="$INSTALLED_STACK_SMOKE_DAST_RECALL_JSON"
         mkdir -p "$(dirname "$recall_path")"
+        benchmark_status=0
         python3 "$ROOT_DIR/scripts/benchmark_targets.py" juice_shop \
             --api "http://127.0.0.1:$API_PORT" --auth --enforce-quality \
             --target-url "juice_shop=http://juice-shop:3000" \
-            --auth-target-url "juice_shop=http://127.0.0.1:$JUICE_PORT"
+            --auth-target-url "juice_shop=http://127.0.0.1:$JUICE_PORT" || benchmark_status=$?
         cp "$ROOT_DIR/results/benchmark-runs/benchmark-juice_shop.json" "$recall_path"
+        # --enforce-quality exits non-zero on a quality-bar shortfall. When the
+        # release owner has authorized waiving that shortfall for this version the
+        # measured card is still produced (certification records it as declared
+        # debt); without a waiver the shortfall fails the smoke exactly as before.
+        if [ "$benchmark_status" -ne 0 ] && [ "${SHAKERSCAN_RELEASE_WAIVE_DAST_QUALITY:-}" != "1" ]; then
+            echo "DAST recall benchmark failed the enforced quality bar (status $benchmark_status)" >&2
+            exit "$benchmark_status"
+        fi
     fi
     if [ -n "${INSTALLED_STACK_SMOKE_FAULT_DIR:-}" ]; then
         fault_dir="$INSTALLED_STACK_SMOKE_FAULT_DIR"
