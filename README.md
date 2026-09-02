@@ -704,7 +704,7 @@ Issues and pull requests are welcome. For source changes:
 ## License and legal
 
 ShakerScan is licensed under the
-[Apache License 2.0](https://github.com/andriyze/shakerscan/blob/main/LICENSE).
+[GNU Affero General Public License v3.0](https://github.com/andriyze/shakerscan/blob/main/LICENSE).
 
 Only use ShakerScan on targets you own or have explicit written permission to test. The software is
 provided on an “AS IS” basis without warranties or conditions of any kind. The authors are not

@@ -214,7 +214,7 @@ COMMON_LABELS=(
     --label "org.opencontainers.image.source=$SOURCE_URL"
     --label "org.opencontainers.image.url=$IMAGE_URL"
     --label "org.opencontainers.image.documentation=$SOURCE_URL#readme"
-    --label "org.opencontainers.image.licenses=Apache-2.0"
+    --label "org.opencontainers.image.licenses=AGPL-3.0-only"
     --label "org.opencontainers.image.vendor=ShakerScan"
 )
 
