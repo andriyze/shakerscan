@@ -95,6 +95,37 @@ def _rebuild(parsed: Any, pairs: list[tuple[str, str]]) -> str:
     ))
 
 
+def _form_pairs(request: ReplayRequest) -> list[tuple[str, str]]:
+    try:
+        text = (request.body or b"").decode("utf-8")
+    except (UnicodeDecodeError, AttributeError) as exc:
+        raise NoSQLiVerifyError("private form request body is invalid") from exc
+    return urllib.parse.parse_qsl(text, keep_blank_values=True)
+
+
+def _form_field_index(pairs: list[tuple[str, str]], field: str) -> int:
+    matches = [index for index, (name, _v) in enumerate(pairs) if name == field]
+    if len(matches) != 1:
+        raise NoSQLiVerifyError("form candidate field authority is ambiguous")
+    return matches[0]
+
+
+def _form_literal(request: ReplayRequest, field: str, value: str) -> ReplayRequest:
+    pairs = _form_pairs(request)
+    pairs[_form_field_index(pairs, field)] = (field, value)
+    return replace(request, body=urllib.parse.urlencode(pairs).encode("utf-8"))
+
+
+def _form_operator(
+    request: ReplayRequest, field: str, operator: str, value: str,
+) -> ReplayRequest:
+    # ``field[$ne]=value`` in a form body is what PHP/Express body parsers turn
+    # into a nested operator object, mirroring the query-string bracket form.
+    pairs = _form_pairs(request)
+    pairs[_form_field_index(pairs, field)] = (f"{field}[{operator}]", value)
+    return replace(request, body=urllib.parse.urlencode(pairs).encode("utf-8"))
+
+
 def _json_document(request: ReplayRequest) -> Any:
     try:
         return json.loads(request.body.decode("utf-8"))
@@ -108,8 +139,27 @@ def _set_json_path(document: Any, field_path: str, value: Any) -> Any:
         parts.append(int(token) if token.lstrip("-").isdigit() else token)
     cursor = document
     for component in parts[:-1]:
-        cursor = cursor[component]
-    cursor[parts[-1]] = value
+        # An array of objects is flattened to a dotted name (items, items.id), so a
+        # string segment landing on a list descends into its first element. Any
+        # other mismatch (a missing node, or a scalar where an object is required)
+        # is a malformed body shape, not proof -- fail closed rather than raise an
+        # uncaught TypeError/KeyError that would settle the whole batch as failed.
+        try:
+            if isinstance(cursor, list) and not isinstance(component, int):
+                cursor = cursor[0]
+            cursor = cursor[component]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise NoSQLiVerifyError(
+                "private JSON body shape does not match the candidate field path"
+            ) from exc
+    try:
+        if isinstance(cursor, list) and not isinstance(parts[-1], int):
+            cursor = cursor[0]
+        cursor[parts[-1]] = value
+    except (IndexError, TypeError) as exc:
+        raise NoSQLiVerifyError(
+            "private JSON body shape does not match the candidate field path"
+        ) from exc
     return document
 
 
@@ -211,13 +261,24 @@ class NoSQLiVerifyAdapter:
         # its siblings while another bounded four-request differential fits.
         self.fields = tuple(dict.fromkeys([field, *declared_fields]))
         self.request_mode = bool(request_ref) or request.method not in {"GET", "HEAD"}
+        # A form-encoded body carries bracket-style operators (field[$ne]=x), not a
+        # JSON document, so routing it through the JSON mutator raised "private JSON
+        # request body is invalid" and no form NoSQL candidate could execute.
+        self.body_is_form = (
+            self.request_mode
+            and "x-www-form-urlencoded" in _content_type(request)
+        )
 
     def _literal(self, field: str, value: str) -> ReplayRequest:
+        if self.body_is_form:
+            return _form_literal(self.request, field, value)
         if self.request_mode:
             return _json_body(self.request, field, value)
         return _query_literal(self.request, field, value)
 
     def _operator(self, field: str, operator: str, value: str) -> ReplayRequest:
+        if self.body_is_form:
+            return _form_operator(self.request, field, operator, value)
         if self.request_mode:
             return _json_body(self.request, field, {operator: value})
         return _query_operator(self.request, field, operator, value)

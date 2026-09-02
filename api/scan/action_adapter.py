@@ -241,6 +241,42 @@ class ObservationBackend(Protocol):
 _BODY_PROOF_PLACEHOLDER = "shakerscan"
 
 
+def _nested_proof_body(fields: Sequence[str]) -> dict[str, Any]:
+    """Rebuild a JSON proof body from dotted/flattened field names.
+
+    Discovery records nested body shape as dotted paths (``profile.email``) and an
+    array of objects as ``items`` plus ``items.id``. A proof body of literal flat
+    keys would make the verifier's dotted-path mutator traverse a missing node and
+    raise, and would send XSS/SQL proofs the wrong schema, so rebuild the nesting
+    the mutator and the target actually expect. Mirrors the fan-out worklist
+    renderer in api/scan/continuation.py so both paths agree on one shape.
+    """
+    body: dict[str, Any] = {}
+    for raw_name in fields:
+        parts = [part for part in str(raw_name).split(".") if part]
+        if not parts:
+            continue
+        cursor: Any = body
+        for part in parts[:-1]:
+            child = cursor.get(part)
+            if isinstance(child, list):
+                if not child or not isinstance(child[0], dict):
+                    child[:] = [{}]
+                cursor = child[0]
+                continue
+            if isinstance(child, dict):
+                cursor = child
+                continue
+            nested: dict[str, Any] = {}
+            # A parent name plus child names is the flattened shape emitted for an
+            # array of objects (items, items.id).
+            cursor[part] = [nested] if child is not None else nested
+            cursor = nested
+        if not isinstance(cursor.get(parts[-1]), (dict, list)):
+            cursor[parts[-1]] = _BODY_PROOF_PLACEHOLDER
+    return body
+
+
 def _candidate_for_synthetic_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
     """Drop an exact-request claim when proof uses a reconstructed request.
 
@@ -289,7 +325,7 @@ def proof_request_for_candidate(
     content_type = str(resolved.get("content_type") or "").lower()
     if "json" in content_type:
         payload = json.dumps(
-            {field: _BODY_PROOF_PLACEHOLDER for field in fields},
+            _nested_proof_body(fields),
             sort_keys=True, separators=(",", ":"),
         )
         media_type = "application/json"
@@ -1613,6 +1649,12 @@ class DatabaseNeutralScanActionDispatcher:
         )
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
+            # A fragment-located candidate (family_hints: ["xss"]) lives only in the
+            # SPA hash route the server never receives, so a server-side SQL proof
+            # would waste budget on a parameter the origin never sees. It belongs to
+            # the browser XSS proof; skip it here.
+            if candidate.get("browser_fragment_path"):
+                continue
             if candidate_id not in candidate_signals:
                 continue
             attempt_id = hashlib.sha256(
@@ -2001,6 +2043,12 @@ class DatabaseNeutralScanActionDispatcher:
         )
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
+            # A fragment-located candidate (family_hints: ["xss"]) never reaches the
+            # server, so its parameter is absent from the server query/body and the
+            # NoSQL differential would search for a parameter that does not exist and
+            # block. It belongs to the browser XSS proof; skip it here.
+            if candidate.get("browser_fragment_path"):
+                continue
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:nosqli:{candidate_id}".encode()
             ).hexdigest()

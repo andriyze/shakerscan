@@ -375,6 +375,96 @@ class BodyMessageEchoTransport:
         return _result(200, json.dumps({"message": f"no user {document.get('email')!s}"}).encode("utf-8"))
 
 
+class FormAuthBypassTransport:
+    """A form-login endpoint that grants a session for a bracket operator."""
+
+    async def send(self, request, **_kwargs):
+        pairs = dict(urllib.parse.parse_qsl(
+            request.body.decode("utf-8"), keep_blank_values=True,
+        ))
+        if any(name.startswith("password[$") for name in pairs):
+            return _result(
+                200, b'{"authentication":{"token":"eyJ.session.grant"}}',
+                {"Content-Type": "application/json", "Set-Cookie": "sid=abc"},
+            )
+        return _result(401, b'{"error":"invalid credentials"}')
+
+
+def test_form_encoded_operator_auth_bypass_executes():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body="email=a%40b.test&password=guess",
+            content_type="application/x-www-form-urlencoded",
+        ),
+        {
+            "candidate_id": "2" * 64, "method": "POST",
+            "field_path": "password", "request_class": "safe_authentication",
+            "request_ref_id": "exact-request",
+        },
+        FormAuthBypassTransport(),
+    )
+    proof = result.observations[0]
+    # Before the fix a form body was routed through the JSON mutator and the
+    # candidate blocked with "private JSON request body is invalid".
+    assert result.status != "blocked"
+    assert proof["proof_state"] == "verified"
+    assert proof["technique"] == "operator_auth_bypass_repeated"
+
+
+class NestedBodyOperatorTransport:
+    """Interprets a ``$ne`` on the nested profile.email node."""
+
+    async def send(self, request, **_kwargs):
+        document = json.loads(request.body.decode("utf-8"))
+        node = document.get("profile", {})
+        value = node.get("email") if isinstance(node, dict) else None
+        if isinstance(value, dict) and "$ne" in value:
+            return _result(200, b'{"results":[{"id":1},{"id":2}]}')
+        if isinstance(value, dict) and "$eq" in value:
+            return _result(200, b'{"results":[]}')
+        return _result(200, b'{"results":[]}')
+
+
+def test_nested_json_field_path_mutates_the_real_node():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/profile/search",
+            body=json.dumps({"profile": {"email": "seed"}}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "3" * 64, "method": "POST",
+            "field_path": "profile.email", "request_class": "safe_read",
+            "request_ref_id": "exact-request",
+        },
+        NestedBodyOperatorTransport(),
+    )
+    proof = result.observations[0]
+    assert result.status != "blocked"
+    assert proof["proof_state"] == "verified"
+
+
+def test_a_flat_body_that_cannot_carry_the_dotted_path_fails_closed():
+    # An old flat body ({"profile.email": ...}) makes the dotted mutator traverse a
+    # missing node; that must fail closed as not_proven, never an uncaught TypeError.
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/profile/search",
+            body=json.dumps({"profile.email": "seed"}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "4" * 64, "method": "POST",
+            "field_path": "profile.email", "request_class": "safe_read",
+            "request_ref_id": "exact-request",
+        },
+        OperatorInterpretedTransport(),
+    )
+    assert result.status in {"blocked", "partial", "success"}
+    assert all(item["proof_state"] == "not_proven" for item in result.observations)
+
+
 def test_body_reflection_without_a_session_is_never_auth_bypass():
     result = _run(
         _request(
