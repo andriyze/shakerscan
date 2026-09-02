@@ -356,3 +356,21 @@ def test_schema_migration_failure_blocks_startup_and_releases_lock(monkeypatch):
         for query, _args in conn.executed
     )
     assert any("pg_advisory_unlock(8675309)" in query for query, _args in conn.executed)
+
+
+def test_hunt_runs_is_created_before_any_migration_reference_to_it():
+    """Guard the upgrade ordering that broke the previous-stable acceptance.
+
+    findings.hunt_run_id (and the other hunt_run_id foreign keys) reference
+    hunt_runs, so on an upgrade from a pre-Hunt release the table must be created
+    before anything references it -- otherwise the migration aborts with
+    "relation hunt_runs does not exist".
+    """
+    import inspect
+
+    source = inspect.getsource(retest_contract._run_schema_migrations_once)
+    create_at = source.index("CREATE TABLE IF NOT EXISTS hunt_runs")
+    first_reference = source.index("REFERENCES hunt_runs(id)")
+    assert first_reference > create_at, (
+        "a migration references hunt_runs before it is created"
+    )

@@ -1137,7 +1137,6 @@ async def _run_schema_migrations_once(pool) -> None:
                 ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS ai_classification_source TEXT,
                 ADD COLUMN IF NOT EXISTS ai_target_id UUID,
-                ADD COLUMN IF NOT EXISTS hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS analyst_verdict TEXT,
                 ADD COLUMN IF NOT EXISTS analyst_verdict_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS analyst_verdict_notes TEXT
@@ -1145,10 +1144,6 @@ async def _run_schema_migrations_once(pool) -> None:
             await conn.execute("""
                 UPDATE findings SET verification_count = 0
                 WHERE verification_count IS NULL
-            """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_findings_hunt_run_id
-                ON findings(hunt_run_id) WHERE hunt_run_id IS NOT NULL
             """)
 
             # Ownership/accountability metadata for the exposure inventory,
@@ -3200,6 +3195,18 @@ async def _run_schema_migrations_once(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hunt_runs_created
                 ON hunt_runs(created_at DESC)
+            """)
+            # findings.hunt_run_id carries a foreign key to hunt_runs, so on an
+            # upgrade from a pre-Hunt release it must be added only after hunt_runs
+            # exists -- adding it in the earlier findings block failed the
+            # previous-stable upgrade with "relation hunt_runs does not exist".
+            await conn.execute("""
+                ALTER TABLE findings
+                ADD COLUMN IF NOT EXISTS hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_hunt_run_id
+                ON findings(hunt_run_id) WHERE hunt_run_id IS NOT NULL
             """)
             # One row per HTTP call a Scan or Hunt made. Bodies and headers live in the
             # content-addressed evidence store, so identical payloads collapse to one
