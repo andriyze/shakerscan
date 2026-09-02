@@ -214,7 +214,7 @@ def test_bfla_is_only_selected_when_two_principals_exist():
     spec.loader.exec_module(module)
     source = inspect.getsource(module.submit_target)
     assert "if len(minted_tokens) >= 2:" in source
-    assert 'include_families.append("authz_surface")' in source
+    assert 'include_families.extend(("bola", "authz_surface"))' in source
 
 
 # --- The quality bar must survive the regression bar -------------------------------------------

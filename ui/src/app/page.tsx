@@ -9,7 +9,7 @@ import {
   getMissionTimeline, getQueueStats, getTargetsGrouped, getWorkers, scaleWorkers, startGungnir,
   stopGungnir, type DashboardActionItem, type DashboardResponse, type ExposureAssetsResponse,
   type GroupedDomain, type GungnirStatus, type QueueStats, type Scan, type TimelineEvent,
-  type WorkerStats,
+  type WorkerStats, type ExposureAsset, type ExposureAssetMetrics, type TargetCohort,
 } from '@/lib/api'
 import {
   Badge,
@@ -23,6 +23,7 @@ import {
 } from '@/components/ui'
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
+import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 
 const DASHBOARD_REFRESH_MS = 10000
 const QUEUE_REFRESH_MS = 15000
@@ -31,6 +32,7 @@ const GUNGNIR_REFRESH_MS = 30000
 const OVERVIEW_REFRESH_MS = 60000
 
 const FOCUS_RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+type CohortView = 'operational' | 'production' | 'staging' | 'non_operational' | 'all'
 
 export default function Dashboard() {
   const toast = useToast()
@@ -53,6 +55,7 @@ export default function Dashboard() {
   const [workersError, setWorkersError] = useState<string | null>(null)
   const [scaling, setScaling] = useState(false)
   const [gungnirActionLoading, setGungnirActionLoading] = useState(false)
+  const [cohortView, setCohortView] = useState<CohortView>('operational')
 
   const dashboardInFlight = useRef(false)
   const dashboardLoadedOnce = useRef(false)
@@ -60,6 +63,8 @@ export default function Dashboard() {
   const workersInFlight = useRef(false)
   const gungnirInFlight = useRef(false)
   const overviewInFlight = useRef(false)
+  const overviewRefreshPending = useRef(false)
+  const cohortViewRef = useRef<CohortView>('operational')
 
   const fetchDashboard = async (showLoading = false): Promise<boolean | undefined> => {
     if (dashboardInFlight.current) return undefined
@@ -139,12 +144,15 @@ export default function Dashboard() {
     }
   }
 
-  const fetchOverview = async () => {
-    if (overviewInFlight.current) return
+  const fetchOverview = async (force = false) => {
+    if (overviewInFlight.current) {
+      if (force) overviewRefreshPending.current = true
+      return
+    }
     overviewInFlight.current = true
     try {
       const [exposureResult, targetsResult, timelineResult] = await Promise.allSettled([
-        getExposureAssets({ limit: 1000 }),
+        getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }),
         getTargetsGrouped({ sort_by: 'active_findings_count', sort_order: 'desc' }),
         getMissionTimeline({ limit: 12 }),
       ])
@@ -154,6 +162,10 @@ export default function Dashboard() {
     } finally {
       overviewInFlight.current = false
       setOverviewLoading(false)
+      if (overviewRefreshPending.current) {
+        overviewRefreshPending.current = false
+        void fetchOverview(true)
+      }
     }
   }
 
@@ -182,10 +194,15 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    fetchOverview()
+    fetchOverview(true)
     const interval = setInterval(fetchOverview, OVERVIEW_REFRESH_MS)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    cohortViewRef.current = cohortView
+    fetchOverview()
+  }, [cohortView])
 
   const handleManualRefresh = async () => {
     if (refreshing) return
@@ -245,10 +262,32 @@ export default function Dashboard() {
   const totalAvailable = fleetEnabled ? (executionCapacity?.total_available ?? localAvailable) : localAvailable
   const maxWorkers = workers?.max_allowed && workers.max_allowed > 0 ? workers.max_allowed : 20
   const staleCount = workers?.stale_workers?.length ?? 0
-  const coverage = useMemo(() => buildCoverageRollup(groupedTargets), [groupedTargets])
+  const pendingWorkerCount = workers?.pending_count
+    ?? Math.max(0, (workerCount ?? 0) - (workers?.current_count ?? 0) - staleCount)
+  const unavailableWorkerCount = (workers?.workers || []).filter((worker) => worker.status !== 'running').length
+  const cohortCounts = useMemo(
+    () => exposure?.cohort_counts || countCohorts(exposure?.assets || []),
+    [exposure],
+  )
+  const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
+  const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
+  const scopedTargetIds = useMemo(() => new Set(scopedTargets.flatMap((domain) => [domain.root_target, ...domain.subdomains].filter(Boolean).map((target) => target!.id))), [scopedTargets])
+  const scopedUrls = useMemo(() => new Set((scopedExposure?.assets || []).flatMap((asset) => [asset.url, asset.root_domain].filter((value): value is string => Boolean(value)).map(normalizeScopeLocator))), [scopedExposure])
+  const coverage = useMemo(() => buildCoverageRollup(scopedTargets), [scopedTargets])
   const meaningfulActivity = useMemo(
-    () => timeline.filter(isMeaningfulActivity).slice(0, 5),
-    [timeline],
+    () => timeline.filter((event) => isMeaningfulActivity(event) && (
+      rowMatchesCohort(event.target_id, event.target_url, cohortView, scopedTargetIds, scopedUrls)
+      || isGlobalActivity(event.target_id, event.target_url)
+    )).slice(0, 5),
+    [timeline, cohortView, scopedTargetIds, scopedUrls],
+  )
+  const recentScans = useMemo(
+    () => (data?.recent_scans || []).filter((scan) => rowMatchesCohort(scan.target_id, scan.target_url, cohortView, scopedTargetIds, scopedUrls)),
+    [data, cohortView, scopedTargetIds, scopedUrls],
+  )
+  const scopedActions = useMemo(
+    () => cohortView === 'all' ? (data?.action_center || []) : buildCohortActions(scopedExposure),
+    [cohortView, data, scopedExposure],
   )
 
   return (
@@ -274,7 +313,7 @@ export default function Dashboard() {
                 >
                   <span className={`h-2 w-2 rounded-full bg-amber-400 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queuePending}</span>
-                  <span className="hidden text-gray-500 sm:inline">scans pending</span>
+                  <span className="text-gray-500">scans pending</span>
                 </Link>
                 <Link
                   href="/scans?status=running"
@@ -283,7 +322,7 @@ export default function Dashboard() {
                 >
                   <span className={`h-2 w-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queueRunning}</span>
-                  <span className="hidden text-gray-500 sm:inline">scan{queueRunning === 1 ? '' : 's'} running</span>
+                  <span className="text-gray-500">scan{queueRunning === 1 ? '' : 's'} running</span>
                 </Link>
                 {(workPending !== queuePending || workRunning !== queueRunning) && (
                   <span
@@ -300,9 +339,10 @@ export default function Dashboard() {
               onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
               aria-label="Emergency clear pending jobs"
               title="Emergency clear pending jobs"
-              className={`ml-0.5 flex h-7 w-7 items-center justify-center rounded text-gray-600 transition-colors hover:bg-red-500/10 hover:text-red-400 ${FOCUS_RING}`}
+              className={`ml-1 flex h-7 items-center justify-center gap-1 rounded border border-red-950/70 px-2 text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300 ${FOCUS_RING}`}
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="text-[10px]">Emergency clear</span>
             </button>
           </div>
 
@@ -320,7 +360,7 @@ export default function Dashboard() {
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
               {workersKnown ? totalAvailable : '--'}
             </span>
-            <span className="hidden text-xs text-gray-500 sm:inline">{fleetEnabled ? 'schedulable' : 'current'}</span>
+            <span className="text-xs text-gray-500">{fleetEnabled ? 'ready across fleet' : 'ready to scan'}</span>
             {fleetEnabled && (
               <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
                 {localAvailable} local
@@ -331,9 +371,19 @@ export default function Dashboard() {
                 {staleCount} stale
               </span>
             )}
+            {pendingWorkerCount > 0 && (
+              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Running worker processes that have not reported a current build identity yet">
+                {pendingWorkerCount} starting
+              </span>
+            )}
+            {unavailableWorkerCount > 0 && (
+              <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300" title="Worker containers that are stopped, restarting, or otherwise unavailable">
+                {unavailableWorkerCount} unavailable
+              </span>
+            )}
             {!fleetEnabled && workersKnown && (
-              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`Worker safety limit: ${maxWorkers}`}>
-                {workerCount} workers · limit {maxWorkers}
+              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
+                {workerCount} running · max {maxWorkers}
               </span>
             )}
             <span className="h-5 w-px bg-gray-800" aria-hidden="true" />
@@ -417,19 +467,154 @@ export default function Dashboard() {
         <ErrorState message={dashboardError} onRetry={() => fetchDashboard(true)} />
       )}
 
-      <SecurityPosture exposure={exposure} loading={overviewLoading} />
+      <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
 
-      <ChangesStrip storageKey="dashboard" />
+      <SecurityPosture exposure={scopedExposure} loading={overviewLoading} />
 
-      <CoverageOverview exposure={exposure} coverage={coverage} loading={overviewLoading} />
+      {cohortView === 'all' ? (
+        <ChangesStrip storageKey="dashboard" />
+      ) : (
+        <Card className="p-4 text-sm text-gray-400">
+          <span className="font-medium text-gray-200">What changed is hidden in scoped mode.</span>{' '}
+          Historical change events do not all carry a cohort binding yet. Choose All cohorts to inspect that unscoped stream.
+        </Card>
+      )}
 
-      <ActionCenter items={data?.action_center || []} loading={dashboardLoading && !data} />
+      <CoverageOverview exposure={scopedExposure} coverage={coverage} loading={overviewLoading} />
+
+      <ActionCenter items={scopedActions} loading={dashboardLoading && !data} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <LatestResults scans={data?.recent_scans || []} loading={dashboardLoading && !data} />
+        <LatestResults scans={recentScans} loading={dashboardLoading && !data} />
         <RecentActivity events={meaningfulActivity} loading={overviewLoading} />
       </div>
     </div>
+  )
+}
+
+function cohortMatches(cohort: TargetCohort | undefined, view: CohortView): boolean {
+  const value = cohort || 'unclassified'
+  if (view === 'all') return true
+  if (view === 'operational') return ['production', 'staging', 'unclassified'].includes(value)
+  if (view === 'non_operational') return ['lab', 'demo', 'calibration', 'internal'].includes(value)
+  return value === view
+}
+
+function normalizeScopeLocator(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase()
+  } catch {
+    return value.trim().toLowerCase()
+  }
+}
+
+function rowMatchesCohort(
+  targetId: string | null | undefined,
+  targetUrl: string | null | undefined,
+  view: CohortView,
+  targetIds: Set<string>,
+  locators: Set<string>,
+): boolean {
+  if (view === 'all') return true
+  if (targetId) return targetIds.has(targetId)
+  return Boolean(targetUrl && locators.has(normalizeScopeLocator(targetUrl)))
+}
+
+function isGlobalActivity(
+  targetId: string | null | undefined,
+  targetUrl: string | null | undefined,
+): boolean {
+  return !targetId && !targetUrl
+}
+
+function countCohorts(assets: ExposureAsset[]): Record<string, number> {
+  return assets.reduce<Record<string, number>>((counts, asset) => {
+    const cohort = asset.cohort || 'unclassified'
+    counts[cohort] = (counts[cohort] || 0) + 1
+    return counts
+  }, {})
+}
+
+function metricsFromAssets(assets: ExposureAsset[]): ExposureAssetMetrics {
+  const count = (predicate: (asset: ExposureAsset) => boolean) => assets.filter(predicate).length
+  return {
+    asset_count: assets.length,
+    active_critical: assets.reduce((sum, asset) => sum + asset.active_critical, 0),
+    active_high: assets.reduce((sum, asset) => sum + asset.active_high, 0),
+    active_verified: assets.reduce((sum, asset) => sum + (asset.active_verified || 0), 0),
+    active_needs_verification: assets.reduce((sum, asset) => sum + (asset.active_needs_verification || 0), 0),
+    ai_surfaces: count((asset) => asset.kind === 'ai'),
+    web_targets: count((asset) => asset.kind === 'web'),
+    model_artifacts: count((asset) => asset.kind === 'model'),
+    public_assets: count((asset) => asset.exposure_class === 'public'),
+    internal_assets: count((asset) => asset.exposure_class === 'internal'),
+    unscanned_assets: count((asset) => asset.coverage_posture === 'unscanned'),
+    stale_assets: count((asset) => asset.coverage_posture === 'stale'),
+    incomplete_scans: count((asset) => asset.coverage_posture === 'limited'),
+    failed_scans: count((asset) => asset.coverage_posture === 'failed'),
+    fresh_scans: count((asset) => asset.coverage_posture === 'fresh'),
+    verified_assets: count((asset) => (asset.active_verified || 0) > 0),
+    unverified_high_assets: count((asset) => (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0),
+    unowned_assets: count((asset) => !asset.owner),
+    needs_action: count((asset) => Boolean(asset.needs_action)),
+    p1_count: count((asset) => asset.action_priority === 'P1'),
+    p2_count: count((asset) => asset.action_priority === 'P2'),
+    p3_count: count((asset) => asset.action_priority === 'P3'),
+    prod_ai_surfaces: count((asset) => asset.kind === 'ai' && (asset.production_mode || asset.environment === 'production')),
+  }
+}
+
+function scopeExposure(exposure: ExposureAssetsResponse | null, view: CohortView): ExposureAssetsResponse | null {
+  if (!exposure || exposure.cohort === view || (view === 'all' && exposure.cohort === 'all')) return exposure
+  const assets = exposure.assets.filter((asset) => cohortMatches(asset.cohort, view))
+  return {
+    ...exposure,
+    assets,
+    count: assets.length,
+    total: assets.length,
+    new_count: assets.filter((asset) => asset.is_new).length,
+    metrics: metricsFromAssets(assets),
+  }
+}
+
+function scopeTargetGroups(groups: GroupedDomain[], view: CohortView): GroupedDomain[] {
+  if (view === 'all') return groups
+  return groups.flatMap((group) => {
+    const root = group.root_target && cohortMatches(group.root_target.cohort, view) ? group.root_target : null
+    const subdomains = group.subdomains.filter((target) => cohortMatches(target.cohort, view))
+    if (!root && subdomains.length === 0) return []
+    return [{ ...group, root_target: root, subdomains, subdomain_count: subdomains.length, total_count: subdomains.length + (root ? 1 : 0) }]
+  })
+}
+
+function buildCohortActions(exposure: ExposureAssetsResponse | null): DashboardActionItem[] {
+  const metrics = exposure?.metrics
+  if (!metrics) return []
+  const items: DashboardActionItem[] = []
+  if ((metrics.failed_scans || 0) > 0) items.push({ id: 'cohort-failures', priority: 'high', category: 'Reliability', title: 'Review failed assessments', detail: `${metrics.failed_scans} scoped asset${metrics.failed_scans === 1 ? ' has' : 's have'} a failed latest assessment.`, href: '/scans?status=failed', action_label: 'Review failures', count: metrics.failed_scans })
+  if ((metrics.active_needs_verification || 0) > 0) items.push({ id: 'cohort-unverified', priority: 'high', category: 'Evidence', title: 'Reduce unverified risk noise', detail: `${metrics.active_needs_verification} active scoped finding${metrics.active_needs_verification === 1 ? '' : 's'} still need deterministic verification.`, href: '/exposure?posture=needs_verification', action_label: 'Review evidence', count: metrics.active_needs_verification })
+  if ((metrics.stale_assets || 0) > 0) items.push({ id: 'cohort-stale', priority: 'medium', category: 'Freshness', title: 'Refresh stale assets', detail: `${metrics.stale_assets} scoped asset${metrics.stale_assets === 1 ? '' : 's'} have stale evidence.`, href: '/exposure?posture=stale', action_label: 'Review stale assets', count: metrics.stale_assets })
+  return items
+}
+
+function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChange: (value: CohortView) => void; counts: Record<string, number> }) {
+  const nonOperational = ['lab', 'demo', 'calibration', 'internal'].reduce((sum, key) => sum + (counts[key] || 0), 0)
+  const unclassified = counts.unclassified || 0
+  return (
+    <Card className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <h2 className="text-sm font-medium text-white">Executive cohort scope</h2>
+        <p className="mt-1 text-xs text-gray-400">Operational includes production, staging, and clearly labeled unclassified assets. Lab data is never silently mixed into it.</p>
+        <p className="mt-1 text-xs text-gray-500">{nonOperational} non-operational · {unclassified} unclassified</p>
+      </div>
+      <select value={value} onChange={(event) => onChange(event.target.value as CohortView)} aria-label="Dashboard cohort scope" className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
+        <option value="operational">Operational + unclassified</option>
+        <option value="production">Production only</option>
+        <option value="staging">Staging only</option>
+        <option value="non_operational">Lab / demo / calibration / internal</option>
+        <option value="all">All cohorts</option>
+      </select>
+    </Card>
   )
 }
 
@@ -757,7 +942,9 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
       </div>
       <div className="divide-y divide-gray-800">
         {loading ? Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="m-4 h-10" />)
-          : scans.length ? scans.slice(0, 5).map((scan) => (
+          : scans.length ? scans.slice(0, 5).map((scan) => {
+            const assurance = scanAssurance(scan)
+            return (
             <Link key={scan.id} href={`/scans/${scan.id}`} className={`flex items-center gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>
               <span className="rounded-lg bg-blue-500/10 p-2 text-blue-300"><ScanLine className="h-4 w-4" /></span>
               <span className="min-w-0 flex-1">
@@ -765,10 +952,18 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
                 <span className="block text-xs text-gray-500">{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
               </span>
               {typeof scan.findings_count === 'number' ? <span className="hidden text-xs tabular-nums text-gray-500 sm:block">{scan.findings_count} findings</span> : null}
-              {scan.grade ? <span className={`text-lg font-semibold ${getGradeColor(scan.grade)}`}>{scan.grade}</span> : null}
+              {scan.grade ? (
+                <span className="hidden text-right sm:block">
+                  <span className={`block text-xs font-medium ${getGradeColor(scan.grade)}`} title="Risk observed by this run; not an overall safety score">Observed posture {scan.grade}</span>
+                  <span className={`block text-[11px] ${assuranceClass(assurance?.band)}`}>
+                    {assurance ? `${assurance.label} · ${assurance.score}/100` : 'Examination strength unavailable'}
+                  </span>
+                </span>
+              ) : null}
               <ScanStatusBadge status={scan.status} />
             </Link>
-          )) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
+            )
+          }) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
       </div>
     </Card>
   )
@@ -842,11 +1037,13 @@ function activityHref(event: TimelineEvent): string | null {
 
 function activityTitle(event: TimelineEvent): string {
   const raw = event.action_name || event.command || event.kind
+  if (raw === 'scan.submit') {
+    return ({ accepted: 'Scan accepted for queueing', queued: 'Scan queued', running: 'Scan running', completed: 'Scan completed', failed: 'Scan failed', cancelled: 'Scan cancelled', blocked: 'Scan blocked' } as Record<string, string>)[event.status] || 'Scan submission'
+  }
   const labels: Record<string, string> = {
     'Experiment.workflow': 'Autonomous test completed',
     'Research.episode': 'Investigation update',
     'Finding.retest': 'Finding verification',
-    'Scan.submit': 'Scan queued',
     'Scan.result': 'Scan reviewed',
     evidence_bound: 'Evidence recorded',
     evidence_instance: 'Evidence recorded',

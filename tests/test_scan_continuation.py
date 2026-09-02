@@ -15,11 +15,15 @@ from api.scan.continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     amended_scan_plan_revision,
+    absent_receipt_summary,
     build_discovery_continuation_manifests,
+    discovery_shard_endpoint_worklist,
+    endpoint_worklist_from_manifest_entries,
     merge_scan_action_continuation,
 )
 from api.scan.capability_result import CapabilityResultStatus
 from api.scan.contracts import resolve_scan_contract
+from api.scan.surface_manifest import build_scan_surface_manifest
 from api.scan.work_manifests import (
     ScanWorkManifestReference,
     build_candidate_manifest,
@@ -600,3 +604,288 @@ def test_default_passive_scan_allows_its_own_passive_template_capability():
     }
     assert "templates.passive_batch" in allowed
     assert allowed, "a passive Scan must allow at least one continuation capability"
+
+
+def test_discovery_shard_worklist_reads_canonical_observations():
+    """A placed discovery shard's receipts must reach fan-out.
+
+    The shard writes canonical observation manifests keyed by discover.* action
+    id. Fan-out harvested the V1 report shape instead, which a canonical shard
+    never emits, so a successful producer yielded an empty worklist: measured on
+    the benchmark application the shard recorded 35 browser-crawl observations
+    while fan-out logged "harvested 0 endpoints from recon (0 discovered)", and
+    every endpoint shard then reported xss, sqli and nosqli as zero_attempts.
+    """
+    target = _target()
+    observations = {
+        "discover.web_crawl": [
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://app.example.test/rest/products/search?q=apple",
+            },
+        ],
+        "discover.browser_crawl": [
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://app.example.test/api/BasketItems?id=1",
+            },
+            # A static asset is discovered but is not injectable surface.
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://app.example.test/main.js",
+            },
+            # Another origin is out of scope and must never enter the worklist.
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://evil.test/collect?x=1",
+            },
+            {
+                "kind": "discovered_route",
+                "method": "POST",
+                "url": "https://app.example.test/rest/user/login",
+                "content_type": "application/json",
+                "body_field_names": ["email", "password"],
+            },
+            {
+                "kind": "discovered_route",
+                "method": "POST",
+                "url": "https://app.example.test/account/reset",
+                "content_type": "application/x-www-form-urlencoded",
+                "body_field_names": ["email", "csrf"],
+            },
+        ],
+    }
+
+    worklist, meta = discovery_shard_endpoint_worklist(
+        scan_id="00000000-0000-4000-8000-0000000000d1",
+        target=target,
+        target_url="https://app.example.test",
+        options={},
+        action_statuses={
+            "discover.web_probe": "success",
+            "discover.web_crawl": "success",
+            "discover.browser_crawl": "success",
+        },
+        observations=observations,
+        max_endpoints=100,
+    )
+
+    # A surface within the cap reports honest, non-truncated meta.
+    assert meta["truncated"] is False
+    assert meta["returned"] == len(worklist)
+    assert meta["raw_discovered"] >= len(worklist)
+    # The browser crawl's parameterised route is what makes xss/sqli testable.
+    assert "GET /api/BasketItems?id=" in worklist
+    assert "GET /rest/products/search?q=" in worklist
+    assert 'POST /rest/user/login json:{"email":"test","password":"test"}' in worklist
+    assert "POST /account/reset form:csrf=1&email=1" in worklist
+    # Parameter names survive the round trip; discovered values do not.
+    assert not any("apple" in item for item in worklist)
+    assert not any("evil.test" in item for item in worklist)
+    assert not any(item.endswith("/main.js") for item in worklist)
+
+    # Fan-out is a value-free serialization boundary, not permission to discard
+    # the body shape. Rebuild the exact child manifests and prove both body
+    # candidates survive the same path used by parallel child compilation.
+    empty = {"status": "success", "observations": []}
+    child_surface = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=target,
+        options={"custom_endpoints": worklist},
+        collection_replay=empty,
+        subdomains=empty,
+        probe=empty,
+        crawl=empty,
+        browser=empty,
+        content=empty,
+        max_endpoints=100,
+    )
+    child_endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000d2",
+        target_binding_digest=target.digest,
+        surface_manifest=child_surface,
+        source_action_ids=("parallel.plan",),
+        auth_lane="anonymous",
+    )
+    child_candidates = build_candidate_manifest(
+        child_endpoints,
+        source_action_ids=("parallel.plan",),
+        allow_state_changing_http=True,
+        maximum=100,
+    )
+    endpoint_shapes = {
+        item["canonical_path"]: (
+            tuple(item["body_field_names"]), item["content_type"],
+        )
+        for item in child_endpoints.entries
+        if item.get("body_field_names")
+    }
+    assert endpoint_shapes["/rest/user/login"] == (
+        ("email", "password"), "application/json",
+    )
+    assert endpoint_shapes["/account/reset"] == (
+        ("csrf", "email"), "application/x-www-form-urlencoded",
+    )
+    body_candidates = {
+        (item["canonical_path"], item["parameter_name"], item["content_type"])
+        for item in child_candidates.entries
+        if item.get("body_field_names")
+    }
+    assert ("/rest/user/login", "email", "application/json") in body_candidates
+    assert (
+        "/account/reset", "email", "application/x-www-form-urlencoded",
+    ) in body_candidates
+
+
+def test_discovery_shard_worklist_reports_truncation_honestly():
+    """A capped surface must not report the capped list as the whole surface.
+
+    The canonical shard path once hard-coded truncated=false and raw_discovered =
+    returned, so coverage/assurance overstated examination whenever discovery
+    exceeded the cap. The meta now carries the real pre-cap count and flag.
+    """
+    target = _target()
+    observations = {
+        "discover.web_crawl": [
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": f"https://app.example.test/rest/item{n}?id=1",
+            }
+            for n in range(6)
+        ],
+    }
+    worklist, meta = discovery_shard_endpoint_worklist(
+        scan_id="00000000-0000-4000-8000-0000000000d3",
+        target=target,
+        target_url="https://app.example.test",
+        options={},
+        action_statuses={"discover.web_crawl": "success"},
+        observations=observations,
+        max_endpoints=2,
+    )
+    assert meta["truncated"] is True
+    assert meta["returned"] == len(worklist) <= 2
+    assert meta["raw_discovered"] > meta["returned"]
+    assert meta["cap"] == 2
+
+
+def test_fan_out_worklist_preserves_spa_fragment_routes():
+    """A fragment-routed DOM-XSS candidate must survive the parallel fan-out.
+
+    The worklist renderer serialized only the server path/query/body, so a SPA
+    hash route (#/search?q=) was dropped before endpoint shards were built and
+    the DOM-XSS candidate disappeared. The fragment now round-trips.
+    """
+    try:
+        from scanner.manifests import normalize_endpoint
+    except ModuleNotFoundError:  # flat runtime layout
+        from manifests import normalize_endpoint
+
+    target = _target()
+    record = normalize_endpoint(
+        method="GET",
+        url="https://app.example.test/#/search?q=private-discovery-value",
+        source="web.browser_crawl",
+    )
+    assert record.browser_fragment_path == "/search"
+    surface = {
+        "schema_version": "endpoint-manifest/v1",
+        "status": "complete",
+        "reason": None,
+        "endpoints": [record.public_dict()],
+    }
+    endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000e1",
+        target_binding_digest=target.digest,
+        surface_manifest=surface,
+        source_action_ids=("discover.browser_crawl",),
+        auth_lane="anonymous",
+    )
+    worklist = endpoint_worklist_from_manifest_entries(endpoints.entries)
+    assert any("#/search?q=" in item for item in worklist)
+    # No discovered value ever survives the fan-out boundary.
+    assert not any("private-discovery-value" in item for item in worklist)
+
+    # Feed the worklist back through the exact child-shard pipeline and prove the
+    # fragment survives all the way to a browser XSS candidate.
+    empty = {"status": "success", "observations": []}
+    child_surface = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=target,
+        options={"custom_endpoints": worklist},
+        collection_replay=empty,
+        subdomains=empty,
+        probe=empty,
+        crawl=empty,
+        browser=empty,
+        content=empty,
+        max_endpoints=100,
+    )
+    child_endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-0000000000e2",
+        target_binding_digest=target.digest,
+        surface_manifest=child_surface,
+        source_action_ids=("parallel.plan",),
+        auth_lane="anonymous",
+    )
+    assert any(
+        item.get("browser_fragment_path") == "/search"
+        for item in child_endpoints.entries
+    )
+    child_candidates = build_candidate_manifest(
+        child_endpoints,
+        source_action_ids=("parallel.plan",),
+        maximum=100,
+    )
+    fragment_candidates = [
+        item for item in child_candidates.entries
+        if item.get("browser_fragment_path") == "/search"
+    ]
+    assert fragment_candidates
+    assert tuple(fragment_candidates[0]["family_hints"]) == ("xss",)
+
+
+def test_absent_receipt_from_an_enabled_producer_is_failed_not_skipped():
+    """Silence from an enabled producer is a failure, and keeps its full shape.
+
+    These records are read downstream by field, so pin the exact key set: an
+    extracted builder that quietly drops one (network_binding did get dropped)
+    changes a durable receipt without failing anything nearer the change.
+    """
+    # Never enabled: the caller keeps its own default rather than inventing one.
+    assert absent_receipt_summary(None, kind="network", enabled=False) is None
+    # A produced summary passes through untouched.
+    assert absent_receipt_summary(
+        {"status": "success"}, kind="network", enabled=True,
+    ) == {"status": "success"}
+
+    subdomain = absent_receipt_summary(
+        None, kind="subdomain", enabled=True, root_domain="example.test",
+    )
+    assert subdomain["status"] == "failed"
+    assert subdomain["root_domain"] == "example.test"
+    assert subdomain["errors"]
+    assert set(subdomain) == {
+        "schema_version", "enabled", "status", "root_domain", "observations",
+        "observation_count", "partial", "timed_out", "errors", "budget_consumed",
+        "durable_budget_settled", "network_binding",
+        "automatically_scanned_discovered_hosts",
+    }
+    assert subdomain["schema_version"] == "canonical-scan-subdomain-discovery/v1"
+    assert subdomain["network_binding"] == "root_domain_target_binding"
+
+    network = absent_receipt_summary(None, kind="network", enabled=True)
+    assert network["status"] == "failed"
+    assert set(network) == {
+        "schema_version", "enabled", "status", "addresses", "actions",
+        "observations", "open_ports", "services", "observation_count",
+        "partial", "timed_out", "errors", "budget_consumed",
+        "durable_budget_settled", "network_binding",
+    }
+    assert network["schema_version"] == "canonical-scan-network-discovery/v1"
+    assert network["network_binding"] == "exact_address_subset"

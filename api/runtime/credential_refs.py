@@ -38,7 +38,7 @@ def select_hunt_principal_reference(
     context: Mapping[str, Any],
     value: Any,
     *,
-    capability: str = "request.replay",
+    capability: str = "collections.replay_safe",
 ) -> dict[str, Any] | None:
     """Select exactly one content-free generic profile from an admitted Hunt context."""
     slot = normalize_hunt_principal_slot(value)
@@ -51,7 +51,7 @@ def select_hunt_principal_reference(
         if item.get("source") != "credential_profiles" or item.get("principal_slot") != slot:
             continue
         allowed = item.get("allowed_capabilities") or []
-        if allowed and capability not in allowed:
+        if capability not in allowed:
             continue
         matches.append(dict(item))
     if len(matches) != 1:

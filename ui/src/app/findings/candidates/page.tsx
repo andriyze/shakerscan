@@ -115,7 +115,9 @@ export default function InvestigationCandidatesPage() {
                       </span>
                     </div>
                     <h2 className="mt-3 font-medium text-gray-100">{candidate.title}</h2>
-                    <p className="mt-1 text-sm text-gray-400">{candidate.claim}</p>
+                    {candidate.claim.trim().toLowerCase() !== candidate.title.trim().toLowerCase() && (
+                      <p className="mt-1 text-sm text-gray-400">{candidate.claim}</p>
+                    )}
                     <p className="mt-2 text-xs text-gray-500">
                       {candidate.family.replace(/_/g, ' ')} · {candidate.verifier_contract_id || 'no verifier available'} · observed {candidate.observation_count || 1} time{(candidate.observation_count || 1) === 1 ? '' : 's'} · last {formatDate(candidate.last_seen_at)}
                     </p>

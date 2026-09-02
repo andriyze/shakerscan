@@ -97,6 +97,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          # check_surface_dispositions.py verifies the manifest source_head is an
+          # ancestor of HEAD; the default shallow clone omits it and the ancestry
+          # check fails with "source_head is not an ancestor of the current checkout".
+          fetch-depth: 0
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
@@ -113,8 +118,10 @@ jobs:
       - name: Freeze monolith growth and lock the API contract
         run: |
           python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
           PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
-            tests/test_api_characterization.py
+            tests/test_api_characterization.py \
+            tests/test_documentation_policy.py
 
       - name: Verify the public installer ships its whole import closure
         run: |
@@ -245,6 +252,22 @@ jobs:
             tests/test_api_helpers.py::test_primary_api_rejects_legacy_hunt_start_even_with_old_override_env \
             tests/test_api_helpers.py::test_primary_api_rejects_oversized_hunt_body_before_json_parsing \
             tests/test_api_helpers.py::test_native_hunt_start_persists_exact_contract_and_capability_allowlist
+
+      - name: Validate credential, archive, Hunt skill, and assurance regressions
+        run: |
+          PYTHONPATH=.:api:scanner python -m pytest -q -p no:cacheprovider \
+            tests/test_http_archive.py \
+            tests/test_hunt_authority_integrity.py \
+            tests/test_hunt_direct_origin.py \
+            tests/test_hunt_http_capability.py \
+            tests/test_hunt_run_router.py \
+            tests/test_hunt_skills.py \
+            tests/test_runtime_credentials.py \
+            tests/test_scan_credentials.py \
+            tests/test_scan_finalizer.py \
+            tests/test_scan_risk_and_assurance.py
+          PYTHONPATH=api:scanner:. python -m pytest -q -p no:cacheprovider \
+            tests/test_runtime_hardening.py
 
       - name: Validate durable budget, persistence, and receipt contracts
         env:

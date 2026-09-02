@@ -124,6 +124,30 @@ def test_scan_action_diagnostic_line_explains_prelaunch_failure_without_raw_erro
     assert "secret.example" not in line
 
 
+def test_budget_skip_does_not_claim_an_adapter_error():
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(
+        action,
+        status=CapabilityResultStatus.SKIPPED,
+        reason=CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET,
+    )
+
+    line = scan_action_diagnostic_line(
+        action=action,
+        result=result,
+        receipt={
+            "errors": ["private allocator diagnostic"],
+            "redacted_execution": {"execution_started": False},
+        },
+    )
+
+    assert line is not None
+    assert "outcome=skipped" in line
+    assert "reason=insufficient_plan_budget" in line
+    assert "error=none" in line
+
+
 def test_parallel_scan_activity_combines_child_logs_and_status_fallbacks():
     lines = parallel_scan_activity_lines(
         shards=(

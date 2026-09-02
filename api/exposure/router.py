@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 try:
     from ai_assurance import build_agent_blast_radius
+    from asset_cohorts import target_cohort, target_exposure_class
     from api_utils import (
         SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _int_or_none, _iso_or_none, _optional_uuid,
         _parse_graph_json, _row_value, _scan_completion_flags, _severity_sort_value,
@@ -34,6 +35,7 @@ try:
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
+    from ..asset_cohorts import target_cohort, target_exposure_class
     from ..api_utils import (
         SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _int_or_none, _iso_or_none, _optional_uuid,
         _parse_graph_json, _row_value, _scan_completion_flags, _severity_sort_value,
@@ -874,20 +876,7 @@ def _exposure_risk_score(critical: int, high: int, total: int) -> int:
 def _exposure_class(value: str | None, *, kind: str = "web") -> str:
     if kind == "model":
         return "supply_chain"
-    host = _exposure_hostname(value)
-    if not host:
-        return "unknown"
-    if host in {"localhost", "host.docker.internal"} or host.endswith(".internal") or host.endswith(".local"):
-        return "internal"
-    try:
-        ip = ipaddress.ip_address(host)
-        if ip.is_loopback or ip.is_private or ip.is_link_local:
-            return "internal"
-    except ValueError:
-        pass
-    if "." not in host:
-        return "internal"
-    return "public"
+    return target_exposure_class(value)
 
 
 def _exposure_days_since(value: Any) -> int | None:
@@ -1019,6 +1008,10 @@ def _exposure_recommended_actions(*, kind: str, reasons: list[str], active_verif
 async def exposure_assets(
     root_domain: Optional[str] = None,
     kind: Optional[str] = None,
+    cohort: Optional[str] = Query(
+        None,
+        pattern="^(operational|non_operational|production|staging|lab|demo|calibration|internal|unclassified|all)$",
+    ),
     limit: int = Query(1000, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
@@ -1189,6 +1182,11 @@ async def exposure_assets(
             "root_domain": None if is_model else row.get("root_domain"),
             "origin": row.get("root_domain") if is_model else None,
             "exposure_class": exposure_class,
+            "cohort": target_cohort(
+                url=row.get("url"), name=row.get("name"),
+                discovery_source=row.get("discovery_source"), metadata=meta,
+                exposure_class=exposure_class,
+            ),
             "owner": str(meta.get("owner") or meta.get("asset_owner") or "").strip() or None,
             "environment": str(meta.get("environment") or "").strip().lower() or None,
             "risk_tier": str(meta.get("risk_tier") or "").strip() or None,
@@ -1293,6 +1291,11 @@ async def exposure_assets(
             "target_type": row.get("target_type"),
             "production_mode": bool(row.get("production_mode")),
             "exposure_class": exposure_class,
+            "cohort": target_cohort(
+                url=row.get("endpoint_url"), name=row.get("name"),
+                discovery_source="ai_gate", metadata=ai_meta,
+                exposure_class=exposure_class,
+            ),
             "owner": ai_owner,
             "environment": ai_environment,
             "blast_radius_score": blast_radius.get("score"),
@@ -1337,7 +1340,23 @@ async def exposure_assets(
             "findings_href": f"/findings?ai_target_id={row['id']}&status=active",
         })
 
-    # Headline metrics from the full (uncapped) set so the stat row stays
+    cohort_counts = dict(Counter(
+        str(asset.get("cohort") or "unclassified") for asset in assets
+    ))
+    selected_cohort = str(cohort if isinstance(cohort, str) else "all")
+    if selected_cohort != "all":
+        if selected_cohort == "operational":
+            allowed_cohorts = {"production", "staging", "unclassified"}
+        elif selected_cohort == "non_operational":
+            allowed_cohorts = {"lab", "demo", "calibration", "internal"}
+        else:
+            allowed_cohorts = {selected_cohort}
+        assets = [
+            asset for asset in assets
+            if str(asset.get("cohort") or "unclassified") in allowed_cohorts
+        ]
+
+    # Headline metrics from the full selected (uncapped) set so the stat row stays
     # accurate and independent of the heavier graph fetch. Compute before the
     # display limit is applied.
     metrics = {
@@ -1389,6 +1408,9 @@ async def exposure_assets(
         "offset": offset,
         "new_count": new_count,
         "metrics": metrics,
+        "cohort": selected_cohort,
+        "cohort_counts": cohort_counts,
+        "truncated": offset + len(assets) < total,
     }
 
 

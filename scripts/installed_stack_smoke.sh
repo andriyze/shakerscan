@@ -128,7 +128,9 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
         SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan" \
         SHAKERSCAN_E2E_CLI_HOME="$SMOKE_HOME" \
         SHAKERSCAN_E2E_HONEY_HOST="$fixture_host" \
+        SHAKERSCAN_E2E_FIXTURES_HOST="shakerscan-fixtures.internal" \
         SHAKERSCAN_E2E_DAST_TARGET="http://juice-shop:3000" \
+        SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000" \
         SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN="$token" \
         python3 "$ROOT_DIR/tests/e2e/run_e2e.py" "${e2e_args[@]}"
     check_equal "exact-image E2E gate" "$(jq -r '.gate' "$scorecard_path")" "pass"

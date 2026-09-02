@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { validateScanTarget } from './targetValidation.ts'
+import { scanScopeEnvironment, validateScanTarget } from './targetValidation.ts'
 
 test('accepts public and local-lab HTTP targets', () => {
   for (const target of [
@@ -26,4 +26,24 @@ test('rejects malformed and unsupported targets', () => {
   assert.equal(validateScanTarget('not a host'), 'Target cannot contain spaces')
   assert.equal(validateScanTarget('file:///etc/passwd'), 'Only http(s) targets are supported')
   assert.match(validateScanTarget('http://bad_host') ?? '', /valid URL or domain/)
+})
+
+test('uses lab scope only for unmistakably local scan targets', () => {
+  for (const target of [
+    'http://localhost:3000',
+    'http://host.docker.internal:3001',
+    'http://juice-shop:3000',
+    'http://192.168.1.5',
+    'http://[fd00::10]:8080',
+  ]) {
+    assert.equal(scanScopeEnvironment(target), 'lab', target)
+  }
+
+  for (const target of [
+    'https://example.com',
+    'https://api.example.com',
+    'https://public.example.internal.evil.test',
+  ]) {
+    assert.equal(scanScopeEnvironment(target), 'production', target)
+  }
 })

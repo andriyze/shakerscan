@@ -98,6 +98,20 @@ class AuthBypassTransport:
         return _result(401, b'{"error":"invalid credentials"}')
 
 
+class SiblingFieldAuthBypassTransport:
+    """Only a non-anchor body field accepts an operator object."""
+
+    async def send(self, request, **_kwargs):
+        document = json.loads(request.body.decode("utf-8"))
+        password = document.get("password")
+        if isinstance(password, dict) and "$ne" in password:
+            return _result(
+                200, b'{"authentication":{"token":"eyJ.session.grant"}}',
+                {"Content-Type": "application/json", "Set-Cookie": "sid=abc"},
+            )
+        return _result(401, b'{"error":"invalid credentials"}')
+
+
 def test_operator_set_differential_promotes_repeatably():
     result = _run(
         _request(url="https://app.example.test/rest/products/search?q=apple"),
@@ -110,7 +124,7 @@ def test_operator_set_differential_promotes_repeatably():
     proof = result.observations[0]
     assert proof["proof_state"] == "verified"
     assert proof["proof_contract"] == "nosqli_operator_differential/v1"
-    assert proof["technique"] == "operator_set_differential_repeated"
+    assert proof["technique"] == "operator_equality_complement_differential"
     assert proof["repetitions"] == 2
     assert len(proof["response_pairs"]) == 2
 
@@ -148,6 +162,27 @@ def test_json_body_operator_authentication_bypass_is_critical_class():
     assert proof["technique"] == "operator_auth_bypass_repeated"
     assert proof["session_state_discarded"] is True
     assert proof["secret_values_visible"] is False
+
+
+def test_json_body_candidate_tests_declared_siblings_after_its_anchor():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body=json.dumps({"email": "a@b.test", "password": "guess"}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "d" * 64, "method": "POST",
+            "parameter_name": "email", "body_field_names": ["email", "password"],
+            "request_class": "safe_authentication",
+        },
+        SiblingFieldAuthBypassTransport(),
+    )
+
+    assert [item["field_path"] for item in result.observations] == ["email", "password"]
+    assert [item["proof_state"] for item in result.observations] == ["not_proven", "verified"]
+    assert result.actual_budget["http_requests"] == 8
+    assert result.status == "success"
 
 
 def test_nosqli_is_a_registered_canonical_family():
@@ -252,3 +287,197 @@ def test_a_server_error_on_the_operator_payload_is_never_proof():
     proof = result.observations[0]
     assert proof["proof_state"] == "not_proven"
     assert proof["finding_verdict"] == "not_proven"
+
+
+class QueryEchoTransport:
+    """A 200 endpoint that reflects the parsed query value back in its body.
+
+    Express parses ``q[$ne]=x`` into ``{"$ne": "x"}``; echoing that back makes
+    the operator response differ from the literal response for every request,
+    which a bare literal-vs-operator differential mistakes for interpretation.
+    """
+
+    async def send(self, request, **_kwargs):
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(request.url).query, keep_blank_values=True,
+        )
+        return _result(200, json.dumps({"searched": query}).encode("utf-8"))
+
+
+class RawQueryStringEchoTransport:
+    """A 200 permalink page that renders the raw query string verbatim."""
+
+    async def send(self, request, **_kwargs):
+        raw = urllib.parse.urlsplit(request.url).query
+        return _result(200, f"<p>You searched for: {raw}</p>".encode("utf-8"))
+
+
+class ConstantOperatorRejectionTransport:
+    """A 200 endpoint that answers any operator object with one constant page.
+
+    A type guard that rejects every ``field[<op>]`` shape with the same body
+    makes the ``$ne`` response differ from the literal yet be sentinel-stable,
+    which a differential-only oracle mistakes for an interpreted operator.
+    """
+
+    async def send(self, request, **_kwargs):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.url).query)
+        if any("[$" in key for key in query):
+            return _result(200, b'{"error":"operator objects are not allowed"}')
+        return _result(200, b'{"results":[]}')
+
+
+def test_reflected_query_value_is_never_mistaken_for_an_operator():
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "e" * 64, "method": "GET",
+            "parameter_name": "q", "request_class": "safe_read",
+        },
+        QueryEchoTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+    assert proof["finding_verdict"] == "not_proven"
+
+
+def test_raw_query_string_reflection_is_never_proof():
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "f" * 64, "method": "GET",
+            "parameter_name": "q", "request_class": "safe_read",
+        },
+        RawQueryStringEchoTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+
+
+def test_constant_operator_rejection_page_is_never_proof():
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "0" * 64, "method": "GET",
+            "parameter_name": "q", "request_class": "safe_read",
+        },
+        ConstantOperatorRejectionTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+
+
+class BodyMessageEchoTransport:
+    """A 200 login-shaped endpoint that reflects the submitted value, no session."""
+
+    async def send(self, request, **_kwargs):
+        document = json.loads(request.body.decode("utf-8"))
+        return _result(200, json.dumps({"message": f"no user {document.get('email')!s}"}).encode("utf-8"))
+
+
+class FormAuthBypassTransport:
+    """A form-login endpoint that grants a session for a bracket operator."""
+
+    async def send(self, request, **_kwargs):
+        pairs = dict(urllib.parse.parse_qsl(
+            request.body.decode("utf-8"), keep_blank_values=True,
+        ))
+        if any(name.startswith("password[$") for name in pairs):
+            return _result(
+                200, b'{"authentication":{"token":"eyJ.session.grant"}}',
+                {"Content-Type": "application/json", "Set-Cookie": "sid=abc"},
+            )
+        return _result(401, b'{"error":"invalid credentials"}')
+
+
+def test_form_encoded_operator_auth_bypass_executes():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body="email=a%40b.test&password=guess",
+            content_type="application/x-www-form-urlencoded",
+        ),
+        {
+            "candidate_id": "2" * 64, "method": "POST",
+            "field_path": "password", "request_class": "safe_authentication",
+            "request_ref_id": "exact-request",
+        },
+        FormAuthBypassTransport(),
+    )
+    proof = result.observations[0]
+    # Before the fix a form body was routed through the JSON mutator and the
+    # candidate blocked with "private JSON request body is invalid".
+    assert result.status != "blocked"
+    assert proof["proof_state"] == "verified"
+    assert proof["technique"] == "operator_auth_bypass_repeated"
+
+
+class NestedBodyOperatorTransport:
+    """Interprets a ``$ne`` on the nested profile.email node."""
+
+    async def send(self, request, **_kwargs):
+        document = json.loads(request.body.decode("utf-8"))
+        node = document.get("profile", {})
+        value = node.get("email") if isinstance(node, dict) else None
+        if isinstance(value, dict) and "$ne" in value:
+            return _result(200, b'{"results":[{"id":1},{"id":2}]}')
+        if isinstance(value, dict) and "$eq" in value:
+            return _result(200, b'{"results":[]}')
+        return _result(200, b'{"results":[]}')
+
+
+def test_nested_json_field_path_mutates_the_real_node():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/profile/search",
+            body=json.dumps({"profile": {"email": "seed"}}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "3" * 64, "method": "POST",
+            "field_path": "profile.email", "request_class": "safe_read",
+            "request_ref_id": "exact-request",
+        },
+        NestedBodyOperatorTransport(),
+    )
+    proof = result.observations[0]
+    assert result.status != "blocked"
+    assert proof["proof_state"] == "verified"
+
+
+def test_a_flat_body_that_cannot_carry_the_dotted_path_fails_closed():
+    # An old flat body ({"profile.email": ...}) makes the dotted mutator traverse a
+    # missing node; that must fail closed as not_proven, never an uncaught TypeError.
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/profile/search",
+            body=json.dumps({"profile.email": "seed"}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "4" * 64, "method": "POST",
+            "field_path": "profile.email", "request_class": "safe_read",
+            "request_ref_id": "exact-request",
+        },
+        OperatorInterpretedTransport(),
+    )
+    assert result.status in {"blocked", "partial", "success"}
+    assert all(item["proof_state"] == "not_proven" for item in result.observations)
+
+
+def test_body_reflection_without_a_session_is_never_auth_bypass():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body=json.dumps({"email": "a@b.test", "password": "guess"}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "1" * 64, "method": "POST",
+            "field_path": "email", "request_class": "safe_authentication",
+            "request_ref_id": "exact-request",
+        },
+        BodyMessageEchoTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"

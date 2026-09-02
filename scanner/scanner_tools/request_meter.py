@@ -264,9 +264,38 @@ class RequestMeter:
             f"request destination is outside the frozen target binding ({reason})"
         )
 
-    def record_completion(self, *, phase: str, url: Any, status_code: int | None = None) -> None:
+    def record_completion(
+        self,
+        *,
+        phase: str,
+        url: Any,
+        status_code: int | None = None,
+        method: Any = None,
+        response_headers: Any = None,
+        response_body: Any = None,
+        elapsed_ms: int | None = None,
+    ) -> None:
         if not self.applies_to(url):
             return
+        # The scanner tools that use httpx or aiohttp rather than curl already funnel
+        # through this wrapper, so the archive picks them up here instead of each tool
+        # growing its own recorder.
+        try:
+            from . import http_archive_capture as _capture
+        except ImportError:  # pragma: no cover - flat-module fallback
+            try:
+                import http_archive_capture as _capture
+            except ImportError:
+                _capture = None
+        if _capture is not None and _capture.capture_active():
+            try:
+                _capture.record_client_call(
+                    method=method or "GET", url=url, status_code=status_code,
+                    response_headers=response_headers, response_body=response_body,
+                    elapsed_ms=elapsed_ms, source=str(phase),
+                )
+            except Exception:  # pragma: no cover - capture must not fail a probe
+                pass
         with self._lock:
             self.completed += 1
             self._increment_adapter(phase, "completed")
@@ -442,7 +471,13 @@ def install_async_client_metering() -> dict[str, bool]:
                     raise
                 if metered:
                     meter.record_completion(
-                        phase="httpx", url=url, status_code=getattr(response, "status_code", None)
+                        phase="httpx", url=url,
+                        status_code=getattr(response, "status_code", None),
+                        method=method,
+                        response_headers={
+                            str(name).lower(): str(value)
+                            for name, value in getattr(response, "headers", {}).items()
+                        },
                     )
                 return response
 

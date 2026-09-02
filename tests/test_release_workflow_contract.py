@@ -41,6 +41,8 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert "INSTALLED_STACK_SMOKE_E2E" in text
     assert "INSTALLED_STACK_SMOKE_DAST_RECALL_JSON" in text
     assert "INSTALLED_STACK_SMOKE_FAULT_DIR" in text
+    assert "INSTALLED_STACK_SMOKE_E2E_EXCLUDE_AREAS" not in text
+    assert "--exclude-program model_intake" not in text
     assert text.count("make installed-stack-smoke") == 1
     assert text.count("scripts/upgrade_smoke.sh") == 1
     assert "CANDIDATE_IMAGE_DIGEST" in text
@@ -73,6 +75,8 @@ def test_release_promotion_reuses_candidate_digests_without_physical_gate():
     assert "Reverify signed candidate provenance" in text
     assert 'shakerscan-release-candidate/v2' in text
     assert '.certification.status == "pass"' in text
+    assert "scripts/validate_promotion_receipt.py --receipt" in text
+    assert '[.certification.checks[] == "pass"]' not in text
 
 
 def test_stable_channel_is_separate_last_step():

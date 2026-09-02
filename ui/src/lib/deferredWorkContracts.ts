@@ -9,6 +9,7 @@ export interface AsmScheduleForm {
   endpointFilter: AsmEndpointFilter
   family: AsmFamily
   exploitDepth: boolean
+  approvalReceiptId: string
 }
 
 export function buildAsmScheduleOptions(form: AsmScheduleForm): Record<string, unknown> {
@@ -19,6 +20,7 @@ export function buildAsmScheduleOptions(form: AsmScheduleForm): Record<string, u
   if (form.endpointFilter !== 'all') options.endpoint_filter = form.endpointFilter
   if (form.family !== 'all') options.check_family = form.family
   if (form.exploitDepth) options.exploit_depth = true
+  if (form.approvalReceiptId.trim()) options.approval_receipt_id = form.approvalReceiptId.trim()
   return options
 }
 
@@ -37,6 +39,7 @@ export function readAsmScheduleOptions(options: Record<string, unknown>): AsmSch
     endpointFilter: String(options.endpoint_filter || options.asm_endpoint_filter || 'all') === 'api' ? 'api' : 'all',
     family,
     exploitDepth: options.exploit_depth === true || options.exploit_depth === 'true',
+    approvalReceiptId: String(options.approval_receipt_id || ''),
   }
 }
 

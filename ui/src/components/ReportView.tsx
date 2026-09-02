@@ -21,6 +21,7 @@ import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
+import InfrastructureIntelligenceSection from '@/components/report/InfrastructureIntelligenceSection'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -540,6 +541,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const scanData = scan.result || scan.results || {}
   const input = scanData.input || {}
   const dns = scanData.dns || {}
+  const infrastructure = scanData.infrastructure || {}
   const tls = scanData.tls || {}
   const http = scanData.http || {}
   const discovery = scanData.discovery || {}
@@ -1058,7 +1060,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 Provisional posture
               </div>
             )}
-            {scorePresentation.status === 'unavailable' ? (
+            {scorePresentation.status === 'not_examined' ? (
+              <div className="text-sm font-medium text-amber-200">Application not examined</div>
+            ) : scorePresentation.status === 'unavailable' ? (
               <div className="text-sm font-medium text-amber-200">Posture score unavailable</div>
             ) : (
               <>
@@ -2334,6 +2338,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       )}
+
+      {/* Informational target infrastructure */}
+      <InfrastructureIntelligenceSection infrastructure={infrastructure} />
 
       {/* DNS */}
       {dns && Object.keys(dns).length > 0 && (

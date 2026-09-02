@@ -1,17 +1,21 @@
 'use client'
 
-import { useEffect, useState, Suspense, useRef } from 'react'
+import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
+import HttpArchiveExport from '@/components/HttpArchiveExport'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
+import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -91,13 +95,35 @@ function CoverageMetric({ label, value, accent = 'text-white' }: { label: string
   )
 }
 
+type ScanLogFilter = 'key' | 'all' | 'warnings' | 'findings'
+
+function scanLogTone(kind: string): string {
+  switch (kind) {
+    case 'error': return 'border-red-500/30 bg-red-500/5 text-red-100'
+    case 'warning': return 'border-amber-500/30 bg-amber-500/5 text-amber-100'
+    case 'finding': return 'border-fuchsia-500/30 bg-fuchsia-500/5 text-fuchsia-100'
+    case 'milestone': return 'border-blue-500/25 bg-blue-500/5 text-blue-100'
+    default: return 'border-transparent text-gray-300'
+  }
+}
+
+function scanLogBadgeTone(kind: string): string {
+  switch (kind) {
+    case 'error': return 'bg-red-500/15 text-red-300'
+    case 'warning': return 'bg-amber-500/15 text-amber-300'
+    case 'finding': return 'bg-fuchsia-500/15 text-fuchsia-300'
+    case 'milestone': return 'bg-blue-500/15 text-blue-300'
+    default: return 'bg-gray-800 text-gray-400'
+  }
+}
+
 function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; buildVersion?: string | null; buildFingerprint?: string | null }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
     .map((severity) => [severity, severityCounts[severity]] as const)
     .filter(([, count]) => count > 0)
-  const totalCounted = severityEntries.reduce((sum, [, count]) => sum + count, 0)
   const scorePresentation = deviceScorePresentation(scan)
+  const assurance = scanAssurance(scan)
   const hasGrade = Boolean(scorePresentation.grade)
   const hasScore = typeof scorePresentation.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
@@ -112,92 +138,187 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
     (scanFingerprint && buildFingerprint && scanFingerprint !== buildFingerprint) ||
     (!scanFingerprint && scanVersion && buildVersion && scanVersion !== buildVersion)
   )
+  const resultPresentation = scanResultPresentation(scan, assurance)
+  const scoreProjection = scan?.result?.result?.score_projection
+  const weakAssurance = ['none', 'weak', 'limited'].includes(String(assurance?.band || 'none'))
+  const observedRiskColor = weakAssurance ? 'text-gray-200' : gradeTextColor(scorePresentation.grade)
+  const conclusionTone = resultPresentation.tone === 'danger'
+    ? 'border-red-500/30 bg-red-500/10'
+    : resultPresentation.tone === 'warning'
+      ? 'border-amber-500/30 bg-amber-500/10'
+      : 'border-blue-500/25 bg-blue-500/10'
+  const scopeSummary = [
+    resultPresentation.budgetProfile !== 'unknown' ? `${resultPresentation.budgetProfile} budget` : null,
+    resultPresentation.activeTesting ? 'active testing' : 'passive checks',
+    resultPresentation.authenticated ? 'authenticated' : 'anonymous',
+  ].filter(Boolean).join(' · ')
 
   return (
-    <Card className="p-6 mb-6">
-      <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
-        {(hasGrade || hasScore || scorePresentation.status === 'unavailable') && (
-          <div>
-            {scorePresentation.status === 'provisional' && (
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-300">
-                Provisional posture
-              </p>
-            )}
-            {scorePresentation.status === 'unavailable' ? (
-              <p className="text-sm font-medium text-amber-200">Posture score unavailable</p>
-            ) : (
-              <div className="flex items-baseline gap-3">
-                {hasGrade && (
-                  <span className={`text-5xl font-bold ${gradeTextColor(scorePresentation.grade)}`}>
-                    {scorePresentation.grade}
-                  </span>
-                )}
-                {hasScore && (
-                  <span className="text-lg text-gray-400">{scorePresentation.score}/100</span>
-                )}
-              </div>
-            )}
-            {scorePresentation.note && (
-              <p className="mt-1 max-w-md text-xs text-amber-200/80">{scorePresentation.note}</p>
-            )}
+    <Card className="mb-6 overflow-hidden p-0">
+      <section className={`border-b p-6 ${conclusionTone}`} aria-labelledby="scan-conclusion-heading">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-3xl">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Run conclusion</p>
+            <h2 id="scan-conclusion-heading" className="mt-2 text-2xl font-semibold text-white">
+              {resultPresentation.headline}
+            </h2>
+            <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
+            <p className={`mt-3 text-sm font-medium ${assuranceClass(assurance?.band)}`}>
+              {resultPresentation.confidence}
+            </p>
           </div>
-        )}
-        {severityEntries.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {severityEntries.map(([severity, count]) => (
+          <div className="text-right text-xs text-gray-500">
+            {scanTypeLabel && <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>}
+            {duration && <p className="mt-0.5">Completed in {duration}</p>}
+            <p className="mt-0.5 capitalize">{scopeSummary}</p>
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-px bg-gray-800 md:grid-cols-3">
+        <div className="bg-gray-950/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Observed risk from this run</p>
+          {scorePresentation.status === 'not_examined' ? (
+            <p className="mt-3 text-lg font-semibold text-amber-200">Not examined</p>
+          ) : scorePresentation.status === 'unavailable' ? (
+            <p className="mt-3 text-sm font-medium text-amber-200">Risk score unavailable</p>
+          ) : (
+            <div className="mt-2 flex items-baseline gap-3">
+              {hasGrade && (
+                <span className={`text-4xl font-bold ${observedRiskColor}`}>
+                  {scorePresentation.grade}
+                </span>
+              )}
+              {hasScore && <span className="text-lg text-gray-300">{scorePresentation.score}/100</span>}
+            </div>
+          )}
+          <p className="mt-2 text-xs leading-5 text-gray-500">
+            {resultPresentation.notExamined
+              ? 'No application response was observed, so this run cannot publish a clean risk grade.'
+              : resultPresentation.postureIncluded
+              ? 'Finding evidence and deterministic application posture observed by this run.'
+              : 'Finding evidence observed by this run; this historical scoring policy may exclude posture deductions.'}
+            {' '}This is not an overall safety or release score.
+          </p>
+          {resultPresentation.scorePolicy && (
+            <p className="mt-2 text-xs text-gray-600">
+              Scored by <span className="font-mono text-gray-500">{resultPresentation.scorePolicy}</span>.
+              {scoreProjection?.reason === 'historical_policy_preserved' && ' Historical output is preserved; it was not silently rescored.'}
+            </p>
+          )}
+          {scorePresentation.note && (
+            <p className="mt-2 text-xs text-amber-200/80">{scorePresentation.note}</p>
+          )}
+        </div>
+
+        <div className="bg-gray-950/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Examination strength</p>
+          {assurance ? (
+            <>
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className={`text-4xl font-bold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
+                <span className="text-sm text-gray-300">/100 · {assurance.label}</span>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                How much planned work, candidate testing, identity coverage, and verification actually ran.
+              </p>
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-gray-500">Coverage score unavailable</p>
+          )}
+        </div>
+
+        <div className="bg-gray-950/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Evidence observed</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {severityEntries.length > 0 ? severityEntries.map(([severity, count]) => (
               <Link
                 key={severity}
                 href={`/findings?scan_id=${scan.id}&severity=${severity}`}
-                title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} for this scan`}
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded uppercase cursor-pointer transition hover:opacity-90 hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
+                title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} from this scan`}
+                className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
               >
                 {count} {severity}
               </Link>
-            ))}
+            )) : (
+              <span className="text-sm text-gray-400">No findings reported</span>
+            )}
           </div>
-        ) : totalCounted === 0 && (scan.findings_count || 0) === 0 ? (
-          <span className="text-sm text-gray-500">No findings</span>
-        ) : null}
-        <div className="ml-auto text-right">
-          {scanTypeLabel && (
-            <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>
-          )}
-          {duration && (
-            <p className="text-xs text-gray-500 mt-0.5">Completed in {duration}</p>
-          )}
+          <p className="mt-3 text-xs leading-5 text-gray-500">
+            {resultPresentation.confirmedCount > 0
+              ? `${resultPresentation.confirmedCount} material finding${resultPresentation.confirmedCount === 1 ? ' carries' : 's carry'} deterministic proof.`
+              : resultPresentation.candidateCount > 0
+                ? `${resultPresentation.candidateCount} material candidate${resultPresentation.candidateCount === 1 ? '' : 's'} still need verification.`
+                : 'No confirmed medium, high, or critical finding was produced by this run.'}
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3 border-t border-gray-800 p-5">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <CoverageMetric label="Budget" value={resultPresentation.budgetProfile} />
+          <CoverageMetric label="Testing" value={resultPresentation.activeTesting ? 'Active allowed' : 'Passive only'} />
+          <CoverageMetric label="Identity coverage" value={resultPresentation.authenticated ? 'Authenticated' : 'Anonymous only'} />
+          <CoverageMetric label="HTTP requests used" value={resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()} />
+        </div>
+        {resultPresentation.resolvedFamilies.length > 0 && (
+          <p className="text-xs text-gray-500">
+            Check families run: {resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}
+          </p>
+        )}
+        {resultPresentation.missingHeaders.length > 0 && (
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">Baseline posture needs attention</p>
+            <p className="mt-1 text-xs leading-5 text-amber-100/75">
+              Missing headers: {resultPresentation.missingHeaders.join(', ')}.
+              {resultPresentation.postureIncluded
+                ? ` These deterministic weaknesses reduced the observed-risk score${resultPresentation.posturePenalty !== null ? ` by ${resultPresentation.posturePenalty} points` : ''}.`
+                : ' This historical score predates posture-aware scoring, so these weaknesses are visible but were not deducted from its number.'}
+            </p>
+          </div>
+        )}
+        {resultPresentation.coverageWarnings.length > 0 && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">Requested coverage did not complete</p>
+            <p className="mt-1 text-xs leading-5 text-amber-100/75">
+              {resultPresentation.coverageWarnings.join(' · ')}. Review the execution details before relying on this run.
+            </p>
+          </div>
+        )}
+        {assurance && assurance.gaps.length > 0 && (
+          <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+            <p className="text-xs font-medium text-gray-300">What was not established</p>
+            <ul className="mt-2 grid gap-1 text-xs text-gray-500 sm:grid-cols-2">
+              {assurance.gaps.map((gap: string) => <li key={gap}>• {gap}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 bg-gray-950/70 px-5 py-3 text-xs text-gray-500">
+        <span>Scan ID {scan.id}</span>
+        <div className="text-right">
           {scanVersion && (
-            <p
-              className={`text-xs mt-0.5 font-mono ${versionMismatch ? 'text-red-400 font-semibold' : 'text-gray-500'}`}
-              title={
-                versionMismatch
-                  ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan on the current build for up-to-date detection.`
-                  : `Scanner build ${scanVersion}`
-              }
+            <span
+              className={`font-mono ${versionMismatch ? 'font-semibold text-red-400' : ''}`}
+              title={versionMismatch
+                ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan for current detector behavior.`
+                : `Scanner build ${scanVersion}`}
             >
               {versionMismatch ? '⚠ ' : ''}scanner {scanVersion}
-              {versionMismatch
-                ? (scanVersion === buildVersion && scanFingerprint && buildFingerprint
-                    // Same git label but different source fingerprint: show the
-                    // fingerprints, else the UI prints a confusing "X ≠ X".
-                    ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
-                    : ` ≠ ${buildVersion}`)
-                : ''}
-            </p>
+              {versionMismatch && scanVersion === buildVersion && scanFingerprint && buildFingerprint
+                ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
+                : versionMismatch ? ` ≠ ${buildVersion}` : ''}
+            </span>
           )}
           {(() => {
-            // §2: warn when this scan was submitted against a build-stale fleet —
-            // its results may have come from older detector code.
             const staleAtSubmit = Number((scan?.options as any)?.stale_worker_count_at_submit || 0)
             const fleetAtSubmit = Number((scan?.options as any)?.worker_fleet_size_at_submit || 0)
-            if (staleAtSubmit > 0) {
-              return (
-                <p className="text-xs mt-0.5 font-mono text-amber-400"
-                   title="Some workers were running older code than the current checkout when this scan was submitted; results may be from stale detectors. Restart workers and re-scan.">
-                  ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
-                </p>
-              )
-            }
-            return null
+            return staleAtSubmit > 0 ? (
+              <span className="ml-3 font-mono text-amber-400" title="Some workers were build-stale when this scan was submitted.">
+                ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
+              </span>
+            ) : null
           })()}
         </div>
       </div>
@@ -405,21 +526,16 @@ function ScanFindingContextCard({
       !scanPersistedCurrent.some((current: Finding) => current.id === finding.id)
     )),
   ]
-  const findingKey = (finding: any) => [
-    String(finding?.title || ''),
-    String(finding?.url || ''),
-    String(finding?.cwe || ''),
-  ].join('|')
   const persistedByKey = new Map(
-    persistedCurrent.map((finding: Finding) => [findingKey(finding), finding]),
+    persistedCurrent.map((finding: Finding) => [scanFindingIdentity(finding), finding]),
   )
-  const currentKeys = new Set(rawCurrent.map(findingKey))
+  const currentKeys = new Set(rawCurrent.map(scanFindingIdentity))
   const additionalPersistedCurrent = persistedCurrent.filter(
-    (finding: Finding) => !currentKeys.has(findingKey(finding)),
+    (finding: Finding) => !currentKeys.has(scanFindingIdentity(finding)),
   )
   const current = [
     ...rawCurrent.map((finding: any, index: number) => {
-      const persisted = persistedByKey.get(findingKey(finding))
+      const persisted = persistedByKey.get(scanFindingIdentity(finding))
       return {
         ...finding,
         ...persisted,
@@ -464,7 +580,7 @@ function ScanFindingContextCard({
         </p>
       ) : (
         <ul className="mt-3 divide-y divide-gray-800 rounded-lg border border-gray-800">
-          {current.map((finding: any) => (
+          {current.slice(0, 6).map((finding: any) => (
             <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
               <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
                 {String(finding.severity || 'info')}
@@ -485,6 +601,32 @@ function ScanFindingContextCard({
             </li>
           ))}
         </ul>
+      )}
+      {current.length > 6 && !loading && !error && (
+        <details className="mt-2 rounded-lg border border-gray-800 bg-gray-950/50">
+          <summary className="cursor-pointer px-3 py-2 text-xs text-gray-400 hover:text-gray-200">
+            Show {current.length - 6} more findings observed in this scan
+          </summary>
+          <ul className="divide-y divide-gray-800 border-t border-gray-800">
+            {current.slice(6).map((finding: any) => (
+              <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
+                  {String(finding.severity || 'info')}
+                </span>
+                {finding.id && finding._persisted ? (
+                  <Link href={`/findings/${finding.id}`} className="min-w-0 flex-1 break-words text-gray-200 hover:text-white">
+                    {finding.title || 'Untitled finding'}
+                  </Link>
+                ) : (
+                  <span className="min-w-0 flex-1 break-words text-gray-200">{finding.title || 'Untitled finding'}</span>
+                )}
+                <span className="text-xs text-gray-500">
+                  {finding.proof_state?.replaceAll('_', ' ') || (finding.verified ? 'verified' : finding.suspected ? 'needs verification' : finding.status?.replaceAll('_', ' ') || 'unverified')}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </Card>
   )
@@ -1272,14 +1414,22 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
   )
     .replace(/_/g, ' ')
     .trim()
-  const failureMessage =
+  const rawFailureMessage = String(
     scan?.result?.scan_metadata?.terminated_reason ||
     scan?.error_message ||
     scan?.error ||
     'No specific error was reported.'
+  )
+  // Some older timeout rows appended the only durable diagnostic excerpt to
+  // error_message. Keep it available without overloading the failure headline.
+  const failureParts = rawFailureMessage.split(/\s+Last logs:\s*/i, 2)
+  const failureMessage = failureParts[0]
+    .replace(/^Scan terminated:\s*/i, '')
+    .trim() || 'No specific error was reported.'
+  const legacyLogExcerpt = String(failureParts[1] || '').trim().slice(0, 4000)
   const targetUrl = String(scan?.target_url || scan?.target || '').trim()
-  const looksLikeReachabilityFailure = /dns|resolve|host|connect|timeout|unreachable/i.test(String(failureMessage))
   const isShard = scan?.scan_role === 'shard' && Boolean(scan?.parent_scan_id)
+  const nextStep = scanFailureRecommendation(rawFailureMessage, isShard)
 
   return (
     <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-5 mb-6">
@@ -1295,6 +1445,16 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
               : `This ${isShard ? 'shard' : 'scan'} stopped before it finished.`}
           </p>
           <p className="text-red-200/70 text-sm mt-1">{failureMessage}</p>
+          {legacyLogExcerpt && (
+            <details className="mt-3 rounded-lg border border-red-400/20 bg-black/20 p-3">
+              <summary className="cursor-pointer text-xs font-medium text-red-100/80">
+                Historical failure log excerpt
+              </summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-red-100/70">
+                {legacyLogExcerpt}
+              </pre>
+            </details>
+          )}
           <ul className="mt-3 space-y-1 text-sm text-red-200/80 list-disc list-inside">
             {hasPartialResults ? (
               <li>Partial baseline / discovery data was recovered and is shown below, but the scan is incomplete.</li>
@@ -1306,11 +1466,7 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
           <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
             <p className="text-sm font-medium text-amber-200">Recommended next step</p>
             <p className="mt-1 text-sm text-amber-100/80">
-              {isShard
-                ? 'Open the parent Scan to review sibling status and the authoritative final result.'
-                : looksLikeReachabilityFailure
-                  ? 'Confirm the target address is correct and reachable from the scanner, then try again.'
-                  : 'Review the failure above, then retry this target when the underlying problem is resolved.'}
+              {nextStep}
             </p>
             {isShard ? (
               <Link
@@ -1377,6 +1533,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
   const completed = Number(matrix.completed || 0)
   const total = Number(matrix.total || Math.max(0, actions.length - 1))
   const scanTerminal = ['completed', 'failed', 'cancelled'].includes(String(scan?.status || ''))
+  const hasFinalGrade = scan?.status === 'completed' && Boolean(scan?.grade || scan?.result?.grade)
   const hasGap = Number(matrix.partial || 0) + Number(matrix.blocked || 0) + Number(matrix.failed || 0) + Number(matrix.skipped || 0) + Number(matrix.pending || 0) > 0
   const apiRecordUrl = `${API_URL}/scans/${scan.id}/actions`
 
@@ -1425,9 +1582,13 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
 
       {reliability.reliable === false && (
         <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/10 p-3">
-          <div className="text-sm font-medium text-amber-200">Grade is provisional</div>
+          <div className="text-sm font-medium text-amber-200">
+            {hasFinalGrade ? 'Observed posture is provisional' : 'Execution coverage is incomplete'}
+          </div>
           <p className="mt-1 text-xs text-amber-100/80">
-            {String(reliability.warning || 'Required coverage did not complete cleanly.')}
+            {hasFinalGrade
+              ? String(reliability.warning || 'Required coverage did not complete cleanly.')
+              : 'No score or grade was produced. The coverage record below explains what ran and what remained unresolved.'}
           </p>
           {Array.isArray(reliability.reason_labels) && reliability.reason_labels.length > 0 && (
             <p className="mt-1 text-xs text-amber-200/70">{reliability.reason_labels.join(' · ')}</p>
@@ -1520,6 +1681,10 @@ function ScanDetailContent() {
   const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
   const [logsError, setLogsError] = useState<string | null>(null)
+  const [logFilter, setLogFilter] = useState<ScanLogFilter>('key')
+  const [logSearch, setLogSearch] = useState('')
+  const [autoFollowLogs, setAutoFollowLogs] = useState(true)
+  const [logsUpdatedAt, setLogsUpdatedAt] = useState<Date | null>(null)
   const [buildVersion, setBuildVersion] = useState<string | null>(null)
   const [buildFingerprint, setBuildFingerprint] = useState<string | null>(null)
   const [deploymentDecision, setDeploymentDecision] = useState<DeploymentDecision | null>(null)
@@ -1590,7 +1755,7 @@ function ScanDetailContent() {
           refreshDeploymentDecision()
         }
         try {
-          const logData = await getScanLogs(scanId, 200)
+          const logData = await getScanLogs(scanId, 500)
           let nextLogs = logData?.lines || []
           const isDeviceScan = ['device_posture', 'device_probe'].includes(
             String(data?.run_kind || data?.scan_type),
@@ -1604,6 +1769,7 @@ function ScanDetailContent() {
             }
           }
           setLogs(nextLogs)
+          setLogsUpdatedAt(new Date())
           setLogsError(null)
         } catch {
           setLogsError('Failed to load logs')
@@ -1622,7 +1788,7 @@ function ScanDetailContent() {
       if (statusRef.current === 'running' || statusRef.current === 'pending') {
         fetchScanAndLogs()
       }
-    }, 5000)
+    }, 3000)
     return () => clearInterval(interval)
   }, [scanId, retryNonce])
 
@@ -1636,35 +1802,144 @@ function ScanDetailContent() {
   }, [])
 
   useEffect(() => {
-    if (logsRef.current) {
+    if (autoFollowLogs && logsRef.current) {
       logsRef.current.scrollTop = logsRef.current.scrollHeight
     }
-  }, [logs])
+  }, [logs, autoFollowLogs])
+
+  const parsedLogs = useMemo(() => logs.map(scanLogEntry), [logs])
+  const filteredLogs = useMemo(() => {
+    const query = logSearch.trim().toLowerCase()
+    return parsedLogs.filter((entry: any) => {
+      const filterMatch = (
+        logFilter === 'all'
+        || (logFilter === 'key' && entry.kind !== 'detail')
+        || (logFilter === 'warnings' && ['warning', 'error'].includes(entry.kind))
+        || (logFilter === 'findings' && entry.kind === 'finding')
+      )
+      return filterMatch && (!query || entry.raw.toLowerCase().includes(query))
+    })
+  }, [parsedLogs, logFilter, logSearch])
 
   const renderScanActivityLogs = (live: boolean) => {
     const isModelIntake = scan?.run_kind === 'model_intake' || scan?.scan_type === 'model_intake'
-    const title = isModelIntake ? 'Model Intake Activity' : live ? 'Live Logs' : 'Scan Logs'
+    const title = isModelIntake ? 'Model Intake activity' : live ? 'Live scan activity' : 'Scan activity'
+    const filterOptions: Array<{ value: ScanLogFilter; label: string }> = [
+      { value: 'key', label: 'Key activity' },
+      { value: 'all', label: 'All logs' },
+      { value: 'warnings', label: 'Warnings & errors' },
+      { value: 'findings', label: 'Finding signals' },
+    ]
+    const copyVisibleLogs = async () => {
+      try {
+        await navigator.clipboard.writeText(filteredLogs.map((entry: any) => entry.raw).join('\n'))
+      } catch {
+        setLogsError('Could not copy logs to the clipboard.')
+      }
+    }
     return (
-      <Card className="p-4">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-semibold text-gray-400">{title}</h2>
-          <span className="text-xs text-gray-500">{logs.length} lines</span>
+      <Card className="overflow-hidden p-0">
+        <div className="border-b border-gray-800 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                {live && <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" aria-hidden="true" />}
+                <h2 className="text-sm font-semibold text-gray-200">{title}</h2>
+                {live && <span className="sr-only">Updating automatically</span>}
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {live
+                  ? `Updates every 3 seconds${logsUpdatedAt ? ` · last checked ${logsUpdatedAt.toLocaleTimeString()}` : ''}`
+                  : 'A durable record of the worker activity captured for this scan.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <span>{filteredLogs.length} shown · {logs.length} total</span>
+              <button
+                type="button"
+                onClick={copyVisibleLogs}
+                disabled={filteredLogs.length === 0}
+                className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Copy shown
+              </button>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap gap-1" aria-label="Log filters">
+              {filterOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={logFilter === option.value}
+                  onClick={() => setLogFilter(option.value)}
+                  className={`rounded px-2.5 py-1 text-xs transition ${
+                    logFilter === option.value
+                      ? 'bg-blue-500/20 text-blue-200 ring-1 ring-blue-500/40'
+                      : 'bg-gray-900 text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <label className="min-w-52 flex-1">
+              <span className="sr-only">Search scan logs</span>
+              <input
+                type="search"
+                value={logSearch}
+                onChange={(event) => setLogSearch(event.target.value)}
+                placeholder="Search logs"
+                className="w-full rounded border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 focus:border-blue-500 focus:outline-none"
+              />
+            </label>
+            {live && (
+              <button
+                type="button"
+                aria-pressed={autoFollowLogs}
+                onClick={() => setAutoFollowLogs((current) => !current)}
+                className={`rounded px-2.5 py-1 text-xs ${
+                  autoFollowLogs ? 'bg-emerald-500/15 text-emerald-300' : 'bg-gray-900 text-gray-400'
+                }`}
+              >
+                {autoFollowLogs ? 'Following latest' : 'Auto-follow paused'}
+              </button>
+            )}
+          </div>
         </div>
-        <div ref={logsRef} className="max-h-64 overflow-y-auto bg-black/30 rounded p-3 font-mono text-xs text-gray-300">
-          {logs.length > 0 ? (
-            logs.map((line, idx) => (
-              <div key={idx} className="whitespace-pre-wrap break-words">
-                {line}
+        <div
+          ref={logsRef}
+          aria-live={live ? 'polite' : 'off'}
+          className="max-h-[30rem] space-y-1 overflow-y-auto bg-black/25 p-3 font-mono text-xs"
+        >
+          {filteredLogs.length > 0 ? (
+            filteredLogs.map((entry: any, idx: number) => (
+              <div key={`${idx}-${entry.raw}`} className={`rounded border px-3 py-2 ${scanLogTone(entry.kind)}`}>
+                <div className="flex flex-wrap items-start gap-2">
+                  <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${scanLogBadgeTone(entry.kind)}`}>
+                    {entry.label}
+                  </span>
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words leading-5">{entry.message}</span>
+                  {entry.meta && <span className="shrink-0 text-[10px] text-gray-500">{entry.meta}</span>}
+                </div>
               </div>
             ))
+          ) : logs.length > 0 ? (
+            <div className="px-2 py-8 text-center text-gray-500">
+              No log entries match the current filter.
+            </div>
           ) : (
-            <div className="text-gray-500">
-              {isModelIntake ? 'No Model Intake activity has been recorded yet.' : 'No logs yet.'}
+            <div className="px-2 py-8 text-center text-gray-500">
+              {isModelIntake
+                ? 'No Model Intake activity has been recorded yet.'
+                : live
+                  ? 'Waiting for the worker’s first activity update…'
+                  : 'No scan activity was recorded.'}
             </div>
           )}
         </div>
         {logsError && (
-          <p className="text-red-400 text-xs mt-2">{logsError}</p>
+          <p role="alert" className="border-t border-red-500/20 bg-red-500/5 px-4 py-2 text-xs text-red-300">{logsError}</p>
         )}
       </Card>
     )
@@ -1704,41 +1979,87 @@ function ScanDetailContent() {
 
   // Show progress bar while running
   if (scan.status === 'running' || scan.status === 'pending') {
+    const phase = scanPhasePresentation(scan)
+    const startedAt = scan.started_at || scan.created_at
+    const elapsedSeconds = startedAt
+      ? Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
+      : null
+    const executionPlan = scan?.options?.scan_execution_plan || {}
+    const policy = executionPlan.policy || scan?.options?.scan_policy || {}
+    const budgetProfile = executionPlan.budget_profile || scan?.options?.budget_profile || 'balanced'
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <Link href={backUrl} className="text-gray-400 hover:text-white">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <h1 className="break-words text-2xl font-bold text-white">{boundedDisplayText(scan.target_url, 200)}</h1>
-        </div>
-        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-6">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-blue-400 font-medium text-lg">
-              {scan.status === 'pending'
-                ? 'Waiting to start...'
-                : `Scanning: ${(scan.current_phase || 'Processing').replace(/_/g, ' ')}`}
-            </span>
-            <span className="text-blue-400 text-xl font-bold">{scan.progress || 0}%</span>
-          </div>
-          <div className="w-full bg-blue-500/20 rounded-full h-3">
+        <PageHeader title={boundedDisplayText(scan.target_url, 200)} backHref={backUrl} backLabel="Back to scans" />
+        <section aria-labelledby="scan-progress-heading" className="overflow-hidden rounded-xl border border-blue-500/25 bg-gradient-to-br from-blue-500/10 to-gray-950">
+          <div className="p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="mb-2 flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${scan.status === 'running' ? 'animate-pulse bg-emerald-400' : 'bg-amber-400'}`} />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-blue-300">
+                    {scan.status === 'running' ? 'Scan running' : 'Queued'}
+                  </span>
+                </div>
+                <h1 id="scan-progress-heading" className="text-xl font-semibold text-white">{phase.label}</h1>
+                <p className="mt-1 max-w-2xl text-sm text-gray-400">{phase.description}</p>
+              </div>
+              <div className="text-right">
+                <div className="text-3xl font-bold tabular-nums text-blue-300">{phase.progress}%</div>
+                <div className="mt-1 text-xs text-gray-500">Updates automatically</div>
+              </div>
+            </div>
             <div
-              className="bg-blue-500 h-3 rounded-full transition-all duration-500"
-              style={{ width: `${scan.progress || 0}%` }}
-            ></div>
+              role="progressbar"
+              aria-label="Scan progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={phase.progress}
+              className="mt-5 h-3 overflow-hidden rounded-full bg-blue-500/15"
+            >
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
+                style={{ width: `${phase.progress}%` }}
+              />
+            </div>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Current phase</div>
+                <div className="mt-1 truncate text-sm font-medium capitalize text-gray-200" title={String(scan.current_phase || '')}>
+                  {String(scan.current_phase || 'Waiting').replaceAll('_', ' ')}
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Elapsed</div>
+                <div className="mt-1 text-sm font-medium text-gray-200">
+                  {elapsedSeconds === null ? 'Not started' : formatDuration(elapsedSeconds)}
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Scan budget</div>
+                <div className="mt-1 text-sm font-medium capitalize text-gray-200">{String(budgetProfile)}</div>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/45 p-3">
+                <div className="text-xs text-gray-500">Testing permission</div>
+                <div className="mt-1 text-sm font-medium text-gray-200">
+                  {policy.active_testing ? 'Active testing allowed' : 'Passive checks only'}
+                </div>
+              </div>
+            </div>
           </div>
-          <p className="text-gray-400 text-sm mt-4">
-            The scan is in progress. This page will automatically update when complete.
-          </p>
-        </div>
+          <div className="border-t border-blue-500/15 bg-blue-500/5 px-6 py-3 text-xs text-gray-400">
+            You can leave this page. The scan continues in the worker queue and the complete activity record is retained.
+          </div>
+        </section>
         <ShardContextBanner scan={scan} />
         <ParallelShardRollup scan={scan} />
         <ParentCoverageRollup scan={scan} />
-        <ExecutionPlanCard scan={scan} />
-
         {renderScanActivityLogs(true)}
+        <details className="rounded-lg border border-gray-800 bg-gray-900/50">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+            Scan plan and worker details
+          </summary>
+          <div className="px-4 pb-4"><ExecutionPlanCard scan={scan} /></div>
+        </details>
       </div>
     )
   }
@@ -1746,7 +2067,7 @@ function ScanDetailContent() {
   // Show error for failed scans - but show partial results if available
   if (scan.status === 'failed') {
     const hasPartialResults = scan.result && (
-      scan.result.dns || scan.result.tls || scan.result.http ||
+      scan.result.infrastructure || scan.result.dns || scan.result.tls || scan.result.http ||
       (scan.result.findings && scan.result.findings.length > 0)
     )
     const isPartial = scan.result?.scan_metadata?.partial === true
@@ -1834,23 +2155,40 @@ function ScanDetailContent() {
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       <ShardContextBanner scan={scan} />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
-      <ParallelShardRollup scan={scan} />
-      <ParentCoverageRollup scan={scan} />
-      <ExecutionPlanCard scan={scan} />
-      {renderStoredScanLogs()}
       <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
-      <AiGateCampaignReviewCard scan={scan} />
       <DeploymentDecisionCard
         decision={deploymentDecision}
         persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
         loading={deploymentDecisionLoading}
         onRefresh={refreshDeploymentDecision}
       />
-      <ReportView
-        scan={scan}
-        isAuthenticated={true}
-        enableRemediationTracking={true}
-      />
+      <HttpArchiveExport ownerKind="scan" ownerId={scan.id} />
+      <AiGateCampaignReviewCard scan={scan} />
+
+      <details className="mb-4 rounded-lg border border-gray-800 bg-gray-900/50">
+        <summary className="cursor-pointer px-4 py-3 font-medium text-gray-200 hover:text-white">
+          Full technical report and finding evidence
+        </summary>
+        <div className="px-4 pb-4">
+          <ReportView
+            scan={scan}
+            isAuthenticated={true}
+            enableRemediationTracking={true}
+          />
+        </div>
+      </details>
+
+      <details className="rounded-lg border border-gray-800 bg-gray-900/50">
+        <summary className="cursor-pointer px-4 py-3 font-medium text-gray-200 hover:text-white">
+          Coverage, execution plan, and logs
+        </summary>
+        <div className="px-4 pb-4">
+          <ParallelShardRollup scan={scan} />
+          <ParentCoverageRollup scan={scan} />
+          <ExecutionPlanCard scan={scan} />
+          {renderStoredScanLogs()}
+        </div>
+      </details>
     </div>
   )
 }

@@ -24,6 +24,7 @@ try:
         parse_credential_secret,
         public_credential_configuration,
     )
+    from runtime.capability_registry import CAPABILITY_REGISTRY
 except ModuleNotFoundError:
     from api.runtime.credential_store import (
         CredentialProfileMetadata,
@@ -38,6 +39,7 @@ except ModuleNotFoundError:
         parse_credential_secret,
         public_credential_configuration,
     )
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 try:
     from secret_store import SecretStoreUnavailable, encrypt_secret, encryption_enabled
@@ -47,6 +49,33 @@ except ModuleNotFoundError:
 
 router = APIRouter(prefix="/credential-profiles", tags=["credentials"])
 _store = PostgresCredentialProfileStore()
+_approval_validator: Any = None
+
+
+def configure_credential_api(*, approval_validator: Any) -> None:
+    global _approval_validator
+    _approval_validator = approval_validator
+
+
+async def _require_active_capability_approval(
+    conn: Any,
+    *,
+    approval_receipt_id: str | None,
+    target_id: uuid.UUID,
+) -> None:
+    if _approval_validator is None:
+        raise HTTPException(status_code=503, detail="credential approval validation is unavailable")
+    await _approval_validator(
+        conn,
+        approval_receipt_id,
+        target_id=target_id,
+        action_name="credential_profile.active_capabilities",
+        command="credential_profile.active_capabilities",
+        risk_tier="credential",
+        always_require_receipt=True,
+        require_target_binding=True,
+        require_expiry=True,
+    )
 
 
 def public_credential_validation_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -98,6 +127,8 @@ class CredentialProfileCreate(BaseModel):
     parameter_name: str | None = Field(default=None, max_length=200)
     expires_at: datetime | None = None
     allowed_capabilities: list[str] = Field(default_factory=list, max_length=128)
+    allow_active_capabilities: bool = False
+    approval_receipt_id: str | None = None
     created_by: str = Field(default="api", max_length=120)
 
 
@@ -112,6 +143,8 @@ class CredentialProfilePatch(BaseModel):
     clear_expiry: bool = False
     is_active: bool | None = None
     allowed_capabilities: list[str] | None = Field(default=None, max_length=128)
+    allow_active_capabilities: bool = False
+    approval_receipt_id: str | None = None
 
 
 class CredentialProfileRotate(BaseModel):
@@ -140,6 +173,107 @@ def _custom_headers(value: Mapping[str, SecretStr] | None) -> dict[str, str] | N
     if value is None:
         return None
     return {str(name): secret.get_secret_value() for name, secret in value.items()}
+
+
+def _safe_credential_capabilities(
+    *, target_kind: str, auth_kind: str,
+) -> tuple[str, ...]:
+    if auth_kind in {"ssh_password", "ssh_private_key", "ssh_private_key_with_passphrase"}:
+        # SSH capabilities all require explicit active authority or a separate
+        # immutable-plan confirmation. A blank SSH allowlist therefore grants none.
+        return ()
+    if auth_kind == "query_parameter":
+        return ("collections.replay_safe",)
+    if auth_kind in {"form_login", "oauth_client_credentials", "oauth_password"}:
+        return (
+            "auth.session.establish",
+            "auth.session.refresh",
+            "auth.session.revoke",
+            "http.request",
+        )
+    return ("http.request",)
+
+
+def _credential_capabilities(
+    values: list[str] | tuple[str, ...],
+    *,
+    target_kind: str,
+    auth_kind: str,
+    allow_active: bool,
+) -> list[str]:
+    requested = list(dict.fromkeys(
+        str(value or "").strip().lower() for value in values if str(value or "").strip()
+    ))
+    if not requested:
+        requested = list(_safe_credential_capabilities(
+            target_kind=target_kind, auth_kind=auth_kind,
+        ))
+    if not requested:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "allowed_capabilities must contain at least one capability when "
+                "this credential kind has no safe default"
+            ),
+        )
+    validated: list[str] = []
+    for name in requested:
+        try:
+            spec = CAPABILITY_REGISTRY.require(name)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"allowed_capabilities contains unknown capability: {name}",
+            ) from exc
+        if target_kind not in spec.target_kinds:
+            raise HTTPException(
+                status_code=422,
+                detail=f"capability {name} does not support target kind {target_kind}",
+            )
+        requires_active_elevation = (
+            spec.risk_tier in {"active", "mutation"}
+            or spec.required_approval == "active_testing"
+        )
+        if requires_active_elevation and not allow_active:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"capability {name} requires explicit active-capability elevation"
+                ),
+            )
+        validated.append(spec.name)
+    return validated
+
+
+@router.get("/capabilities")
+async def credential_capability_catalog(
+    target_kind: Literal["web", "api", "network", "device"],
+    auth_kind: CredentialAuthKind,
+):
+    defaults = set(_safe_credential_capabilities(
+        target_kind=target_kind, auth_kind=auth_kind,
+    ))
+    capabilities = []
+    for spec in CAPABILITY_REGISTRY.list(target_kind=target_kind):
+        if not spec.placement_requirements.get("credentials_resolved_server_side") and not (
+            auth_kind.startswith("ssh_") and spec.name.startswith("device.ssh.")
+        ):
+            continue
+        capabilities.append({
+            "name": spec.name,
+            "description": spec.description,
+            "risk_tier": spec.risk_tier,
+            "requires_active_approval": (
+                spec.risk_tier in {"active", "mutation"}
+                or spec.required_approval == "active_testing"
+            ),
+            "default": spec.name in defaults,
+        })
+    return {
+        "blank_semantics": "safe_server_defaults",
+        "safe_defaults": sorted(defaults),
+        "capabilities": capabilities,
+    }
 
 
 def _material(auth_kind: str, value: Any) -> tuple[str, dict[str, Any]]:
@@ -411,6 +545,12 @@ async def _sync_legacy_from_generic(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_credential_profile(request: Request, payload: CredentialProfileCreate):
     envelope, configuration = _material(payload.auth_kind, payload)
+    allowed_capabilities = _credential_capabilities(
+        payload.allowed_capabilities,
+        target_kind=payload.target_kind,
+        auth_kind=payload.auth_kind,
+        allow_active=payload.allow_active_capabilities,
+    )
     pool = _pool(request)
     try:
         async with pool.acquire() as conn:
@@ -418,6 +558,12 @@ async def create_credential_profile(request: Request, payload: CredentialProfile
                 await _require_target(
                     conn, target_kind=payload.target_kind, target_id=payload.target_id
                 )
+                if payload.allow_active_capabilities:
+                    await _require_active_capability_approval(
+                        conn,
+                        approval_receipt_id=payload.approval_receipt_id,
+                        target_id=payload.target_id,
+                    )
                 profile = await _store.create_profile(
                     conn,
                     target_kind=payload.target_kind,
@@ -430,7 +576,7 @@ async def create_credential_profile(request: Request, payload: CredentialProfile
                     encrypted_secret=_encrypt(envelope),
                     encrypted_metadata=_private_metadata(created_by=payload.created_by),
                     expires_at=payload.expires_at,
-                    allowed_capabilities=payload.allowed_capabilities,
+                    allowed_capabilities=allowed_capabilities,
                     created_by=payload.created_by,
                     now=datetime.now(timezone.utc),
                 )
@@ -488,6 +634,21 @@ async def patch_credential_profile(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 existing = await _store.get_profile(conn, profile_id=profile_id)
+                if payload.allowed_capabilities is not None and payload.allow_active_capabilities:
+                    await _require_active_capability_approval(
+                        conn,
+                        approval_receipt_id=payload.approval_receipt_id,
+                        target_id=uuid.UUID(existing.target_id),
+                    )
+                allowed_capabilities = (
+                    _credential_capabilities(
+                        payload.allowed_capabilities,
+                        target_kind=existing.target_kind,
+                        auth_kind=existing.auth_kind,
+                        allow_active=payload.allow_active_capabilities,
+                    )
+                    if payload.allowed_capabilities is not None else None
+                )
                 expiry_changed = payload.clear_expiry or "expires_at" in payload.model_fields_set
                 expires_at = None if payload.clear_expiry else (
                     payload.expires_at if "expires_at" in payload.model_fields_set
@@ -511,7 +672,7 @@ async def patch_credential_profile(
                         if payload.is_active is not None
                         else existing.is_active
                     ),
-                    allowed_capabilities=payload.allowed_capabilities,
+                    allowed_capabilities=allowed_capabilities,
                     now=datetime.now(timezone.utc),
                 )
                 await _sync_legacy_from_generic(conn, profile)

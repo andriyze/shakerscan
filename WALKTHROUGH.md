@@ -37,7 +37,7 @@ Try:
 
 ```text
 Check whether ShakerScan is healthy.
-Run a quick scan on https://app.example.test.
+Run a fast passive Scan on https://app.example.test.
 Show active critical and high findings.
 ```
 
@@ -48,16 +48,16 @@ stops instead of waiting for a long-running scan.
 
 1. Open **New Scan**.
 2. Enter a target you own or are explicitly authorized to test.
-3. Choose **Quick** for DNS, TLS, headers, and basic posture.
-4. Keep the default Balanced coverage budget.
+3. Keep the default **Balanced** coverage budget.
+4. Leave active testing off for the first run.
 5. Submit and open the returned Scan Detail page.
 
 Scan Detail shows progress, current phase, logs, partial-result warnings, coverage, findings, proof
 state, deployment decision, and the final report.
 
-Full, Aggressive, and Smart modes send active probes. Confirm authorization with the agent before it
-submits one, and follow the warnings in the UI. Do not use active modes on third-party systems
-without explicit permission.
+The **Thorough** budget increases ceilings but does not grant active authority. Confirm authorization
+with the agent before enabling **Active testing**, and follow the warnings in the UI. Do not use
+active probes on third-party systems without explicit permission.
 
 ## 4. Review and verify findings
 
@@ -98,7 +98,7 @@ the target authorization and expiring approval prompts still apply.
 
 ```text
 Show ShakerScan status and use the correct remote UI URL.
-Run a standard scan on my authorized staging application.
+Run a balanced passive Scan on my authorized staging application.
 Explain the proof and coverage gaps for scan <id>.
 Show active Hunt findings for this target.
 What should Continuous ASM test next?

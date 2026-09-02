@@ -6,7 +6,7 @@ governance, automation, UI, CLI, API, and agent-facing surfaces. The human-reada
 the behavior; the generated inventory in §17 enumerates every current public route, registry command,
 CLI flag, wrapper command, Make target, release gate, runtime configuration key, UI page, skill,
 agent, adapter, scanner module, and durable table.
-**Reconciled:** 2026-08-24
+**Reconciled:** 2026-08-29
 **Audience:** users, operators, AI coding agents, and engineers who need one place that explains the
 product's functionality end to end.
 
@@ -347,10 +347,19 @@ Interactive form/OAuth profiles must additionally authorize `auth.session.establ
 Canonical Scan submission accepts up to two `credential_profile_ids`, bound to the exact Web/API
 target. Profiles hold authorization headers, bearer tokens, API-key headers, cookies, custom
 headers, basic auth, or interactive form/OAuth material in the encrypted credential store.
+Basic auth, form login, and OAuth password profiles accept a username-only or secret-only identity
+when that unusual target flow requires it; at least one half is required. This is storage
+flexibility, not proof that a specific Scan capability can authenticate with incomplete material.
 `primary`/`service` selects the first identity and `secondary` selects the differential identity.
 `scan.execute` is accepted only as a deprecated compatibility scope; new profiles should use
 semantic capability names. Query-parameter credentials are not admitted to generic Scan because
 they require exact request-replay authority.
+
+Hunt can inspect public client artifacts without expanding every HTTP response placed in planner
+context. `artifact.inspect` returns one target-pinned, redacted byte window (16 KiB maximum), while
+`javascript.analyze` privately reads at most 256 KiB and returns bounded routes, source-map
+references, client sink signals, Supabase origins, and decoded JWT metadata. JWT values never leave
+the worker result boundary; a classified token remains evidence, not credential authority.
 
 Worker-private form login, OAuth client credentials, and OAuth password exchange are supported.
 Sealed private session checkpoints preserve resumability without plaintext secrets at rest. Session
@@ -379,13 +388,25 @@ be rebuilt with `scanner.sh report-rebuild` while outbound sockets are disabled;
 result, revision, or observation digests fail closed. File output uses an atomic same-directory
 write, refuses to overwrite by default, and requires an explicit `--force` replacement.
 
-**Scoring & grading** (`scanner/grading.py`): evidence-backed findings are scored on a CVSS-style
-scale with context and exploit-maturity modifiers. AI notes and suspected candidates cannot promote
-a finding to verified. Required failed/blocked/partial actions and active verifiers with candidates
-but zero attempts make the grade provisional. The scan returns:
+**Scoring & grading** (`api/scan/scoring.py`, policy `risk_and_assurance/v8`): the report carries two
+independent axes which must not be blended. `risk_score` (0–100, higher is better) and `risk_grade`
+(A–F) describe the material risk observed by deterministic evidence, including only HTTP posture
+that was actually observed from an application response. `assurance_score` (0–100) and
+`assurance_band` (`none`, `weak`, `limited`, `adequate`, `strong`) describe completed required work,
+selected-family and candidate coverage, verification attempts, authenticated contexts, placement,
+and examination breadth. AI notes and suspected candidates cannot promote a finding to verified.
 
-- `score`: 0–100 (higher is better)
-- `grade`: A / B / C / D / F
+The compatibility `score` and `grade` mirror the risk axis. An unreliable grade gains `*`, while
+`grade_reliable=false`, `coverage.grade_reliability.reasons`, and `assurance_gaps` carry the exact
+qualification. `risk_assessment_state=not_examined` / `application_observed=false` is explicit when
+the run received an HTTP response but did not observe the application (such as a 401 challenge). In
+that state a numerical risk projection is not a clean bill of health. Historical reports retain
+their stored scoring policy; `score_projection.recomputed_for_display` remains false rather than
+silently rewriting old evidence. The scan also returns:
+
+- `risk_score`, `risk_grade`, `risk_assessment_state`, and `grade_reliable`
+- `assurance_score`, `assurance_band`, `assurance_components`, and `assurance_gaps`
+- compatibility `score` / `grade`
 - `findings`: array with severities `critical` / `high` / `medium` / `low` / `info`
 - `result`: the rich object below
 
@@ -635,7 +656,8 @@ The AI side has five capabilities:
    not a target-specific planning engine. Historical Deep Hunt/device-agent URLs redirect to Hunt.
 2. **AI Gate** — probe-driven runtime testing of chat, RAG, agent, MCP, and widget surfaces.
 3. **Model Intake** — static artifact and supply-chain vetting before deployment.
-4. **AI Security Sessions** — interactive browser/session testing with separate user contexts.
+4. **Interactive session compatibility API** — bounded browser/session testing retained for
+   Command Arsenal and the compatibility skill; no standalone 2.0 UI.
 5. **AI-assisted analysis** — correlation, explanation, and retest planning for DAST findings.
 
 **Design principle.** AI may help judge, correlate, and explain, but verified security decisions must
@@ -647,7 +669,7 @@ are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belo
 
 ### AI capability status quick read
 
-These implemented components were last reconciled against code on 2026-08-08. AI Gate remains a
+These implemented components were last reconciled against code on 2026-08-29. AI Gate remains a
 preview product surface for 2.0.0. Model Intake is release-gated for deterministic static review,
 artifact and report generation, and its opt-in AMD64 Linux/KVM Firecracker tier; unsupported formats,
 incomplete evidence, missing required tools, and unavailable runtime qualification fail closed. The
@@ -821,18 +843,20 @@ Result shape: `model_intake.checks.*`, `aibom`, `supply_chain`, `summary` (with 
 `source_type=model_intake`; they are excluded from `source_type=dast`. Sensitive URL params and
 metadata keys are redacted.
 
-### 11.3 Interactive Testing
+### 11.3 Interactive session compatibility API
 
-`api/session_manager.py` plus `/session/*` endpoints provide collaborative, interactive testing in a
-headless browser. You start a session, drive browser actions (`navigate`, `click`, `fill`, `register`,
+`api/session_manager.py` plus `/session/*` endpoints remain available to agents and Command Arsenal
+for bounded manual browser work. There is no standalone 2.0 UI and new adaptive investigation should
+normally use Hunt. A compatibility client can start a session and drive actions (`navigate`, `click`, `fill`, `register`,
 `login`, `submit`, `wait`, `extract`), maintain **separate per-user contexts** (e.g. user1/user2),
 capture screenshots, and test endpoints for cross-user access (`test-endpoint` with `as_user`).
 Endpoint tests that name a user require that user to exist and be authenticated in the session; authz
 replay automation also requires at least two authenticated principals before it can make a
 cross-principal claim.
-Validated findings are saved via `POST /session/{id}/findings` (the compatibility source value is
+Evidence-backed findings can be saved via `POST /session/{id}/findings` (the compatibility source value is
 `ai_session`; the user-facing source label is **Interactive**). This is the engine behind the
-`/ai-security-session` compatibility skill; see
+`/ai-security-session` compatibility skill. These findings remain unverified until deterministic
+proof establishes impact; see
 [`docs/INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md).
 
 ### 11.4 AI-assisted analysis of DAST findings
@@ -864,6 +888,14 @@ The current Codex, Claude, or OpenCode session plans through `POST /hunts`, `/qu
 server-returned capability manifest; ShakerScan alone executes actions. Active or credentialed
 capabilities require a live, target-bound, expiring approval that is revalidated per call.
 
+`GET /hunt/skills` publishes metadata for 31 server-shipped web-testing methodologies. Complete
+methodology bodies remain server-side. A Hunt normally starts with no selection, then
+`POST /hunts/{id}/skills/suggestions` returns at most three compact recommendations from the
+objective, target metadata, and bounded observed-stack signals. The planner loads exactly one at the
+Hunt-specific `/read` endpoint before `/bind`; it can later unbind or record evidenced use. Binding
+validates existing prerequisites but never grants, removes, or resizes authority. Versioned lifecycle
+events are stored outside the planner context and included in the Hunt record export.
+
 The planner can issue read probes on explicit target-bound origins, compare managed principal
 contexts when they are configured, query stored knowledge, record candidates, and invoke bounded
 active capabilities. It cannot issue
@@ -884,6 +916,12 @@ controller remains available for specialized guided verification and is not a Hu
 `/agent/hunt/*` and `/device-agent/*` writes return `410 Gone` by default; reads and cancellation remain
 temporarily available with deprecation headers.
 
+Candidates can be created, corrected with `PATCH`, expired with `DELETE`, and submitted to a
+registered deterministic verifier. A budget-exhausted run still accepts a final debrief without
+erasing its exhaustion reason. `GET /hunts` supports target/search/status/kind/budget filters,
+sorting, and pagination; `GET /hunts/{id}/record` exports the bounded explicit decision trace and
+debrief, never hidden chain-of-thought.
+
 `HuntStartContract` is the sole Hunt policy and budget authority. The server publishes the same
 dimension/profile schema used to generate UI types at `GET /hunts/contract`. Zero is valid for risk
 dimensions: disabled mutation, network discovery, out-of-band interaction, and non-device fragility
@@ -897,8 +935,12 @@ The target APIs return `origins` ordered by recent DAST use. Hunt binds the targ
 origins at creation; capability calls cannot replace that destination. Model Intake subjects retain exact artifact/revision identity in the Model Intake evidence model;
 they do not appear in the normal web-target inventory.
 
+Targets also expose a validated cohort (`production`, `staging`, `lab`, `demo`, `calibration`,
+`internal`, or `unclassified` on update). Cohorts drive grouped target views, the Exposure lens, and
+the dashboard's default operational scope; they do not alter DAST scoring or finding proof.
+
 Natural-language routing treats an unqualified “scan” as the deterministic Scan, historical mode
-names as compatibility budget/policy mappings, “Deep Hunt” as Hunt, “verify this finding” as deterministic retest/verification, and manual
+names as display-only history, “Deep Hunt” as Hunt, “verify this finding” as deterministic retest/verification, and manual
 browser work as Interactive Testing. See [`product-model.md`](product-model.md).
 
 ### 11.7 Test scenario catalog and Honey demo
@@ -964,6 +1006,15 @@ pair to evidence objects, tool receipts, campaign actions, proof state, and rete
 list/record instances, export content-free manifests or bounded bundles, verify object hashes on
 read, and record export events. Retention classes are `short`, `standard`, `audit`, `legal_hold`, and
 `sensitive`; legal hold is never swept.
+
+**HTTP transaction archive**: `GET /scans/{id}/http-transactions` and
+`GET /hunts/{id}/http-transactions` export instrumented calls as ShakerScan transaction JSON or HAR
+1.2, aggregating descendant scan shards for a user-visible parent. JSON is redacted by default. HAR
+is deliberately raw replay evidence and may contain credentials and bodies; raw non-HAR JSON also
+requires `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` plus the operator credential. The export's `fidelity`
+and archive stats distinguish complete, partial, unavailable, failed, and dropped capture; absence
+of an archived row is not proof that no request occurred. Operator-authenticated `DELETE` routes
+purge the archive and unreferenced blobs without requiring raw export to be enabled.
 
 **Mission campaigns and action ledger**: campaigns are durable operating wrappers over Continuous
 ASM, authenticated DAST, API authorization, AI red-team, Model Intake, benchmark, and retest work.
@@ -1070,16 +1121,15 @@ Hypothesis proof reconciliation is separately approval-gated and can only link a
 `exploited` canonical finding with exact campaign-action, target, family, and route dimensions; it
 never creates or verifies a finding from lead context.
 
-**Bounded Research Agent**: `GET /research/readiness` · `POST /research/launch` ·
-`POST|GET /research/episodes` · `GET /research/episodes/{id}` ·
-`POST /research/episodes/{id}/plan-step` · `POST /research/episodes/{id}/decisions` ·
+**Bounded Research Agent**: `GET /research/readiness` · `POST|GET /research/episodes` ·
+`GET /research/episodes/{id}` · `POST /research/episodes/{id}/decisions` ·
 `POST /research/episodes/{id}/observe` · `POST /research/episodes/{id}/settle` ·
 `POST /research/episodes/{id}/cancel`. An episode is a target-bound state machine over immutable,
 redacted `ObservationPack` rows and exactly-one-action `DecisionEpisode` rows. Decisions are bound to
 the current observation ID/hash, cannot carry receipts or credentials, must declare an expected
-signal and falsifier, and consume bounded step/action/time/request/model-token budgets. The launch
-API supplies server-owned target-hunt, exact-finding, and ASM-gap missions, deduplicates concurrent
-one-click launches, and reserves a final synthesis step. The UI launches these missions from Finding
+signal and falsifier, and consume bounded step/action/time/request/model-token budgets. The campaign
+and episode APIs supply server-owned target-hunt, exact-finding, and ASM-gap missions, deduplicate
+concurrent one-click launches, and reserve a final synthesis step. The UI launches these missions from Finding
 Detail, Continuous ASM, and registered web assets in Exposure as well as from the main Autonomous
 Hunt page. Linked scans and finding retests must settle
 before exactly one result-bearing observation is attached. No-progress duplicate actions are rejected
@@ -1141,15 +1191,19 @@ server-materialized create/read-back proof and is surfaced in the run outcome.
 adapter. Arsenal inspection exposes targets, ASM gaps, findings, content-free evidence manifests,
 the mission timeline, saved dry-run plans, and tool status through `POST /arsenal/execute`; it
 revalidates the live catalog and never represents state-changing Arsenal commands. Hunt tools load
-`GET /hunts/contract`, generate the canonical start schema, and wrap start/get/query/capability/
-candidate/verify/finish/cancel. Capability calls require the live Hunt manifest, validate its
+`GET /hunts/contract`, generate the canonical start schema, expose progressive methodology
+suggest/read/bind/unbind/usage operations, and wrap start/get/query/capability/candidate-create/
+candidate-update/candidate-delete/verify/finish/cancel. Candidate edits are
+Hunt-scoped and cannot alter deterministic proof state; deletion retains an immutable audit record.
+Capability calls require the live Hunt manifest, validate its
 published input schema, and use a caller-provided or returned generated idempotency key. Target
 binding, approvals, budgets, receipts, evidence, and deterministic proof remain server-enforced.
 See [`docs/mcp.md`](mcp.md).
 
 **Scans (DAST)**: `POST /scans` · `POST /scans/batch` · `GET /scans` · `GET /scans/{id}` ·
 `GET /scans/{id}/result` · `GET /scans/{id}/logs` · `POST /scans/{id}/cancel` ·
-`GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report`
+`GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report` ·
+`GET|DELETE /scans/{id}/http-transactions`
 
 **Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}`
 · `POST /findings/bulk` · `POST /findings/cleanup` · `POST /findings/manual` ·
@@ -1164,9 +1218,17 @@ See [`docs/mcp.md`](mcp.md).
 `POST /devices/{id}/verify-service` · `GET /device-scans` ·
 `GET|POST /devices/{id}/credentials` · `POST /devices/{id}/credentials/{profile_id}/rotate` ·
 `DELETE /devices/{id}/credentials/{profile_id}` · `POST /devices/{id}/credentials/{profile_id}/acknowledge-lockout` ·
-`POST /hunts` · `GET /hunts/{hunt_id}` · `POST /hunts/{hunt_id}/query` ·
-`POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `GET|POST /device-policies` · `PATCH /device-policies/{id}`
+
+**Hunt**: `GET /hunts/contract` · `GET /hunt/skills` · `GET /hunt/skills/{skill_id}` ·
+`POST|GET /hunts` · `GET /hunts/{hunt_id}` · `GET /hunts/{hunt_id}/record` ·
+`POST /hunts/{hunt_id}/skills/suggestions` ·
+`POST /hunts/{hunt_id}/skills/{skill_id}/read|bind|usage` ·
+`DELETE /hunts/{hunt_id}/skills/{skill_id}` ·
+`POST /hunts/{hunt_id}/query` · `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
+`POST /hunts/{hunt_id}/candidates` · `PATCH|DELETE /hunts/{hunt_id}/candidates/{candidate_id}` ·
+`POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` ·
+`POST /hunts/{hunt_id}/finish|cancel|resume` · `GET|DELETE /hunts/{hunt_id}/http-transactions`
 
 Every Hunt capability call carries a client-generated opaque `idempotency_key`. Repeating the same
 key with the same semantic input returns the original durable action; reusing it for a different
@@ -1431,8 +1493,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 392 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 329 | `api/**/*.py` |
+| Public REST operations | 403 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 337 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1442,14 +1504,14 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 18 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 357 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 118 | `scanner/scanner_tools/` |
-| UI pages | 36 | `ui/src/app/` |
+| Runtime environment keys | 364 | Python sources + Compose manifests |
+| Internal compatibility scanner modules | 119 | `scanner/scanner_tools/` |
+| UI pages | 37 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 97 | `db/init.sql` + migrations |
+| Durable tables | 100 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1457,13 +1519,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 |---|---|---|
 | `GET` | `/` | `root` |
 | `GET` | `/agent/context/{target_id}` | `get_agent_context_pack` |
-| `POST` | `/agent/findings/{finding_id}/verify` | `verify_suspected_agent_finding` |
 | `GET` | `/agent/findings/{target_id}` | `get_agent_two_tier_findings` |
 | `GET` | `/agent/hunt/runs` | `list_agent_hunt_runs` |
 | `GET` | `/agent/hunt/session/{run_id}` | `get_agent_hunt_session` |
 | `POST` | `/agent/hunt/session/{run_id}/cancel` | `cancel_agent_hunt_session` |
 | `GET` | `/agent/tools/readiness` | `get_agent_tool_readiness` |
-| `POST` | `/agent/tools/{target_id}/execute` | `execute_agent_tool_endpoint` |
 | `GET` | `/agents/local` | `local_agents` |
 | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
 | `POST` | `/agents/local/plan/parse` | `local_agent_parse_candidate_plan` |
@@ -1548,6 +1608,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/asm/check-families` | `asm_check_families` |
 | `GET` | `/credential-profiles` | `list_credential_profiles` |
 | `POST` | `/credential-profiles` | `create_credential_profile` |
+| `GET` | `/credential-profiles/capabilities` | `credential_capability_catalog` |
 | `DELETE` | `/credential-profiles/{profile_id}` | `delete_credential_profile` |
 | `GET` | `/credential-profiles/{profile_id}` | `get_credential_profile` |
 | `PATCH` | `/credential-profiles/{profile_id}` | `patch_credential_profile` |
@@ -1648,6 +1709,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/health` | `health` |
 | `GET` | `/health` | `health` |
 | `GET` | `/health` | `health` |
+| `GET` | `/hunt/skills` | `list_hunt_skills` |
+| `GET` | `/hunt/skills/{skill_id}` | `get_hunt_skill` |
 | `GET` | `/hunts` | `list_hunts` |
 | `POST` | `/hunts` | `start_hunt` |
 | `GET` | `/hunts/contract` | `get_hunt_contract` |
@@ -1655,12 +1718,22 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/hunts/{hunt_id}` | `get_hunt` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
+| `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
+| `PATCH` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `update_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
+| `DELETE` | `/hunts/{hunt_id}/http-transactions` | `purge_hunt_transactions` |
+| `GET` | `/hunts/{hunt_id}/http-transactions` | `export_hunt_transactions` |
 | `POST` | `/hunts/{hunt_id}/query` | `query_hunt` |
+| `GET` | `/hunts/{hunt_id}/record` | `export_hunt_record` |
 | `POST` | `/hunts/{hunt_id}/resume` | `resume_hunt` |
 | `POST` | `/hunts/{hunt_id}/shell-plans/{plan_id}/confirm` | `confirm_hunt_shell_plan` |
+| `POST` | `/hunts/{hunt_id}/skills/suggestions` | `suggest_hunt_skills` |
+| `DELETE` | `/hunts/{hunt_id}/skills/{skill_id}` | `unbind_hunt_skill` |
+| `POST` | `/hunts/{hunt_id}/skills/{skill_id}/bind` | `bind_hunt_skill` |
+| `POST` | `/hunts/{hunt_id}/skills/{skill_id}/read` | `read_hunt_skill` |
+| `POST` | `/hunts/{hunt_id}/skills/{skill_id}/usage` | `record_hunt_skill_usage` |
 | `POST` | `/internal/model-intake/admissions/issue` | `issue` |
 | `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
 | `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |
@@ -1752,9 +1825,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/research/episodes/{episode_id}/cancel` | `cancel_research_episode` |
 | `POST` | `/research/episodes/{episode_id}/decisions` | `submit_research_decision` |
 | `POST` | `/research/episodes/{episode_id}/observe` | `refresh_research_observation` |
-| `POST` | `/research/episodes/{episode_id}/plan-step` | `plan_research_episode_step` |
 | `POST` | `/research/episodes/{episode_id}/settle` | `settle_research_episode` |
-| `POST` | `/research/launch` | `launch_research_episode` |
 | `GET` | `/research/readiness` | `research_readiness` |
 | `GET` | `/results` | `list_results` |
 | `GET` | `/results/{target_folder}/latest` | `get_latest_result` |
@@ -1775,6 +1846,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/scans/{scan_id}/coverage` | `get_scan_coverage` |
 | `GET` | `/scans/{scan_id}/deployment-decision` | `get_scan_deployment_decision` |
 | `GET` | `/scans/{scan_id}/device-activity` | `get_scan_device_activity` |
+| `DELETE` | `/scans/{scan_id}/http-transactions` | `purge_scan_transactions` |
+| `GET` | `/scans/{scan_id}/http-transactions` | `export_scan_transactions` |
 | `GET` | `/scans/{scan_id}/logs` | `get_scan_logs` |
 | `GET` | `/scans/{scan_id}/parity-artifact` | `get_scan_parity_artifact` |
 | `GET` | `/scans/{scan_id}/queue-delivery` | `get_scan_queue_delivery` |
@@ -2302,6 +2375,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `HIBP_API_KEY` | `scanner/scanner.py` |
 | `HOSTNAME` | `api/api.py`, `api/broker_worker.py`, `api/hunt/interaction_router.py`, `api/worker.py` |
 | `HOST_RESULTS_PATH` | `api/api.py` |
+| `HTTP_ARCHIVE_MAX_BODY_BYTES` | `api/runtime/http_archive.py` |
+| `HTTP_ARCHIVE_MAX_CAPTURED_CALLS` | `scanner/scanner_tools/http_archive_capture.py` |
+| `HTTP_ARCHIVE_MAX_CAPTURE_BYTES` | `scanner/scanner_tools/http_archive_capture.py` |
 | `LOCAL_ENV_FILE` | `api/settings_routes/router.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2375,7 +2451,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
-| `RESULTS_DIR` | `api/api.py`, `api/secret_store.py`, `api/worker.py` |
+| `RESULTS_DIR` | `api/api.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_ERROR_THRESHOLD` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2459,8 +2535,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
+| `SHAKERSCAN_EXPECTED_API_FINGERPRINT` | `docker-compose.yml` |
 | `SHAKERSCAN_FLEET_OPERATOR_TOKEN` | `scripts/fleet_acceptance.py` |
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_HTTP_ARCHIVE` | `api/runtime/http_archive.py` |
+| `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` | `api/runtime/http_archive_router.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
 | `SHAKERSCAN_INSTALL_KIND` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2491,6 +2570,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_RUNTIME_DIR` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_SKILLS_DIR` | `api/hunt/skills.py` |
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
@@ -2540,6 +2620,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/findings` | `ui/src/app/findings/page.tsx` |
 | `/fleet` | `ui/src/app/fleet/page.tsx` |
 | `/hunt` | `ui/src/app/hunt/page.tsx` |
+| `/hunts` | `ui/src/app/hunts/page.tsx` |
 | `/model-intake` | `ui/src/app/model-intake/page.tsx` |
 | `/` | `ui/src/app/page.tsx` |
 | `/request-collections` | `ui/src/app/request-collections/page.tsx` |
@@ -2596,7 +2677,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 
@@ -2644,9 +2725,12 @@ Scan feature or a second orchestration engine.
 | `finding_verifications` | `db/init.sql` |
 | `findings` | `db/init.sql` |
 | `fleet_node_events` | `db/init.sql` |
+| `http_archive_stats` | `db/init.sql` |
+| `http_transactions` | `db/init.sql` |
 | `hunt_actions` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_runs` | `db/init.sql` |
+| `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
 | `investigation_candidate_observations` | `api/retest_contract.py` |
 | `investigation_candidates` | `api/retest_contract.py` |
@@ -2717,7 +2801,7 @@ Scan feature or a second orchestration engine.
 | Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
-| Interactive AI security sessions | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
+| Interactive session compatibility API | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
 | DAST execution and Continuous ASM architecture | [`dast-asm-architecture.md`](dast-asm-architecture.md) |
 | Connected-device architecture, policies, and safety boundary | [`connected-device-security.md`](connected-device-security.md) |
 | Multi-node fleet architecture (RFC) | [`multi-node-architecture.md`](multi-node-architecture.md) |

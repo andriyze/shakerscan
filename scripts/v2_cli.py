@@ -120,6 +120,9 @@ class ApiClient:
             "POST", path, payload=payload, idempotency_key=idempotency_key,
         )
 
+    def delete(self, path: str) -> Any:
+        return self.request("DELETE", path)
+
     def download(self, path: str, *, max_bytes: int = MAX_REQUEST_BYTES) -> tuple[bytes, str]:
         request = urllib.request.Request(
             f"{self.base_url}{path}", headers={"Accept": "application/json, application/zip"},
@@ -338,10 +341,65 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
         "credential_refs": _pairs(args.credential_ref, label="credential reference"),
         "capabilities": list(dict.fromkeys(args.capability)),
         "request_collection_ids": list(dict.fromkeys(args.collection_id)),
+        "skill_ids": list(dict.fromkeys(args.skill_id)),
     }
 
 
 def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
+    if args.hunt_command == "skills":
+        query = {}
+        if args.target_kind:
+            query["target_kind"] = args.target_kind
+        if args.support:
+            query["support"] = args.support
+        if args.goal is not None:
+            query["goal"] = args.goal
+        suffix = f"?{urllib.parse.urlencode(query)}" if query else ""
+        return client.get(f"/hunt/skills{suffix}")
+    if args.hunt_command == "skill-suggest":
+        return client.post(
+            f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/skills/suggestions",
+            {"signals": list(dict.fromkeys(args.signal))},
+        )
+    if args.hunt_command == "skill-read":
+        return client.post(
+            "/hunts/{}/skills/{}/read".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.skill_id, safe=""),
+            ),
+            {},
+        )
+    if args.hunt_command == "skill-bind":
+        return client.post(
+            "/hunts/{}/skills/{}/bind".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.skill_id, safe=""),
+            ),
+            {
+                "reason": args.reason or "",
+                "evidence_refs": list(dict.fromkeys(args.evidence_ref)),
+            },
+        )
+    if args.hunt_command == "skill-unbind":
+        query = urllib.parse.urlencode({"reason": args.reason}) if args.reason else ""
+        path = "/hunts/{}/skills/{}".format(
+            urllib.parse.quote(args.hunt_id, safe=""),
+            urllib.parse.quote(args.skill_id, safe=""),
+        )
+        return client.delete(f"{path}?{query}" if query else path)
+    if args.hunt_command == "skill-usage":
+        return client.post(
+            "/hunts/{}/skills/{}/usage".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.skill_id, safe=""),
+            ),
+            {
+                "state": args.state,
+                "action_id": args.action_id,
+                "evidence_refs": list(dict.fromkeys(args.evidence_ref)),
+                "reason": args.reason or "",
+            },
+        )
     if args.hunt_command == "start":
         contract = client.get("/hunts/contract")
         if not isinstance(contract, Mapping):
@@ -420,6 +478,44 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             payload,
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
+    if args.hunt_command == "candidate-update":
+        if args.request:
+            payload = _read_json(args.request, default={})
+            if not isinstance(payload, dict):
+                raise CliError("Hunt candidate update must be one JSON object")
+        else:
+            payload = {
+                key: value
+                for key, value in {
+                    "title": args.title,
+                    "claim": args.claim,
+                    "severity": args.severity,
+                    "evidence_refs": (
+                        list(dict.fromkeys(args.evidence_ref))
+                        if args.evidence_ref else None
+                    ),
+                    "verifier_contract_id": args.verifier_contract_id,
+                }.items()
+                if value is not None
+            }
+        if not payload:
+            raise CliError("candidate-update requires --request or at least one changed field")
+        return client.request(
+            "PATCH",
+            "/hunts/{}/candidates/{}".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.candidate_id, safe=""),
+            ),
+            payload=payload,
+        )
+    if args.hunt_command == "candidate-delete":
+        return client.request(
+            "DELETE",
+            "/hunts/{}/candidates/{}".format(
+                urllib.parse.quote(args.hunt_id, safe=""),
+                urllib.parse.quote(args.candidate_id, safe=""),
+            ),
+        )
     if args.hunt_command == "verify":
         return client.post(
             "/hunts/{}/candidates/{}/verify".format(
@@ -478,7 +574,7 @@ def _run_credentials(args: argparse.Namespace, client: ApiClient) -> Any:
         }
         if args.capability:
             allowed = {str(item) for item in profile.get("allowed_capabilities") or ()}
-            checks["capability_allowed"] = not allowed or args.capability in allowed
+            checks["capability_allowed"] = args.capability in allowed
         return {
             "schema_version": "credential-admission-test/v1",
             "profile_id": str(profile.get("profile_id") or args.profile_id),
@@ -551,10 +647,19 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
     if args.collections_command == "select":
-        schema = _openapi_schema(client, "RequestCollectionSelect")
+        schema_name = (
+            "RequestCollectionSelect"
+            if args.preview
+            else "RequestCollectionSelectionUpsert"
+        )
+        schema = _openapi_schema(client, schema_name)
         if args.request:
             payload = _read_json(args.request, default={})
-        else:
+        elif args.preview:
+            if args.name or args.binding_id or args.disposable_credentials:
+                raise CliError(
+                    "collection preview does not accept durable selection fields"
+                )
             payload = {
                 "request_ids": list(dict.fromkeys(args.request_id)),
                 "folders": list(dict.fromkeys(args.folder)),
@@ -565,11 +670,40 @@ def _run_collections(args: argparse.Namespace, client: ApiClient) -> Any:
             }
             if args.path_regex:
                 payload["path_regex"] = args.path_regex
+        else:
+            if not args.name or not args.binding_id:
+                raise CliError(
+                    "durable collection selection requires --name and --binding-id; "
+                    "use --preview for a non-durable preview"
+                )
+            if (
+                args.include_mutating
+                and args.replay_policy not in {"confirmed_active", "safe_authentication"}
+            ):
+                raise CliError(
+                    "--include-mutating requires --replay-policy confirmed_active "
+                    "or safe_authentication"
+                )
+            payload = {
+                "name": args.name,
+                "binding_id": args.binding_id,
+                "replay_policy": args.replay_policy,
+                "request_ids": list(dict.fromkeys(args.request_id)),
+                "folders": list(dict.fromkeys(args.folder)),
+                "methods": list(dict.fromkeys(method.upper() for method in args.method)),
+                "tags": list(dict.fromkeys(args.tag)),
+                "safe_methods_only": not args.include_mutating,
+                "max_requests": args.limit,
+                "disposable_credentials": args.disposable_credentials,
+            }
+            if args.path_regex:
+                payload["path_regex"] = args.path_regex
         payload = _validate_schema_object(
             payload, schema, label="request collection selection",
         )
+        endpoint = "select" if args.preview else "selections"
         return client.post(
-            f"/request-collections/{collection_id}/select",
+            f"/request-collections/{collection_id}/{endpoint}",
             payload,
             idempotency_key=_validate_idempotency_key(args.idempotency_key),
         )
@@ -649,6 +783,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     hunt = products.add_parser("hunt", help="Manage the complete canonical Hunt lifecycle")
     hunt_commands = hunt.add_subparsers(dest="hunt_command", required=True)
+    hunt_skills = hunt_commands.add_parser(
+        "skills", help="List or suggest server-shipped Hunt methodologies",
+    )
+    hunt_skills.add_argument("--target-kind")
+    hunt_skills.add_argument("--support", choices=("supported", "partial", "reference"))
+    hunt_skills.add_argument("--goal", help="Return deterministic advisory suggestions for this objective")
+    hunt_skill_suggest = hunt_commands.add_parser(
+        "skill-suggest", help="Get a compact adaptive methodology shortlist for one Hunt",
+    )
+    hunt_skill_suggest.add_argument("hunt_id")
+    hunt_skill_suggest.add_argument(
+        "--signal", action="append", default=[],
+        help="Observed technology or surface signal (repeatable; bodies are not loaded)",
+    )
+    hunt_skill_read = hunt_commands.add_parser(
+        "skill-read", help="Load exactly one methodology for an active Hunt",
+    )
+    hunt_skill_read.add_argument("hunt_id")
+    hunt_skill_read.add_argument("skill_id")
+    hunt_skill_bind = hunt_commands.add_parser(
+        "skill-bind", help="Bind one reviewed methodology without changing Hunt authority",
+    )
+    hunt_skill_bind.add_argument("hunt_id")
+    hunt_skill_bind.add_argument("skill_id")
+    hunt_skill_bind.add_argument("--reason")
+    hunt_skill_bind.add_argument("--evidence-ref", action="append", default=[])
+    hunt_skill_unbind = hunt_commands.add_parser(
+        "skill-unbind", help="Remove one explicitly selected methodology",
+    )
+    hunt_skill_unbind.add_argument("hunt_id")
+    hunt_skill_unbind.add_argument("skill_id")
+    hunt_skill_unbind.add_argument("--reason")
+    hunt_skill_usage = hunt_commands.add_parser(
+        "skill-usage", help="Record evidenced methodology use or completion",
+    )
+    hunt_skill_usage.add_argument("hunt_id")
+    hunt_skill_usage.add_argument("skill_id")
+    hunt_skill_usage.add_argument("state", choices=("used", "completed", "deferred"))
+    hunt_skill_usage.add_argument("--action-id")
+    hunt_skill_usage.add_argument("--evidence-ref", action="append", default=[])
+    hunt_skill_usage.add_argument("--reason")
     hunt_start = hunt_commands.add_parser("start", help="Start a target-bound Hunt")
     hunt_start.add_argument("--request", metavar="FILE", help="Complete JSON contract; use - for stdin")
     hunt_start.add_argument("--idempotency-key")
@@ -667,6 +842,13 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--credential-ref", action="append", default=[], metavar="SLOT=ID")
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
+    hunt_start.add_argument(
+        "--skill-id", action="append", default=[],
+        help=(
+            "Pre-bind an already reviewed methodology (repeatable; normally start empty and "
+            "use skill-suggest, skill-read, then skill-bind)"
+        ),
+    )
 
     hunt_get = hunt_commands.add_parser("get", help="Read one Hunt and its capability manifest")
     hunt_get.add_argument("hunt_id")
@@ -702,6 +884,24 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_candidate.add_argument("--evidence-ref", action="append", default=[])
     hunt_candidate.add_argument("--verifier-contract-id")
     hunt_candidate.add_argument("--idempotency-key")
+
+    hunt_candidate_update = hunt_commands.add_parser(
+        "candidate-update", help="Correct metadata on a Hunt-owned candidate",
+    )
+    hunt_candidate_update.add_argument("hunt_id")
+    hunt_candidate_update.add_argument("candidate_id")
+    hunt_candidate_update.add_argument("--request", metavar="FILE", help="Complete JSON update; use - for stdin")
+    hunt_candidate_update.add_argument("--title")
+    hunt_candidate_update.add_argument("--claim")
+    hunt_candidate_update.add_argument("--severity", choices=("critical", "high", "medium", "low", "info"))
+    hunt_candidate_update.add_argument("--evidence-ref", action="append", default=[])
+    hunt_candidate_update.add_argument("--verifier-contract-id")
+
+    hunt_candidate_delete = hunt_commands.add_parser(
+        "candidate-delete", help="Delete a Hunt-owned candidate while preserving its audit record",
+    )
+    hunt_candidate_delete.add_argument("hunt_id")
+    hunt_candidate_delete.add_argument("candidate_id")
 
     hunt_verify = hunt_commands.add_parser("verify", help="Run canonical deterministic candidate verification")
     hunt_verify.add_argument("hunt_id")
@@ -770,16 +970,31 @@ def build_parser() -> argparse.ArgumentParser:
     collection_bind.add_argument("--environment-id")
     collection_bind.add_argument("--idempotency-key")
     collection_select = collection_commands.add_parser(
-        "select", help="Preview one redacted bounded request selection",
+        "select", help="Save one bounded request selection and return its durable ID",
     )
     collection_select.add_argument("collection_id")
     collection_select.add_argument("--request", metavar="FILE")
+    collection_select.add_argument("--name")
+    collection_select.add_argument("--binding-id")
+    collection_select.add_argument(
+        "--replay-policy",
+        choices=(
+            "discovery_only", "safe_reads", "safe_authentication",
+            "confirmed_active",
+        ),
+        default="safe_reads",
+    )
     collection_select.add_argument("--request-id", action="append", default=[])
     collection_select.add_argument("--folder", action="append", default=[])
     collection_select.add_argument("--method", action="append", default=[])
     collection_select.add_argument("--path-regex")
     collection_select.add_argument("--tag", action="append", default=[])
     collection_select.add_argument("--include-mutating", action="store_true")
+    collection_select.add_argument("--disposable-credentials", action="store_true")
+    collection_select.add_argument(
+        "--preview", action="store_true",
+        help="Preview matching redacted requests without saving a selection",
+    )
     collection_select.add_argument("--limit", type=int, default=500)
     collection_select.add_argument("--idempotency-key")
 

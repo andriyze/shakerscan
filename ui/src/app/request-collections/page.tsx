@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Braces, ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react'
+import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import {
   getDevices,
   getTargets,
@@ -10,6 +10,7 @@ import {
 } from '@/lib/api'
 import {
   createRequestCollection,
+  deactivateRequestCollectionSelection,
   getRequestCollection,
   listRequestCollectionInventory,
   listRequestCollections,
@@ -339,6 +340,34 @@ export default function RequestCollectionsPage() {
     }
   }
 
+  function loadSelectionForEdit(selection: RequestCollectionDetail['selections'][number], clone: boolean) {
+    setSelectionName(clone ? `${selection.name} copy` : selection.name)
+    setSelectionBindingId(selection.binding_id)
+    setReplayPolicy(selection.replay_policy)
+    setRequestIds(selection.selector.request_ids.join('\n'))
+    setFolders(selection.selector.folders.join('\n'))
+    setMethods(selection.selector.methods.join(', '))
+    setTags(selection.selector.tags.join(', '))
+    setPathRegex(selection.selector.path_regex || '')
+    setSafeMethodsOnly(selection.selector.safe_methods_only)
+    setMaxRequests(String(selection.selector.max_requests || 500))
+    toast.info(clone ? 'Loaded a copy. Rename or adjust it, then save.' : 'Loaded for replacement. Saving the same name creates a new digest.')
+  }
+
+  async function deactivateSelection(selectionId: string) {
+    if (!detail || !window.confirm('Deactivate this saved selection? Existing historical scan records are retained.')) return
+    setBusy(true)
+    try {
+      await deactivateRequestCollectionSelection(detail.collection.id, selectionId)
+      await loadDetail(inventoryOffset)
+      toast.success('Request selection deactivated')
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Selection deactivation failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (loading) return <div className="p-6 text-sm text-gray-400">Loading collection targets…</div>
   if (error && !targets.length && !devices.length) return <ErrorState message={error} />
 
@@ -346,7 +375,7 @@ export default function RequestCollectionsPage() {
     <div className="mx-auto max-w-7xl space-y-6 p-6">
       <PageHeader
         title="Request Collections"
-        description="Upload once, bind to exact approved origins, browse a redacted inventory, and attach saved selections to Scan or Hunt. Documents and environment values are never returned after upload."
+        description="Upload once, assign the collection to one exact target ID, permit explicit origins on that target's hostname, and attach immutable selection digests to Scan or Hunt. Documents and environment values are never returned after upload."
         icon={<Braces className="h-6 w-6" />}
         actions={<>
           <Button variant="secondary" onClick={() => void loadCollections()} disabled={!targetId}>
@@ -383,7 +412,7 @@ export default function RequestCollectionsPage() {
           message={targetId ? 'No shared request collections for this target' : 'Choose a collection owner'}
           hint={targetId
             ? 'Upload a Postman, HAR, OpenAPI, or Swagger JSON document to begin.'
-            : 'Select the exact asset that owns this collection. Every imported request stays bound to approved origins on that target.'}
+            : 'Select the exact asset record that owns this collection. Binding then permits explicit scheme + hostname + port origins on that owner hostname.'}
           action={targetId ? { label: 'Upload collection', onClick: openUploader } : undefined}
         />
       ) : (
@@ -444,7 +473,10 @@ export default function RequestCollectionsPage() {
               <Card className="space-y-4 p-5">
                 <div>
                   <h3 className="font-medium text-white">Exact-origin binding</h3>
-                  <p className="mt-1 text-xs text-gray-500">Origins must use the exact target host and contain no path, query, or credentials.</p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Ownership is exact target ID. Each permitted origin is exact scheme + hostname + port; all origins must keep the owner&apos;s hostname, but may intentionally use a different discovered port.
+                  </p>
+                  {selectedChoice && <p className="mt-1 text-xs text-blue-300">Owner: {selectedChoice.label} · hostname source {selectedChoice.locator}</p>}
                 </div>
                 {matchingBindings.map((binding) => (
                   <div key={binding.id} className="rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
@@ -471,9 +503,16 @@ export default function RequestCollectionsPage() {
                   <p className="mt-1 text-xs text-gray-500">Selectors are frozen with the collection, environment, binding, and replay policy digests.</p>
                 </div>
                 {detail.selections.map((selection) => (
-                  <div key={selection.id} className="rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
-                    <span className="font-medium text-white">{selection.name}</span>
-                    <span className="ml-2 text-xs text-gray-500">{selection.selected_request_count} requests · {selection.replay_policy.replaceAll('_', ' ')} · {selection.selection_digest.slice(0, 12)}</span>
+                  <div key={selection.id} className="flex flex-wrap items-center justify-between gap-3 rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
+                    <div>
+                      <span className="font-medium text-white">{selection.name}</span>
+                      <span className="ml-2 text-xs text-gray-500">{selection.selected_request_count} requests · {selection.replay_policy.replaceAll('_', ' ')} · {selection.selection_digest.slice(0, 12)}</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="secondary" size="sm" onClick={() => loadSelectionForEdit(selection, false)}><Pencil className="h-3.5 w-3.5" /> Replace</Button>
+                      <Button variant="secondary" size="sm" onClick={() => loadSelectionForEdit(selection, true)}><Copy className="h-3.5 w-3.5" /> Clone</Button>
+                      <Button variant="danger" size="sm" onClick={() => void deactivateSelection(selection.id)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Deactivate</Button>
+                    </div>
                   </div>
                 ))}
                 {!matchingBindings.length ? (
@@ -497,6 +536,7 @@ export default function RequestCollectionsPage() {
                       <input type="checkbox" checked={safeMethodsOnly} disabled={replayPolicy !== 'confirmed_active'} onChange={(event) => setSafeMethodsOnly(event.target.checked)} />
                       Safe methods only. Turning this off is only valid for confirmed-active selections; execution still requires active testing, state-changing permission, and a target-bound approval.
                     </label>
+                    <p className="text-xs text-gray-500">Saving an existing name replaces its selector and digest; changing the name creates a clone. Historical scan bindings remain immutable.</p>
                     <Button onClick={saveSelection} loading={busy} disabled={!selectionName.trim() || !selectionBindingId}>Save selection</Button>
                   </div>
                 )}

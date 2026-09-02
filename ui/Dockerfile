@@ -6,7 +6,7 @@ WORKDIR /app
 # The immutable Node image can lag Alpine's security repository by a few days.
 # Pin the small security delta so a candidate cannot silently resolve different
 # package revisions, and retry only this network-bound repository operation.
-ARG APK_TOOLS_VERSION=3.0.7-r0
+ARG APK_TOOLS_VERSION=3.0.8-r0
 ARG OPENSSL_VERSION=3.5.8-r0
 RUN set -eu; \
     attempt=1; \
@@ -32,9 +32,12 @@ COPY . .
 
 # Build-time app version (exposed to client)
 ARG NEXT_PUBLIC_APP_VERSION=dev
+ARG NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT=unknown
 ARG UI_SOURCE_REVISION=unknown
 ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
+ENV NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT=$NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT
 RUN printf '%s\n' "$NEXT_PUBLIC_APP_VERSION" > /app/UI_BUILD_VERSION
+RUN printf '%s\n' "$NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT" > /app/UI_EXPECTED_API_BUILD_FINGERPRINT
 RUN printf '%s\n' "$UI_SOURCE_REVISION" > /app/UI_SOURCE_REVISION
 
 # Build
@@ -47,7 +50,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-ARG APK_TOOLS_VERSION=3.0.7-r0
+ARG APK_TOOLS_VERSION=3.0.8-r0
 ARG OPENSSL_VERSION=3.5.8-r0
 RUN set -eu; \
     attempt=1; \
@@ -70,6 +73,7 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/UI_BUILD_VERSION ./UI_BUILD_VERSION
+COPY --from=builder /app/UI_EXPECTED_API_BUILD_FINGERPRINT ./UI_EXPECTED_API_BUILD_FINGERPRINT
 COPY --from=builder /app/UI_SOURCE_REVISION ./UI_SOURCE_REVISION
 
 EXPOSE 3000

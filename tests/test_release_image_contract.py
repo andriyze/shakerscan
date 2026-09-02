@@ -128,7 +128,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
 
     assert "node:24-alpine@sha256:" in ui
     assert ui.count("apk add --no-cache --upgrade") == 2
-    assert ui.count("APK_TOOLS_VERSION=3.0.7-r0") == 2
+    assert ui.count("APK_TOOLS_VERSION=3.0.8-r0") == 2
     assert ui.count("OPENSSL_VERSION=3.5.8-r0") == 2
     assert ui.count("Pinned Alpine security update failed after 4 attempts") == 2
     assert "rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx" in ui
@@ -207,6 +207,30 @@ def test_scanner_image_contains_runtime_device_catalog():
 
     assert "COPY scanner/data /app/data" in dockerfile
     assert (ROOT / "scanner" / "data" / "device_api_catalog.json").is_file()
+
+
+def test_release_api_image_contains_hunt_methodology_catalog():
+    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+
+    assert "COPY skills/web /app/skills/web" in dockerfile
+    assert (ROOT / "skills" / "web" / "README.md").is_file()
+    assert len(list((ROOT / "skills" / "web").glob("[0-9][0-9]-*.md"))) == 31
+
+
+def test_fresh_installer_downloads_every_hunt_methodology_asset():
+    installers = (
+        (ROOT / "install" / "index.sh").read_text(),
+        (ROOT / "install" / "index.html").read_text(),
+    )
+    assets = [
+        path.relative_to(ROOT / "skills" / "web").as_posix()
+        for path in (ROOT / "skills" / "web").rglob("*.md")
+    ]
+    assert len(assets) == 39
+    for installer in installers:
+        assert 'mkdir -p "$INSTALL_STAGE/skills/web/core"' in installer
+        for relative in assets:
+            assert relative.split("/")[-1] in installer
 
 
 def test_release_compose_has_dedicated_agent_tool_fast_lane():

@@ -14,3 +14,10 @@ test('device collection summaries tolerate list responses without request previe
   assert.match(page, /onToggle=\{\(event\) => \{ if \(event\.currentTarget\.open\) void loadRequestPreview\(collection\.id\) \}\}/)
   assert.match(page, /requestPreviews\[collection\.id\]\.requests\.map/)
 })
+
+test('device detail and list share the canonical readiness gate', () => {
+  assert.match(page, /getDeviceReadiness\(\)/)
+  assert.match(page, /setWorkerReady\(readiness\.enabled && readiness\.status === 'ready'\)/)
+  assert.match(page, /disabled=\{!workerReady\}/)
+  assert.match(page, /if \(!workerReady\) \{/)
+})

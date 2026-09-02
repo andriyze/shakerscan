@@ -80,7 +80,7 @@ release candidate:
 4. Install into an empty temporary home with `SHAKERSCAN_START=0`.
 5. Confirm the runtime contains the general and research skills plus
    `.claude/commands/research.md`.
-6. Run `shakerscan doctor`, start the stack, verify agent launch, and submit one safe quick scan.
+6. Run `shakerscan doctor`, start the stack, verify agent launch, and submit one fast passive Scan.
 7. Re-run the installer over that test install and confirm `.env`, results, and Docker volumes are
    preserved.
 

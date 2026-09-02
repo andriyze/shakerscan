@@ -19,6 +19,11 @@ from uuid import uuid4
 from .json_fields import strip_null_bytes
 from .budgets import BUDGET_DIMENSIONS
 
+try:
+    from redaction import redact_text as _shared_redact_text
+except ModuleNotFoundError:
+    from scanner.redaction import redact_text as _shared_redact_text
+
 
 _TERMINAL_RESERVATION_STATES = frozenset({"committed", "released", "failed"})
 _ZERO_COST_RESERVATION_CAPABILITIES = frozenset({"scan.finalize"})
@@ -161,7 +166,7 @@ def _normalize_budget(values: Mapping[str, int], *, allow_zero: bool) -> dict[st
 
 
 def _redact_string(value: str) -> str:
-    redacted = value
+    redacted = str(_shared_redact_text(value))
     for index, pattern in enumerate(_INLINE_SECRET_PATTERNS):
         if index == 0:
             redacted = pattern.sub(r"\1 ***", redacted)

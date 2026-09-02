@@ -155,16 +155,17 @@ def test_allocator_skips_optional_actions_with_stable_dependency_reasons():
 
     assert rows["discover.web_crawl"].admission_status == "planned"
     assert rows["passive.templates"].requested_budget == {
-        "http_requests": 7, "tool_wall_seconds": 10,
+        "http_requests": 7, "tool_wall_seconds": 30,
     }
     assert rows["active.templates"].reason_code == "insufficient_plan_budget"
     assert rows["active.templates"].requested_budget == {}
     assert rows["verify.xss"].reason_code == "insufficient_plan_budget"
     assert rows["verify.xss"].requested_budget == {}
-    assert rows["verify.sqli"].admission_status == "planned"
-    assert rows["verify.sqli"].requested_budget == {
-        "http_requests": 160, "tool_wall_seconds": 30,
-    }
+    # The required root passive baseline keeps its reviewed 30-second process
+    # floor. Under this deliberately over-subscribed legacy fixture, optional
+    # SQL verification therefore cannot borrow those 20 seconds.
+    assert rows["verify.sqli"].reason_code == "insufficient_plan_budget"
+    assert rows["verify.sqli"].requested_budget == {}
     assert rows["finalize.report"].admission_status == "planned"
 
 
@@ -190,8 +191,8 @@ def test_thorough_allocator_funds_full_verifiers_before_template_breadth():
     }
 
 
-def test_allocator_scales_required_passive_pack_inside_parallel_child_budget():
-    budget = ScanBudget(120, 10, 10, 1, 1, 21, 1, 0, 1)
+def test_allocator_preserves_required_passive_pack_inside_parallel_child_budget():
+    budget = ScanBudget(120, 10, 10, 1, 1, 31, 1, 0, 1)
     execution = ScanExecutionPlan(
         policy=ScanPolicy(active_testing=False),
         budget_profile="fast",
@@ -216,13 +217,41 @@ def test_allocator_scales_required_passive_pack_inside_parallel_child_budget():
 
     assert rows["passive.templates"].requested_budget == {
         "http_requests": 7,
-        "tool_wall_seconds": 10,
+        "tool_wall_seconds": 30,
     }
     assert rows["passive.templates"].admission_status == "planned"
     assert rows["finalize.report"].requested_budget == {
         "tool_wall_seconds": 1,
     }
-    assert allocation.allocated["tool_wall_seconds"] == 11
+    assert allocation.allocated["tool_wall_seconds"] == 31
+
+
+def test_allocator_rejects_parallel_child_that_cannot_fund_passive_pack():
+    budget = ScanBudget(120, 10, 10, 1, 1, 21, 1, 0, 1)
+    execution = ScanExecutionPlan(
+        policy=ScanPolicy(active_testing=False),
+        budget_profile="fast",
+        budget=budget,
+    )
+    templates = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=_target().digest,
+        include_active=False,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        template_manifest_ref=templates.reference().canonical_dict(),
+        action_scope="endpoint",
+        shard_authority={"options_digest": "a" * 64},
+    )
+
+    with pytest.raises(
+        ScanBudgetAllocationError,
+        match="required Scan action passive.templates exceeds the plan budget",
+    ):
+        allocate_scan_action_plan(plan, budget)
 
 
 def test_allocator_fails_admission_when_focused_required_graph_cannot_fit():

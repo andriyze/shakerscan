@@ -184,6 +184,21 @@ def _path(value: Any) -> str:
     return path
 
 
+def _client_route_path(value: Any) -> str:
+    path = str(value or "").strip()
+    route_path = path[1:] if path.startswith("!/") else path
+    if (
+        not route_path.startswith("/") or route_path.startswith("//")
+        or "?" in path or "#" in path or "\\" in path or len(path) > 2_000
+        or any(ord(char) < 0x20 or ord(char) == 0x7f for char in path)
+        or redact_path(route_path) != route_path
+    ):
+        raise ScanWorkManifestError(
+            "browser_fragment_path must be a bounded value-free SPA route"
+        )
+    return path
+
+
 def _string_list(value: Any, *, name: str, maximum: int) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or len(value) > maximum:
         raise ScanWorkManifestError(f"{name} must be a bounded list")
@@ -248,9 +263,11 @@ def route_id(
     port: int,
     canonical_path: str,
     query_parameter_names: Sequence[str],
+    browser_fragment_path: str | None = None,
+    browser_fragment_query_parameter_names: Sequence[str] = (),
 ) -> str:
     """Derive one stable, value-free route identity."""
-    return _digest({
+    identity = {
         "target_binding_digest": _hex(
             target_binding_digest, name="target_binding_digest",
         ),
@@ -260,7 +277,20 @@ def route_id(
         "port": int(port),
         "canonical_path": _path(canonical_path),
         "query_parameter_names": sorted(str(item) for item in query_parameter_names),
-    })
+    }
+    fragment_names = sorted(
+        str(item) for item in browser_fragment_query_parameter_names
+    )
+    if browser_fragment_path:
+        identity.update({
+            "browser_fragment_path": _client_route_path(browser_fragment_path),
+            "browser_fragment_query_parameter_names": fragment_names,
+        })
+    elif fragment_names:
+        raise ScanWorkManifestError(
+            "browser fragment parameters require a browser fragment path"
+        )
+    return _digest(identity)
 
 
 def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str, Any]:
@@ -274,7 +304,10 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
     # only the content fingerprint: the fingerprint distinguishes two shapes but tells a later
     # stage nothing about what to test, which is why no body-bearing endpoint could become a
     # candidate. Values never appear here, only names.
-    optional = {"content_type", "body_field_names"}
+    optional = {
+        "content_type", "body_field_names", "browser_fragment_path",
+        "browser_fragment_query_parameter_names",
+    }
     keys = set(value)
     if not expected <= keys or not keys <= (expected | optional):
         raise ScanWorkManifestError("endpoint manifest entry fields are invalid")
@@ -288,6 +321,18 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
     query_names = _string_list(
         value["query_parameter_names"], name="query_parameter_names", maximum=64,
     )
+    fragment_path = (
+        _client_route_path(value["browser_fragment_path"])
+        if value.get("browser_fragment_path") else None
+    )
+    fragment_names = _string_list(
+        value.get("browser_fragment_query_parameter_names") or [],
+        name="browser_fragment_query_parameter_names", maximum=64,
+    )
+    if fragment_names and fragment_path is None:
+        raise ScanWorkManifestError(
+            "browser fragment parameters require a browser fragment path"
+        )
     expected_route = route_id(
         target_binding_digest=target_digest,
         method=method,
@@ -296,13 +341,15 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
         port=port,
         canonical_path=canonical_path,
         query_parameter_names=query_names,
+        browser_fragment_path=fragment_path,
+        browser_fragment_query_parameter_names=fragment_names,
     )
     if _hex(value["route_id"], name="route_id") != expected_route:
         raise ScanWorkManifestError("route_id does not match endpoint identity")
     lane = _token(value["auth_lane"], name="auth_lane", optional=True)
     if lane not in {None, "primary", "secondary", "service", "anonymous"}:
         raise ScanWorkManifestError("endpoint auth_lane is invalid")
-    return {
+    result = {
         "route_id": expected_route,
         "method": method,
         "scheme": scheme,
@@ -328,6 +375,12 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
             value.get("body_field_names") or [], name="body_field_names", maximum=128,
         )),
     }
+    if fragment_path:
+        result.update({
+            "browser_fragment_path": fragment_path,
+            "browser_fragment_query_parameter_names": list(fragment_names),
+        })
+    return result
 
 
 def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -337,7 +390,8 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "family_hints", "source_tool", "source_observation_ref", "auth_lane",
         "selected_shard", "request_ref_id", "score", "ranking_rationale",
     }
-    if set(value) != expected:
+    optional = {"browser_fragment_path", "browser_fragment_query_parameter_names"}
+    if not expected <= set(value) or not set(value) <= (expected | optional):
         raise ScanWorkManifestError("candidate manifest entry fields are invalid")
     method = str(value["method"] or "").strip().upper()
     if not _METHOD_RE.fullmatch(method):
@@ -352,13 +406,33 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     body_names = _string_list(
         value["body_field_names"], name="body_field_names", maximum=128,
     )
+    fragment_path = (
+        _client_route_path(value["browser_fragment_path"])
+        if value.get("browser_fragment_path") else None
+    )
+    fragment_names = _string_list(
+        value.get("browser_fragment_query_parameter_names") or [],
+        name="browser_fragment_query_parameter_names", maximum=64,
+    )
     # A candidate names exactly one injection point, and it must exist where the entry says it is.
     # body_field_names being non-empty is what marks the candidate as testing a request body.
     in_body = bool(body_names)
+    in_fragment = bool(fragment_names)
+    if fragment_path is not None and not in_fragment:
+        raise ScanWorkManifestError(
+            "fragment candidate requires browser fragment parameters"
+        )
+    if sum((in_body, in_fragment)) > 1:
+        raise ScanWorkManifestError("candidate has multiple injection locations")
     if in_body:
         if parameter not in body_names:
             raise ScanWorkManifestError(
                 "candidate parameter is absent from body_field_names"
+            )
+    elif in_fragment:
+        if fragment_path is None or parameter not in fragment_names:
+            raise ScanWorkManifestError(
+                "candidate parameter is absent from browser fragment parameters"
             )
     elif parameter not in query_names:
         raise ScanWorkManifestError(
@@ -377,13 +451,15 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     if in_body:
         identity["location"] = "body"
+    elif in_fragment:
+        identity["location"] = "fragment"
     expected_id = _digest(identity)
     if _hex(value["candidate_id"], name="candidate_id") != expected_id:
         raise ScanWorkManifestError("candidate_id does not match candidate identity")
     lane = _token(value["auth_lane"], name="auth_lane", optional=True)
     if lane not in {None, "primary", "secondary", "service", "anonymous"}:
         raise ScanWorkManifestError("candidate auth_lane is invalid")
-    return {
+    result = {
         "candidate_id": expected_id,
         "route_id": route,
         "method": method,
@@ -411,6 +487,12 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
             value["ranking_rationale"], name="ranking_rationale", maximum=16,
         )),
     }
+    if in_fragment:
+        result.update({
+            "browser_fragment_path": fragment_path,
+            "browser_fragment_query_parameter_names": list(fragment_names),
+        })
+    return result
 
 
 def _request_entry(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -786,7 +868,14 @@ def endpoint_entry_from_public_record(
     port = int(record.get("port") or (443 if scheme == "https" else 80))
     path = str(record.get("normalized_path") or record.get("concrete_path") or "/")
     query_names = sorted(str(item) for item in record.get("query_keys") or ())
-    return {
+    fragment_path = (
+        str(record.get("browser_fragment_path"))
+        if record.get("browser_fragment_path") else None
+    )
+    fragment_names = sorted(
+        str(item) for item in record.get("browser_fragment_query_keys") or ()
+    )
+    entry = {
         "route_id": route_id(
             target_binding_digest=target_binding_digest,
             method=method,
@@ -795,6 +884,8 @@ def endpoint_entry_from_public_record(
             port=port,
             canonical_path=path,
             query_parameter_names=query_names,
+            browser_fragment_path=fragment_path,
+            browser_fragment_query_parameter_names=fragment_names,
         ),
         "method": method,
         "scheme": scheme,
@@ -810,6 +901,12 @@ def endpoint_entry_from_public_record(
         "selected_shard": selected_shard,
         "request_ref_ids": list(request_ref_ids),
     }
+    if fragment_path:
+        entry.update({
+            "browser_fragment_path": fragment_path,
+            "browser_fragment_query_parameter_names": fragment_names,
+        })
+    return entry
 
 
 def build_endpoint_manifest(
@@ -946,11 +1043,13 @@ def build_candidate_manifest(
     }
 
     def ranked_candidate(
-        endpoint: Mapping[str, Any], parameter: str, *, in_body: bool = False,
+        endpoint: Mapping[str, Any], parameter: str, *, location: str = "query",
     ) -> dict[str, Any]:
+        in_body = location == "body"
+        in_fragment = location == "fragment"
         normalized_name = parameter.lower().replace("-", "_")
         score = 30
-        rationale = ["parameterized_body" if in_body else "parameterized_query"]
+        rationale = [f"parameterized_{location}"]
         source_score, source_reason = source_points.get(
             str(endpoint["source_tool"]), (2, "other_admitted_source"),
         )
@@ -986,8 +1085,10 @@ def build_candidate_manifest(
             # Only a body candidate carries the location, so a query candidate's id is byte-identical
             # to what earlier builds produced and stored manifests still validate.
             identity["location"] = "body"
+        elif in_fragment:
+            identity["location"] = "fragment"
         candidate_id = _digest(identity)
-        return {
+        candidate = {
             "candidate_id": candidate_id,
             "route_id": endpoint["route_id"],
             "method": endpoint["method"],
@@ -1001,7 +1102,8 @@ def build_candidate_manifest(
                 (str(endpoint.get("content_type")) if endpoint.get("content_type") else None)
                 if in_body else None
             ),
-            "family_hints": ["xss", "sqli"],
+            # URL fragments never reach the server, so SQL injection is not a meaningful family.
+            "family_hints": ["xss"] if in_fragment else ["xss", "sqli"],
             "source_tool": endpoint["source_tool"],
             "source_observation_ref": None,
             "auth_lane": endpoint["auth_lane"],
@@ -1013,6 +1115,14 @@ def build_candidate_manifest(
             "score": min(100, score),
             "ranking_rationale": rationale,
         }
+        if in_fragment:
+            candidate.update({
+                "browser_fragment_path": endpoint["browser_fragment_path"],
+                "browser_fragment_query_parameter_names": list(
+                    endpoint["browser_fragment_query_parameter_names"]
+                ),
+            })
+        return candidate
 
     # Keep only the best bounded set while visiting potentially large endpoint
     # manifests.  The heap key makes a higher score and, on ties, a lower
@@ -1023,9 +1133,14 @@ def build_candidate_manifest(
         # A non-GET endpoint used to be skipped outright, so an application whose injectable
         # surface is a JSON body produced no candidates at all. Query parameters and declared body
         # fields are both injection points; the planner decides which it holds authority to test.
-        locations: list[tuple[str, bool]] = [
-            (str(name), False) for name in endpoint["query_parameter_names"]
+        locations: list[tuple[str, str]] = [
+            (str(name), "query") for name in endpoint["query_parameter_names"]
         ]
+        if endpoint["method"] == "GET":
+            locations.extend(
+                (str(name), "fragment")
+                for name in endpoint.get("browser_fragment_query_parameter_names") or ()
+            )
         if endpoint["method"] != "GET":
             # ONE candidate for the whole declared body, not one per field. The verifier tests
             # every field in a single run and stops at the first vulnerable one, so per-field
@@ -1035,11 +1150,11 @@ def build_candidate_manifest(
             # highest-ranked field anchors the candidate's identity; the whole body is tested.
             body_fields = [str(name) for name in endpoint.get("body_field_names") or ()]
             locations = (
-                [(max(body_fields, key=lambda name: (_body_field_rank(name), name)), True)]
+                [(max(body_fields, key=lambda name: (_body_field_rank(name), name)), "body")]
                 if allow_state_changing_http and body_fields else []
             )
-        for parameter, in_body in locations:
-            candidate = ranked_candidate(endpoint, parameter, in_body=in_body)
+        for parameter, location in locations:
+            candidate = ranked_candidate(endpoint, parameter, location=location)
             candidate_count += 1
             heap_key = (
                 int(candidate["score"]),
@@ -1458,6 +1573,7 @@ def canonical_nuclei_options_for_manifest(
 
 def execution_url_for_endpoint(
     entry: Mapping[str, Any], *, parameter_name: str | None = None,
+    parameter_location: str = "query",
 ) -> str:
     """Materialize a value-free execution URL from canonical manifest fields."""
     scheme = str(entry["scheme"])
@@ -1467,14 +1583,28 @@ def execution_url_for_endpoint(
     default_port = 443 if scheme == "https" else 80
     authority = authority_host if port == default_port else f"{authority_host}:{port}"
     names = list(entry.get("query_parameter_names") or ())
+    fragment_names = list(
+        entry.get("browser_fragment_query_parameter_names") or ()
+    )
     if parameter_name is not None:
-        names = [parameter_name]
+        if parameter_location not in {"query", "fragment"}:
+            raise ScanWorkManifestError("candidate parameter location is invalid")
+        names = [parameter_name] if parameter_location == "query" else []
+        fragment_names = [parameter_name] if parameter_location == "fragment" else []
     path = str(entry["canonical_path"])
     path = path.replace("{int}", "1").replace(
         "{uuid}", "00000000-0000-4000-8000-000000000000",
     )
     query = urllib.parse.urlencode([(name, "1") for name in names])
-    return urllib.parse.urlunsplit((scheme, authority, path, query, ""))
+    fragment_path = str(entry.get("browser_fragment_path") or "")
+    fragment_query = urllib.parse.urlencode([
+        (name, "1") for name in fragment_names
+    ])
+    fragment = (
+        f"{fragment_path}{'?' + fragment_query if fragment_query else ''}"
+        if fragment_path else ""
+    )
+    return urllib.parse.urlunsplit((scheme, authority, path, query, fragment))
 
 
 def execution_url_for_manifest_endpoint(
@@ -1556,16 +1686,37 @@ def execution_url_for_manifest_candidate(
         raise ScanWorkManifestError(
             "candidate route is absent from its endpoint manifest"
         )
+    fragment_names = list(
+        candidate.get("browser_fragment_query_parameter_names") or ()
+    )
+    in_fragment = bool(fragment_names)
     if (
         endpoint["method"] != candidate["method"]
         or endpoint["canonical_path"] != candidate["canonical_path"]
-        or candidate["parameter_name"] not in endpoint["query_parameter_names"]
+        or (
+            str(candidate["parameter_name"])
+            not in (
+                endpoint.get("browser_fragment_query_parameter_names") or ()
+                if in_fragment else endpoint["query_parameter_names"]
+            )
+        )
+        or (
+            in_fragment
+            and (
+                candidate.get("browser_fragment_path")
+                != endpoint.get("browser_fragment_path")
+                or sorted(fragment_names) != sorted(
+                    endpoint.get("browser_fragment_query_parameter_names") or ()
+                )
+            )
+        )
     ):
         raise ScanWorkManifestError(
             "candidate identity conflicts with its endpoint manifest"
         )
     return execution_url_for_endpoint(
         endpoint, parameter_name=str(candidate["parameter_name"]),
+        parameter_location="fragment" if in_fragment else "query",
     )
 
 

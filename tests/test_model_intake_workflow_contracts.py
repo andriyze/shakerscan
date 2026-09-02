@@ -161,6 +161,29 @@ def test_automatic_review_payload_distinguishes_pending_runner_work():
 
     assert payload["active_runner_job_state"] == "pending"
     assert payload["effective_current_step"] == "calibrate_known_answer_queued"
+    assert payload["progress_semantics"] == "workflow_lifecycle_percentage"
+    assert payload["workflow_terminal"] is False
+    assert payload["required_technical_controls_status"] == "pending"
+
+
+def test_automatic_review_payload_never_equates_terminal_progress_with_control_success():
+    incomplete = mi_router._model_intake_automatic_review_payload({
+        "id": "review-1", "state": "technical_review_complete",
+        "current_step": "report_ready", "progress": 100,
+        "technical_outcome": "INCOMPLETE", "timeline_json": [], "pending_controls": [],
+    })
+    assert incomplete["workflow_terminal"] is True
+    assert incomplete["effective_progress"] == 100
+    assert incomplete["required_technical_controls_complete"] is False
+    assert incomplete["required_technical_controls_status"] == "incomplete"
+
+    passed = mi_router._model_intake_automatic_review_payload({
+        "id": "review-2", "state": "technical_review_complete",
+        "current_step": "report_ready", "progress": 100,
+        "technical_outcome": "PASS", "timeline_json": [], "pending_controls": [],
+    })
+    assert passed["required_technical_controls_complete"] is True
+    assert passed["required_technical_controls_status"] == "complete"
 
 
 def test_automatic_review_payload_separates_license_from_static_findings():

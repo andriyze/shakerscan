@@ -20,6 +20,7 @@ export interface CredentialProfile {
     schema_version: string
     auth_kind: CredentialAuthKind
     username_configured: boolean
+    secret_configured: boolean
     secondary_secret_configured: boolean
     header_name?: string | null
     endpoint_configured: boolean
@@ -52,7 +53,35 @@ export type CredentialSecretPayload = Omit<
   'expected_record_version' | 'created_by'
 >
 
-export type CredentialProfileCreatePayload = GeneratedCredentialProfileCreate
+export type CredentialProfileCreatePayload = GeneratedCredentialProfileCreate & {
+  allow_active_capabilities?: boolean
+  approval_receipt_id?: string
+}
+
+export interface CredentialCapabilityOption {
+  name: string
+  description: string
+  risk_tier: string
+  requires_active_approval: boolean
+  default: boolean
+}
+
+export async function listCredentialCapabilities(params: {
+  target_kind: CredentialTargetKind
+  auth_kind: CredentialAuthKind
+}): Promise<{
+  blank_semantics: 'safe_server_defaults'
+  safe_defaults: string[]
+  capabilities: CredentialCapabilityOption[]
+}> {
+  const search = new URLSearchParams({
+    target_kind: params.target_kind,
+    auth_kind: params.auth_kind,
+  })
+  const response = await fetch(`${API_URL}/credential-profiles/capabilities?${search}`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load credential capabilities'))
+  return response.json()
+}
 
 export async function listCredentialProfiles(params: {
   target_kind: CredentialTargetKind

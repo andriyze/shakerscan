@@ -1,6 +1,6 @@
 # ShakerScan MCP
 
-**Status:** shipped and contract-tested as of 2026-08-25.
+**Status:** shipped and contract-tested as of 2026-08-29.
 
 ShakerScan includes a fail-closed MCP stdio adapter over the REST Command Arsenal and canonical
 Hunt V2. Arsenal tools remain read-only. Hunt tools wrap `/hunts` directly and inherit its exact
@@ -43,15 +43,23 @@ Read-only Arsenal inspection:
 
 Target-bound Hunt V2 (including state-changing and target-facing operations):
 
+- `shakerscan_hunt_skills` for catalog metadata and `shakerscan_hunt_skill` for global detail
+- `shakerscan_hunt_skill_suggestions`, `shakerscan_hunt_skill_read`,
+  `shakerscan_hunt_skill_bind`, `shakerscan_hunt_skill_unbind`, and
+  `shakerscan_hunt_skill_usage` for progressive, audited methodology use
 - `shakerscan_hunt_start`, `shakerscan_hunt_get`, and `shakerscan_hunt_query`
 - `shakerscan_hunt_capability` for capabilities returned by that Hunt's manifest
-- `shakerscan_hunt_candidate`, `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
+- `shakerscan_hunt_candidate`, `shakerscan_hunt_candidate_update`, and `shakerscan_hunt_candidate_delete`
+- `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
 
 Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain `read_only` risk,
 and dispatch through the audited Arsenal endpoint. Hunt discovery reads `GET /hunts/contract` and
 generates the start schema from the live authority contract. The MCP boundary uses only the
 canonical `goal` name and sends the complete V2 body: schema version, target kind, policy, budgets,
-credential references, capability allowlist, and request-collection references.
+credential references, capability allowlist, request-collection references, and optional
+`skill_ids`. A run normally starts without one. Adaptive suggestions return at most three compact
+records and no bodies; the planner loads exactly one relevant method through the Hunt-specific read
+tool before binding it. MCP never auto-binds a methodology or changes authority.
 
 Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an active or
 awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input
@@ -63,7 +71,9 @@ results fail closed.
 
 Tool annotations reflect these boundaries: Arsenal inspection and Hunt get/query are read-only;
 capability and verification operations are conservatively marked destructive and open-world;
-start, candidate, finish, and cancel are state-changing. Raw secrets, target-address overrides,
+start, candidate create/update/delete, finish, and cancel are state-changing. Candidate updates
+cannot change identity or proof-owned fields; deletion expires the candidate while retaining its
+immutable audit record. Raw secrets, target-address overrides,
 planner argv, and arbitrary shell commands are not representable. Input schemas enforce UUIDs,
 enums, required/nested fields, patterns, uniqueness, and numeric bounds before dispatch. The
 transport also caps request and response sizes and rejects redirects.

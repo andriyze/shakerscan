@@ -189,6 +189,14 @@
       "smokePath": "/hunt"
     },
     {
+      "route": "/hunts",
+      "source": "src/app/hunts/page.tsx",
+      "owner": "hunt",
+      "caseId": "HUNT-010",
+      "stateAssertion": "Cross-target hunt history renders with filters, sort and paging.",
+      "smokePath": "/hunts"
+    },
+    {
       "route": "/model-intake",
       "source": "src/app/model-intake/page.tsx",
       "owner": "model-intake",

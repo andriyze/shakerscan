@@ -1,6 +1,6 @@
 # DAST Execution and Continuous ASM Architecture
 
-**Status (reconciled 2026-08-09):** current implementation reference. This document describes the
+**Status (reconciled 2026-08-29):** current implementation reference. This document describes the
 shipped local and broker execution model and its safety boundaries. Future fleet work belongs in
 [`multi-node-architecture.md`](multi-node-architecture.md); release gates belong in
 [`release-readiness.md`](release-readiness.md).

@@ -36,6 +36,48 @@ class _FakeRedis:
         return granted
 
 
+def test_inventory_semantics_does_not_call_scanner_candidates_confirmed_routes():
+    item = a.endpoint_inventory_semantics({
+        "source": "coverage_discovery",
+        "test_status": "tested",
+        "last_reachability_at": None,
+        "last_http_status": None,
+        "unreachable_streak": 0,
+    })
+
+    assert item["provenance_kind"] == "scanner_discovered"
+    assert item["provenance_label"] == "Scanner candidate"
+    assert item["reachability_state"] == "not_checked"
+    assert "not proof" in item["provenance_explanation"]
+
+
+def test_inventory_semantics_keeps_reachability_separate_from_test_status():
+    item = a.endpoint_inventory_semantics({
+        "source": "scan_telemetry",
+        "test_status": "stale",
+        "last_reachability_at": "2026-08-29T00:00:00Z",
+        "last_http_status": 401,
+        "unreachable_streak": 0,
+    })
+
+    assert item["provenance_kind"] == "response_observed"
+    assert item["reachability_state"] == "reachable_observed"
+    assert item["test_status"] == "stale"
+
+
+def test_inventory_semantics_marks_soft_404_retirement_explicitly():
+    item = a.endpoint_inventory_semantics({
+        "source": "scan",
+        "test_status": "gone",
+        "last_reachability_at": "2026-08-29T00:00:00Z",
+        "last_http_status": 200,
+        "unreachable_streak": 2,
+    })
+
+    assert item["reachability_state"] == "retired_unreachable"
+    assert item["reachability_label"] == "Retired"
+
+
 def test_domain_rate_reservation_zero_remaining_cap_denies():
     redis = _FakeRedis()
 
@@ -517,6 +559,12 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     conn = _CoverageConn(
         {
             "total": 5,
+            "canonical_routes": 2,
+            "canonical_routes_ever_completed": 1,
+            "variants_ever_completed": 3,
+            "proof_bearing_variants": 1,
+            "execution_attempts": 12,
+            "snapshot_at": None,
             "tested": 1,
             "untested": 4,
             "in_progress": 0,
@@ -559,6 +607,17 @@ def test_coverage_summary_uses_latest_attempt_ledger_when_present():
     }
     # §11: headline carries one labeled denominator (testable = total - gone).
     assert summary["denominator"] == 4
+    contract = summary["metric_contract"]
+    assert contract["schema_version"] == "asm_coverage_metrics/v2"
+    assert contract["inventory"] == {
+        "canonical_routes": 2,
+        "route_variants": 4,
+        "retired_variants": 1,
+    }
+    assert contract["examination"]["variants_ever_completed"] == 3
+    assert contract["execution"]["attempts"] == 12
+    assert contract["proof"]["proof_bearing_variants"] == 1
+    assert "method + normalized path + auth state" in contract["definitions"]["route_variant"]
 
 
 def test_coverage_summary_degrades_unversioned_completed_attempt():

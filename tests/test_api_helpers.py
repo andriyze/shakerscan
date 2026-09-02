@@ -1347,6 +1347,11 @@ from scan_verification_state import scan_time_verification_fields  # noqa: E402
 sys.path.pop(0)
 
 
+def _squeeze(sql: str) -> str:
+    """Collapse SQL whitespace so an assertion pins behavior, not formatting."""
+    return " ".join(str(sql).split())
+
+
 def _fleet_request(
     *, host: str, scheme: str = "https", authorization: str = "", headers: dict | None = None
 ):
@@ -1646,6 +1651,71 @@ def test_broker_canonical_queue_retries_never_serialize_materialized_options():
     assert result_source.index("await settle_broker_scan_execution(") < result_source.index(
         "INSERT INTO broker_job_results"
     )
+
+
+def test_broker_drops_scan_job_without_a_valid_durable_owner(monkeypatch):
+    class Conn:
+        async def execute(self, *_args):
+            return "UPDATE 0"
+
+        async def fetchval(self, *_args):
+            return False
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    lease = types.SimpleNamespace(
+        legacy=False,
+        payload=json.dumps({
+            "type": "scan",
+            "scan_id": "not-a-uuid",
+            "job_id": "job-1",
+            "target": "https://example.test",
+        }),
+        delivery_attempts=1,
+        queue_name="scan_jobs",
+        stream_key="queue:scan_jobs",
+        message_id="1-0",
+    )
+    acknowledgements = []
+
+    async def authenticated(*_args, **_kwargs):
+        return {"id": uuid.uuid4(), "labels": {"transport": "broker"}}
+
+    monkeypatch.setattr(fleet_router_module, "_broker_authenticated_node", authenticated)
+    monkeypatch.setattr(fleet_router_module, "_pool", lambda: Pool())
+    monkeypatch.setattr(fleet_router_module, "get_redis", object)
+    monkeypatch.setattr(fleet_router_module, "qualified_route_queues", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(fleet_router_module, "lease_job", lambda *_args, **_kwargs: lease)
+    monkeypatch.setattr(
+        fleet_router_module,
+        "acknowledge_lease",
+        lambda _redis, acknowledged: acknowledgements.append(acknowledged) or True,
+    )
+    monkeypatch.setattr(
+        fleet_router_module,
+        "_broker_take_or_refresh_slot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("malformed work must not allocate a broker slot")
+        ),
+    )
+
+    response = asyncio.run(fleet_router_module.lease_broker_job(
+        "00000000-0000-4000-8000-000000000031",
+        fleet_router_module.BrokerLeaseRequest(worker_id="worker-1", wait_seconds=0),
+        _fleet_request(host="127.0.0.1", scheme="http"),
+    ))
+
+    assert response.status_code == 204
+    assert acknowledgements == [lease]
 
 
 def test_json_object_decodes_jsonb_strings_for_execution_context():
@@ -2523,6 +2593,69 @@ def test_normalize_parallel_result_replaces_stale_backbone_coverage():
     }
 
 
+def test_normalize_scan_result_preserves_legacy_score_with_visible_provenance():
+    report = {
+        "http": {
+            "missing_security_headers": [
+                "content-security-policy",
+                "referrer-policy",
+            ],
+        },
+        "findings": [],
+        "coverage": {
+            "status": "complete",
+            "planned_action_count": 2,
+            "terminal_action_count": 2,
+        },
+        "result": {
+            "score_policy": "risk_and_assurance/v3",
+            "score": 100,
+            "grade": "A",
+            "risk_score": 100,
+            "risk_grade": "A",
+            "assurance_score": 100,
+            "assurance_band": "strong",
+            "grade_reliable": True,
+        },
+    }
+
+    normalized = api_module._normalize_scan_result_for_api(report)
+
+    assert normalized["result"]["score_policy"] == "risk_and_assurance/v3"
+    assert normalized["result"]["risk_score"] == 100
+    assert normalized["result"]["score"] == 100
+    assert normalized["result"]["assurance_score"] == 100
+    assert normalized["result"]["score_projection"] == {
+        "recomputed_for_display": False,
+        "display_policy": "risk_and_assurance/v3",
+        "stored": {
+            "score_policy": "risk_and_assurance/v3",
+            "score": 100,
+            "grade": "A",
+            "risk_score": 100,
+            "risk_grade": "A",
+            "assurance_score": 100,
+            "assurance_band": "strong",
+        },
+        "reason": "historical_policy_preserved",
+    }
+
+
+def test_normalize_scan_result_leaves_current_score_projection_untouched():
+    report = {
+        "result": {
+            "score_policy": "risk_and_assurance/v8",
+            "score": 73,
+            "grade": "C",
+        },
+    }
+
+    normalized = api_module._normalize_scan_result_for_api(report)
+
+    assert normalized["result"] == report["result"]
+    assert "score_projection" not in normalized["result"]
+
+
 def test_scan_worker_container_name_filter_excludes_gungnir_worker():
     assert api_module._is_scan_worker_container_name("shakerscan-worker-1") is True
     assert api_module._is_scan_worker_container_name("/shakerscan-worker-5") is True
@@ -3173,6 +3306,8 @@ class _FakeConn:
     def __init__(self, schedules):
         self.schedules = schedules
         self.executes = []
+        self.fetchvals = []
+        self.claim_result = True
 
     async def fetch(self, query, *args):
         if "FROM schedules" in query:
@@ -3180,6 +3315,9 @@ class _FakeConn:
         return []
 
     async def fetchval(self, query, *args):
+        self.fetchvals.append((query, args))
+        if "UPDATE schedules" in query and "RETURNING id" in query:
+            return args[1] if self.claim_result else None
         return 0
 
     async def fetchrow(self, query, *args):
@@ -3241,6 +3379,11 @@ async def _fake_create_asm_campaign(*_args, **_kwargs):
 
 
 def _freeze_test_asm_target(monkeypatch):
+    async def validate(_url):
+        return ("192.0.2.10",)
+
+    monkeypatch.setattr(api_module, "validate_schedule_target_destination", validate)
+
     async def freeze(**kwargs):
         return {
             "target_id": str(kwargs["target_id"]),
@@ -3326,7 +3469,7 @@ def test_enqueue_asm_exploit_batch_fails_committed_scan_when_queue_handoff_fails
             redis_client,
             "11111111-1111-4111-8111-111111111111",
             "https://example.test",
-            {},
+            {"approval_receipt_id": "44444444-4444-4444-8444-444444444444"},
             batch_size=10,
             stale_days=30,
             exploit_depth=False,
@@ -3429,7 +3572,7 @@ def test_asm_enqueue_persists_research_dispatch_correlation_before_queue_handoff
                 redis_client,
                 "33333333-3333-4333-8333-333333333333",
                 "https://example.test",
-                {},
+                {"approval_receipt_id": "44444444-4444-4444-8444-444444444444"},
                 batch_size=10,
                 stale_days=30,
                 exploit_depth=False,
@@ -3508,7 +3651,7 @@ def test_enqueue_asm_confirmation_ack_loss_uses_exact_fresh_readback(
             redis_client,
             "11111111-1111-4111-8111-111111111111",
             "https://example.test",
-            {},
+            {"approval_receipt_id": "44444444-4444-4444-8444-444444444444"},
             batch_size=10,
             stale_days=30,
             exploit_depth=False,
@@ -3550,7 +3693,7 @@ def test_enqueue_asm_confirmation_write_failure_fails_scan_and_campaign(monkeypa
                 redis_client,
                 "11111111-1111-4111-8111-111111111111",
                 "https://example.test",
-                {},
+                {"approval_receipt_id": "44444444-4444-4444-8444-444444444444"},
                 batch_size=10,
                 stale_days=30,
                 exploit_depth=False,
@@ -3666,8 +3809,57 @@ def test_run_due_schedules_does_not_advance_schedule_on_redis_failure(monkeypatc
     assert "INSERT INTO scans" in executed_sql
     assert "UPDATE scans" in executed_sql
     assert "scheduled enqueue failed" in str(conn.executes)
-    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" not in _squeeze(executed_sql)
     assert redis_client.rpush_calls
+
+
+def test_run_due_schedules_retries_transient_dns_without_consuming_run(monkeypatch):
+    schedule = _due_schedule()
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+
+    async def unresolved(_url):
+        raise api_module.ScheduleTargetResolutionError(
+            "Scheduled target DNS resolution failed."
+        )
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module, "validate_schedule_target_destination", unresolved)
+
+    before = api_module.utc_now()
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+    after = api_module.utc_now()
+
+    assert redis_client.rpush_calls == []
+    assert len(conn.executes) == 1
+    query, args = conn.executes[0]
+    assert "WHERE id=$2 AND is_active=true" in query
+    assert "SET next_run_at=$1" in query
+    assert "SET is_active" not in query
+    assert "last_run_at" not in query
+    assert args[1] == schedule["id"]
+    assert before + timedelta(minutes=14) < args[0] < after + timedelta(minutes=16)
+
+
+def test_run_due_schedules_disables_unsafe_dns_destination(monkeypatch):
+    schedule = _due_schedule()
+    conn = _FakeConn([schedule])
+    redis_client = _RecordingRedis()
+
+    async def unsafe(_url):
+        raise api_module.ScheduleTargetSafetyError(
+            "Scheduled targets must not resolve to a private destination."
+        )
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(api_module, "validate_schedule_target_destination", unsafe)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    assert redis_client.rpush_calls == []
+    query, args = conn.executes[0]
+    assert "SET is_active=false, next_run_at=NULL" in query
+    assert args == (schedule["id"],)
 
 
 def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatch):
@@ -3680,10 +3872,30 @@ def test_run_due_schedules_advances_schedule_after_successful_enqueue(monkeypatc
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" in executed_sql
-    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" in _squeeze(executed_sql)
     assert "UPDATE scans" not in executed_sql
     assert len(redis_client.rpush_calls) == 1
     assert len(redis_client.hset_calls) == 1
+
+
+def test_run_due_schedules_requires_atomic_due_occurrence_claim(monkeypatch):
+    conn = _FakeConn([_due_schedule()])
+    conn.claim_result = False
+    redis_client = _RecordingRedis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    _freeze_test_asm_target(monkeypatch)
+
+    asyncio.run(api_module.run_due_schedules(_FakePool(conn)))
+
+    claim_query, claim_args = next(
+        item for item in conn.fetchvals
+        if "UPDATE schedules" in item[0] and "RETURNING id" in item[0]
+    )
+    assert "is_active=true" in claim_query
+    assert "next_run_at <=" in claim_query
+    assert claim_args[1] is not None
+    assert redis_client.rpush_calls == []
+    assert not any("INSERT INTO scans" in query for query, _args in conn.executes)
 
 
 def test_canonical_schedule_queues_scan_job_v2_without_legacy_identity(monkeypatch):
@@ -3781,8 +3993,8 @@ def test_run_due_schedules_disables_legacy_retention_schedule(monkeypatch):
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET is_active = false" in executed_sql
-    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert "UPDATE schedules SET is_active=false, updated_at=NOW()" in _squeeze(executed_sql)
+    assert "last_run_at=$1, next_run_at=$2" not in _squeeze(executed_sql)
     assert redis_client.rpush_calls == []
     assert redis_client.hset_calls == []
 
@@ -3799,12 +4011,15 @@ def test_run_due_schedules_disables_legacy_destructive_retention_schedule(monkey
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET is_active = false" in executed_sql
+    assert "UPDATE schedules SET is_active=false, updated_at=NOW()" in _squeeze(executed_sql)
     assert "UPDATE schedules SET next_run_at" not in executed_sql
-    assert "UPDATE schedules SET last_run_at" not in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" not in _squeeze(executed_sql)
 
 
 def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
+    _freeze_test_asm_target(monkeypatch)
+    approval_receipt_id = str(uuid.uuid4())
+    scope_receipt_id = str(uuid.uuid4())
     schedule = _due_schedule()
     schedule["schedule_kind"] = "asm_improve"
     schedule["scan_options"] = {
@@ -3813,6 +4028,7 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
         "check_family": "sqli",
         "endpoint_filter": "api",
         "exploit_depth": True,
+        "approval_receipt_id": approval_receipt_id,
     }
     conn = _FakeConn([schedule])
     redis_client = _RecordingRedis()
@@ -3848,7 +4064,17 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
         }
         return {"scan_id": "11111111-1111-4111-8111-111111111111"}
 
+    async def validate_approval(_conn, receipt_id, **_kwargs):
+        assert receipt_id == approval_receipt_id
+        return {
+            "approval_receipt_id": approval_receipt_id,
+            "scope_receipt_id": scope_receipt_id,
+        }
+
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
+    monkeypatch.setattr(
+        api_module, "_validate_approval_receipt_for_action", validate_approval,
+    )
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable_count)
     # dual-use: api.py callers and the router both resolve this name.
     monkeypatch.setattr(api_module, "_enqueue_asm_exploit_batch", fake_enqueue_asm_exploit_batch)
@@ -3861,7 +4087,7 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
 
     executed_sql = "\n".join(query for query, _args in conn.executes)
     assert "INSERT INTO scans" not in executed_sql
-    assert "UPDATE schedules SET last_run_at" in executed_sql
+    assert "last_run_at=$1, next_run_at=$2" in _squeeze(executed_sql)
     assert queued["triggered_by"] == "schedule"
     assert queued["claimable_kwargs"] == {
         "stale_days": 7,
@@ -3874,6 +4100,8 @@ def test_run_due_schedules_uses_typed_asm_schedule_kind(monkeypatch):
         "check_family": "sqli",
         "endpoint_filter": "api",
         "exploit_depth": True,
+        "approval_receipt_id": approval_receipt_id,
+        "scope_receipt_id": scope_receipt_id,
     }
     assert queued["batch_size"] == 3
     assert queued["stale_days"] == 7
@@ -7025,7 +7253,11 @@ def test_reconcile_hypothesis_promotes_only_existing_action_proof(monkeypatch):
         "severity": "high",
         "status": "active",
         "url": "https://app.example.com/api/search?q=x",
-        "evidence": {"method": "GET", "parameter": "q"},
+        "evidence": {
+            "method": "GET",
+            "parameter": "q",
+            "proof_of_exploitation": True,
+        },
         "request": {},
         "response": {},
         "last_verification_status": "still_vulnerable",
@@ -7558,7 +7790,7 @@ def test_refuter_work_summary_triggers_weak_ai_and_model_claims():
             "source": "scan",
             "tool": "smart_sqli",
             "last_verification_verdict": "exploited",
-            "evidence": json.dumps({}),
+            "evidence": json.dumps({"proof_of_exploitation": True}),
         },
     ]
     reviews = [{"subject_type": "finding", "subject_id": str(weak_id)}]
@@ -9021,6 +9253,36 @@ def _run_retention_execute(conn, preview_id, **overrides):
         api_module.EvidenceRetentionSweepRequest(**fields),
         pool=_pool_for(conn),
     ))
+
+
+def test_retention_scope_accepts_only_target_bound_hunt_archive_blobs():
+    target_id = uuid.uuid4()
+    object_id = uuid.uuid4()
+
+    class Conn:
+        async def fetch(self, query, *params):
+            assert "FROM http_transactions ht" in query
+            assert params == ([object_id], target_id)
+            return [{"object_id": object_id, "target_scoped": True}]
+
+    row = {"id": object_id, "finding_id": None, "scan_id": None}
+    assert asyncio.run(evidence_router_module._evidence_retention_links_match_target(
+        Conn(), [row], target_id=target_id,
+    )) is True
+
+
+def test_retention_scope_rejects_unlinked_archive_blobs():
+    target_id = uuid.uuid4()
+    object_id = uuid.uuid4()
+
+    class Conn:
+        async def fetch(self, query, *params):
+            return []
+
+    row = {"id": object_id, "finding_id": None, "scan_id": None}
+    assert asyncio.run(evidence_router_module._evidence_retention_links_match_target(
+        Conn(), [row], target_id=target_id,
+    )) is False
 
 
 def test_retention_sweep_execute_requires_preview_before_approval(monkeypatch):
@@ -13074,6 +13336,28 @@ def test_timeline_scan_status_maps_to_explicit_vocabulary():
     assert api_module._timeline_scan_status(None) == "queued"
 
 
+def test_timeline_submission_receipt_is_accepted_not_execution_complete():
+    assert ops_router_module._normalized_timeline_event_status(
+        "completed", command="scan.submit",
+    ) == "accepted"
+    assert ops_router_module._normalized_timeline_event_status(
+        "completed", command="scan.result",
+    ) == "completed"
+
+
+def test_timeline_blockers_do_not_erase_an_explicit_execution_status():
+    assert ops_router_module._normalized_timeline_event_status(
+        "completed", command="scan.runtime_scope_check",
+        blocked_by=["destination_not_allowed"],
+    ) == "completed"
+    assert ops_router_module._normalized_timeline_event_status(
+        "approval_required", blocked_by=["approval_receipt_missing"],
+    ) == "approval_required"
+    assert ops_router_module._normalized_timeline_event_status(
+        None, blocked_by=["destination_not_allowed"],
+    ) == "blocked"
+
+
 def test_command_result_event_uses_live_scan_status_over_frozen_status():
     # command result was recorded "queued"; the joined scan is now running.
     row = {
@@ -13441,17 +13725,32 @@ class _FindingExceptionEditConn:
             self.update_args = args
             updated = dict(self.current_row)
             updated.update({
-                "scope": args[1], "owner": args[2], "approver": args[3],
-                "reason": args[4], "compensating_controls": args[5],
-                "status": args[6], "expires_at": args[7],
-                "edit_history": args[8],
+                "policy_id": args[1], "target_id": args[2], "scope": args[3],
+                "owner": args[4], "approver": args[5], "reason": args[6],
+                "compensating_controls": args[7], "status": args[8],
+                "expires_at": args[9], "edit_history": args[10],
             })
             return updated
         return None
 
 
-def test_update_finding_exception_requires_owner_or_approver():
-    # The 422 gate must fire before any DB access (db_pool is unset in tests).
+def test_update_finding_exception_rejects_incomplete_merged_effective_waiver(monkeypatch):
+    current_row = {
+        "id": _EXCEPTION_ID,
+        "finding_id": "f1",
+        "fingerprint": None,
+        "policy_id": None,
+        "target_id": None,
+        "scope": None,
+        "owner": None,
+        "approver": None,
+        "reason": None,
+        "compensating_controls": None,
+        "status": "revoked",
+        "expires_at": None,
+        "edit_history": json.dumps([]),
+    }
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(_FindingExceptionEditConn(current_row)))
     with pytest.raises(api_module.HTTPException) as exc:
         asyncio.run(
             api_module.update_finding_exception(
@@ -13466,8 +13765,8 @@ def test_update_finding_exception_appends_edit_history(monkeypatch):
         "id": _EXCEPTION_ID,
         "finding_id": "f1",
         "fingerprint": None,
-        "policy_id": None,
-        "target_id": None,
+        "policy_id": uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        "target_id": uuid.UUID("33333333-3333-4333-8333-333333333333"),
         "scope": "old-scope",
         "owner": "alice",
         "approver": "bob",
@@ -13487,7 +13786,7 @@ def test_update_finding_exception_appends_edit_history(monkeypatch):
 
     assert result["owner"] == "carol"
     assert conn.update_query is not None and "edit_history" in conn.update_query
-    snapshot = json.loads(conn.update_args[8])[0]
+    snapshot = json.loads(conn.update_args[10])[0]
     assert snapshot["owner"] == "alice"
     assert snapshot["approver"] == "bob"
     assert snapshot["status"] == "active"
@@ -20109,10 +20408,13 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
 
     class Conn:
         async def fetchrow(self, query, *args):
-            assert "RETURNING id, url, root_domain, is_root" in query
+            assert "RETURNING id, url, name, discovery_source, metadata_json" in query
             return {
                 "id": existing_id,
                 "url": "http://localhost:3001",
+                "name": "stored internal target",
+                "discovery_source": "manual",
+                "metadata_json": {"cohort": "internal"},
                 "root_domain": "localhost",
                 "is_root": False,
                 "created": False,
@@ -20131,6 +20433,7 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     assert response["url"] == "http://localhost:3001"
     assert response["root_domain"] == "localhost"
     assert response["is_root"] is False
+    assert response["cohort"] == "internal"
     assert response["status"] == "already_exists"
     # The reuse must also be announced. Returning only the stored metadata let a caller believe it
     # had registered https://localhost:9090; a scope receipt and a Hunt were then bound to one
@@ -20300,6 +20603,67 @@ def test_finding_owner_count_refreshes_web_and_device_namespaces():
     assert calls[0][1] == [web_id]
     assert "UPDATE device_targets" in calls[1][0]
     assert calls[1][1] == [device_id]
+
+
+def test_finding_fingerprint_mutation_rejects_cross_target_ambiguity():
+    class Conn:
+        async def fetch(self, query, fingerprint, *args):
+            assert "LIMIT 2" in query
+            assert fingerprint == "scanner:shared"
+            assert args == ()
+            return [
+                {"id": uuid.UUID("00000000-0000-4000-8000-000000000021")},
+                {"id": uuid.UUID("00000000-0000-4000-8000-000000000022")},
+            ]
+
+    with pytest.raises(api_module.HTTPException) as excinfo:
+        asyncio.run(api_module._resolve_finding_mutation_id(
+            Conn(),
+            "scanner:shared",
+        ))
+
+    assert excinfo.value.status_code == 409
+    assert "ambiguous across targets" in excinfo.value.detail
+
+
+def test_finding_fingerprint_mutation_honors_exact_scan_scope():
+    finding_id = uuid.UUID("00000000-0000-4000-8000-000000000023")
+    scan_id = uuid.UUID("00000000-0000-4000-8000-000000000024")
+
+    class Conn:
+        async def fetch(self, query, fingerprint, query_scan_id):
+            assert "fingerprint=$1 AND scan_id=$2" in query
+            assert fingerprint == "scanner:scoped"
+            assert query_scan_id == scan_id
+            return [{"id": finding_id}]
+
+    resolved = asyncio.run(api_module._resolve_finding_mutation_id(
+        Conn(),
+        "scanner:scoped",
+        scan_id=scan_id,
+    ))
+
+    assert resolved == finding_id
+
+
+def test_finding_record_rejects_ambiguous_fingerprint_before_retest():
+    class Conn:
+        async def fetchrow(self, *_args):
+            raise AssertionError("a non-UUID fingerprint must not use UUID lookup")
+
+        async def fetch(self, query, fingerprint):
+            assert "LIMIT 2" in query
+            assert fingerprint == "scanner:shared"
+            return [
+                {"id": uuid.UUID("00000000-0000-4000-8000-000000000031")},
+                {"id": uuid.UUID("00000000-0000-4000-8000-000000000032")},
+            ]
+
+    with pytest.raises(api_module.HTTPException) as excinfo:
+        asyncio.run(api_module.get_finding_record(Conn(), "scanner:shared"))
+
+    assert excinfo.value.status_code == 409
+    assert "use the finding UUID" in excinfo.value.detail
 
 
 def test_all_public_limit_parameters_have_explicit_lower_bounds():
@@ -21083,6 +21447,65 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
     assert result["queue_consistency"]["stale_running_job_hashes"] == 1
     assert redis.jobs["job:planning-job"]["status"] == "running"
     assert redis.jobs["job:stale-job"]["status"] == "orphaned"
+
+
+def test_queue_stats_treats_worker_leased_pending_handoff_as_consistent(monkeypatch):
+    class Conn:
+        async def fetch(self, _query, *_args):
+            return [{
+                "job_id": "leased-planning-job",
+                "status": "pending",
+                "scan_role": "parent",
+            }]
+
+    class Redis:
+        def __init__(self):
+            self.jobs = {
+                "job:leased-planning-job": {"status": "queued"},
+            }
+
+        def get(self, _key):
+            return None
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def scan_iter(self, pattern):
+            return list(self.jobs) if pattern == "job:*" else []
+
+        def hgetall(self, key):
+            return dict(self.jobs.get(key) or {})
+
+        def hset(self, key, field=None, value=None, mapping=None):
+            self.jobs.setdefault(key, {})
+            if mapping:
+                self.jobs[key].update(mapping)
+            elif field is not None:
+                self.jobs[key][field] = value
+
+        def expire(self, *_args):
+            return True
+
+    redis = Redis()
+    payload = json.dumps({"job_id": "leased-planning-job"})
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    monkeypatch.setattr(ops_router_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        ops_router_module,
+        "queue_payloads",
+        lambda *_args, include_leased=True, **_kwargs: (
+            [payload] if include_leased else []
+        ),
+    )
+    monkeypatch.setattr(ops_router_module, "pending_depth", lambda *_args, **_kwargs: 0)
+
+    result = asyncio.run(ops_router_module.queue_stats())
+
+    assert result["pending"] == 1
+    assert result["queued"] == 0
+    assert result["queue_consistency"]["reconciled"] is True
+    assert result["queue_consistency"]["active_scan_without_queue_entry"] == 0
+    assert redis.jobs["job:leased-planning-job"] == {"status": "queued"}
 
 
 def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypatch):

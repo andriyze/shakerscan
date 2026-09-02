@@ -45,11 +45,22 @@ interface TimelineFilters {
 
 function eventTitle(event: TimelineEvent): string {
   const raw = event.action_name || event.command || event.kind
+  if (raw === 'scan.submit') {
+    const scanTitles: Record<string, string> = {
+      accepted: 'Scan accepted for queueing',
+      queued: 'Scan queued',
+      running: 'Scan running',
+      completed: 'Scan completed',
+      failed: 'Scan failed',
+      cancelled: 'Scan cancelled',
+      blocked: 'Scan blocked',
+    }
+    return scanTitles[effectiveEventStatus(event)] || 'Scan submission'
+  }
   const friendly: Record<string, string> = {
     'Experiment.workflow': 'Autonomous test completed',
     'Research.episode': 'Investigation update',
     'Finding.retest': 'Finding verification',
-    'Scan.submit': 'Scan queued',
     'Scan.result': 'Scan reviewed',
     'Scan.runtime scope check': 'Scan blocked by scope policy',
     'Asm.improve': 'Coverage work queued',
@@ -63,6 +74,12 @@ function eventTitle(event: TimelineEvent): string {
   }
   if (friendly[raw]) return friendly[raw]
   return raw.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
+}
+
+function effectiveEventStatus(event: TimelineEvent): string {
+  const stored = String(event.status || '').trim()
+  if (stored) return stored
+  return Array.isArray(event.blocked_by) && event.blocked_by.length > 0 ? 'blocked' : 'queued'
 }
 
 function eventKindLabel(event: TimelineEvent): string {
@@ -87,11 +104,14 @@ function eventHref(event: TimelineEvent): string | null {
 function EventRow({ event }: { event: TimelineEvent }) {
   const href = eventHref(event)
   const timestamp = event.next_eligible_at || event.created_at
+  const scheduledRule = event.kind === 'schedule'
+    ? `${event.frequency || 'scheduled'}${event.day_of_week !== undefined && event.day_of_week !== null ? ` · day ${event.day_of_week}` : ''} · ${event.time_of_day || 'time not set'} ${event.timezone || 'UTC'}`
+    : null
   return (
     <div className="flex flex-col gap-2 border-b border-gray-800 py-3 last:border-b-0 md:flex-row md:items-start md:justify-between">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <TimelineStatusBadge status={event.status} />
+          <TimelineStatusBadge status={effectiveEventStatus(event)} />
           <RiskTierBadge tier={event.risk_tier} />
           <span className="text-sm font-medium text-white">{eventTitle(event)}</span>
           <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
@@ -117,10 +137,16 @@ function EventRow({ event }: { event: TimelineEvent }) {
           {Array.isArray(event.evidence_object_ids) && event.evidence_object_ids.length > 0 && (
             <span>{event.evidence_object_ids.length} evidence</span>
           )}
+          {scheduledRule && <span>Scheduled rule: {scheduledRule}</span>}
+          {scheduledRule && <span>Dispatch jitter: ±{event.jitter_minutes || 0} min</span>}
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-3 text-xs text-gray-500">
-        {timestamp && <span title={timestamp}>{formatDate(timestamp)}</span>}
+        {timestamp && (
+          <span title={timestamp}>
+            {event.kind === 'schedule' ? 'Jittered dispatch: ' : ''}{formatDate(timestamp)}
+          </span>
+        )}
         {href && (
           <Link href={href} className="text-blue-400 hover:text-blue-300">
             Open →

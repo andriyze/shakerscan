@@ -28,9 +28,10 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .run_service import agent_tools
+from . import finding_actions as _hunt_finding_actions
 from .cancellation import (
     HuntCancellationWatch,
     record_cancellable_job_durable,
@@ -108,6 +109,49 @@ _deps: dict[str, Callable[..., Any]] = {}
 _AGENT_TOOL_MAX_QUERY_ROWS = 100
 
 
+def _hunt_budget_accounting(
+    reserved: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    used_after_reconciliation: Mapping[str, Any],
+    *,
+    charge_basis: str = "capability_reported_settlement",
+    settlement_status: str,
+    reservation_id: str | None,
+) -> dict[str, Any]:
+    """Publish exact settlement semantics without conflating holds and charges."""
+
+    normalized_reserved = {
+        str(key): max(0, int(value)) for key, value in reserved.items()
+    }
+    normalized_actual = {
+        str(key): max(0, int(value)) for key, value in actual.items()
+    }
+    accounting = {
+        "schema_version": "hunt-budget-settlement/v1",
+        "charge_basis": charge_basis,
+        "settlement_status": settlement_status,
+        "reservation_id": reservation_id,
+        "reserved": normalized_reserved,
+        "actual": normalized_actual,
+        "overspent": {
+            key: int(normalized_actual.get(key) or 0) - amount
+            for key, amount in normalized_reserved.items()
+            if int(normalized_actual.get(key) or 0) > amount
+        },
+        "used_after_reconciliation": {
+            str(key): max(0, int(value))
+            for key, value in used_after_reconciliation.items()
+        },
+    }
+    if settlement_status == "succeeded":
+        accounting["released"] = {
+            key: amount - int(normalized_actual.get(key) or 0)
+            for key, amount in normalized_reserved.items()
+            if amount >= int(normalized_actual.get(key) or 0)
+        }
+    return accounting
+
+
 def configure_hunt_interaction_router(
     pool_provider: Callable[[], Any], **collaborators: Callable[..., Any]
 ) -> None:
@@ -178,6 +222,30 @@ class HuntCandidateRequest(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"] = "info"
     evidence_refs: list[str] = Field(min_length=1, max_length=100)
     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+
+
+class HuntCandidateUpdateRequest(BaseModel):
+    """Editable candidate metadata; identity and proof-owned fields are absent by design."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    claim: Optional[str] = Field(default=None, min_length=1, max_length=8000)
+    severity: Optional[
+        Literal["critical", "high", "medium", "low", "info"]
+    ] = None
+    evidence_refs: Optional[list[str]] = Field(
+        default=None, min_length=1, max_length=100,
+    )
+    verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if not self.model_fields_set:
+            raise ValueError("Candidate update must change at least one field")
+        for field_name in ("title", "claim", "severity", "evidence_refs"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 @router.post("/hunts/{hunt_id}/query")
@@ -995,6 +1063,67 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
 
 
+def _candidate_lifecycle_http_error(
+    exc: investigation_candidates.CandidateLifecycleError,
+) -> HTTPException:
+    if exc.code == "candidate_not_owned":
+        return HTTPException(status_code=404, detail=str(exc))
+    if exc.code in {
+        "candidate_update_empty", "candidate_update_field_forbidden",
+        "candidate_evidence_required",
+    }:
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=409, detail=str(exc))
+
+
+@router.patch("/hunts/{hunt_id}/candidates/{candidate_id}")
+async def update_hunt_candidate(
+    hunt_id: str, candidate_id: str, request: HuntCandidateUpdateRequest,
+):
+    """Correct metadata on a candidate produced by this Hunt.
+
+    Candidate identity, proof state, and verification results remain server-owned. Historical
+    Hunts may correct their own non-terminal candidates because this operation performs no target
+    traffic and appends an immutable lifecycle observation.
+    """
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction():
+                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                result = await investigation_candidates.update_candidate_for_hunt(
+                    conn,
+                    hunt_run_id=str(hunt_uuid),
+                    candidate_id=str(candidate_uuid),
+                    changes=request.model_dump(exclude_unset=True),
+                    created_by=f"hunt_v2:{hunt_uuid}",
+                )
+    except investigation_candidates.CandidateLifecycleError as exc:
+        raise _candidate_lifecycle_http_error(exc) from exc
+    return {"hunt_id": str(hunt_uuid), "candidate": result}
+
+
+@router.delete("/hunts/{hunt_id}/candidates/{candidate_id}")
+async def delete_hunt_candidate(hunt_id: str, candidate_id: str):
+    """Delete a Hunt-owned candidate from active use without erasing its audit record."""
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction():
+                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                result = await investigation_candidates.expire_candidate_for_hunt(
+                    conn,
+                    hunt_run_id=str(hunt_uuid),
+                    candidate_id=str(candidate_uuid),
+                    created_by=f"hunt_v2:{hunt_uuid}",
+                )
+    except investigation_candidates.CandidateLifecycleError as exc:
+        raise _candidate_lifecycle_http_error(exc) from exc
+    return {"hunt_id": str(hunt_uuid), "candidate": result}
+
+
 # Mirror of the fan-out `_device_verify_candidate_tool` performs. A test pins these against the
 # values it actually passes, so the reservation cannot drift away from the traffic it authorizes.
 _DEVICE_VERIFICATION_WEB_CONTRACTS: frozenset[str] = frozenset({"device.tls", "device.auth_bypass"})
@@ -1442,10 +1571,30 @@ async def _execute_hunt_capability_lifecycle(
                     and request.input.get("secondary_session_ref")
                 )
             )
+            # Forging a client address is a distinct authority the operator granted, so a
+            # call that uses it is metered and re-approved like any other active action.
+            # Classifying it by the capability's static risk tier alone let anonymous
+            # forged-header requests run to the HTTP ceiling without ever touching
+            # max_active_actions, which breaks the multidimensional budget invariant.
+            forges_identity = bool(
+                agent_tools.IDENTITY_HEADERS & {
+                    str(header).strip().lower()
+                    for header in (request.input.get("headers") or {})
+                }
+            ) if isinstance(request.input.get("headers"), Mapping) else False
+            # Sending a request to an operator-confirmed origin instead of the target's
+            # resolved address is at least as significant as forging a header: it is the
+            # act that demonstrates an edge bypass. Left on the capability's passive tier
+            # it consumed no active action and was never re-approved per call.
+            uses_direct_origin = bool(
+                str(request.input.get("via_address") or "").strip()
+            )
             requires_call_approval = (
                 spec.requires_active_approval
                 or principal_slot != "anonymous"
                 or uses_session
+                or forges_identity
+                or uses_direct_origin
             )
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -1454,7 +1603,11 @@ async def _execute_hunt_capability_lifecycle(
                 call_approval_context = await _validate_approval_receipt_for_action(
                     conn, policy.get("approval_receipt_id"), target_url=target_url,
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
-                    command=name, risk_tier="credential" if principal_slot != "anonymous" or uses_session else str(spec.risk_tier), always_require_receipt=True,
+                    command=name, risk_tier=(
+                        "credential" if principal_slot != "anonymous" or uses_session
+                        else "active" if forges_identity or uses_direct_origin
+                        else str(spec.risk_tier)
+                    ), always_require_receipt=True,
                     require_target_binding=True,
                     require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
                 )
@@ -2110,6 +2263,42 @@ async def _execute_hunt_capability_lifecycle(
                 requested_budget=durable_reservation.record.requested,
             )
             result = collection_adapter.result
+        elif name in {"findings.create", "findings.update", "findings.delete"}:
+            async def mutate_hunt_finding() -> dict[str, Any]:
+                try:
+                    if name == "findings.create":
+                        operation = _hunt_finding_actions.create_hunt_finding
+                    elif name == "findings.update":
+                        operation = _hunt_finding_actions.update_hunt_finding
+                    else:
+                        operation = _hunt_finding_actions.delete_hunt_finding
+                    return await operation(
+                        _pool(),
+                        hunt_id=run["id"],
+                        action_id=action_id,
+                        values=request.input,
+                    )
+                except _hunt_finding_actions.HuntFindingActionError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+            finding_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=mutate_hunt_finding,
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution=_hunt_redacted_capability_input(
+                    name, request.input,
+                ),
+                blocked_exceptions=(HTTPException,),
+                conservative_full_budget=True,
+            )
+            capability_execution = await dispatch_registered_adapter(
+                finding_adapter,
+                target=inline_hunt_target_binding(),
+                requested_budget=durable_reservation.record.requested,
+            )
+            result = finding_adapter.result
+            if finding_adapter.blocked_exception is not None:
+                raise finding_adapter.blocked_exception
         elif name == "collections.select":
             collection_adapter = ControlPlaneExecutionAdapter(
                 specification=spec,
@@ -2524,6 +2713,7 @@ async def _execute_hunt_capability_lifecycle(
                         "failed", "blocked"
                     }
             reconciled_used = dict(used)
+            settlement_status = "not_attempted"
             is_partial = bool(
                 isinstance(receipt_payload, dict)
                 and (receipt_payload.get("partial") or receipt_payload.get("status") == "partial")
@@ -2796,6 +2986,20 @@ async def _execute_hunt_capability_lifecycle(
                         receipt_payload["budget_consumed"] = dict(
                             terminal_record.actual
                         )
+                        receipt_payload["budget_accounting"] = (
+                            _hunt_budget_accounting(
+                                terminal_record.requested,
+                                terminal_record.actual,
+                                reconciled_used,
+                                charge_basis=(
+                                    "conservative_full_reservation"
+                                    if name == "candidate.verify"
+                                    else "capability_reported_settlement"
+                                ),
+                                settlement_status="succeeded",
+                                reservation_id=terminal_record.reservation_id,
+                            )
+                        )
                     updated_action = await conn.execute(
                         """UPDATE hunt_actions
                            SET status=$2, result_summary=$3, receipt_id=$4,
@@ -2872,6 +3076,7 @@ async def _execute_hunt_capability_lifecycle(
                             # usage in the same transaction as the canonical receipt,
                             # or still owns the live reservation after an API timeout.
                             reconciled_used = current_used
+                            settlement_status = "worker_managed"
                         else:
                             current_ledger = {
                                 key: int(current_used.get(key) or 0)
@@ -2887,7 +3092,9 @@ async def _execute_hunt_capability_lifecycle(
                                 locked["id"], json.dumps(current_used),
                             )
                             reconciled_used = current_used
+                            settlement_status = "succeeded"
                 except Exception:
+                    settlement_status = "failed"
                     logger.exception(
                         "Failed to reconcile Hunt capability budget",
                         extra={"hunt_id": hunt_id, "action_id": str(action_id)},
@@ -2925,6 +3132,23 @@ async def _execute_hunt_capability_lifecycle(
                     receipt_id = receipt_result.get("tool_receipt", {}).get("id")
                 except Exception:
                     logger.exception("Failed to record Hunt capability receipt", extra={"hunt_id": hunt_id, "action_id": str(action_id)})
+                if isinstance(receipt_payload, dict):
+                    receipt_payload["budget_consumed"] = dict(actual_charges)
+                    receipt_payload["budget_accounting"] = _hunt_budget_accounting(
+                        charges,
+                        actual_charges,
+                        reconciled_used,
+                        charge_basis=(
+                            "conservative_full_reservation"
+                            if name == "candidate.verify"
+                            else "capability_reported_settlement"
+                        ),
+                        settlement_status=settlement_status,
+                        reservation_id=(
+                            durable_reservation.record.reservation_id
+                            if durable_reservation is not None else None
+                        ),
+                    )
                 await conn.execute(
                     """UPDATE hunt_actions SET status=$2, result_summary=$3, receipt_id=$4, completed_at=NOW() WHERE id=$1""",
                     action_id, status, json.dumps(_arsenal_routes._redact_agent_payload(receipt_payload), default=str),
@@ -3550,7 +3774,11 @@ def _hunt_managed_principal_reference(
     context: Mapping[str, Any], value: Any,
 ) -> dict[str, Any] | None:
     try:
-        return select_hunt_principal_reference(context, value)
+        return select_hunt_principal_reference(
+            context,
+            value,
+            capability="collections.replay_safe",
+        )
     except CredentialReferenceError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 

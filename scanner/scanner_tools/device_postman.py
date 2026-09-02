@@ -32,7 +32,10 @@ MAX_HEADER_VALUE_CHARS = 64 * 1024
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 SUPPORTED_METHODS = SAFE_METHODS | STATE_CHANGING_METHODS
-_VARIABLE_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+# No ``\s*`` around the capture: whitespace is inside ``[^{}]`` too, so the old
+# ``\s*([^{}]+?)\s*`` was ambiguous and backtracked polynomially on a malformed
+# ``{{`` with trailing spaces and no close. The key is stripped in code below.
+_VARIABLE_RE = re.compile(r"\{\{([^{}]+?)\}\}")
 _SENSITIVE_NAME_RE = re.compile(
     r"(?:authorization|api[-_]?key|token|secret|password|passwd|cookie|session|credential|private[-_]?key)",
     re.I,

@@ -25,6 +25,7 @@ PUBLIC_CONFIGURATION_KEYS = frozenset({
     "schema_version",
     "auth_kind",
     "username_configured",
+    "secret_configured",
     "secondary_secret_configured",
     "header_name",
     "endpoint_configured",
@@ -262,6 +263,19 @@ def _positive_version(value: Any, *, name: str) -> int:
     return normalized
 
 
+def _with_secret_configured(value: Any, *, auth_kind: str) -> Any:
+    """Backfill ``secret_configured`` on profiles written before it existed.
+
+    Every kind except ``custom_headers`` required a secret at the time those rows were
+    stored, so its presence is known from the kind alone. Returning the row unchanged left
+    the field undefined, and a client reading "has username, secret unknown" reasonably
+    rendered a complete pair as "username only".
+    """
+    if not isinstance(value, Mapping) or "secret_configured" in value:
+        return value
+    return {**dict(value), "secret_configured": auth_kind != "custom_headers"}
+
+
 def _public_configuration(value: Any, *, auth_kind: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CredentialStoreError("configuration must be an object")
@@ -328,6 +342,7 @@ class CredentialProfileMetadata:
             except json.JSONDecodeError as exc:
                 raise CredentialStoreError("stored configuration is invalid JSON") from exc
         kind = _auth_kind(item.get("auth_kind"))
+        configuration = _with_secret_configured(configuration, auth_kind=kind)
         raw_capabilities = item.get("allowed_capabilities") or []
         if isinstance(raw_capabilities, str):
             try:
@@ -702,7 +717,7 @@ class PostgresCredentialProfileStore:
             except json.JSONDecodeError as exc:
                 raise CredentialStoreError("stored capability binding is invalid") from exc
         allowed = tuple(_capabilities(raw_capabilities))
-        if allowed and capability_name not in allowed:
+        if capability_name not in allowed:
             raise CredentialStoreError("credential profile is not allowed for capability")
         return WorkerCredentialCiphertext(
             metadata=CredentialProfileMetadata.from_row(item),

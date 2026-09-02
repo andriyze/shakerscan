@@ -37,8 +37,11 @@ test('worker labels stay grammatical and completed shards show useful attributio
 test('dashboard distinguishes logical scans, worker jobs, and worker processes', () => {
   assert.match(dashboard, /Scan and work queue/)
   assert.match(dashboard, /work unit\{workRunning === 1 \? '' : 's'\} running/)
-  assert.match(dashboard, /workers · limit/)
-  assert.doesNotMatch(dashboard, /\{workerCount\} running · max/)
+  assert.match(dashboard, /ready to scan/)
+  assert.match(dashboard, /\{workerCount\} running · max \{maxWorkers\}/)
+  assert.match(dashboard, /\{pendingWorkerCount\} starting/)
+  assert.match(dashboard, /\{unavailableWorkerCount\} unavailable/)
+  assert.doesNotMatch(dashboard, /workers · limit/)
 })
 
 

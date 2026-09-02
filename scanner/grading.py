@@ -24,7 +24,9 @@ try:
         EndpointPatterns,
     )
     from .target_context import is_local_or_private_scan_target
+    from .score_bands import grade_for
     from .ai_verdict_policy import has_deterministic_exploit_proof, is_trusted_ai_false_positive
+    from .risk_scoring import risk as canonical_risk, proof_weight as canonical_proof_weight
 except ImportError:
     from constants import (
         FINDING_CVSS_SCORES,
@@ -38,7 +40,9 @@ except ImportError:
         EndpointPatterns,
     )
     from target_context import is_local_or_private_scan_target
+    from score_bands import grade_for
     from ai_verdict_policy import has_deterministic_exploit_proof, is_trusted_ai_false_positive
+    from risk_scoring import risk as canonical_risk, proof_weight as canonical_proof_weight
 
 
 def hsts_preload_readiness(hsts: str | None) -> dict[str, Any]:
@@ -653,9 +657,10 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
         penalty = sum(per_finding * _confidence_weight(f) for f in findings_list)
         return min(max_penalty, int(round(penalty)))
 
-    # Finding penalties
+    # Finding notes use the same proof weighting as the canonical risk scorer. The final
+    # score below also comes from that scorer; this function owns narrative only.
     if critical_findings:
-        penalty = calc_weighted_penalty(critical_findings, 15, 45)
+        penalty = int(round(sum(20 * canonical_proof_weight(f) for f in critical_findings)))
         score -= penalty
         fp_in_crit = sum(1 for f in critical_findings if is_trusted_ai_false_positive(f))
         fp_note = f" ({fp_in_crit} likely FP)" if fp_in_crit else ""
@@ -663,7 +668,7 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
         remediation.append("URGENT: Address critical vulnerabilities immediately.")
 
     if high_findings:
-        penalty = calc_weighted_penalty(high_findings, 10, 30)
+        penalty = int(round(sum(10 * canonical_proof_weight(f) for f in high_findings)))
         score -= penalty
         fp_in_high = sum(1 for f in high_findings if is_trusted_ai_false_positive(f))
         fp_note = f" ({fp_in_high} likely FP)" if fp_in_high else ""
@@ -671,7 +676,7 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
         remediation.append("HIGH PRIORITY: Fix high severity issues.")
 
     if medium_findings:
-        penalty = calc_weighted_penalty(medium_findings, 4, 20)
+        penalty = int(round(sum(5 * canonical_proof_weight(f) for f in medium_findings)))
         score -= penalty
         fp_in_med = sum(1 for f in medium_findings if is_trusted_ai_false_positive(f))
         fp_note = f" ({fp_in_med} likely FP)" if fp_in_med else ""
@@ -689,21 +694,11 @@ def grade(report: dict[str, Any]) -> dict[str, Any]:
     if not pol:
         remediation.append("Add DMARC record: v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com")
 
-    # Final score and grade
-    score = max(0, min(100, score))
-
-    if max_severity == "critical":
-        letter = "D" if score >= 55 else "F"
-    elif max_severity == "high":
-        letter = "C" if score >= 70 else "D" if score >= 55 else "F"
-    else:
-        letter = (
-            "A" if score >= 90 else
-            "B" if score >= 80 else
-            "C" if score >= 70 else
-            "D" if score >= 55 else
-            "F"
-        )
+    # One producer owns the observed-risk number and its proof-sensitive ceilings. This
+    # legacy module supplies remediation/compliance prose around that canonical result.
+    canonical = canonical_risk(findings, posture=report)
+    score = canonical["score"]
+    letter = canonical["grade"]
 
     unproven_high_critical = [
         finding for finding in findings

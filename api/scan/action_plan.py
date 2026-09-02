@@ -87,7 +87,11 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
         "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
         "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
-        "nosqli.verify_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
+        # The NoSQL verifier spends four requests per declared body field, so the
+        # earlier 8/candidate funded only two fields and marked ordinary larger
+        # bodies partial. Fund four fields per candidate (16 requests); the value
+        # sits far under the 1,000/200 fast ceiling.
+        "nosqli.verify_batch": (5, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
         "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
     },
     "balanced": {
@@ -100,7 +104,8 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "sqli.prove_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
         "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
         "exposure.verify_batch": (60, {"http_requests": 400, "tool_wall_seconds": 180}),
-        "nosqli.verify_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
+        # Four requests per field, four fields per candidate (see fast), under the 5,000/800 ceiling.
+        "nosqli.verify_batch": (10, {"http_requests": 160, "state_changing_requests": 160, "tool_wall_seconds": 150}),
         "authz_surface.verify_batch": (20, {"http_requests": 200, "tool_wall_seconds": 150}),
     },
     "thorough": {
@@ -120,19 +125,65 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
             "http_requests": 1_280, "state_changing_requests": 480,
             "tool_wall_seconds": 780,
         }),
-        # All five passive batches hit their 60-second slice exactly and timed out. 120
-        # lets a 50-template sweep finish; breadth still ranks below proof for budget.
-        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 120}),
-        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
+        # Raised from 60 to 120 when every passive batch hit its slice exactly, and
+        # measured again at 120: the sweep still consumed 350/350 requests and
+        # 120/120 seconds and timed out, so 120 was the ceiling and not the cost.
+        # 240 lets a 50-template sweep finish; breadth still ranks below proof.
+        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 240}),
+        # Same measurement: 3,392 of 4,000 requests but 300 of 300 seconds, so this
+        # batch was wall-bound rather than traffic-bound and left templates unrun.
+        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 600}),
         "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
         "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
         "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
         "exposure.verify_batch": (80, {"http_requests": 600, "tool_wall_seconds": 240}),
-        "nosqli.verify_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
+        # Four requests per field, four fields per candidate (see fast), under the 20,000/2,000 ceiling.
+        "nosqli.verify_batch": (25, {"http_requests": 400, "state_changing_requests": 400, "tool_wall_seconds": 240}),
         "authz_surface.verify_batch": (40, {"http_requests": 400, "tool_wall_seconds": 180}),
     },
 }
+_BATCH_TIER_ORDER: tuple[str, ...] = ("thorough", "balanced", "fast")
+
+
+def _affordable_batch_tier(
+    capability_name: str,
+    *,
+    budget_profile: str,
+    limits: Mapping[str, int],
+) -> tuple[int, Mapping[str, int]]:
+    """Pick the largest published batch shape this ledger can actually reserve.
+
+    Batch reservations are absolute per-profile numbers, but a parallel endpoint
+    child carries the parent's profile NAME over a divided ledger. thorough
+    reserves 600 requests for one XSS slice; a child holding roughly a fifth of
+    the parent ceiling cannot pay that, and a required verifier then failed the
+    whole Scan closed -- "required Scan action verify.xss exceeds the plan
+    budget: {'http_requests': 483, 'tool_wall_seconds': 145}".
+
+    Step down through the published tiers instead of inventing a scale factor:
+    each one is already calibrated so its reservation funds its slice size, and
+    fast's single-candidate slice is the smallest shape that still verifies.
+    A child too small even for that keeps fast's shape and fails admission
+    honestly rather than silently planning work it cannot run.
+    """
+    tiers = _BATCH_TIER_ORDER
+    start = tiers.index(budget_profile) if budget_profile in tiers else tiers.index("balanced")
+    for name in tiers[start:]:
+        candidate = _BATCH_PROFILES[name].get(capability_name)
+        if candidate is None:
+            continue
+        _, reservation = candidate
+        if all(
+            int(limits.get(dimension, 0)) >= int(amount)
+            for dimension, amount in reservation.items()
+            if int(amount) > 0
+        ):
+            return candidate
+    smallest = _BATCH_PROFILES[tiers[-1]].get(capability_name)
+    return smallest if smallest is not None else _BATCH_PROFILES["balanced"][capability_name]
+
+
 _FORBIDDEN_ACTION_KEYS = frozenset({
     "password", "passwd", "secret", "token", "authorization", "cookie", "cookies",
     "private_key", "client_secret", "api_key", "auth_header", "auth_cookies",
@@ -666,6 +717,7 @@ class ScanActionPlanCompiler:
         authority_refs: Mapping[str, Any] | None = None,
         shard_authority: Mapping[str, Any] | None = None,
         action_scope: str = "full",
+        ledger_limits: Mapping[str, int] | None = None,
         family_scope: Sequence[str] | None = None,
         defer_manifest_actions: bool = False,
         include_finalizer: bool = True,
@@ -1089,7 +1141,15 @@ class ScanActionPlanCompiler:
                     if isinstance(raw_slice, Mapping) else batch_size
                 )
                 wall_floor = {
-                    "templates.passive_batch": 10,
+                    # A root Scan executes the reviewed fixed seven-request
+                    # passive pack through ``templates.passive_scan``.  Its
+                    # smallest process profile is 30 seconds; scaling a
+                    # one-target manifest down to 10 seconds made ordinary
+                    # public targets deterministically report partial coverage.
+                    # Parallel children must keep the same floor: admitting a
+                    # smaller shard with a predictably incomplete required
+                    # baseline is worse than rejecting that partition budget.
+                    "templates.passive_batch": 30,
                     "templates.active_batch": 30,
                     "xss.verify_batch": 10,
                     "sqli.verify_batch": 20,
@@ -1222,7 +1282,10 @@ class ScanActionPlanCompiler:
                 minimum_reservation_scaled_profile(capability_name)
                 or dict(specification.budget_cost)
             )
-            limits = execution_plan.budget.ledger_limits()
+            limits = (
+                dict(ledger_limits) if ledger_limits is not None
+                else execution_plan.budget.ledger_limits()
+            )
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
                 "finalize.report",
@@ -1293,23 +1356,10 @@ class ScanActionPlanCompiler:
             reserve_dependency_slots: int = 0,
         ) -> None:
             """Compile bounded ranked slices instead of one process per candidate."""
-            profile = _BATCH_PROFILES.get(
-                execution_plan.budget_profile, _BATCH_PROFILES["balanced"],
+            limits = (
+                dict(ledger_limits) if ledger_limits is not None
+                else execution_plan.budget.ledger_limits()
             )
-            batch_size, batch_budget = profile[capability_name]
-            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
-            if entry_count:
-                total_batches = max(1, (entry_count + batch_size - 1) // batch_size)
-            else:
-                # The candidate manifest is not materialized at admission: its
-                # entries arrive through the discovery continuation. Assuming a
-                # single batch here capped `count` at 1, so any profile whose
-                # published minimum is higher -- thorough requires two XSS
-                # batches -- failed to compile at all with
-                # "required batch action verify.xss exceeds plan graph capacity".
-                # Reserve the published minimum instead of guessing one.
-                total_batches = max(1, minimum_batches)
-            limits = execution_plan.budget.ledger_limits()
             reserved = {name: 0 for name in limits}
             finalizer_budget = dict(action_budgets or {}).get(
                 "finalize.report",
@@ -1322,6 +1372,30 @@ class ScanActionPlanCompiler:
                     continue
                 for name, amount in blueprint_budget(blueprint).items():
                     reserved[name] = reserved.get(name, 0) + amount
+            # Choose the batch shape against what is LEFT after the required work
+            # already planned, not the raw ceiling: the shortfall that failed a
+            # sharded Scan was 483 requests of a 600-request slice, i.e. the ledger
+            # was large enough until its siblings were counted.
+            batch_size, batch_budget = _affordable_batch_tier(
+                capability_name,
+                budget_profile=execution_plan.budget_profile,
+                limits={
+                    name: max(0, int(limit) - int(reserved.get(name, 0)))
+                    for name, limit in limits.items()
+                },
+            )
+            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
+            if entry_count:
+                total_batches = max(1, (entry_count + batch_size - 1) // batch_size)
+            else:
+                # The candidate manifest is not materialized at admission: its
+                # entries arrive through the discovery continuation. Assuming a
+                # single batch here capped `count` at 1, so any profile whose
+                # published minimum is higher -- thorough requires two XSS
+                # batches -- failed to compile at all with
+                # "required batch action verify.xss exceeds plan graph capacity".
+                # Reserve the published minimum instead of guessing one.
+                total_batches = max(1, minimum_batches)
             affordable = total_batches
             for name, amount in batch_budget.items():
                 if amount > 0:
@@ -1329,7 +1403,17 @@ class ScanActionPlanCompiler:
                         0, limits.get(name, 0) - reserved.get(name, 0),
                     )
                     affordable = min(affordable, available_amount // amount)
-            count = max(1, minimum_batches if required else 0, affordable)
+            # ``affordable`` is what this plan's own ledger can actually pay for.
+            # Taking max() with the published minimum discarded that: a parallel
+            # endpoint child holds a fraction of the parent ceiling but inherits the
+            # parent's profile name, so thorough's floor of two XSS batches was
+            # forced onto a child that could fund one. The second slice is required,
+            # so the whole Scan failed closed -- "required Scan action verify.xss.001
+            # exceeds the plan budget: {'http_requests': 48}" -- rather than running
+            # the breadth it could afford. The minimum is a target for planning, not
+            # authority over a budget; ``total_batches`` below still reserves it when
+            # the candidate manifest is not yet materialized.
+            count = max(1, affordable)
             count = min(
                 total_batches,
                 count,
@@ -1342,7 +1426,11 @@ class ScanActionPlanCompiler:
             # yields one batch of candidates has still run the family, and
             # failing there is why no thorough scan could complete. Fail only
             # when the plan cannot fit the batches the work actually needs.
-            if required and count < min(minimum_batches, total_batches):
+            # Budget shortage degrades; only graph capacity fails. Comparing
+            # against the published minimum alone conflated the two once
+            # affordability bounded ``count``: a child that could fund one batch
+            # tripped a check meant for dependency-slot exhaustion.
+            if required and count < min(minimum_batches, total_batches, max(1, affordable)):
                 raise ScanActionPlanError(
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )

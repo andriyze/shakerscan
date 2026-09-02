@@ -734,61 +734,63 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
     try:
         candidate_scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
     except ValueError:
-        candidate_scan_id = None
-    if candidate_scan_id:
-        async with _pool().acquire() as conn:
-            state = await conn.fetchrow(
-                """
-                SELECT child.status, child.target_url, parent.status AS parent_status
-                FROM scans child
-                LEFT JOIN scans parent ON parent.id=child.parent_scan_id
-                WHERE child.id=$1
-                """,
-                candidate_scan_id,
-            )
-        if not state or str(state["status"]) in {"completed", "failed", "cancelled"} or str(state.get("parent_status") or "") == "cancelled":
-            await asyncio.to_thread(acknowledge_lease, redis_client, lease)
-            return Response(status_code=204)
-        if payload.get("schema_version") == SCAN_JOB_SCHEMA:
-            try:
-                canonical_materialized = await _materialize_control_plane_scan_job_v2(payload)
-            except HTTPException as exc:
-                async with _pool().acquire() as conn:
-                    await _fail_broker_scan_and_reconcile_parent(
-                        conn,
-                        scan_id=candidate_scan_id,
-                        phase="scope_revalidation_failed",
-                        message=str(exc.detail),
-                        redis_client=redis_client,
-                    )
-                await asyncio.to_thread(acknowledge_lease, redis_client, lease)
-                return Response(status_code=204)
-        execution_target = (
-            canonical_materialized.get("target")
-            if canonical_materialized is not None else payload.get("target")
+        # Broker execution is Scan-only. A malformed owner must never bypass the
+        # durable Scan lookup, target match, and execution-authority projection.
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+    async with _pool().acquire() as conn:
+        state = await conn.fetchrow(
+            """
+            SELECT child.status, child.target_url, parent.status AS parent_status
+            FROM scans child
+            LEFT JOIN scans parent ON parent.id=child.parent_scan_id
+            WHERE child.id=$1
+            """,
+            candidate_scan_id,
         )
-        target_matches = _broker_target_key(execution_target) == _broker_target_key(
-            state.get("target_url")
-        )
-        if canonical_materialized is not None:
-            materialized_options = canonical_materialized.get("options")
-            target_matches = target_matches or bool(
-                isinstance(materialized_options, Mapping)
-                and materialized_options.get("target_scheme_inferred")
-                and _broker_target_authority(execution_target)
-                == _broker_target_authority(state.get("target_url"))
-            )
-        if not target_matches:
+    if not state or str(state["status"]) in {"completed", "failed", "cancelled"} or str(state.get("parent_status") or "") == "cancelled":
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+    if payload.get("schema_version") == SCAN_JOB_SCHEMA:
+        try:
+            canonical_materialized = await _materialize_control_plane_scan_job_v2(payload)
+        except HTTPException as exc:
             async with _pool().acquire() as conn:
                 await _fail_broker_scan_and_reconcile_parent(
                     conn,
                     scan_id=candidate_scan_id,
                     phase="scope_revalidation_failed",
-                    message="queued target does not match the durable scan target",
+                    message=str(exc.detail),
                     redis_client=redis_client,
                 )
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
+    execution_target = (
+        canonical_materialized.get("target")
+        if canonical_materialized is not None else payload.get("target")
+    )
+    target_matches = _broker_target_key(execution_target) == _broker_target_key(
+        state.get("target_url")
+    )
+    if canonical_materialized is not None:
+        materialized_options = canonical_materialized.get("options")
+        target_matches = target_matches or bool(
+            isinstance(materialized_options, Mapping)
+            and materialized_options.get("target_scheme_inferred")
+            and _broker_target_authority(execution_target)
+            == _broker_target_authority(state.get("target_url"))
+        )
+    if not target_matches:
+        async with _pool().acquire() as conn:
+            await _fail_broker_scan_and_reconcile_parent(
+                conn,
+                scan_id=candidate_scan_id,
+                phase="scope_revalidation_failed",
+                message="queued target does not match the durable scan target",
+                redis_client=redis_client,
+            )
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
 
     broker_candidate_plan = None
     broker_requires_private_inputs = False
@@ -849,11 +851,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
 
     raw_token = _generate_fleet_secret("bjl_")
     payload_hash = hashlib.sha256(lease.payload.encode("utf-8")).hexdigest()
-    scan_id = None
-    try:
-        scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
-    except ValueError:
-        pass
+    scan_id = candidate_scan_id
     expires_at = utc_now() + timedelta(seconds=BROKER_LEASE_SECONDS)
     budget_reservation: dict[str, Any] | None = None
     durable_scan_execution: dict[str, Any] | None = None
@@ -3590,7 +3588,7 @@ async def _broker_private_replay_plan(
              ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
            JOIN request_collection_selections s
              ON s.id=$3 AND s.collection_id=c.id
-            AND s.binding_id=b.id AND s.is_active=true
+            AND s.binding_id=b.id AND s.revoked_at IS NULL
            LEFT JOIN request_collection_environments e
              ON e.id=b.environment_id AND e.collection_id=c.id
             AND e.is_active=true

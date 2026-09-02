@@ -18,6 +18,7 @@ import agent_provenance as prov
 import agent_text_toolcalls as tc
 import agent_context_pack as cp
 import agent_tools as at
+from runtime.capability_registry import CapabilityInputContractError
 from tests.api_sources import (
     api_tree_source, definition_source, route_is_declared, route_source,
 )
@@ -316,6 +317,22 @@ def test_header_filter_drops_auth():
     assert filtered.get("X-Custom") == "ok"
 
 
+def test_header_filter_explains_decisions_without_echoing_values():
+    accepted, rejected = at.classify_request_headers({
+        "Authorization": "Bearer should-never-be-echoed",
+        "Origin": "https://comparison.example",
+        "X-Forwarded-For": "127.0.0.1",
+        "Transfer-Encoding": "chunked",
+    })
+    assert accepted == {"Origin": "https://comparison.example"}
+    assert rejected == {
+        "authorization": "managed_principal_required",
+        "transfer-encoding": "executor_owned_header",
+        "x-forwarded-for": "identity_header_approval_required",
+    }
+    assert "should-never-be-echoed" not in repr(rejected)
+
+
 def test_principal_slot_normalize():
     assert at.normalize_principal_slot("") == "anonymous"
     assert at.normalize_principal_slot("User1") == "user1"
@@ -509,12 +526,51 @@ def test_katana_argv_is_bounded_and_same_host():
     assert argv[argv.index("-depth") + 1] == "2"                 # bounded depth
     assert argv[argv.index("-crawl-duration") + 1] == "30s"      # hard wall cap
     assert argv[argv.index("-rate-limit") + 1] == "5"
-    assert "-jsonl" not in argv                                # URL-only; no raw bodies
+    assert "-jsonl" in argv                                  # typed method/body shape
+    assert "-omit-raw" in argv and "-omit-body" in argv
+    excluded = argv[argv.index("-exclude-output-fields") + 1].split(",")
+    assert {"headers", "response", "raw"} <= set(excluded)
     assert at.scanner_request_reservation("katana") == 150
     assert timeout > 0
     # no form-submission / cross-scope flags leaked in
     for unsafe in ("-form-extraction", "-automatic-form-fill", "-aff", "-display-out-scope", "-do"):
         assert unsafe not in argv
+
+
+def test_katana_preserves_distinct_body_encodings_for_the_same_fields():
+    output = at.parse_scanner_output("katana", "\n".join((
+        json.dumps({"request": {
+            "endpoint": "https://app.test/api/search",
+            "method": "POST",
+            "body": '{"q":"json-value"}',
+        }}),
+        json.dumps({"request": {
+            "endpoint": "https://app.test/api/search",
+            "method": "POST",
+            "body": "q=form-value",
+        }}),
+    )))
+
+    assert output["record_count"] == 2
+    assert {record["content_type"] for record in output["records"]} == {
+        "application/json", "application/x-www-form-urlencoded",
+    }
+
+
+def test_katana_preserves_only_spa_fragment_route_shape_and_field_names():
+    output = at.parse_scanner_output(
+        "katana_headless",
+        "https://app.test/#/search?q=private-browser-value&sort=recent",
+        allowed_host="app.test",
+    )
+
+    assert output["records"] == [{
+        "kind": "discovered_route",
+        "url": "https://app.test/#/search?q=&sort=",
+        "method": "GET",
+        "source": None,
+    }]
+    assert "private-browser-value" not in json.dumps(output)
 
 
 def test_external_scanner_output_is_typed_and_query_values_are_redacted():
@@ -597,6 +653,15 @@ def test_worker_scanner_target_revalidation_is_same_host_and_http_only():
         at.validate_scanner_execution_target("https://example.test", "https://evil.test/")
     with pytest.raises(at.AgentToolError, match=r"HTTP\(S\)"):
         at.validate_scanner_execution_target("https://example.test", "file:///etc/passwd")
+    # A fragment is client-side only: it cannot move the destination, and a browser
+    # DOM check needs it, so it must survive revalidation.
+    assert at.validate_scanner_execution_target(
+        "http://example.test:3000", "http://example.test:3000/#/search?q=1"
+    ) == "http://example.test:3000/#/search?q=1"
+    with pytest.raises(at.AgentToolError, match="selected target host"):
+        at.validate_scanner_execution_target(
+            "http://example.test:3000", "http://evil.test:3000/#/search?q=1"
+        )
 
 
 def test_scanner_execution_is_address_pinned_with_original_host_and_sni():
@@ -731,6 +796,39 @@ def test_katana_compact_output_is_typed_deduplicated_and_host_scoped():
         "method": "GET",
         "source": None,
     }]
+
+
+def test_katana_jsonl_retains_only_value_free_request_body_shape():
+    secret = "worker-private-password"
+    output = at.parse_scanner_output("katana", "\n".join([
+        json.dumps({"request": {
+            "method": "GET",
+            "endpoint": "https://app.test/api/session",
+        }}),
+        json.dumps({"request": {
+            "method": "POST",
+            "endpoint": "https://app.test/api/session",
+            "body": json.dumps({"email": "operator@example.test", "password": secret}),
+        }}),
+    ]), allowed_host="app.test")
+
+    assert output["records"] == [
+        {
+            "kind": "discovered_route",
+            "url": "https://app.test/api/session",
+            "method": "GET",
+            "source": None,
+        },
+        {
+            "kind": "discovered_route",
+            "url": "https://app.test/api/session",
+            "method": "POST",
+            "source": None,
+            "content_type": "application/json",
+            "body_field_names": ["email", "password"],
+        },
+    ]
+    assert secret not in repr(output)
 
 
 def test_nuclei_focused_default_and_progress_counter_contract():
@@ -906,6 +1004,32 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert argv[argv.index("--only-poc") + 1] == "v"  # default severity -> verified-only PoCs
     assert argv[argv.index("--format") + 1] == "jsonl"
 
+    _, dom_argv, _ = at.build_scanner_argv(
+        "dalfox", "http://t/#/search?q=1",
+        {"severity": "high", "deep_domxss": True},
+    )
+    assert "--skip-headless" not in dom_argv
+    assert "--force-headless-verification" in dom_argv
+    # --deep-domxss never converges inside the capability wall ceiling.
+    assert "--deep-domxss" not in dom_argv
+    assert dom_argv[dom_argv.index("--delay") + 1] == "0"
+    assert dom_argv[dom_argv.index("--worker") + 1] == "10"
+    assert argv[argv.index("--delay") + 1] == "1000"
+    assert argv[argv.index("--worker") + 1] == "3"
+
+    plan = at.build_enforced_scanner_plan(
+        "dalfox", "http://t/#/search?q=1", {"deep_domxss": True},
+        reserved_budget={"http_requests": 400, "tool_wall_seconds": 120},
+        pinned_address="127.0.0.1",
+        pinned_proxy_url="socks5://127.0.0.1:1080",
+    )
+    proof_inputs = plan.budget_proof["inputs"]
+    assert proof_inputs["headless"] is True
+    assert proof_inputs["delay_ms"] == 0
+    assert proof_inputs["workers"] == 10
+    assert plan.argv[plan.argv.index("--delay") + 1] == "0"
+    assert plan.argv[plan.argv.index("--worker") + 1] == "10"
+
     b, argv, timeout = at.build_scanner_argv("sqlmap", "http://t/item?id=1", {})
     assert b == "sqlmap"
     assert argv[argv.index("-u") + 1] == "http://t/item?id=1"
@@ -1043,6 +1167,18 @@ def test_dalfox_sqlmap_output_is_typed_and_payloads_not_exposed():
     assert record["kind"] == "xss_alert" and record["proof_state"] == "verified"
     assert "alert(1)" not in json.dumps(record) and record["payload_sha256"]
 
+    headless_url = "http://t/#/search?q=%3Csvg%20onload%3Dalert(1)%3E"
+    out = at.parse_scanner_output("dalfox", json.dumps({
+        "type": "V", "inject_type": "headless", "data": headless_url,
+        "param": "", "payload": "", "message_str": "Triggered XSS Payload",
+    }))
+    record = out["records"][0]
+    assert record["proof_state"] == "verified"
+    assert record["url"] == "http://t/"
+    assert record["client_route"] == "/search?q="
+    assert record["payload_sha256"]
+    assert "svg" not in json.dumps(record).lower()
+
     out = at.parse_scanner_output("sqlmap", "Parameter 'q' is vulnerable. Do you want to keep testing? [Ny/N]\n[INFO] back-end DBMS: MySQL")
     kinds = {r["kind"] for r in out["records"]}
     assert kinds == {"sqli_finding", "sqli_dbms_fingerprint"}
@@ -1070,16 +1206,68 @@ def test_nuclei_interactsh_disabled_by_default_and_off_without_gate(monkeypatch)
     monkeypatch.delenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", raising=False)
     _, argv, _ = at.build_scanner_argv("nuclei", "https://t/", {}, pinned_address="10.0.0.1")
     assert "-no-interactsh" in argv and "-interactsh-server" not in argv
-    assert at.resolve_hunt_interactsh_config(allow_active=True) == (None, None)
-    assert at.resolve_hunt_interactsh_config(allow_active=False) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=False, reserved_oob_interactions=1,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=0,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=False, allow_oob=True, reserved_oob_interactions=1,
+    ) == (None, None)
 
 
 def test_nuclei_interactsh_requires_gate_and_private_server(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "https://oast.fun")
-    assert at.resolve_hunt_interactsh_config(allow_active=True) == (None, None)  # public rejected
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=1,
+    ) == (None, None)  # public rejected
     monkeypatch.setenv("SHAKERSCAN_HUNT_INTERACTSH_SERVER", "oob.corp.example")
-    assert at.resolve_hunt_interactsh_config(allow_active=False) == (None, None)  # not gated
-    assert at.resolve_hunt_interactsh_config(allow_active=True) == ("https://oob.corp.example", None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=False, reserved_oob_interactions=1,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=0,
+    ) == (None, None)
+    assert at.resolve_hunt_interactsh_config(
+        allow_active=True, allow_oob=True, reserved_oob_interactions=1,
+    ) == ("https://oob.corp.example", None)
+
+
+def test_hunt_scanner_projection_rejects_body_mutation_but_preserves_scan_input():
+    body = {
+        "path": "/rest/user/login",
+        "method": "DELETE",
+        "content_type": "application/json",
+        "body_field_names": ["email", "password"],
+        "injection_field": "email",
+    }
+    for capability in ("xss.verify", "sqli.verify"):
+        # Deterministic Scan may still execute an immutable body candidate.
+        assert at.CAPABILITY_REGISTRY.validate_input(capability, body) == body
+        # Hunt planners cannot turn those private adapter fields into mutation.
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.CAPABILITY_REGISTRY.validate_hunt_input(capability, body)
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.canonical_hunt_scanner_options(capability, body)
+
+
+def test_hunt_nuclei_uses_server_owned_get_only_pack():
+    options = at.canonical_hunt_scanner_options(
+        "templates.scan", {"path": "/api/products?limit=10"},
+    )
+    assert options["template_ids"] == at._CANONICAL_PASSIVE_NUCLEI_IDS
+    assert options["template_pack_digest"]
+    assert options["template_request_cost_upper_bound"] == 7
+    _, argv, _ = at.build_scanner_argv("nuclei", "https://t/", options)
+    assert argv[argv.index("-id") + 1] == at._CANONICAL_PASSIVE_NUCLEI_IDS
+    assert "-no-interactsh" in argv
+    assert "-tags" not in argv
+    for forbidden in ("tags", "severity", "template_ids", "template_pack_digest"):
+        with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
+            at.CAPABILITY_REGISTRY.validate_hunt_input(
+                "templates.scan", {forbidden: "cve"},
+            )
 
 
 def test_nuclei_interactsh_enable_drops_proxy_internal_keeps_scan_pin():

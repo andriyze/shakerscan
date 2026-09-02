@@ -49,3 +49,57 @@ test('real dynamic detail routes remain usable and accessible', async ({ page, r
   expect(routes.length, 'dynamic records available for UI acceptance').toBeGreaterThanOrEqual(6)
   for (const route of routes) await visitAndAuditPage(page, route, 700)
 })
+
+test('filtered scan history stays synchronized through Back and Forward', async ({ page, request }) => {
+  test.skip(!REAL_STACK, 'release-only non-mutating navigation acceptance')
+
+  const scanData = await readJson(request, '/scans?status=completed&limit=50')
+  const scan = (scanData.scans || []).find((item: any) => (
+    item.scan_role !== 'shard' && item.target_url && item.run_kind === 'web_dast'
+  )) || (scanData.scans || []).find((item: any) => item.scan_role !== 'shard' && item.target_url)
+  expect(scan, 'a completed top-level scan is available').toBeTruthy()
+
+  const listUrl = `/scans?status=completed&search=${encodeURIComponent(scan.target_url)}`
+  await page.goto(listUrl)
+  await expect(page.getByLabel('Filter by scan status')).toHaveValue('completed')
+  await expect(page.getByLabel('Search scans by target URL')).toHaveValue(scan.target_url)
+  await page.locator(`a[href^="/scans/${scan.id}"]:visible`).first().click()
+  await expect(page).toHaveURL(new RegExp(`/scans/${scan.id}`))
+
+  await page.goBack()
+  await expect.poll(() => {
+    const current = new URL(page.url())
+    return `${current.pathname}${current.search}`
+  }).toBe(listUrl)
+  await expect(page.getByRole('heading', { name: 'Scans', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Filter by scan status')).toHaveValue('completed')
+  await expect(page.getByLabel('Search scans by target URL')).toHaveValue(scan.target_url)
+
+  await page.goForward()
+  await expect(page).toHaveURL(new RegExp(`/scans/${scan.id}`))
+  await expect(page.getByRole('heading', { name: scan.target_url, exact: true })).toBeVisible()
+})
+
+test('internal scan visibility toggles immediately and follows browser history', async ({ page }) => {
+  test.skip(!REAL_STACK, 'release-only non-mutating navigation acceptance')
+
+  await page.goto('/scans')
+  const checkbox = page.getByLabel('Show ASM and internal scans', { exact: true })
+  await expect(checkbox).not.toBeChecked()
+
+  await checkbox.check()
+  await expect(checkbox).toBeChecked()
+  await expect(page).toHaveURL(/include_internal=true/)
+
+  await checkbox.uncheck()
+  await expect(checkbox).not.toBeChecked()
+  await expect(page).not.toHaveURL(/include_internal=true/)
+
+  await page.goBack()
+  await expect(checkbox).toBeChecked()
+  await expect(page).toHaveURL(/include_internal=true/)
+
+  await page.goForward()
+  await expect(checkbox).not.toBeChecked()
+  await expect(page).not.toHaveURL(/include_internal=true/)
+})

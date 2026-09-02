@@ -17,6 +17,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
+def canonical_pythonpath(existing: str = "") -> str:
+    """Return the complete source layout required by every gate subprocess."""
+    ordered = (
+        str(REPO_ROOT / "api"),
+        str(REPO_ROOT / "scanner"),
+        str(REPO_ROOT),
+        *str(existing or "").split(os.pathsep),
+    )
+    return os.pathsep.join(dict.fromkeys(part for part in ordered if part))
+
 GATES: dict[str, tuple[str, ...]] = {
     "test:no-phantom-tools": (
         "tests/test_command_arsenal.py::test_tool_status_release_gate_passes_current_catalog_without_probe",
@@ -195,11 +206,7 @@ def run_gates(requested: list[str], *, extra_pytest_args: list[str] | None = Non
         cmd = [sys.executable, "-m", "pytest", "-q", *selectors, *(extra_pytest_args or [])]
         print(f"\n== {gate} ==")
         env = os.environ.copy()
-        api_path = str(REPO_ROOT / "api")
-        existing_pythonpath = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = os.pathsep.join(
-            part for part in (api_path, existing_pythonpath) if part
-        )
+        env["PYTHONPATH"] = canonical_pythonpath(env.get("PYTHONPATH", ""))
         status = subprocess.call(cmd, cwd=REPO_ROOT, env=env)
         if status != 0:
             return status

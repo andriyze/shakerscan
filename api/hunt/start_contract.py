@@ -9,6 +9,7 @@ collections.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import ipaddress
 import re
 from typing import Any, Mapping, Sequence
 
@@ -19,14 +20,22 @@ MAX_HUNT_BODY_BYTES = 1_048_576
 MAX_GOAL_CHARS = 20_000
 MAX_CAPABILITIES = 128
 MAX_COLLECTIONS = 32
+# Kept equal to MAX_SKILLS_PER_HUNT in hunt/skills.py; asserted by the skill tests so the
+# request boundary and the library cannot drift into disagreeing about the same limit.
+MAX_SKILLS = 4
+# Enough to cover an origin's IPv4 and IPv6 addresses plus a small failover pool. A larger
+# list stops being an operator confirming specific hosts and becomes a scan range.
+MAX_DIRECT_ORIGIN_ADDRESSES = 8
 MAX_CREDENTIAL_REFS = 16
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _CAPABILITY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+_SKILL_RE = re.compile(r"^skill\.[a-z0-9][a-z0-9_.-]{0,127}$")
 _ALLOWED_TARGET_KINDS = frozenset({"web", "api", "device", "network"})
 _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "target_id", "target_kind", "goal", "objective", "budget_profile", "policy_profile",
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
-    "approval_receipt_id", "scope_receipt_id", "schema_version",
+    "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
+    "direct_origin_addresses",
 })
 _ALLOWED_BUDGET_KEYS = frozenset({
     "max_duration_seconds",
@@ -58,6 +67,8 @@ _ALLOWED_POLICY_KEYS = frozenset({
     "allow_state_changing_http",
     "network_discovery",
     "allow_oob_interactions",
+    "allow_identity_headers",
+    "allow_direct_origin",
     "authorization_confirmed",
     "approval_receipt_id",
     "scope_receipt_id",
@@ -152,11 +163,15 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "capabilities": MAX_CAPABILITIES,
             "request_collections": MAX_COLLECTIONS,
             "credential_refs": MAX_CREDENTIAL_REFS,
+            "skill_ids": MAX_SKILLS,
+            "direct_origin_addresses": MAX_DIRECT_ORIGIN_ADDRESSES,
         },
         "patterns": {
             "identifier": _ID_RE.pattern,
             "capability": _CAPABILITY_RE.pattern,
+            "skill_id": _SKILL_RE.pattern,
         },
+        "skill_catalog": "/hunt/skills",
         "budget_profiles": {
             name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
         },
@@ -281,6 +296,14 @@ class HuntStartPolicy:
     allow_state_changing_http: bool = False
     network_discovery: bool = False
     allow_oob_interactions: bool = False
+    # The operator's explicit decision that forging a client-address header against this
+    # target is in scope. Needed to test whether an origin trusts a client-suppliable
+    # address, which is exploitable wherever that origin is reachable outside its edge.
+    allow_identity_headers: bool = False
+    # The operator's explicit decision that this hunt may connect to specific addresses it
+    # names, rather than only the target's resolved address. This is the difference between
+    # suspecting an origin is exposed behind a CDN and demonstrating it.
+    allow_direct_origin: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = None
     scope_receipt_id: str | None = None
@@ -288,6 +311,22 @@ class HuntStartPolicy:
     @property
     def authorized(self) -> bool:
         return bool(self.authorization_confirmed and self.approval_receipt_id)
+
+    def is_privileged(self, *, credentials_requested: bool) -> bool:
+        """Whether this policy needs confirmed authorization and an approval receipt.
+
+        One definition, because the same rule was previously restated at the start handler
+        and had to be edited in both places whenever a new authority was added.
+        """
+        return bool(
+            credentials_requested
+            or self.active_testing
+            or self.allow_state_changing_http
+            or self.network_discovery
+            or self.allow_oob_interactions
+            or self.allow_identity_headers
+            or self.allow_direct_origin
+        )
 
     def validate(self, *, credentials_requested: bool) -> None:
         if self.scope_receipt_id and not self.approval_receipt_id:
@@ -300,13 +339,15 @@ class HuntStartPolicy:
             raise HuntStartContractError("network discovery requires active_testing")
         if self.allow_oob_interactions and not self.active_testing:
             raise HuntStartContractError("OOB interactions require active_testing")
-        privileged = bool(
-            self.active_testing
-            or self.allow_state_changing_http
-            or self.network_discovery
-            or self.allow_oob_interactions
-            or credentials_requested
-        )
+        if self.allow_identity_headers and not self.active_testing:
+            raise HuntStartContractError(
+                "identity-header forgery requires active_testing"
+            )
+        if self.allow_direct_origin and not self.active_testing:
+            raise HuntStartContractError(
+                "direct-origin requests require active_testing"
+            )
+        privileged = self.is_privileged(credentials_requested=credentials_requested)
         if privileged and not self.authorization_confirmed:
             raise HuntStartContractError(
                 "active, network, mutation, OOB, and credential use require authorization_confirmed=true"
@@ -338,6 +379,8 @@ class HuntStartPolicy:
             "allow_state_changing_http": self.allow_state_changing_http,
             "network_discovery": self.network_discovery,
             "allow_oob_interactions": self.allow_oob_interactions,
+            "allow_identity_headers": self.allow_identity_headers,
+            "allow_direct_origin": self.allow_direct_origin,
             "authorization_confirmed": self.authorization_confirmed,
             "approval_receipt_id": self.approval_receipt_id,
             "scope_receipt_id": self.scope_receipt_id,
@@ -385,6 +428,8 @@ class HuntStartContract:
     credential_refs: Mapping[str, str]
     capabilities: Sequence[str]
     request_collection_ids: Sequence[str]
+    skill_ids: Sequence[str] = ()
+    direct_origin_addresses: Sequence[str] = ()
     schema_version: str = HUNT_START_SCHEMA
 
     @property
@@ -402,6 +447,53 @@ class HuntStartContract:
     def resolved_budget_object(self) -> HuntBudget:
         return HuntBudget(**self.resolved_budget)
 
+    def persisted_policy(
+        self,
+        *,
+        approval_validated: bool,
+        credential_access: bool,
+        approval_receipt_id: str | None,
+        scope_receipt_id: str | None,
+        budget: Any,
+        allowed_capabilities: Sequence[str],
+    ) -> dict[str, Any]:
+        """Project the requested policy into the row a run is actually governed by.
+
+        Every privileged authority is ANDed with ``approval_validated`` here rather than at
+        each reader, so a request that asked for authority it did not earn is stored as not
+        having it. Workers read this row, not the request.
+        """
+        earned = bool(approval_validated)
+        return {
+            "schema_version": "hunt-policy/v2",
+            "target_kind": self.target_kind,
+            "active_testing": bool(self.policy.active_testing and earned),
+            "credential_access": credential_access,
+            "mutation_allowed": bool(self.policy.allow_state_changing_http and earned),
+            "allow_state_changing_http": bool(
+                self.policy.allow_state_changing_http and earned
+            ),
+            "network_discovery": bool(self.policy.network_discovery and earned),
+            "allow_oob_interactions": bool(self.policy.allow_oob_interactions and earned),
+            "allow_identity_headers": bool(self.policy.allow_identity_headers and earned),
+            "allow_direct_origin": bool(self.policy.allow_direct_origin and earned),
+            "direct_origin_addresses": (
+                list(self.direct_origin_addresses) if earned else []
+            ),
+            "authorization_confirmed": self.policy.authorization_confirmed,
+            "approval_receipt_id": approval_receipt_id,
+            "scope_receipt_id": scope_receipt_id,
+            "device_fragility_profile": (
+                "authenticated_active"
+                if self.target_kind == "device" and credential_access
+                else "safe_remote" if self.target_kind == "device" else None
+            ),
+            "budget_profile": self.budget_profile,
+            "budget_schema_version": HUNT_BUDGET_SCHEMA,
+            "budget": asdict(budget),
+            "allowed_capabilities": list(allowed_capabilities),
+        }
+
     def public_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -416,8 +508,51 @@ class HuntStartContract:
             "credential_refs": dict(self.credential_refs),
             "capabilities": list(self.capabilities),
             "request_collection_ids": list(self.request_collection_ids),
+            "skill_ids": list(self.skill_ids),
+            "direct_origin_addresses": list(self.direct_origin_addresses),
             "secret_values_visible": False,
         }
+
+
+def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
+    """Operator-confirmed literal addresses. Hostnames are refused on purpose.
+
+    A hostname would be resolved at connect time, which is exactly the indirection this
+    field exists to remove: the operator is naming the machine, not another name for it.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_DIRECT_ORIGIN_ADDRESSES:
+        raise HuntStartContractError(
+            f"{field} must be an array of at most "
+            f"{MAX_DIRECT_ORIGIN_ADDRESSES} IP addresses"
+        )
+    addresses: list[str] = []
+    forbidden_networks = tuple(ipaddress.ip_network(network) for network in (
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+        "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7",
+        "fe80::/10", "ff00::/8",
+    ))
+    for item in value:
+        try:
+            parsed = ipaddress.ip_address(str(item).strip())
+        except ValueError as exc:
+            raise HuntStartContractError(
+                f"{field} must contain literal IP addresses"
+            ) from exc
+        comparable = getattr(parsed, "ipv4_mapped", None) or parsed
+        if any(
+            comparable.version == network.version and comparable in network
+            for network in forbidden_networks
+        ):
+            raise HuntStartContractError(
+                f"{field} cannot contain private, local, or non-routable addresses"
+            )
+        address = str(parsed)
+        if address not in addresses:
+            addresses.append(address)
+    return tuple(addresses)
 
 
 def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
@@ -468,6 +603,12 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         allow_oob_interactions=_boolean(
             policy_raw.get("allow_oob_interactions"), "allow_oob_interactions"
         ),
+        allow_identity_headers=_boolean(
+            policy_raw.get("allow_identity_headers"), "allow_identity_headers"
+        ),
+        allow_direct_origin=_boolean(
+            policy_raw.get("allow_direct_origin"), "allow_direct_origin"
+        ),
         authorization_confirmed=_boolean(
             policy_raw.get("authorization_confirmed"), "authorization_confirmed"
         ),
@@ -497,6 +638,21 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
             + ", ".join(contradictions)
         )
 
+    direct_origin_addresses = _ip_addresses(
+        payload.get("direct_origin_addresses"), "direct_origin_addresses",
+    )
+    # The two halves have to agree. An address list without the authority would be silently
+    # ignored, and the authority without addresses grants something with nothing to use it
+    # on -- both read as "this was configured" while doing nothing.
+    if direct_origin_addresses and not policy.allow_direct_origin:
+        raise HuntStartContractError(
+            "direct_origin_addresses requires policy.allow_direct_origin"
+        )
+    if policy.allow_direct_origin and not direct_origin_addresses:
+        raise HuntStartContractError(
+            "policy.allow_direct_origin requires at least one direct origin address"
+        )
+
     return HuntStartContract(
         target_id=target_id or "",
         target_kind=target_kind,
@@ -516,4 +672,11 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
             "request_collection_ids",
             maximum=MAX_COLLECTIONS,
         ),
+        skill_ids=_string_list(
+            payload.get("skill_ids"),
+            "skill_ids",
+            maximum=MAX_SKILLS,
+            pattern=_SKILL_RE,
+        ),
+        direct_origin_addresses=direct_origin_addresses,
     )

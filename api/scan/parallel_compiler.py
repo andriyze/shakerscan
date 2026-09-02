@@ -14,6 +14,11 @@ try:
 except ModuleNotFoundError:
     from ..runtime.models import ScanBudget, TargetBinding
 
+try:
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+except ImportError:  # package import in host-side tests
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY
+
 from .action_plan import ScanActionPlan
 from .continuation import ScanContinuationAllocation
 from .execution import ScanExecutionPlan
@@ -38,6 +43,11 @@ _LEDGER_TO_BUDGET = {
     "hosts_attempted": "max_hosts",
     "tool_wall_seconds": "max_tool_wall_seconds",
 }
+
+
+def _endpoint_has_injection_surface(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return "?" in text or " json:" in text or " form:" in text
 
 
 class ParallelActionPlanError(ValueError):
@@ -200,7 +210,8 @@ class ParallelPlannedChild:
         # here divides the existing immutable parent ceiling; it never widens
         # traffic or time authority.
         endpoint_weight = sum(
-            3 if "?" in endpoint else 1 for endpoint in self.endpoints
+            3 if _endpoint_has_injection_surface(endpoint) else 1
+            for endpoint in self.endpoints
         )
         return max(
             1,
@@ -933,21 +944,65 @@ class ParallelActionPlanCompiler:
         return "coverage" if execution_plan.policy.active_testing else "family"
 
     @staticmethod
+    def discovery_stage_cost(*, include_network: bool, include_subdomains: bool) -> dict[str, int]:
+        """Sum the registry cost of every capability the discovery stage can plan.
+
+        Derived from the registry rather than written down here, so adding a
+        discovery capability cannot silently shrink the stage's budget below
+        what its own plan costs.
+        """
+        names = [
+            "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
+        ]
+        if include_subdomains:
+            names.append("subdomains.discover")
+        if include_network:
+            names.extend(("ports.discover", "service.fingerprint"))
+        totals: dict[str, int] = {}
+        for name in names:
+            try:
+                specification = CAPABILITY_REGISTRY.require(name)
+            except Exception:  # an unregistered capability simply cannot be planned
+                continue
+            for dimension, amount in dict(specification.budget_cost).items():
+                totals[str(dimension)] = totals.get(str(dimension), 0) + int(amount)
+        return totals
+
+    @staticmethod
     def discovery_budget(
         execution_plan: ScanExecutionPlan,
         *,
         include_network: bool,
     ) -> ScanShardBudget:
-        """Reserve a small typed producer budget before endpoint fan-out."""
+        """Reserve a typed producer budget that funds the whole discovery stage.
+
+        This shard is the only owner of ``discover.*`` once fan-out happens, so
+        a ceiling below its own plan cost does not merely slow it down -- it
+        drops actions. A flat 180-second wall funded only probe plus the static
+        crawl, so ``discover.browser_crawl`` was skipped as
+        ``insufficient_plan_budget`` on every sharded scan. A single-page
+        application builds its API calls in JavaScript, and candidates are only
+        made from observed parameters, so losing the browser crawl left xss,
+        sqli and nosqli with zero candidates and a truthful but empty
+        ``zero_attempts`` result. Size the floor from the registry instead, and
+        keep the parent ceiling as the upper bound.
+        """
         parent = execution_plan.budget
         endpoints = min(parent.max_endpoints, 500)
+        cost = ParallelActionPlanCompiler.discovery_stage_cost(
+            include_network=include_network,
+            include_subdomains=bool(execution_plan.policy.subdomain_discovery),
+        )
+        # Headroom for per-action reservation rounding; never above the parent.
+        wall = min(parent.max_tool_wall_seconds, max(180, int(cost.get("tool_wall_seconds", 0) * 1.2)))
+        http = min(parent.max_http_requests, max(1_000, int(cost.get("http_requests", 0) * 1.2)))
         return ScanShardBudget(
-            max_duration_seconds=min(parent.max_duration_seconds, 180),
-            max_http_requests=min(parent.max_http_requests, 1_000),
+            max_duration_seconds=min(parent.max_duration_seconds, max(180, wall)),
+            max_http_requests=http,
             max_endpoints=endpoints,
-            max_browser_actions=0,
+            max_browser_actions=min(parent.max_browser_actions, cost.get("browser_actions", 0)),
             max_tcp_ports=parent.max_tcp_ports if include_network else 0,
-            max_tool_wall_seconds=min(parent.max_tool_wall_seconds, 180),
+            max_tool_wall_seconds=wall,
             max_workers=1,
             max_state_changing_requests=0,
             max_hosts=min(int(parent.max_hosts or endpoints), endpoints),
@@ -1131,6 +1186,31 @@ class ParallelActionPlanCompiler:
             max(1, available_endpoint_slots // max(1, axis_count)),
             work_count,
         ))
+        # Endpoint count decides how many children there are; candidate count
+        # decides whether more children help. For an active Scan the verifiers
+        # are candidate-driven, and candidates come from parameterised routes --
+        # a fraction of the crawl. Splitting by endpoints alone fragments a small
+        # injectable surface across children AND quarters each child's verifier
+        # ledger, so every child drops to a smaller batch tier at once.
+        #
+        # Measured on the benchmark application: 138 endpoints yielded 9
+        # candidates. Unsharded, those 9 verified at the thorough tier and
+        # produced 13 verified findings. Split four ways they landed 5/4/0/0 --
+        # three children with nothing to do -- each at the fast tier, and the run
+        # produced none. Keep a child only if it can hold enough injectable
+        # surface to fill a verifier batch; below that, fanning out costs depth
+        # and buys nothing.
+        injectable = sum(
+            1 for item in endpoints if _endpoint_has_injection_surface(item)
+        )
+        if parent_execution_plan.policy.active_testing and injectable:
+            candidate_slots = max(1, injectable // _MIN_INJECTABLE_ENDPOINTS_PER_SHARD)
+            if candidate_slots < per_axis_slots:
+                notes.append(
+                    f"endpoint fan-out limited to {candidate_slots} by "
+                    f"{injectable} injectable endpoints"
+                )
+                per_axis_slots = candidate_slots
         expanded_placements: list[ParallelPlacementCapacity] = []
         for placement in placement_lanes:
             expanded_placements.extend([placement] * placement.capacity)
@@ -1300,8 +1380,34 @@ class ParallelActionPlanCompiler:
             # minimum wall-time before distributing the remaining tool budget.
             remaining["tool_wall_seconds"], weights, minimum=1,
         )
+        # Browser proof runs against candidates, and candidates live on the
+        # endpoint children -- the backbone holds none by construction. Giving the
+        # whole browser allowance to the backbone made xss.browser_prove_batch
+        # structurally unrunnable in every sharded Scan: measured, prove.xss was
+        # skipped as insufficient_plan_budget on all four endpoint children while
+        # the backbone sat on the entire 1,000-action ceiling and had nothing to
+        # prove. Share it across the ENDPOINT children only: _weighted_shares
+        # floors every weight at 1, so including the candidate-free backbone would
+        # hand it a proportional slice of dead budget and, under a reduced or
+        # custom ceiling, push endpoint shards below their minimum browser-proof
+        # reservation. tcp stays backbone-only: ports.discover is a target-wide
+        # producer, not per-endpoint work.
+        endpoint_indices = [i for i in range(len(child_specs)) if i != global_index]
         browser = [0] * len(child_specs)
-        browser[global_index] = remaining["browser_actions"]
+        if endpoint_indices and remaining["browser_actions"] > 0:
+            endpoint_browser = _weighted_shares(
+                remaining["browser_actions"],
+                [weights[i] for i in endpoint_indices],
+                minimum=0,
+            )
+            for slot, child_index in enumerate(endpoint_indices):
+                browser[child_index] = endpoint_browser[slot]
+        elif not endpoint_indices:
+            # Degenerate global-only plan: the backbone is the only child, so it
+            # keeps the browser allowance for any discovery-phase browser crawl.
+            browser = list(
+                _weighted_shares(remaining["browser_actions"], weights, minimum=0)
+            )
         tcp = [0] * len(child_specs)
         tcp[global_index] = remaining["tcp_ports_attempted"]
 
@@ -1667,6 +1773,8 @@ def merge_parallel_action_executions(
     observation_refs: list[dict[str, Any]] = []
     children: list[dict[str, Any]] = []
     incomplete_children: list[str] = []
+    candidate_coverage: dict[str, dict[str, Any]] = {}
+    family_coverage: dict[str, dict[str, Any]] = {}
     for scan_id in sorted(expected, key=lambda key: int(expected[key].get("index", 0))):
         partition_child = expected[scan_id]
         status = str(child_statuses[scan_id] or "unknown").strip().lower()
@@ -1696,6 +1804,63 @@ def merge_parallel_action_executions(
             raise ParallelActionPlanError(
                 "parallel child canonical action execution is malformed"
             )
+        child_coverage = (
+            report.get("coverage")
+            if isinstance(report.get("coverage"), Mapping) else {}
+        )
+        for family, raw in (
+            child_coverage.get("candidate_coverage") or {}
+        ).items():
+            if not isinstance(raw, Mapping) or not str(family).strip():
+                continue
+            family_name = str(family).strip()
+            aggregate = candidate_coverage.setdefault(family_name, {
+                "status": "complete",
+                "batch_actions": 0,
+                "planned_candidates": 0,
+                "attempted_candidates": 0,
+                "completed_candidates": 0,
+                "incomplete_candidates": 0,
+                "unattempted_candidates": 0,
+            })
+            for key in (
+                "batch_actions", "planned_candidates", "attempted_candidates",
+                "completed_candidates", "incomplete_candidates",
+                "unattempted_candidates",
+            ):
+                aggregate[key] += max(0, int(raw.get(key) or 0))
+            if str(raw.get("status") or "complete").lower() != "complete":
+                aggregate["status"] = "partial"
+        for raw in child_coverage.get("family_coverage") or ():
+            if not isinstance(raw, Mapping) or not str(raw.get("family") or "").strip():
+                continue
+            family_name = str(raw.get("family")).strip()
+            aggregate = family_coverage.setdefault(family_name, {
+                "family": family_name,
+                "selected": False,
+                "required": False,
+                "coverage_status": "complete",
+                "reason": None,
+                "batch_actions": 0,
+                "planned_candidates": 0,
+                "attempted_candidates": 0,
+                "completed_candidates": 0,
+                "incomplete_candidates": 0,
+                "unattempted_candidates": 0,
+                "verified_findings": 0,
+                "suspected_findings": 0,
+            })
+            aggregate["selected"] = aggregate["selected"] or raw.get("selected") is True
+            aggregate["required"] = aggregate["required"] or raw.get("required") is True
+            for key in (
+                "batch_actions", "planned_candidates", "attempted_candidates",
+                "completed_candidates", "incomplete_candidates",
+                "unattempted_candidates", "verified_findings", "suspected_findings",
+            ):
+                aggregate[key] += max(0, int(raw.get(key) or 0))
+            if str(raw.get("coverage_status") or "complete").lower() != "complete":
+                aggregate["coverage_status"] = "partial"
+                aggregate["reason"] = aggregate["reason"] or raw.get("reason") or "child_family_incomplete"
         expected_ids = list(partition_child.get("expected_action_ids") or ())
         actual_ids = [
             str(item.get("action_id") or "")
@@ -1752,8 +1917,44 @@ def merge_parallel_action_executions(
         "observation_manifests": observation_refs,
         "incomplete_child_scan_ids": incomplete_children,
         "partial": bool(incomplete_children),
+        "candidate_coverage": {
+            key: candidate_coverage[key] for key in sorted(candidate_coverage)
+        },
+        "family_coverage": [
+            _reconciled_family_coverage(family_coverage[key])
+            for key in sorted(family_coverage)
+        ],
     }
     return {**payload, "merge_digest": _digest(payload)}
+
+
+# The smallest injectable surface worth its own endpoint child. thorough's XSS
+# slice verifies 4 candidates and its SQLi slice 6, so a child holding fewer
+# parameterised routes than one full batch cannot even fill the verifier it was
+# split off to run -- it only takes budget away from the children that can.
+_MIN_INJECTABLE_ENDPOINTS_PER_SHARD = 8
+
+
+def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
+    """Make a merged family's reason agree with the counters merged beside it.
+
+    Child reasons are inherited first-wins, so a shard holding no candidates for
+    a family -- a normal outcome, since candidates cluster on whichever shard
+    owns the parameterised routes -- stamped its own ``zero_attempts`` onto the
+    parent. Measured: two of four shards ran sqli to success on 854 and 1,067
+    requests and the parent still reported the family as ``zero_attempts``,
+    understating work that demonstrably happened.
+
+    The counters are summed correctly, so read the reason back off them. A
+    family the merged run did attempt is incomplete, not unattempted.
+    """
+    row = dict(aggregate)
+    if (
+        str(row.get("reason") or "") == "zero_attempts"
+        and int(row.get("attempted_candidates") or 0) > 0
+    ):
+        row["reason"] = "child_family_incomplete"
+    return row
 
 
 def summarize_parallel_action_coverage(
@@ -1813,6 +2014,10 @@ def summarize_parallel_action_coverage(
             )
         ),
         "finalization_action_id": "finalize.report",
+        "placement_executed": bool(actions) and not any(
+            str(item.get("reason_code") or "") == "placement_unavailable"
+            for item in actions
+        ),
         "capability_coverage": {
             "total": len(actions),
             "required": len(required),
@@ -1844,4 +2049,20 @@ def summarize_parallel_action_coverage(
         },
         "optional_gaps": optional_gaps,
         "active_zero_attempt_actions": [],
+        "candidate_coverage": {
+            str(key): dict(value)
+            for key, value in (merge.get("candidate_coverage") or {}).items()
+            if isinstance(value, Mapping)
+        },
+        "family_coverage": [
+            dict(item) for item in merge.get("family_coverage") or ()
+            if isinstance(item, Mapping)
+        ],
+        "selected_family_gaps": sorted({
+            str(item.get("family"))
+            for item in merge.get("family_coverage") or ()
+            if isinstance(item, Mapping)
+            and item.get("required") is True
+            and str(item.get("coverage_status") or "").lower() != "complete"
+        }),
     }

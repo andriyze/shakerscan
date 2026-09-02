@@ -456,7 +456,7 @@ class PostgresAuthSessionStore:
                 "authentication session is incompatible with the capability"
             )
         live_capabilities = _capabilities(row.get("live_allowed_capabilities") or [])
-        if live_capabilities and capability_name not in live_capabilities:
+        if capability_name not in live_capabilities:
             raise AuthSessionStoreError(
                 "authentication session profile no longer allows the capability"
             )

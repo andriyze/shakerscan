@@ -346,9 +346,13 @@ COPY api/settings_routes /app/settings_routes
 COPY api/targets /app/targets
 COPY api/scan /app/scan
 COPY api/worker_handlers /app/worker_handlers
+# Hunt methodology is runtime input, not host-only documentation. Prebuilt
+# API images must serve and bind the same catalog as a source checkout even
+# when /workspace contains only the minimal curl installation.
+COPY skills/web /app/skills/web
 
 # Ensure scanner files are readable
-RUN chmod -R 755 /app/scanner_tools /app/wordlists /app/payloads
+RUN chmod -R 755 /app/scanner_tools /app/wordlists /app/payloads /app/skills/web
 
 # The official Rust parser boundary is a release-image gate, not an optional
 # test dependency or a monkeypatched unit-test seam.

@@ -50,12 +50,22 @@ from retest_contract import (
     extract_auth_context,
     get_attempt_ladder,
     infer_retest_inputs,
+    mark_candidate_inconclusive,
     normalize_retest_type,
     parse_json_field,
+    retest_queue_binding_matches,
     run_schema_migrations,
+    settle_retest_subject_error,
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
+from runtime.worker_projection import (
+    AI_GATE_RUN_KINDS,
+    MODEL_INTAKE_RUN_KINDS,
+    runtime_destination_records as _runtime_destination_records,
+    subprocess_parser_error_reason as _subprocess_parser_error_reason,
+    truthy_module_output as _truthy_module_output,
+)
 import parallel_scan
 import asm_inventory
 import family_proof
@@ -67,6 +77,7 @@ from capabilities.network import (
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from capabilities.http import execute_bound_http_request
+from capabilities.artifact import analyze_target_javascript, inspect_target_artifact
 from capabilities.auth import (
     TargetBoundSessionCredential,
     establish_target_bound_http_session,
@@ -77,10 +88,12 @@ from capabilities.authz import (
 )
 from capabilities.dns import inspect_dns_posture
 from capabilities.inline import (
+    ArtifactInspectionExecutionAdapter,
     AuthSessionExecutionAdapter,
     AuthzVerificationExecutionAdapter,
     DnsInspectionExecutionAdapter,
     HttpRequestExecutionAdapter,
+    InfrastructureInspectionExecutionAdapter,
     TlsInspectionExecutionAdapter,
 )
 from capabilities.scanner import ScannerExecutionAdapter
@@ -99,6 +112,7 @@ from hunt.capability_reservations import (
     terminalize_hunt_capability,
 )
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+from hunt.deterministic_findings import materialize_verified_hunt_findings
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.auth_session_store import (
     AuthSessionStoreError,
@@ -144,6 +158,11 @@ from scan.collection_replay import (
     scan_replay_ledger_limits,
     scan_replay_runtime_http_ceiling,
     scan_replay_selector,
+)
+from scan.parallel_outcome import (
+    apply_parallel_action_budget as _apply_parallel_action_budget,
+    mark_parallel_parent_coverage_incomplete as _mark_parallel_parent_coverage_incomplete,
+    mark_parallel_parent_degraded as _mark_parallel_parent_degraded,
 )
 from scan.capability_execution import (
     ScanCapabilityContractError,
@@ -201,7 +220,10 @@ from scan.continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     amended_scan_plan_revision,
+    absent_receipt_summary,
     build_discovery_continuation_manifests,
+    discovery_shard_endpoint_worklist,
+    load_discovery_shard_receipts,
     merge_scan_action_continuation,
 )
 from scan.manifest_store import PostgresScanManifestStore
@@ -243,6 +265,9 @@ from scan.execution_backend import (
     ActionLease,
     PostgresScanExecutionBackend,
 )
+from runtime import http_archive
+from scan import scoring as scan_scoring
+from scanner_tools import http_archive_capture as scanner_http_capture
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
@@ -380,8 +405,6 @@ WORKER_BUILD_REGISTRY_KEY = worker_role(
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
-AI_GATE_RUN_KINDS = {"ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"}
-MODEL_INTAKE_RUN_KINDS = {"model_intake"}
 ASM_RECON_RUN_KINDS = {"asm_recon"}
 ASM_BATCH_RUN_KINDS = {"asm_batch", "asm_dynamic_batch"}
 _RESEARCH_DISPATCH_CORRELATION_KEY = "research_dispatch_correlation"
@@ -580,11 +603,13 @@ async def _release_evidence_blob_lock(conn, content_sha256: str | None) -> None:
         pass
 
 
-async def _acquire_evidence_identity_lock(conn, finding_id: Any, object_type: str) -> str | None:
+async def _acquire_evidence_identity_lock(
+    conn, finding_id: Any, object_type: str, scan_id: Any = None,
+) -> str | None:
     """Serialize a finding/object upsert with retention intent for that exact row."""
     if not finding_id or not object_type:
         return None
-    key = f"evidence-row:{finding_id}:{object_type}"
+    key = f"evidence-row:{finding_id}:{object_type}:{scan_id or 'unscoped'}"
     await conn.fetchval("SELECT pg_advisory_lock(hashtextextended($1, 0))", key)
     return key
 
@@ -800,51 +825,6 @@ async def _record_internal_executor_tool_receipt(
             if isinstance(scan_receipts, list) and receipt_id not in scan_receipts:
                 scan_receipts.append(receipt_id)
     return receipt_id
-
-
-def _truthy_module_output(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(v not in (None, "", [], {}) for v in value.values())
-    if isinstance(value, list):
-        return bool(value)
-    return value not in (None, "", [], {})
-
-
-def _subprocess_parser_error_reason(tool_name: str, receipt: dict[str, Any]) -> str | None:
-    """Conservatively classify known parser/output-format failures from subprocess previews."""
-    tool = str(tool_name or "").strip().lower()
-    parser_backed_tools = {
-        "httpx", "katana", "subfinder", "ffuf", "nuclei", "dalfox",
-        "sqlmap", "nmap", "sslyze", "testssl", "playwright",
-    }
-    if tool not in parser_backed_tools:
-        return None
-    if str(receipt.get("status") or "").strip() == "timeout" or receipt.get("timed_out"):
-        return None
-    combined = " ".join(
-        str(receipt.get(key) or "")
-        for key in ("stderr_preview", "stdout_preview")
-    ).lower()
-    if not combined:
-        return None
-    parser_markers = (
-        "json: cannot unmarshal",
-        "invalid character",
-        "unexpected end of json input",
-        "failed to parse json",
-        "failed parsing json",
-        "json parse error",
-        "parse error",
-        "could not parse",
-        "cannot parse",
-        "malformed json",
-        "invalid json",
-        "unmarshal type error",
-    )
-    for marker in parser_markers:
-        if marker in combined:
-            return marker
-    return None
 
 
 def _external_dast_tool_specs(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2982,6 +2962,29 @@ def _strip_null_bytes(value):
     return strip_null_bytes(value)
 
 
+def _bind_evidence_object_provenance(content, scan_id, finding_id):
+    """Stamp one immutable evidence subject and reject contradictory producer claims."""
+    if not content:
+        return None
+    if not isinstance(content, dict):
+        return content
+    expected_scan = str(scan_id)
+    existing = content.get("_provenance")
+    if isinstance(existing, dict):
+        claimed_scan = existing.get("evidence_producing_scan_id")
+        if claimed_scan and str(claimed_scan) != expected_scan:
+            raise ValueError("evidence-producing scan subject mismatch")
+    claimed_scan = content.get("evidence_producing_scan_id")
+    if claimed_scan and str(claimed_scan) != expected_scan:
+        raise ValueError("evidence-producing scan subject mismatch")
+    bound = dict(content)
+    bound["_provenance"] = {
+        "evidence_producing_scan_id": expected_scan,
+        "finding_id": str(finding_id),
+    }
+    return bound
+
+
 async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, evidence_redacted,
                                    *, tool_override: str | None = None) -> None:
     """Best-effort: persist a finding's (already null-stripped + redacted) evidence as
@@ -2993,25 +2996,30 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
     locked_sha: str | None = None
     identity_lock: str | None = None
     try:
-        content = evidence_redacted if evidence_redacted else None
+        content = _bind_evidence_object_provenance(evidence_redacted, scan_uuid, finding_id)
         tool = tool_override or finding.get("tool")
         object_type = (f"{tool}_evidence" if tool else "finding_evidence")[:64]
         # Lock the stable row identity before checking pending state. Otherwise a
         # retention intent can land between the check and a different-content
         # upsert, making the conditional UPSERT a silent no-op after a new blob
         # was already written.
-        identity_lock = await _acquire_evidence_identity_lock(conn, finding_id, object_type)
-        pending_preview = await conn.fetchval(
+        identity_lock = await _acquire_evidence_identity_lock(
+            conn, finding_id, object_type, scan_uuid,
+        )
+        existing_object = await conn.fetchrow(
             """
-            SELECT retention_delete_preview_id
+            SELECT id, retention_delete_preview_id
             FROM evidence_objects
-            WHERE finding_id=$1 AND object_type=$2
-              AND retention_delete_pending_at IS NOT NULL
+            WHERE finding_id=$1 AND object_type=$2 AND scan_id=$3
             """,
             finding_id,
             object_type,
+            scan_uuid,
         )
-        if pending_preview:
+        # Evidence identity is append-only. A repeated producer observation for
+        # the same finding/type/scan may confirm the row exists, but it cannot
+        # rewrite the bytes, hash, retention state, or creation timestamp.
+        if existing_object:
             return
         locked_sha = await _acquire_evidence_blob_lock(conn, content)
         stored = store_evidence_content(content, results_dir=RESULTS_DIR)
@@ -3024,11 +3032,9 @@ async def _persist_evidence_object(conn, scan_uuid, finding_id, finding: dict, e
                 (scan_id, finding_id, object_type, content_sha256, size_bytes,
                  storage_uri, redaction_profile, retention_class, content)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (finding_id, object_type) DO UPDATE SET
-                content_sha256=EXCLUDED.content_sha256, size_bytes=EXCLUDED.size_bytes,
-                storage_uri=EXCLUDED.storage_uri, content=EXCLUDED.content,
-                retention_class=EXCLUDED.retention_class, created_at=NOW()
-            WHERE evidence_objects.retention_delete_pending_at IS NULL
+            ON CONFLICT (finding_id, object_type, scan_id)
+                WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
+            DO NOTHING
         """, scan_uuid, finding_id, object_type,
              stored["content_sha256"], stored["size_bytes"], stored["storage_uri"],
              "redact_sensitive_v1", retention, stored["content"])
@@ -5423,6 +5429,10 @@ def _merge_ai_result_into_retest_result(result: dict[str, Any], ai_result: dict[
     result["verdict_reason"] = ai_result.get("reasoning", "")
     result["confidence"] = ai_confidence
     result["result_status"] = _result_status_for_verdict(ai_verdict)
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    artifacts = dict(artifacts)
+    artifacts["ai_step_results"] = list(ai_result.get("step_results") or [])
+    result["artifacts"] = artifacts
     return _enforce_verdict_invariants(result)
 
 
@@ -6320,6 +6330,10 @@ async def process_finding_retest_job(job_data: dict):
         print(f"[retest:{job_id[:8]}] Invalid job payload: {reason}", flush=True)
         return
 
+    # validate_retest_job_payload already proved both parse; this only narrows
+    # the exhaustion UPDATE to the exact subject the queue message named.
+    queued_finding_uuid = _optional_uuid(job_data.get("finding_id"))
+    queued_candidate_uuid = _optional_uuid(job_data.get("candidate_id"))
     print(f"[retest:{job_id[:8]}] Starting retest {verification_id}", flush=True)
     now = utc_now()
     if not _try_acquire_retest_slot(r):
@@ -6339,15 +6353,7 @@ async def process_finding_retest_job(job_data: dict):
             r.expire(retest_key, 86400)
             async with db_pool.acquire() as conn:
                 try:
-                    finding_uuid = uuid.UUID(str(job_data.get("finding_id")))
-                except Exception:
-                    finding_uuid = None
-                try:
-                    candidate_uuid = uuid.UUID(str(job_data.get("candidate_id")))
-                except Exception:
-                    candidate_uuid = None
-                try:
-                    await conn.execute("""
+                    exhausted = await conn.fetchrow("""
                         UPDATE finding_verifications
                         SET status = 'failed',
                             result_status = 'error',
@@ -6360,33 +6366,23 @@ async def process_finding_retest_job(job_data: dict):
                             error_message = $3,
                             completed_at = NOW(),
                             updated_at = NOW()
-                        WHERE id = $1
-                    """, uuid.UUID(verification_id), attempt, f"Retest slot wait exceeded {RETEST_SLOT_WAIT_MAX_SECONDS}s.")
-                    if finding_uuid is not None:
-                        await conn.execute(
-                            """
-                            UPDATE findings
-                            SET last_verification_status = 'error',
-                                last_verification_verdict = 'error',
-                                last_verification_confidence = NULL,
-                                last_verified_at = NOW(),
-                                verification_count = COALESCE(verification_count, 0) + 1,
-                                updated_at = NOW()
-                            WHERE id = $1
-                            """,
-                            finding_uuid,
-                        )
-                    if candidate_uuid is not None:
-                        await conn.execute(
-                            """UPDATE investigation_candidates
-                               SET status='inconclusive',
-                                   verification_context=verification_context || jsonb_build_object(
-                                       'error','retest_slot_exhausted',
-                                       'verification_id',$2::text
-                                   ), updated_at=NOW()
-                               WHERE id=$1""",
-                            candidate_uuid, uuid.UUID(verification_id),
-                        )
+                        WHERE id = $1 AND job_id = $4
+                          AND (
+                            ($5::uuid IS NOT NULL AND finding_id=$5 AND candidate_id IS NULL)
+                            OR
+                            ($6::uuid IS NOT NULL AND candidate_id=$6 AND finding_id IS NULL)
+                          )
+                        RETURNING finding_id, candidate_id
+                    """,
+                        uuid.UUID(verification_id), attempt,
+                        f"Retest slot wait exceeded {RETEST_SLOT_WAIT_MAX_SECONDS}s.",
+                        job_id, queued_finding_uuid, queued_candidate_uuid,
+                    )
+                    await settle_retest_subject_error(
+                        conn, exhausted,
+                        verification_id=verification_id,
+                        error="retest_slot_exhausted",
+                    )
                 except Exception:
                     pass
             print(
@@ -6453,6 +6449,19 @@ async def process_finding_retest_job(job_data: dict):
                 })
                 r.expire(retest_key, 86400)
                 print(f"[retest:{job_id[:8]}] Verification not found: {verification_id}", flush=True)
+                return
+
+            if not retest_queue_binding_matches(verification, job_data):
+                r.hset(retest_key, mapping={
+                    "status": "failed",
+                    "error": "invalid_job_binding",
+                    "verification_id": verification_id,
+                })
+                r.expire(retest_key, 86400)
+                print(
+                    f"[retest:{job_id[:8]}] Queue identity does not match durable verification",
+                    flush=True,
+                )
                 return
 
             claimed = await conn.fetchrow("""
@@ -7004,16 +7013,10 @@ async def process_finding_retest_job(job_data: dict):
         if candidate_value:
             try:
                 async with db_pool.acquire() as conn:
-                    await conn.execute(
-                        """UPDATE investigation_candidates
-                           SET status='inconclusive',
-                               verification_context=verification_context || jsonb_build_object(
-                                   'error',$2::text,'verification_id',$3::text
-                               ), updated_at=NOW()
-                           WHERE id=$1""",
-                        uuid.UUID(str(candidate_value)),
-                        f"worker_error:{type(exc).__name__}"[:160],
-                        verification_id,
+                    await mark_candidate_inconclusive(
+                        conn, uuid.UUID(str(candidate_value)),
+                        verification_id=verification_id,
+                        error=f"worker_error:{type(exc).__name__}",
                     )
             except Exception:
                 pass
@@ -7917,135 +7920,6 @@ def _runtime_scope_guard_applies(options: dict[str, Any]) -> bool:
     return isinstance(guard, dict) and bool(guard.get("requires_runtime_destination_check"))
 
 
-def _runtime_destination_records(result: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
-    run_kind = str((options or {}).get("run_kind") or "").strip()
-    records: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    def add(
-        label: str,
-        url: Any,
-        final_url: Any = None,
-        *,
-        source: str | None = None,
-        redirect_urls: Any = None,
-        resolved_ips: Any = None,
-        resolved_host: Any = None,
-    ) -> None:
-        raw_url = str(url or "").strip()
-        raw_final = str(final_url or raw_url).strip()
-        if not raw_url and not raw_final:
-            return
-        key = (label, raw_url, raw_final)
-        if key in seen:
-            return
-        seen.add(key)
-        record: dict[str, Any] = {"label": label, "url": raw_url or raw_final}
-        if raw_final:
-            record["final_url"] = raw_final
-        if source:
-            record["source"] = source
-        if isinstance(redirect_urls, (list, tuple)):
-            record["redirect_urls"] = [str(item) for item in redirect_urls if str(item or "").strip()]
-        if isinstance(resolved_ips, (list, tuple)):
-            record["resolved_ips"] = [str(item) for item in resolved_ips if str(item or "").strip()]
-        elif str(resolved_ips or "").strip():
-            record["resolved_ips"] = [str(resolved_ips).strip()]
-        if str(resolved_host or "").strip():
-            record["resolved_host"] = str(resolved_host).strip()
-        records.append(record)
-
-    if run_kind in {"device_posture", "device_probe"}:
-        posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
-        probe = result.get("device_probe") if isinstance(result.get("device_probe"), dict) else {}
-        locator = str(result.get("target") or "").strip()
-        resolved = str(result.get("resolved_target") or posture.get("resolved_target") or "").strip()
-        if locator:
-            formatted = f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator
-            port = probe.get("port") if probe else None
-            destination_url = f"http://{formatted}{f':{int(port)}' if port else ''}/"
-            add(
-                "device_target",
-                destination_url,
-                source=run_kind,
-                resolved_ips=[resolved] if resolved else None,
-                resolved_host=locator,
-            )
-        for item in posture.get("runtime_destinations") or ():
-            if isinstance(item, dict):
-                add(
-                    str(item.get("label") or "device_web_child"),
-                    item.get("url"),
-                    item.get("final_url"),
-                    source=item.get("source") or "device_web_dast",
-                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                    resolved_host=item.get("resolved_host"),
-                )
-        return records
-
-    if run_kind in AI_GATE_RUN_KINDS:
-        ai_gate = result.get("ai_gate") if isinstance(result.get("ai_gate"), dict) else {}
-        for item in ai_gate.get("runtime_destinations") or ():
-            if isinstance(item, dict):
-                add(
-                    str(item.get("label") or "ai_gate"),
-                    item.get("url"),
-                    item.get("final_url"),
-                    source=item.get("source"),
-                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                    resolved_host=item.get("resolved_host"),
-                )
-        return records
-
-    if run_kind in MODEL_INTAKE_RUN_KINDS:
-        model_intake = result.get("model_intake") if isinstance(result.get("model_intake"), dict) else {}
-        for item in model_intake.get("runtime_destinations") or ():
-            if isinstance(item, dict):
-                add(
-                    str(item.get("label") or "model_intake"),
-                    item.get("url"),
-                    item.get("final_url"),
-                    source=item.get("source"),
-                    redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                    resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                    resolved_host=item.get("resolved_host"),
-                )
-        return records
-
-    runtime_destinations = result.get("runtime_destinations")
-    if isinstance(runtime_destinations, list):
-        for item in runtime_destinations:
-            if not isinstance(item, dict):
-                continue
-            add(
-                str(item.get("label") or "dast_action"),
-                item.get("url"),
-                item.get("final_url"),
-                source=item.get("source") or "canonical_action_observation",
-                redirect_urls=item.get("redirect_urls") or item.get("redirect_chain"),
-                resolved_ips=item.get("resolved_ips") or item.get("remote_ip"),
-                resolved_host=item.get("resolved_host"),
-            )
-        if records:
-            return records
-
-    http = result.get("http") if isinstance(result.get("http"), dict) else {}
-    final_url = str(http.get("final_url") or "").strip()
-    final_host = urllib.parse.urlparse(final_url).hostname if final_url else None
-    add(
-        "dast_http",
-        http.get("request_url") or final_url,
-        final_url,
-        source="http_observation",
-        redirect_urls=http.get("redirect_chain"),
-        resolved_ips=http.get("remote_ip"),
-        resolved_host=final_host,
-    )
-    return records
-
-
 def _evaluate_runtime_destination_records(
     records: list[dict[str, Any]],
     options: dict[str, Any],
@@ -8420,7 +8294,9 @@ def _device_score_with_web_findings(result: dict[str, Any]) -> None:
     )
     if execution_incomplete:
         score = min(score, 69)
-    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
+    # Device posture keeps its product-specific severity weights, but letters still come
+    # from the shared band table.
+    grade = scan_scoring.grade_for(score)
     result.setdefault("result", {})["score"] = score
     result["result"]["grade"] = grade
     blocking = []
@@ -9067,7 +8943,7 @@ async def _execute_reserved_scan_capability(
         )
     if internal_inline and capability_name not in {
         "auth.session.establish", "authz.verify", "dns.inspect", "http.request",
-        "tls.inspect",
+        "infrastructure.inspect", "tls.inspect",
     }:
         raise ScanCapabilityContractError(
             "unsupported inline Scan capability adapter"
@@ -9492,6 +9368,8 @@ async def _execute_reserved_scan_capability(
             if capability_name == "http.request"
             else DnsInspectionExecutionAdapter
             if capability_name == "dns.inspect"
+            else InfrastructureInspectionExecutionAdapter
+            if capability_name == "infrastructure.inspect"
             else TlsInspectionExecutionAdapter
         )
         executable_adapter = inline_adapter(
@@ -9763,7 +9641,9 @@ async def _execute_scan_auth_session_capability(
     execution = build_native_scan_execution(admission.plan, options)
     if execution.discovery_manifest_only:
         return _skipped_scan_auth_session_summary("discovery_manifest_only")
-    credential = resolve_scan_interactive_credential(options, lane=lane)
+    credential = resolve_scan_interactive_credential(
+        options, lane=lane, capability_name="auth.session.establish",
+    )
     if credential is None:
         return _skipped_scan_auth_session_summary(f"no_interactive_{lane}")
     if not admission.plan.policy.approval_receipt_id:
@@ -10182,7 +10062,9 @@ async def _execute_scan_http_baseline_capability(
         "path": path,
         "follow_redirects": True,
     }
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="http.request",
+    )
     capability_args.update(principal.capability_args())
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -10672,7 +10554,9 @@ async def _execute_scan_web_probe_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="web.probe",
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10807,7 +10691,9 @@ async def _execute_scan_web_crawl_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="web.crawl",
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10944,7 +10830,9 @@ async def _execute_scan_content_discovery_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="web.content_discover",
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -11098,7 +10986,9 @@ async def _execute_scan_xss_verification_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="xss.verify",
+    )
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -11270,8 +11160,12 @@ async def _execute_scan_authz_verification_capability(
         return _skipped_scan_authz_verification_summary(
             "active_approval_missing"
         )
-    primary = resolve_scan_http_principal(options, lane="primary")
-    secondary = resolve_scan_http_principal(options, lane="secondary")
+    primary = resolve_scan_http_principal(
+        options, lane="primary", capability_name="authz.verify",
+    )
+    secondary = resolve_scan_http_principal(
+        options, lane="secondary", capability_name="authz.verify",
+    )
     if not primary.authenticated or not secondary.authenticated:
         return _skipped_scan_authz_verification_summary(
             "two_authenticated_principals_required"
@@ -11507,7 +11401,9 @@ async def _execute_scan_sqli_verification_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name="sqli.verify",
+    )
     candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
@@ -11610,7 +11506,9 @@ async def _execute_scan_template_capability(
     pinned_address = agent_tools.validate_pinned_scanner_address(
         None, authorized_addresses,
     )
-    principal = resolve_scan_http_principal(options, lane="primary")
+    principal = resolve_scan_http_principal(
+        options, lane="primary", capability_name=capability_name,
+    )
     template_options = dict(canonical_template_options or {})
     if canonical_action is not None and not template_options:
         raise ScanCapabilityContractError(
@@ -12922,7 +12820,7 @@ async def _execute_scan_request_collections(
                          ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
                        JOIN request_collection_selections s
                          ON s.id=$3 AND s.collection_id=c.id
-                        AND s.binding_id=b.id AND s.is_active=true
+                        AND s.binding_id=b.id AND s.revoked_at IS NULL
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
@@ -13573,6 +13471,46 @@ async def process_scan_job(job_data: dict):
 
     current_status = await _confirmed_scan_handoff_status(scan_id)
     broker_ingest = bool(job_data.get("_broker_result_id"))
+    if current_status == 'running' and not broker_ingest:
+        delivery = _decode_redis_hash(r.hgetall(f"job:{job_id}"))
+        try:
+            delivery_attempts = int(delivery.get("queue_delivery_attempts") or 0)
+        except (TypeError, ValueError):
+            delivery_attempts = 0
+        reclaimed = (
+            str(delivery.get("queue_reclaimed") or "").strip().lower() == "true"
+            or delivery_attempts >= 2
+        )
+        if reclaimed:
+            message = (
+                "The worker queue lease was reclaimed after the original execution stopped "
+                "acknowledging it. Automatic replay was withheld because the earlier worker "
+                "may already have issued requests; re-run the scan to start a new bounded execution."
+            )
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scans
+                    SET status='failed', current_phase='execution_lease_lost',
+                        error_message=$2, completed_at=NOW()
+                    WHERE id=$1 AND status='running'
+                    """,
+                    uuid.UUID(scan_id),
+                    message,
+                )
+            r.hset(f"job:{job_id}", mapping={
+                'status': 'failed',
+                'current_phase': 'execution_lease_lost',
+                'error': message,
+                'delivery_attempts': str(delivery_attempts),
+            })
+            r.expire(f"job:{job_id}", 86400)
+            print(
+                f"[{job_id[:8]}] reclaimed delivery terminalized without replay "
+                f"(attempt {delivery_attempts})",
+                flush=True,
+            )
+            return
     if current_status not in ({'pending', 'queued', 'running'} if broker_ingest else {'pending', 'queued'}):
         print(f"[{job_id[:8]}] Scan is {current_status}; queued worker job skipped", flush=True)
         r.hset(
@@ -13585,6 +13523,9 @@ async def process_scan_job(job_data: dict):
         )
         r.expire(f"job:{job_id}", 86400)
         return
+
+    if job_data.pop("_deferred_execution_attribution", False):
+        await _attribute_job_execution(job_data)
 
     # Update Redis status
     r.hset(f"job:{job_id}", mapping={
@@ -13710,6 +13651,10 @@ async def process_scan_job(job_data: dict):
     )
     heartbeat_thread.start()
 
+    # Scanner tools run in this process, so their calls are collected here and archived
+    # when the scan finishes. A broker result came from another node with its own record.
+    capture_started = http_archive.start_scan_capture(scanner_http_capture, job_data.get("_broker_result_id"))
+
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -13793,6 +13738,14 @@ async def process_scan_job(job_data: dict):
             result = _unexpected_scan_exception_result(str(target or ""), e)
             print(f"[{job_id[:8]}] Unexpected scan failure: {result['error']}", flush=True)
 
+        # Drain before any result post-processing can fail, and archive independently of
+        # the scan's terminal status. Failed and cancelled work is often the traffic an
+        # operator most needs to inspect. Draining here also prevents a ContextVar capture
+        # from leaking into the next job handled by this worker process.
+        if capture_started:
+            capture_started = False
+            await http_archive.drain_and_archive_scan_capture(db_pool, scanner_http_capture, scan_id=scan_id, target_id=target_id, results_dir=RESULTS_DIR)
+
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result = _apply_runtime_scope_guard_to_result(result, options)
@@ -13873,7 +13826,8 @@ async def process_scan_job(job_data: dict):
                 if current['status'] == 'cancelling':
                     await conn.execute(
                         """UPDATE scans SET status='cancelled', completed_at=$2, progress=100,
-                                  current_phase='cancelled', error_message='Cancelled by user'
+                                  current_phase='cancelled', error_message='Cancelled by user',
+                                  assurance_score=COALESCE(assurance_score, 0)
                            WHERE id=$1 AND status='cancelling'""",
                         uuid.UUID(scan_id), completed_at,
                     )
@@ -13963,6 +13917,9 @@ async def process_scan_job(job_data: dict):
                         metadata["runtime_scope_command_result_id"] = command_result_id
                         result["scan_metadata"] = metadata
                 failure_result = _failure_result_for_scan_error(result, error, diag)
+                failure_assurance = scan_scoring.stamp_terminal_assurance(
+                    failure_result, status="failed",
+                )
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'failed',
@@ -13972,11 +13929,11 @@ async def process_scan_job(job_data: dict):
                         duration_seconds = $4,
                         progress = 100,
                         current_phase = 'failed', coverage_status=$5, coverage_json=$6,
-                        budget_used_json=$7
+                        budget_used_json=$7, assurance_score=$9
                     WHERE id = $8
                 """, error_detail[:2000], json.dumps(failure_result), completed_at, duration,
                      coverage_status, json.dumps(result_coverage), json.dumps(budget_used),
-                     uuid.UUID(scan_id))
+                     uuid.UUID(scan_id), failure_assurance)
                 candidate_id = str((options or {}).get("candidate_id") or "")
                 if candidate_id:
                     try:
@@ -14013,6 +13970,9 @@ async def process_scan_job(job_data: dict):
                     if command_result_id:
                         metadata["runtime_scope_command_result_id"] = command_result_id
                         result["scan_metadata"] = metadata
+                # Stored beside the score so a list view can show that a clean grade came
+                # from a shallow scan without opening the report.
+                assurance_score = (result.get("result") or {}).get("assurance_score")
                 await conn.execute("""
                     UPDATE scans SET
                         status = 'completed',
@@ -14024,11 +13984,13 @@ async def process_scan_job(job_data: dict):
                         duration_seconds = $6,
                         progress = 100,
                         current_phase = 'completed',
-                        coverage_status = $7, coverage_json = $8, budget_used_json = $9
+                        coverage_status = $7, coverage_json = $8, budget_used_json = $9,
+                        assurance_score = $11
                     WHERE id = $10
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, coverage_status, json.dumps(result_coverage),
-                     json.dumps(budget_used), uuid.UUID(scan_id))
+                     json.dumps(budget_used), uuid.UUID(scan_id),
+                     int(assurance_score) if isinstance(assurance_score, int) else None)
                 candidate_settlement = result.get("candidate_verification") if isinstance(result.get("candidate_verification"), dict) else {}
                 candidate_id = str(candidate_settlement.get("candidate_id") or "")
                 if candidate_id:
@@ -14291,6 +14253,9 @@ async def process_scan_job(job_data: dict):
             flush=True,
         )
     finally:
+        # Cancellation can interrupt before the normal drain. Reset the process-local
+        # capture even when no database work is safe during cancellation.
+        http_archive.reset_scan_capture(scanner_http_capture, capture_started)
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
 
@@ -14594,47 +14559,13 @@ def _recompute_focused_parent_result(
         f for f in union_findings
         if isinstance(f, dict) and _merge_finding_matches_family(f, family)
     ]
-    severity_counts = {
-        "critical": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "critical"),
-        "high": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "high"),
-        "medium": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "medium"),
-        "low": sum(1 for f in focused_findings if str(f.get("severity") or "").lower() == "low"),
-    }
-    score = 100
-    score -= min(severity_counts["critical"] * 15, 45)
-    score -= min(severity_counts["high"] * 10, 30)
-    score -= min(severity_counts["medium"] * 4, 20)
-    score -= min(severity_counts["low"] * 1, 10)
-    score = max(0, min(100, score))
-    max_severity = "info"
-    for sev in ("critical", "high", "medium", "low"):
-        if severity_counts[sev]:
-            max_severity = sev
-            break
-    if max_severity == "critical":
-        grade = "D" if score >= 55 else "F"
-    elif max_severity == "high":
-        grade = "C" if score >= 70 else "D" if score >= 55 else "F"
-    else:
-        grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 55 else "F"
+    # One scorer, one band table. This path used to carry a third weight table and its own
+    # D>=55 bands, so the same findings rendered a different letter depending on whether a
+    # focused-family parent or the canonical finalizer produced the row.
+    focused_risk = scan_scoring.risk(focused_findings)
+    score, grade = focused_risk["score"], focused_risk["grade"]
 
-    notes: list[str] = []
-    if severity_counts["critical"]:
-        max_cvss = max([float(f.get("cvss_score") or 0) for f in focused_findings] or [0])
-        notes.append(
-            f"{severity_counts['critical']} critical vulnerability(ies) found "
-            f"(max CVSS: {max_cvss:g}, penalty: -{min(severity_counts['critical'] * 15, 45)})."
-        )
-    if severity_counts["high"]:
-        notes.append(
-            f"{severity_counts['high']} high severity issue(s) found "
-            f"(penalty: -{min(severity_counts['high'] * 10, 30)})."
-        )
-    if severity_counts["medium"]:
-        notes.append(
-            f"{severity_counts['medium']} medium severity issue(s) found "
-            f"(penalty: -{min(severity_counts['medium'] * 4, 20)})."
-        )
+    notes = scan_scoring.severity_notes(focused_findings)
 
     result.update({
         "score": score,
@@ -14647,93 +14578,17 @@ def _recompute_focused_parent_result(
         "focused_active_scope": True,
         "focused_family": family,
         "focused_context_findings": max(0, len(union_findings) - len(focused_findings)),
-        "grade_reliable": True,
+        "score_reasons": focused_risk["reasons"],
+        "risk_score": score,
+        "risk_grade": grade,
+        "score_policy": scan_scoring.SCORE_POLICY,
+        # Previously hardcoded True, which overrode whatever reliability the underlying
+        # merge had determined and made a partial focused scan look fully covered.
+        "grade_reliable": bool(merged.get("result", {}).get("grade_reliable", True)),
     })
     for stale_key in ("grade_warning", "coverage_issues", "original_grade"):
         result.pop(stale_key, None)
     return score, grade
-
-
-def _parallel_result_is_partial(result: dict[str, Any] | None) -> bool:
-    if not isinstance(result, dict):
-        return True
-    meta = result.get('scan_metadata') if isinstance(result.get('scan_metadata'), dict) else {}
-    if any(meta.get(key) is True for key in ('partial', 'degraded', 'timed_out', 'cancelled')):
-        return True
-    result_block = result.get('result') if isinstance(result.get('result'), dict) else {}
-    if result_block.get('grade_reliable') is False:
-        return True
-    coverage = result.get('smart_coverage') if isinstance(result.get('smart_coverage'), dict) else {}
-    status = str(coverage.get('status') or '').strip().lower()
-    if status in {'partial', 'incomplete', 'failed', 'timed_out', 'cancelled'}:
-        return True
-    return False
-
-
-def _mark_parallel_parent_degraded(
-    merged: dict[str, Any],
-    *,
-    failed_count: int,
-    total_count: int,
-    cancelled_count: int = 0,
-    partial_count: int = 0,
-) -> bool:
-    """Mark a merged parent incomplete when any required shard is not complete."""
-    incomplete_count = max(0, failed_count) + max(0, cancelled_count) + max(0, partial_count)
-    if incomplete_count <= 0 or total_count <= 0:
-        return False
-    completed_count = max(0, total_count - incomplete_count)
-    details = ", ".join(
-        item for item in (
-            f"{failed_count} failed" if failed_count else "",
-            f"{cancelled_count} cancelled" if cancelled_count else "",
-            f"{partial_count} partial" if partial_count else "",
-        ) if item
-    )
-    if completed_count:
-        reason = (
-            f"Parallel scan has incomplete execution ({details}; {incomplete_count}/{total_count} shard(s)); "
-            "grade is not reliable for full shard coverage"
-        )
-    else:
-        reason = (
-            f"Parallel scan has no fully completed shard ({details}); "
-            "grade is not reliable"
-        )
-
-    parallel = merged.setdefault("parallel", {})
-    if isinstance(parallel, dict):
-        parallel["degraded"] = True
-        parallel["degrade_reason"] = reason
-
-    meta = merged.setdefault("scan_metadata", {})
-    if isinstance(meta, dict):
-        meta["partial"] = True
-        meta["degraded"] = True
-        meta["grade_reliable"] = False
-        meta["parallel_shards_failed"] = failed_count
-        meta["parallel_shards_cancelled"] = cancelled_count
-        meta["parallel_shards_partial"] = partial_count
-        meta["parallel_shards_total"] = total_count
-
-    result = merged.setdefault("result", {})
-    if isinstance(result, dict):
-        result["grade_reliable"] = False
-        result["degraded"] = True
-        result["grade_warning"] = reason
-        issues = result.get("coverage_issues")
-        if not isinstance(issues, list):
-            issues = [str(issues)] if issues else []
-        if reason not in issues:
-            issues.append(reason)
-        result["coverage_issues"] = issues
-        grade = result.get("grade")
-        if grade is not None:
-            grade_text = str(grade)
-            if not grade_text.endswith("*"):
-                result.setdefault("original_grade", grade_text)
-                result["grade"] = f"{grade_text}*"
-    return True
 
 
 async def _record_endpoint_telemetry_attempts(
@@ -15153,6 +15008,13 @@ def _compile_parallel_child_action_plan(
     raw_plan = ScanActionPlanCompiler().compile(
         scan_id=child_job.scan_id,
         execution_plan=child_job.execution_plan,
+        # A child queue payload carries the PARENT execution plan with a shard
+        # block bolted on, so batch shapes were sized to the parent ceiling and
+        # allocation then rejected the result against the shard's own ledger:
+        # "required Scan action verify.xss exceeds the plan budget:
+        # {'http_requests': 483, 'tool_wall_seconds': 145}". Size the plan
+        # against the ledger that will actually reserve it.
+        ledger_limits=child_job.shard.sub_budget.ledger_limits(),
         target_binding=child_job.target,
         credential_profile_refs=credential_profile_action_refs(credential_refs),
         request_collection_refs=request_collection_action_refs(collection_refs),
@@ -15692,7 +15554,7 @@ async def process_scan_plan_job(job_data: dict):
                     """
                     UPDATE scans SET status='failed', progress=100,
                         current_phase='queue_handoff_failed', completed_at=NOW(),
-                        error_message=$2
+                        error_message=$2, assurance_score=0
                     WHERE id=$1
                     """,
                     uuid.UUID(discovery_id),
@@ -15733,6 +15595,7 @@ async def process_scan_plan_job(job_data: dict):
     recon_result: dict[str, Any] = {}
     placed_subdomain_summary: dict[str, Any] | None = None
     placed_network_summary: dict[str, Any] | None = None
+    harvested = list(submitted_endpoints)
     if discovery_scan_id:
         async with db_pool.acquire() as conn:
             discovery = await conn.fetchrow(
@@ -15754,61 +15617,23 @@ async def process_scan_plan_job(job_data: dict):
             )
             return
         recon_result = _as_report_dict(discovery.get('result')) or {}
-        raw_subdomain_summary = recon_result.get('subdomain_discovery')
-        if isinstance(raw_subdomain_summary, Mapping):
-            placed_subdomain_summary = dict(raw_subdomain_summary)
-        elif canonical_subdomain_discovery:
-            placed_subdomain_summary = {
-                "schema_version": "canonical-scan-subdomain-discovery/v1",
-                "enabled": True,
-                "status": "failed",
-                "root_domain": (
-                    canonical_parent_job.target.allowed_root_domains[0]
-                    if canonical_parent_job.target.allowed_root_domains else None
-                ),
-                "observations": [],
-                "observation_count": 0,
-                "partial": False,
-                "timed_out": False,
-                "errors": [str(
-                    discovery.get('error_message')
-                    or "placed discovery returned no canonical subdomain receipt"
-                )[:500]],
-                "budget_consumed": {},
-                "durable_budget_settled": False,
-                "network_binding": "root_domain_target_binding",
-                "automatically_scanned_discovered_hosts": False,
-            }
-        raw_network_summary = recon_result.get('network_discovery')
-        if isinstance(raw_network_summary, Mapping):
-            placed_network_summary = dict(raw_network_summary)
-        elif canonical_network_discovery:
-            placed_network_summary = {
-                "schema_version": "canonical-scan-network-discovery/v1",
-                "enabled": True,
-                "status": "failed",
-                "addresses": [],
-                "actions": [],
-                "observations": [],
-                "open_ports": [],
-                "services": [],
-                "observation_count": 0,
-                "partial": False,
-                "timed_out": False,
-                "errors": [str(
-                    discovery.get('error_message')
-                    or "placed discovery returned no canonical network receipts"
-                )[:500]],
-                "budget_consumed": {},
-                "durable_budget_settled": False,
-                "network_binding": "exact_address_subset",
-            }
-    harvested = list(submitted_endpoints)
-    if discovery_scan_id:
-        # The placed discovery shard already executed target traffic. This
-        # continuation only reads its durable result and plans self-contained
-        # endpoint shards on the control plane.
         discovery_status = str(discovery.get('status') or '')
+        placed_subdomain_summary = absent_receipt_summary(
+            recon_result.get('subdomain_discovery'),
+            kind="subdomain",
+            enabled=canonical_subdomain_discovery,
+            root_domain=(
+                canonical_parent_job.target.allowed_root_domains[0]
+                if canonical_parent_job.target.allowed_root_domains else None
+            ),
+            error=discovery.get('error_message'),
+        ) or placed_subdomain_summary
+        placed_network_summary = absent_receipt_summary(
+            recon_result.get('network_discovery'),
+            kind="network",
+            enabled=canonical_network_discovery,
+            error=discovery.get('error_message'),
+        ) or placed_network_summary
         if discovery_status == 'failed':
             # A failed producer may still have durable, trustworthy partial output. Harvest it
             # and continue; coverage truth is reported separately from the parent run status.
@@ -15816,10 +15641,35 @@ async def process_scan_plan_job(job_data: dict):
                 discovery.get('error_message') or recon_result.get('error')
                 or 'parallel discovery producer failed after partial output'
             )[:1000]
-        discovered, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
-            recon_result,
-            max_endpoints=canonical_parent_job.execution_plan.budget.max_endpoints,
-        )
+        max_worklist = canonical_parent_job.execution_plan.budget.max_endpoints
+        # The placed discovery shard already executed target traffic. This
+        # continuation only reads its durable result and plans self-contained
+        # endpoint shards on the control plane.
+        # Canonical first: the shard's own durable observations. The legacy report
+        # harvest stays as the fallback for a producer that still emits V1 shape.
+        async with db_pool.acquire() as conn:
+            statuses, discovery_observations = await load_discovery_shard_receipts(
+                conn, scan_id=discovery_scan_id,
+            )
+        # Authority is whether the shard recorded canonical discovery actions at
+        # all -- not whether the render came back non-empty. The projection always
+        # yields at least the bound origin, so keying the fallback off the result
+        # would make the legacy path unreachable and hide a producer that emitted
+        # the old shape behind a worklist of one.
+        if statuses:
+            discovered, harvest_meta = discovery_shard_endpoint_worklist(
+                scan_id=discovery_scan_id,
+                target=canonical_parent_job.target,
+                target_url=target_url,
+                options=options,
+                action_statuses=statuses,
+                observations=discovery_observations,
+                max_endpoints=max_worklist,
+            )
+        else:
+            discovered, harvest_meta = parallel_scan.harvest_endpoints_with_meta(
+                recon_result, max_endpoints=max_worklist,
+            )
         # Surface the worklist cap so "Full Coverage" never reports ~100% over a
         # silently truncated surface: endpoints beyond the cap were discovered but
         # will not be tested. (Recorded on parent_options where it is built below.)
@@ -16607,6 +16457,12 @@ async def process_scan_shard_job(job_data: dict):
         name=f"heartbeat-{job_id[:8]}", daemon=True,
     )
     heartbeat_thread.start()
+    # Shards execute the same scanner adapters as standalone scans. Their traffic must
+    # be captured against the child row so the visible parent export can aggregate it.
+    # Broker ingestion already executed elsewhere and must never synthesize a local trace.
+    capture_started = http_archive.start_scan_capture(
+        scanner_http_capture, job_data.get("_broker_result_id"),
+    )
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -16625,6 +16481,18 @@ async def process_scan_shard_job(job_data: dict):
                       'result': {'score': None, 'grade': None}, 'findings': []}
             print(f"[{job_id[:8]}] Shard '{label}' run_scan error: {e}", flush=True)
 
+        # Archive before result persistence: a later scoring or storage failure must not
+        # erase the exact traffic that explains what this shard actually attempted.
+        if capture_started:
+            capture_started = False
+            await http_archive.drain_and_archive_scan_capture(
+                db_pool,
+                scanner_http_capture,
+                scan_id=scan_id,
+                target_id=target_id,
+                results_dir=RESULTS_DIR,
+            )
+
         result['job_id'] = job_id
         result['scan_id'] = scan_id
         result['shard_label'] = label
@@ -16633,7 +16501,10 @@ async def process_scan_shard_job(job_data: dict):
         findings = result.get('findings', [])
         error = result.get('error')
         partial = bool(
-            not error and not parallel_discovery and _parallel_result_is_partial(result)
+            not error and not parallel_discovery and scan_scoring.parallel_result_is_partial(result)
+        )
+        shard_assurance = scan_scoring.stamp_terminal_assurance(
+            result, status="failed" if error else "partial" if partial else "completed",
         )
         filepath = await persist_result_artifact(
             result,
@@ -16655,19 +16526,21 @@ async def process_scan_shard_job(job_data: dict):
                 await conn.execute("""
                     UPDATE scans SET status = 'failed', error_message = $1, result = $2,
                         score = $3, grade = $4, findings_count = $5, completed_at = $6,
-                        duration_seconds = $7, progress = 100, current_phase = 'failed'
+                        duration_seconds = $7, progress = 100, current_phase = 'failed',
+                        assurance_score = $9
                     WHERE id = $8
                 """, error, json.dumps(result), score, grade, len(findings),
-                     completed_at, duration, uuid.UUID(scan_id))
+                     completed_at, duration, uuid.UUID(scan_id), shard_assurance)
             else:
                 await conn.execute("""
                     UPDATE scans SET status = 'completed', result = $1, score = $2,
                         grade = $3, findings_count = $4, completed_at = $5,
-                        duration_seconds = $6, progress = 100, current_phase = $7
+                        duration_seconds = $6, progress = 100, current_phase = $7,
+                        assurance_score = $9
                     WHERE id = $8
                 """, json.dumps(result), score, grade, len(findings),
                      completed_at, duration, 'partial' if partial else 'completed',
-                     uuid.UUID(scan_id))
+                     uuid.UUID(scan_id), shard_assurance)
 
         final_status = 'failed' if error else 'completed'
         final_phase = 'failed' if error else ('partial' if partial else 'completed')
@@ -16684,6 +16557,7 @@ async def process_scan_shard_job(job_data: dict):
         r.expire(f"job:{job_id}", 86400)
         print(f"[{job_id[:8]}] Shard '{label}' done | findings: {len(findings)} | error: {bool(error)}", flush=True)
     finally:
+        http_archive.reset_scan_capture(scanner_http_capture, capture_started)
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=max(1.0, HEARTBEAT_INTERVAL_SECONDS / 2))
         if slot_acquired:
@@ -16803,7 +16677,7 @@ async def process_scan_merge_job(job_data: dict):
                 UPDATE scans SET status='failed', progress=100,
                     current_phase='parallel_partition_failed',
                     completed_at=NOW(), error_message=$2,
-                    result=$3::jsonb
+                    result=$3::jsonb, assurance_score=0
                 WHERE id=$1 AND status <> 'cancelled'
                 """,
                 uuid.UUID(parent_id),
@@ -16863,7 +16737,7 @@ async def process_scan_merge_job(job_data: dict):
                     UPDATE scans SET status='failed', progress=100,
                         current_phase='parallel_partition_failed',
                         completed_at=NOW(), error_message=$2,
-                        result=$3::jsonb
+                        result=$3::jsonb, assurance_score=0
                     WHERE id=$1 AND status <> 'cancelled'
                     """,
                     uuid.UUID(parent_id),
@@ -16904,7 +16778,7 @@ async def process_scan_merge_job(job_data: dict):
         child_options = _as_report_dict(ch['options']) or {}
         child_partial = bool(
             str(ch.get('current_phase') or '') == 'partial'
-            or (status == 'completed' and _parallel_result_is_partial(cres))
+            or (status == 'completed' and scan_scoring.parallel_result_is_partial(cres))
         )
         sc = cres.get('smart_coverage') if isinstance(cres, dict) else None
         shard_coverage_records.append({
@@ -17014,11 +16888,16 @@ async def process_scan_merge_job(job_data: dict):
     _graded_block = None
     try:
         from grading import grade as _grade_report
+        # grading.grade still produces the human-readable summary, notes, remediation and
+        # compliance narrative. Its score and letter are discarded: it used D>=55 bands
+        # while the canonical finalizer used D>=60, so the two disagreed about the same
+        # findings. The shared scorer decides both here.
         _graded = _grade_report(merged)
-        _gs = _graded.get('score')
-        if _gs is not None and (min_score is None or _gs <= min_score):
+        _risk = scan_scoring.risk(union_findings)
+        _gs = _risk["score"]
+        if min_score is None or _gs <= min_score:
             agg_score = _gs
-            agg_grade = _graded.get('grade')
+            agg_grade = _risk["grade"]
             _graded_block = _graded
     except Exception as e:
         print(f"[merge {parent_id[:8]}] parent grade recompute skipped: {e}", flush=True)
@@ -17036,6 +16915,10 @@ async def process_scan_merge_job(job_data: dict):
         for _k in ("summary", "notes", "remediation", "cvss_metrics", "compliance"):
             if _graded_block.get(_k) is not None:
                 merged["result"][_k] = _graded_block[_k]
+        merged["result"]["score_policy"] = scan_scoring.SCORE_POLICY
+        if agg_score is not None:
+            merged["result"]["risk_score"] = agg_score
+            merged["result"]["risk_grade"] = agg_grade
 
     # Recompute the verification/triage summary from the final union so the parent's
     # counts reflect recon + every shard, not a single shard's stale view.
@@ -17124,7 +17007,7 @@ async def process_scan_merge_job(job_data: dict):
         1 for c in children
         if c['status'] == 'completed' and (
             str(c.get('current_phase') or '') == 'partial'
-            or _parallel_result_is_partial(_as_report_dict(c.get('result')))
+            or scan_scoring.parallel_result_is_partial(_as_report_dict(c.get('result')))
         )
     )
     strategy = parent_options.get('parallel_strategy')
@@ -17163,6 +17046,7 @@ async def process_scan_merge_job(job_data: dict):
             canonical_action_merge,
             additional_reliability_reasons=extra_reasons,
         )
+        _apply_parallel_action_budget(merged, canonical_action_merge)
 
     # Coverage-aware merge: the parent must reflect the whole fan-out, not just
     # the base shard. For scope/coverage shards, use the assigned endpoint
@@ -17202,6 +17086,8 @@ async def process_scan_merge_job(job_data: dict):
         ),
     )
 
+    coverage_incomplete = _mark_parallel_parent_coverage_incomplete(merged)
+
     if _mark_parallel_parent_degraded(
         merged,
         failed_count=failed_n,
@@ -17212,8 +17098,13 @@ async def process_scan_merge_job(job_data: dict):
         if isinstance(merged.get('result'), dict):
             agg_grade = merged['result'].get('grade', agg_grade)
             agg_score = merged['result'].get('score', agg_score)
-    technically_incomplete = bool(failed_n or cancelled_n or partial_n)
+    technically_incomplete = bool(
+        failed_n or cancelled_n or partial_n or coverage_incomplete
+    )
     merged['technical_outcome'] = 'INCOMPLETE' if technically_incomplete else 'COMPLETE'
+    scan_scoring.recompute_parallel_parent_assurance(
+        merged, completed_count=completed_n, total_count=len(children),
+    )
 
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.
@@ -17289,17 +17180,23 @@ async def process_scan_merge_job(job_data: dict):
             )[:2000]
 
     async with db_pool.acquire() as conn:
+        # Recomputed from the union, or cleared. Leaving it untouched let a parent keep an
+        # assurance value a single shard had written, which describes that shard's slice of
+        # the work rather than the whole scan.
+        merged_assurance = (merged.get("result") or {}).get("assurance_score")
         await conn.execute("""
             UPDATE scans SET status = $1, result = $2, score = $3, grade = $4,
                 findings_count = $5, completed_at = $6, duration_seconds = $7,
-                progress = 100, current_phase = $8, error_message = $9
+                progress = 100, current_phase = $8, error_message = $9,
+                assurance_score = $11
             WHERE id = $10
         """, parent_status, json.dumps(merged), agg_score, agg_grade,
              len(union_findings), completed_at, duration,
              ('completed_partial' if technically_incomplete else 'completed')
              if parent_status == 'completed' else 'failed',
              parent_error_message,
-             uuid.UUID(parent_id))
+             uuid.UUID(parent_id),
+             int(merged_assurance) if isinstance(merged_assurance, int) else None)
 
     # Continuous ASM: persist the UNION of every shard's discovered worklist
     # into the per-target inventory (docs §16). Closes the Phase-1 gap so
@@ -18368,13 +18265,17 @@ async def process_exploit_batch_job(job_data: dict):
                 final_status = current['status']
                 terminal_phase = current['status']
             else:
+                # Stored beside the score so a list view can show that a clean grade came
+                # from a shallow scan without opening the report.
+                assurance = (result.get("result") or {}).get("assurance_score")
                 await conn.execute(
                     """UPDATE scans SET status=$1, result=$2, score=$3, grade=$4, findings_count=$5,
                            completed_at=$6, duration_seconds=$7, progress=100, current_phase=$8,
-                           error_message=$10 WHERE id=$9""",
+                           error_message=$10, assurance_score=$11 WHERE id=$9""",
                     final_status, json.dumps(result), score, grade, len(findings),
                     completed_at, duration, terminal_phase, uuid.UUID(scan_id),
                     (error if error else None),
+                    int(assurance) if isinstance(assurance, int) else None,
                 )
         r.hset(f"job:{job_id}", mapping={
             'status': final_status, 'result_path': filepath,
@@ -18703,7 +18604,8 @@ async def _refuse_stale_job_if_needed(job_data: dict) -> bool:
         try:
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE scans SET status='failed', error_message=$2, completed_at=NOW() "
+                    "UPDATE scans SET status='failed', error_message=$2, completed_at=NOW(), "
+                    "assurance_score=0 "
                     "WHERE id=$1 AND status NOT IN ('completed','cancelled')",
                     uuid.UUID(scan_id), msg[:500])
         except Exception as e:
@@ -19337,6 +19239,35 @@ def _worker_json_object(value: Any) -> dict[str, Any]:
     return json_object_field(value)
 
 
+def _worker_hunt_budget_accounting(
+    reserved: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    used_after_reconciliation: Mapping[str, Any],
+    *,
+    charge_basis: str = "capability_reported_settlement",
+) -> dict[str, Any]:
+    normalized_reserved = {
+        str(key): max(0, int(value)) for key, value in reserved.items()
+    }
+    normalized_actual = {
+        str(key): max(0, int(value)) for key, value in actual.items()
+    }
+    return {
+        "schema_version": "hunt-budget-settlement/v1",
+        "charge_basis": charge_basis,
+        "reserved": normalized_reserved,
+        "actual": normalized_actual,
+        "released": {
+            key: max(0, amount - int(normalized_actual.get(key) or 0))
+            for key, amount in normalized_reserved.items()
+        },
+        "used_after_reconciliation": {
+            str(key): max(0, int(value))
+            for key, value in used_after_reconciliation.items()
+        },
+    }
+
+
 def _worker_json_array(value: Any) -> list[Any]:
     return json_array_field(value)
 
@@ -19514,7 +19445,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                          ON b.id=$2 AND b.collection_id=c.id AND b.is_active=true
                        JOIN request_collection_selections s
                          ON s.id=$3 AND s.collection_id=c.id
-                        AND s.binding_id=b.id AND s.is_active=true
+                        AND s.binding_id=b.id AND s.revoked_at IS NULL
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
@@ -19752,7 +19683,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         conn,
                         profile_id=credential_profile_id,
                         target=target,
-                        capability="request.replay",
+                        capability="collections.replay_safe",
                         authority=authority,
                     )
                 )
@@ -20051,7 +19982,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             "budget_consumed": dict(execution.actual_budget),
             "used_after_reconciliation": settled_ledger,
             "reservation_id": reservation_id,
-            "receipt": public_receipt,
+            "receipt_id": public_receipt.get("receipt_id"), "receipt": public_receipt,
             "safe_methods_only": True,
             "secret_values_visible": False,
             "durable_budget_settled": True,
@@ -20280,7 +20211,7 @@ def _worker_session_credential(
         if str(item).strip()
     }))
     if not allowed:
-        allowed = ("http.request",)
+        raise CredentialReferenceError("managed Hunt principal grants no session capabilities")
     binding_digest = hashlib.sha256(json.dumps({
         "schema_version": "hunt-session-credential-binding/v1",
         "profile_id": resolved.profile.profile_id,
@@ -20723,15 +20654,14 @@ async def process_canonical_scanner_capability_job(
                         current=heartbeat_record,
                     )
 
-        oob_server, oob_token = agent_tools.resolve_hunt_interactsh_config(
-            allow_active=bool(policy.active_testing),
-        )
+        scanner_options, oob_server, oob_token = agent_tools.canonical_hunt_scanner_execution(
+            capability_name, capability_input, hunt_policy, persisted.record.requested)
         receipt_properties = dict(
             spec.input_schema.get("properties") or {}
         )
         receipt_input = {
             key: value
-            for key, value in capability_input.items()
+            for key, value in scanner_options.items()
             if key in receipt_properties
         }
         if receipt_input.get("path"):
@@ -20746,7 +20676,7 @@ async def process_canonical_scanner_capability_job(
                 "tool_name": spec.process_tool_name,
                 "execution_target": execution_target,
                 "registered_target": registered_target,
-                "scanner_options": capability_input,
+                "scanner_options": scanner_options,
                 "timeout_ms": int(spec.default_timeout_ms),
                 "pinned_address": pinned_address,
                 "authorized_addresses": authorized_addresses,
@@ -20901,6 +20831,7 @@ async def process_canonical_scanner_capability_job(
                         finished_at.replace("Z", "+00:00")
                     ),
                 )
+                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, capability_input, observations)
                 persisted = await store.persist_terminal(
                     conn,
                     previous=latest,
@@ -20922,8 +20853,13 @@ async def process_canonical_scanner_capability_job(
                     "observation_count": len(observations),
                     "error": error,
                     "record_count": len(observations),
-                    "parser_errors": parser_errors,
+                    "parser_errors": parser_errors, "verified_finding_ids": verified_finding_ids,
                     "budget_consumed": dict(terminal.actual),
+                    "budget_accounting": _worker_hunt_budget_accounting(
+                        latest.record.requested,
+                        terminal.actual,
+                        reconciled,
+                    ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
@@ -20956,7 +20892,7 @@ async def process_canonical_scanner_capability_job(
             "budget_reservation_id": reservation_id,
             "budget_reservation_state": terminal.status,
             "receipt_id": str(receipt_id),
-            "receipt": capability_receipt.public_dict(),
+            "receipt": capability_receipt.public_dict(), "verified_finding_ids": verified_finding_ids,
             "durable_budget_settled": True,
         }
     except asyncio.CancelledError:
@@ -21423,6 +21359,12 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     "error": parser_errors[0] if parser_errors else None,
                     "record_count": len(observations),
                     "parser_errors": parser_errors,
+                    "budget_consumed": dict(terminal.actual),
+                    "budget_accounting": _worker_hunt_budget_accounting(
+                        latest.record.requested,
+                        terminal.actual,
+                        reconciled,
+                    ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
@@ -21897,6 +21839,12 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     "error": error,
                     "record_count": len(observations),
                     "parser_errors": parser_errors[:20],
+                    "budget_consumed": dict(terminal.actual),
+                    "budget_accounting": _worker_hunt_budget_accounting(
+                        latest.record.requested,
+                        terminal.actual,
+                        reconciled,
+                    ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
@@ -22205,6 +22153,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         session_context_ref = None
         trusted_headers: dict[str, str] = {}
         principal_slot = "anonymous"
+        # Not every Hunt capability performs HTTP. Keep an empty collection for those
+        # branches so settlement never depends on a variable created only by http.request.
+        archived_calls, _record_call = http_archive.hunt_run_call_recorder(
+            run, action_id=action_id, capability_name=capability_name,
+            adapter=str(spec.adapter), target_url=target_url,
+        )
 
         if capability_name == "auth.session.establish":
             principal_slot = str(capability_input["as_principal"])
@@ -22400,7 +22354,6 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             primary_headers = worker_session.headers()
             secondary_headers = secondary_worker_session.headers()
             routes = [str(item) for item in capability_input["routes"]]
-
             async def execute_authz() -> dict[str, Any]:
                 return await verify_target_bound_object_authorization(
                     target_url,
@@ -22408,6 +22361,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target=target,
                     primary_headers=primary_headers,
                     secondary_headers=secondary_headers,
+                    transaction_recorder=_record_call,
                 )
 
             operation = execute_authz
@@ -22423,6 +22377,31 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "route_inventory_digest": authz_route_inventory_digest(routes),
                 "route_count": len(routes),
                 "principal_contexts_distinct": True,
+                "secret_values_visible": False,
+            }
+        elif capability_name in {"artifact.inspect", "javascript.analyze"}:
+            public_input = dict(capability_input)
+
+            async def execute_artifact() -> dict[str, Any]:
+                operation = (
+                    inspect_target_artifact
+                    if capability_name == "artifact.inspect"
+                    else analyze_target_javascript
+                )
+                return await operation(
+                    target_url,
+                    public_input,
+                    target=target,
+                    transaction_recorder=_record_call,
+                )
+
+            operation = execute_artifact
+            adapter_type = ArtifactInspectionExecutionAdapter
+            redacted_execution = {
+                "path": redact_url(str(public_input.get("path") or "")),
+                "offset": int(public_input.get("offset") or 0),
+                "max_bytes": int(public_input.get("max_bytes") or 0) or None,
+                "search_term_count": len(public_input.get("search_terms") or []),
                 "secret_values_visible": False,
             }
         else:
@@ -22500,7 +22479,17 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     public_input,
                     target=target,
                     allow_write=False,
+                    transaction_recorder=_record_call,
                     trusted_headers=trusted_headers,
+                    # Read from the persisted hunt policy, which the start handler wrote
+                    # only after validating the target-bound approval receipt. ScanPolicy
+                    # does not carry this flag, so the row is the authority.
+                    allow_identity_headers=bool(
+                        hunt_policy.get("allow_identity_headers")
+                    ),
+                    direct_origin_addresses=tuple(
+                        hunt_policy.get("direct_origin_addresses") or ()
+                    ),
                     principal_slot=principal_slot,
                     timeout_seconds=min(
                         60,
@@ -22566,6 +22555,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         }
         settled_session = None
         async with db_pool.acquire() as conn:
+            # Outside the settlement transaction: an archive failure must not poison the
+            # transaction that reconciles the action's budget.
+            await http_archive.archive_hunt_capture(conn, archived_calls, hunt_id, run["id"], RESULTS_DIR)
             async with conn.transaction():
                 locked = await conn.fetchrow(
                     "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_id,
@@ -22720,9 +22712,18 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 )
                 action_result = {
                     "status": status,
+                    "ok": status == "success",
                     "error": error,
+                    "partial": partial,
+                    "timed_out": timed_out,
                     "record_count": len(observations),
                     "parser_errors": parser_errors[:20],
+                    "budget_consumed": dict(terminal.actual),
+                    "budget_accounting": _worker_hunt_budget_accounting(
+                        latest.record.requested,
+                        terminal.actual,
+                        reconciled,
+                    ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
@@ -22955,9 +22956,16 @@ async def process_job(job_data: dict):
     # Fail-closed: refuse to run a scan on a build-stale worker (see helper).
     if await _refuse_stale_job_if_needed(job_data):
         return
+    job_type = job_data.get('type', 'scan')
     try:
-        if not job_data.get("_broker_result_id"):
+        if not job_data.get("_broker_result_id") and job_type != 'scan':
             await _attribute_job_execution(job_data)
+        elif not job_data.get("_broker_result_id"):
+            # Standalone Scan attribution must happen only after its durable
+            # pending/queued claim succeeds. A reclaimed duplicate must not
+            # overwrite the worker that owned the original execution.
+            job_data = dict(job_data)
+            job_data["_deferred_execution_attribution"] = True
     except RuntimeError as exc:
         # A node can be revoked between lease and dispatch. Preserve the user's
         # work while the control-plane reconciler removes that peer.
@@ -22969,8 +22977,6 @@ async def process_job(job_data: dict):
         print(f"[fleet] refused job on this node and requeued it: {exc}", flush=True)
         await asyncio.sleep(2)
         return
-    job_type = job_data.get('type', 'scan')
-
     try:
         if job_type == 'discovery':
             await process_discovery_job(job_data)

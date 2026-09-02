@@ -10,11 +10,6 @@
     "operation_id": "get_agent_context_pack_agent_context__target_id__get"
   },
   {
-    "path": "/agent/findings/{finding_id}/verify",
-    "method": "post",
-    "operation_id": "verify_suspected_agent_finding_agent_findings__finding_id__verify_post"
-  },
-  {
     "path": "/agent/findings/{target_id}",
     "method": "get",
     "operation_id": "get_agent_two_tier_findings_agent_findings__target_id__get"
@@ -38,11 +33,6 @@
     "path": "/agent/tools/readiness",
     "method": "get",
     "operation_id": "get_agent_tool_readiness_agent_tools_readiness_get"
-  },
-  {
-    "path": "/agent/tools/{target_id}/execute",
-    "method": "post",
-    "operation_id": "execute_agent_tool_endpoint_agent_tools__target_id__execute_post"
   },
   {
     "path": "/agents/local",
@@ -463,6 +453,11 @@
     "path": "/credential-profiles",
     "method": "post",
     "operation_id": "create_credential_profile_credential_profiles_post"
+  },
+  {
+    "path": "/credential-profiles/capabilities",
+    "method": "get",
+    "operation_id": "credential_capability_catalog_credential_profiles_capabilities_get"
   },
   {
     "path": "/credential-profiles/{profile_id}",
@@ -945,6 +940,16 @@
     "operation_id": "health_health_get"
   },
   {
+    "path": "/hunt/skills",
+    "method": "get",
+    "operation_id": "list_hunt_skills_hunt_skills_get"
+  },
+  {
+    "path": "/hunt/skills/{skill_id}",
+    "method": "get",
+    "operation_id": "get_hunt_skill_hunt_skills__skill_id__get"
+  },
+  {
     "path": "/hunts",
     "method": "get",
     "operation_id": "list_hunts_hunts_get"
@@ -980,6 +985,16 @@
     "operation_id": "create_hunt_candidate_hunts__hunt_id__candidates_post"
   },
   {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "method": "delete",
+    "operation_id": "delete_hunt_candidate_hunts__hunt_id__candidates__candidate_id__delete"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "method": "patch",
+    "operation_id": "update_hunt_candidate_hunts__hunt_id__candidates__candidate_id__patch"
+  },
+  {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
     "method": "post",
     "operation_id": "verify_hunt_candidate_hunts__hunt_id__candidates__candidate_id__verify_post"
@@ -995,9 +1010,24 @@
     "operation_id": "finish_hunt_hunts__hunt_id__finish_post"
   },
   {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "method": "delete",
+    "operation_id": "purge_hunt_transactions_hunts__hunt_id__http_transactions_delete"
+  },
+  {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "method": "get",
+    "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get"
+  },
+  {
     "path": "/hunts/{hunt_id}/query",
     "method": "post",
     "operation_id": "query_hunt_hunts__hunt_id__query_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/record",
+    "method": "get",
+    "operation_id": "export_hunt_record_hunts__hunt_id__record_get"
   },
   {
     "path": "/hunts/{hunt_id}/resume",
@@ -1008,6 +1038,31 @@
     "path": "/hunts/{hunt_id}/shell-plans/{plan_id}/confirm",
     "method": "post",
     "operation_id": "confirm_hunt_shell_plan_hunts__hunt_id__shell_plans__plan_id__confirm_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/suggestions",
+    "method": "post",
+    "operation_id": "suggest_hunt_skills_hunts__hunt_id__skills_suggestions_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}",
+    "method": "delete",
+    "operation_id": "unbind_hunt_skill_hunts__hunt_id__skills__skill_id__delete"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/bind",
+    "method": "post",
+    "operation_id": "bind_hunt_skill_hunts__hunt_id__skills__skill_id__bind_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/read",
+    "method": "post",
+    "operation_id": "read_hunt_skill_hunts__hunt_id__skills__skill_id__read_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/usage",
+    "method": "post",
+    "operation_id": "record_hunt_skill_usage_hunts__hunt_id__skills__skill_id__usage_post"
   },
   {
     "path": "/investigation/candidates",
@@ -1440,19 +1495,9 @@
     "operation_id": "refresh_research_observation_research_episodes__episode_id__observe_post"
   },
   {
-    "path": "/research/episodes/{episode_id}/plan-step",
-    "method": "post",
-    "operation_id": "plan_research_episode_step_research_episodes__episode_id__plan_step_post"
-  },
-  {
     "path": "/research/episodes/{episode_id}/settle",
     "method": "post",
     "operation_id": "settle_research_episode_research_episodes__episode_id__settle_post"
-  },
-  {
-    "path": "/research/launch",
-    "method": "post",
-    "operation_id": "launch_research_episode_research_launch_post"
   },
   {
     "path": "/research/readiness",
@@ -1553,6 +1598,16 @@
     "path": "/scans/{scan_id}/device-activity",
     "method": "get",
     "operation_id": "get_scan_device_activity_scans__scan_id__device_activity_get"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "method": "delete",
+    "operation_id": "purge_scan_transactions_scans__scan_id__http_transactions_delete"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "method": "get",
+    "operation_id": "export_scan_transactions_scans__scan_id__http_transactions_get"
   },
   {
     "path": "/scans/{scan_id}/logs",

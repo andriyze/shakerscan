@@ -197,7 +197,11 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
         if url.endswith("/arsenal/scope/preview"):
             return {"scope_receipt": {"receipt_id": "scope-1", "verdict": "allowed"}}
         if url.endswith("/arsenal/approvals"):
-            return {"approval_receipt": {"id": "approval-1"}}
+            approval_ids = {
+                "scan.submit": "approval-scan",
+                "credential_profile.active_capabilities": "approval-credential",
+            }
+            return {"approval_receipt": {"id": approval_ids[body["action_name"]]}}
         if url.endswith("/credential-profiles"):
             return {"profile": {"id": f"profile-{sum(u.endswith('/credential-profiles') for u, _ in calls)}"}}
         assert url.endswith("/scans")
@@ -218,8 +222,8 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     assert mint_urls == ["http://127.0.0.1:8888", "http://127.0.0.1:8888"]
     assert "benchmark_principal_validation" not in options
     assert scan_body["budget_profile"] == "thorough"
-    # Explicit canonical family set (§17): authz_surface is included because a
-    # primary principal was minted; nuclei_active is excluded.
+    # Explicit canonical family set (§17): cross-principal BOLA and BFLA are
+    # included because two distinct principals were minted; nuclei_active is excluded.
     assert scan_body["policy"] == {
         "active_testing": True,
         # nosqli probes mutate by design and a request-body injection candidate is a
@@ -228,17 +232,23 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
         "allow_state_changing_http": True,
         "include_families": [
             "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
-            "nosqli", "authz_surface",
+            "nosqli", "bola", "authz_surface",
         ],
         "exclude_families": ["nuclei_active"],
     }
-    assert scan_body["approval_receipt_id"] == "approval-1"
+    assert scan_body["approval_receipt_id"] == "approval-scan"
     assert scan_body["credential_profile_ids"] == ["profile-1", "profile-2"]
     assert user1_token not in str(scan_body)
     assert user2_token not in str(scan_body)
     profile_calls = [body for url, body in calls if url.endswith("/credential-profiles")]
     assert [body["principal_slot"] for body in profile_calls] == ["primary", "secondary"]
     assert [body["secret"] for body in profile_calls] == [user1_token, user2_token]
+    assert all(body["allow_active_capabilities"] is True for body in profile_calls)
+    assert all(body["approval_receipt_id"] == "approval-credential" for body in profile_calls)
+    approval_calls = [body for url, body in calls if url.endswith("/arsenal/approvals")]
+    assert [body["action_name"] for body in approval_calls] == [
+        "scan.submit", "credential_profile.active_capabilities",
+    ]
     assert receipt == {
         "target": "crapi",
         "scan_id": "scan-1",
@@ -261,18 +271,11 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
     assert "secret" not in str(receipt)
 
 
-def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
-    minted = []
+def test_two_principal_benchmarks_use_fresh_role_distinct_accounts(monkeypatch):
     monkeypatch.setattr(b.secrets, "token_hex", lambda _size: "run123")
-
-    def fake_mint(_target, _login, email, _password):
-        minted.append(email)
-        return _jwt(email=email)
-
-    monkeypatch.setattr(b, "mint_token", fake_mint)
     monkeypatch.setattr(
         b, "_canonical_benchmark_authority",
-        lambda *_args, **_kwargs: ("target-1", "approval-1"),
+        lambda *_args, **_kwargs: ("target-1", "approval-scan", "approval-credential"),
     )
     monkeypatch.setattr(
         b, "_create_benchmark_bearer_profile",
@@ -282,19 +285,27 @@ def test_submit_target_uses_fresh_role_distinct_principal_accounts(monkeypatch):
         "scan_id": "scan-unique", "job_id": "job-unique", "status": "queued",
     })
 
-    receipt = b.submit_target("crapi", "http://scanner.test", True)
+    for benchmark in ("crapi", "juice_shop"):
+        minted = []
 
-    assert minted == [
-        "bench.u1.run123@shaker.test",
-        "bench.u2.run123@shaker.test",
-    ]
-    assert receipt["two_user"] is True
-    assert receipt["principal_validation"]["distinct_identity_claims_validated"] is True
-    assert receipt["principal_validation"]["identity_fingerprints"] == [
-        b._principal_identity_fingerprint("email:bench.u1.run123@shaker.test"),
-        b._principal_identity_fingerprint("email:bench.u2.run123@shaker.test"),
-    ]
-    assert "run123" not in str(receipt)
+        def fake_mint(_target, _login, email, _password):
+            minted.append(email)
+            return _jwt(email=email)
+
+        monkeypatch.setattr(b, "mint_token", fake_mint)
+        receipt = b.submit_target(benchmark, "http://scanner.test", True)
+
+        assert minted == [
+            "bench.u1.run123@shaker.test",
+            "bench.u2.run123@shaker.test",
+        ]
+        assert receipt["two_user"] is True
+        assert receipt["principal_validation"]["distinct_identity_claims_validated"] is True
+        assert receipt["principal_validation"]["identity_fingerprints"] == [
+            b._principal_identity_fingerprint("email:bench.u1.run123@shaker.test"),
+            b._principal_identity_fingerprint("email:bench.u2.run123@shaker.test"),
+        ]
+        assert "run123" not in str(receipt)
 
 
 def test_benchmark_profile_retry_reuses_and_rotates_existing_identity(monkeypatch):
@@ -327,6 +338,7 @@ def test_benchmark_profile_retry_reuses_and_rotates_existing_identity(monkeypatc
         target_id="target-1",
         token="rotated-secret",
         lane="primary",
+        active_capability_approval_id="approval-credential",
     )
 
     assert profile_id == "profile-primary"
@@ -334,6 +346,8 @@ def test_benchmark_profile_retry_reuses_and_rotates_existing_identity(monkeypatc
     assert writes[0][2]["expected_record_version"] == 7
     assert writes[0][2]["is_active"] is True
     assert writes[0][2]["allowed_capabilities"] == b.BENCHMARK_CREDENTIAL_CAPABILITIES
+    assert writes[0][2]["allow_active_capabilities"] is True
+    assert writes[0][2]["approval_receipt_id"] == "approval-credential"
     assert writes[1][2]["expected_record_version"] == 8
     assert writes[1][2]["secret"] == "rotated-secret"
 
@@ -479,6 +493,18 @@ def test_jwt_principal_identity_requires_stable_account_claim():
     assert b._jwt_principal_identity(_jwt(sub="account-42")) == "sub:account-42"
     assert b._jwt_principal_identity(_jwt(role="user")) is None
     assert b._jwt_principal_identity("opaque-token") is None
+
+
+def test_jwt_principal_identity_reads_a_nested_identity_container():
+    # Juice Shop nests the account under ``data``; a top-level-only reader fails
+    # to prove two distinct principals and aborts the whole authenticated run.
+    u1 = _jwt(data={"id": 41, "email": "One@Example.Test", "role": "customer"}, bid=7)
+    u2 = _jwt(data={"id": 42, "email": "Two@Example.Test", "role": "customer"}, bid=8)
+    assert b._jwt_principal_identity(u1) == "email:one@example.test"
+    assert b._jwt_principal_identity(u2) == "email:two@example.test"
+    assert b._jwt_principal_identity(u1) != b._jwt_principal_identity(u2)
+    # A nested numeric id still resolves when no e-mail/username claim exists.
+    assert b._jwt_principal_identity(_jwt(data={"id": 42})) == "id:42"
 
 
 def test_principal_identity_fingerprint_is_bounded_and_non_claim():

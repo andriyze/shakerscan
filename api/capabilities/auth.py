@@ -13,6 +13,7 @@ import urllib.parse
 import uuid
 
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
+from runtime.credentials import IDENTITY_PAIR_KINDS
 from runtime.models import TargetBinding
 
 try:
@@ -38,6 +39,14 @@ _USERNAME_FIELD = re.compile(
 )
 _ADDITIONAL_FACTOR_FIELD = re.compile(
     r"(?:^|[-_.])(?:mfa|otp|totp|one[-_.]?time|verification[-_.]?code)(?:$|[-_.])",
+    re.IGNORECASE,
+)
+_LOGIN_FORM_CUE = re.compile(
+    r"(?:^|[-_/.])(?:login|log-in|signin|sign-in|authenticate|authentication|session)(?:$|[-_/.])",
+    re.IGNORECASE,
+)
+_LOGIN_USERNAME_FIELD = re.compile(
+    r"(?:^|[-_.])(?:user(?:name)?|login|identifier|j_username)(?:$|[-_.])",
     re.IGNORECASE,
 )
 _SUCCESS_REDIRECTS = frozenset({301, 302, 303, 307, 308})
@@ -140,6 +149,9 @@ class _LoginFormParser(HTMLParser):
             self._current = {
                 "action": values.get("action", ""),
                 "method": values.get("method", "POST").upper(),
+                "id": values.get("id", ""),
+                "name": values.get("name", ""),
+                "class": values.get("class", ""),
                 "inputs": [],
             }
         elif tag.lower() == "input" and self._current is not None:
@@ -172,14 +184,20 @@ def _validate_material(credential: TargetBoundSessionCredential) -> None:
         for value in values
     ):
         raise SessionCredentialContractError("session credential material is invalid")
-    if not credential.endpoint_url or not credential.secret:
+    if not credential.endpoint_url:
         raise SessionCredentialContractError("session credential material is incomplete")
-    if credential.auth_kind == "form_login" and not credential.username:
-        raise SessionCredentialContractError("form login requires a username")
+    if credential.auth_kind in IDENTITY_PAIR_KINDS:
+        # The profile contract admits either half of the pair, so the session gate has to
+        # admit the same set. Requiring both here would accept a profile at save time and
+        # then fail it at login, which is the worst place to discover it.
+        if not credential.username and not credential.secret:
+            raise SessionCredentialContractError(
+                "session credential requires a username, a secret, or both"
+            )
+    elif not credential.secret:
+        raise SessionCredentialContractError("session credential material is incomplete")
     if credential.auth_kind == "oauth_client_credentials" and not credential.client_id:
         raise SessionCredentialContractError("OAuth client credentials require a client ID")
-    if credential.auth_kind == "oauth_password" and not credential.username:
-        raise SessionCredentialContractError("OAuth password flow requires a username")
     if (
         credential.auth_kind == "oauth_password"
         and not credential.oauth_password_explicitly_allowed
@@ -236,7 +254,19 @@ def _endpoint_args(
     return origin, path, public_path
 
 
-def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
+def _form_fields(
+    html: str,
+    page_url: str,
+    *,
+    need_username: bool = True,
+    need_password: bool = True,
+) -> tuple[str, str, dict[str, str]]:
+    """Find the login form, requiring only the fields the credential can actually fill.
+
+    Demanding both a password input and a username-like input meant a profile holding one
+    half of the pair -- which the credential contract accepts -- could be stored and then
+    never used, failing at login with "target login form was not identified".
+    """
     parser = _LoginFormParser()
     parser.feed(html)
     for form in parser.forms[:20]:
@@ -245,7 +275,7 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
             str(item.get("name") or "") for item in inputs
             if item.get("type") == "password" and item.get("name")
         ), "")
-        if not password:
+        if need_password and not password:
             continue
         if any(
             item.get("type") != "hidden"
@@ -263,8 +293,22 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
                 or _USERNAME_FIELD.search(str(item.get("name") or ""))
             )
         ), "")
-        if not username:
+        if need_username and not username:
             continue
+        if need_username and not need_password and not password:
+            username_input = next((
+                item for item in inputs if str(item.get("name") or "") == username
+            ), {})
+            form_cues = " ".join(str(form.get(key) or "") for key in (
+                "action", "id", "name", "class",
+            ))
+            is_login_form = bool(
+                _LOGIN_FORM_CUE.search(form_cues)
+                or username_input.get("autocomplete") == "username"
+                or _LOGIN_USERNAME_FIELD.search(username)
+            )
+            if not is_login_form:
+                continue
         fields: dict[str, str] = {}
         for item in inputs:
             name = str(item.get("name") or "")
@@ -282,9 +326,15 @@ def _form_fields(html: str, page_url: str) -> tuple[str, str, dict[str, str]]:
             raise SessionCredentialContractError(
                 "login form must submit credentials with POST"
             )
-        if not _FIELD_NAME.fullmatch(username) or not _FIELD_NAME.fullmatch(password):
-            raise SessionCredentialContractError("login form fields are invalid")
-        return action, username, {**fields, "__password_field__": password}
+        # Only the fields this credential will fill have to be well formed. A form may
+        # legitimately carry the other half; it simply goes unfilled.
+        for present, name in ((need_username, username), (need_password, password)):
+            if present and not _FIELD_NAME.fullmatch(name):
+                raise SessionCredentialContractError("login form fields are invalid")
+        resolved = dict(fields)
+        if need_password:
+            resolved["__password_field__"] = password
+        return action, username, resolved
     raise SessionCredentialContractError("target login form was not identified")
 
 
@@ -454,10 +504,17 @@ async def establish_target_bound_http_session(
             page_url = urllib.parse.urljoin(origin + "/", endpoint_path.lstrip("/"))
             action, username_field, form = _form_fields(
                 page.body().decode("utf-8", errors="replace"), page_url,
+                need_username=bool(credential.username),
+                need_password=bool(credential.secret),
             )
-            password_field = form.pop("__password_field__")
-            form[username_field] = str(credential.username)
-            form[password_field] = credential.secret
+            password_field = form.pop("__password_field__", "")
+            # A one-sided profile submits only the half it holds. Assigning unconditionally
+            # posted the literal string "None" as the username, which the target reads as a
+            # real account name and which no operator would ever see in the redacted receipt.
+            if credential.username and username_field:
+                form[username_field] = credential.username
+            if credential.secret and password_field:
+                form[password_field] = credential.secret
             _bounded_form_size(form)
             action_origin, action_path, _public_action = _endpoint_args(
                 action, target=target, relative_to=origin,
@@ -487,8 +544,10 @@ async def establish_target_bound_http_session(
             if credential.auth_kind == "oauth_client_credentials":
                 form["client_secret"] = credential.secret
             else:
-                form["username"] = str(credential.username)
-                form["password"] = credential.secret
+                if credential.username:
+                    form["username"] = credential.username
+                if credential.secret:
+                    form["password"] = credential.secret
             if credential.scopes:
                 form["scope"] = " ".join(credential.scopes)
             _bounded_form_size(form)

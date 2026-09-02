@@ -117,6 +117,10 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     ):
         _add_tree(files, package_root, logical_root)
     _add_v2_api_packages(files, api_root)
+    # Bound Hunt methodology changes capability selection, budget narrowing,
+    # planner preconditions, and promotion guidance. It is therefore part of
+    # the executable API contract and must invalidate fleet freshness.
+    _add_tree(files, root / "skills" / "web", "hunt_skills")
     _add_tree(files, scanner_root / "model_intake_tools", "model_intake_locks")
     auxiliary = (
         ("runtime/requirements.lock", scanner_root / "requirements.lock"),
@@ -148,6 +152,7 @@ def runtime_file_map(
             package_root = root / logical_root
             _add_tree(files, package_root, logical_root)
         _add_v2_api_packages(files, root)
+        _add_tree(files, root / "skills" / "web", "hunt_skills")
         lock_root = Path(model_intake_lock_root)
         _add_tree(files, lock_root, "model_intake_locks")
         auxiliary = (

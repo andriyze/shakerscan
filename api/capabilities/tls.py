@@ -122,7 +122,7 @@ async def inspect_tls_origin(
     started = time.perf_counter()
     attempts = 0
 
-    async def handshake(context: ssl.SSLContext) -> tuple[Any, bytes]:
+    async def handshake(context: ssl.SSLContext) -> tuple[dict[str, Any], bytes]:
         nonlocal attempts
         attempts += 1
         writer: asyncio.StreamWriter | None = None
@@ -139,7 +139,17 @@ async def inspect_tls_origin(
             tls_object = writer.get_extra_info("ssl_object")
             if tls_object is None:
                 raise ssl.SSLError("TLS handshake produced no SSL object")
-            return tls_object, tls_object.getpeercert(binary_form=True) or b""
+            certificate = tls_object.getpeercert(binary_form=True) or b""
+            # SSLObject access after StreamWriter.wait_closed() is backend- and
+            # timing-dependent. Snapshot every proof-bearing value while the
+            # connection is live; a closed object has returned None in production
+            # and was then misclassified as a verified legacy protocol.
+            return {
+                "protocol": tls_object.version(),
+                "cipher": tls_object.cipher(),
+                "alpn_protocol": tls_object.selected_alpn_protocol(),
+                "certificate_chain": _certificate_chain(tls_object, certificate),
+            }, certificate
         finally:
             if writer is not None:
                 writer.close()
@@ -149,7 +159,7 @@ async def inspect_tls_origin(
                     pass
 
     protocol_results: list[dict[str, Any]] = []
-    successful: list[tuple[Any, bytes]] = []
+    successful: list[tuple[dict[str, Any], bytes]] = []
     for label, version in (
         ("TLSv1.2", ssl.TLSVersion.TLSv1_2),
         ("TLSv1.3", ssl.TLSVersion.TLSv1_3),
@@ -161,7 +171,7 @@ async def inspect_tls_origin(
         context.maximum_version = version
         context.set_alpn_protocols(["h2", "http/1.1"])
         try:
-            tls_object, certificate = await handshake(context)
+            snapshot, certificate = await handshake(context)
         except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
             protocol_results.append({
                 "protocol": label,
@@ -169,16 +179,16 @@ async def inspect_tls_origin(
                 "error_type": type(exc).__name__,
             })
         else:
-            cipher = tls_object.cipher()
+            cipher = snapshot.get("cipher")
             protocol_results.append({
                 "protocol": label,
                 "supported": True,
-                "negotiated_protocol": tls_object.version(),
+                "negotiated_protocol": snapshot.get("protocol"),
                 "cipher": cipher[0] if cipher else None,
                 "cipher_bits": cipher[2] if cipher else None,
-                "alpn_protocol": tls_object.selected_alpn_protocol(),
+                "alpn_protocol": snapshot.get("alpn_protocol"),
             })
-            successful.append((tls_object, certificate))
+            successful.append((snapshot, certificate))
 
     # If the two supported modern profiles both fail, one default negotiation
     # distinguishes a reachable legacy-only endpoint from a non-TLS service.
@@ -188,7 +198,7 @@ async def inspect_tls_origin(
         fallback.verify_mode = ssl.CERT_NONE
         fallback.set_alpn_protocols(["h2", "http/1.1"])
         try:
-            tls_object, certificate = await handshake(fallback)
+            snapshot, certificate = await handshake(fallback)
         except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
             protocol_results.append({
                 "protocol": "default_negotiation",
@@ -196,16 +206,16 @@ async def inspect_tls_origin(
                 "error_type": type(exc).__name__,
             })
         else:
-            cipher = tls_object.cipher()
+            cipher = snapshot.get("cipher")
             protocol_results.append({
                 "protocol": "default_negotiation",
                 "supported": True,
-                "negotiated_protocol": tls_object.version(),
+                "negotiated_protocol": snapshot.get("protocol"),
                 "cipher": cipher[0] if cipher else None,
                 "cipher_bits": cipher[2] if cipher else None,
-                "alpn_protocol": tls_object.selected_alpn_protocol(),
+                "alpn_protocol": snapshot.get("alpn_protocol"),
             })
-            successful.append((tls_object, certificate))
+            successful.append((snapshot, certificate))
 
     trust = "not_evaluated"
     trust_error_type: str | None = None
@@ -252,12 +262,12 @@ async def inspect_tls_origin(
             },
         }
 
-    tls_object, certificate = successful[0]
-    cipher = tls_object.cipher()
+    snapshot, certificate = successful[0]
+    cipher = snapshot.get("cipher")
     certificate_details = _certificate_details(
         certificate,
         hostname=str(parsed.hostname),
-        chain_certificates=_certificate_chain(tls_object, certificate),
+        chain_certificates=tuple(snapshot.get("certificate_chain") or ()),
     )
     observation = {
         "kind": "tls_protocol",
@@ -269,7 +279,7 @@ async def inspect_tls_origin(
         "address_policy": socket_factory.policy_receipt,
         "port": port,
         "status": "success",
-        "protocol": tls_object.version(),
+        "protocol": snapshot.get("protocol"),
         "supported_protocols": [
             item["protocol"] for item in protocol_results
             if item.get("supported") is True
@@ -288,10 +298,10 @@ async def inspect_tls_origin(
             )
         ),
         "legacy_protocol_negotiated": (
-            str(tls_object.version() or "")
+            str(snapshot.get("protocol") or "")
             not in {"TLSv1.2", "TLSv1.3"}
         ),
-        "alpn_protocol": tls_object.selected_alpn_protocol(),
+        "alpn_protocol": snapshot.get("alpn_protocol"),
         "certificate_sha256": (
             hashlib.sha256(certificate).hexdigest() if certificate else None
         ),

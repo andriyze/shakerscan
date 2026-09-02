@@ -1,5 +1,7 @@
 # Upgrade and Rollback
 
+**Status:** current source/installer upgrade runbook; reconciled 2026-08-29.
+
 ShakerScan upgrades are in-place and run database migrations when the API and workers start. Required
 schema invariants fail closed: if a migration cannot complete safely, the affected service exits
 instead of running against a partially upgraded database.

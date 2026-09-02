@@ -116,6 +116,7 @@ services:
     # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
@@ -377,6 +378,7 @@ services:
     # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
     build:
       context: .
       dockerfile: scanner/Dockerfile
@@ -478,6 +480,7 @@ services:
     pull_policy: never
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -523,6 +526,7 @@ services:
     pull_policy: never
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
     environment:
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -651,12 +655,14 @@ services:
       network: ${SHAKERSCAN_BUILD_NETWORK:-default}
       args:
         - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+        - NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT=${SHAKERSCAN_EXPECTED_API_FINGERPRINT:-unknown}
         - UI_SOURCE_REVISION=${GIT_COMMIT:-unknown}
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_UI_PORT:-3000}:3000"
     environment:
       - NEXT_PUBLIC_API_URL=${SHAKERSCAN_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_APP_VERSION=${SCANNER_VERSION:-dev}
+      - NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT=${SHAKERSCAN_EXPECTED_API_FINGERPRINT:-unknown}
       - MODEL_INTAKE_LOCAL_SESSION_SECRET=${MODEL_INTAKE_LOCAL_SESSION_SECRET:-}
       - SHAKERSCAN_README_PATH=/docs/README.md
     volumes:

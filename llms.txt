@@ -1,6 +1,6 @@
 # ShakerScan Open Source
 
-> ShakerScan is an open-source, self-hosted security testing platform for authorized testing of web applications, APIs, connected devices, and AI systems. It runs in Docker and provides a web UI, REST API, CLI, persistent findings and evidence, deterministic Scan, Continuous ASM, Hunt, AI security workflows, Model Intake, interactive testing, and optional multi-node Fleet execution.
+> ShakerScan is an open-source, self-hosted security testing platform for authorized testing of web applications, APIs, connected devices, and AI systems. It runs in Docker and provides a web UI, REST API, CLI, persistent findings and evidence, deterministic Scan, Continuous ASM, Hunt, AI security workflows, Model Intake, a compatibility browser-session API, and optional multi-node Fleet execution.
 
 Source-of-truth and safety rules:
 - For released behavior, resolve `install/STABLE_VERSION`, confirm the matching GitHub release/tag and release mapping, and use documentation from that tag. If these disagree, report the inconsistency instead of guessing. The `main` branch and `VERSION` can contain release work that is not yet supported.
@@ -33,7 +33,7 @@ Source-of-truth and safety rules:
 ## Workflows and interfaces
 
 - [AI test workflows](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/AI_TEST_WORKFLOWS.md): AI Gate and controlled AI-security workflows, APIs, evidence exports, and calibration boundaries.
-- [Interactive testing guide](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/INTERACTIVE_SESSIONS_GUIDE.md): Authorized browser/session testing, credentials, principals, replay, and findings.
+- [Interactive session compatibility API](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/INTERACTIVE_SESSIONS_GUIDE.md): Agent-only bounded browser/session work retained for Command Arsenal; prefer Hunt for new adaptive investigations.
 - [Scan and Continuous ASM architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/dast-asm-architecture.md): One deterministic Scan, resource ceilings, explicit permissions, parallel coverage, and Continuous ASM.
 - [MCP trust boundaries](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/mcp.md): Read-only Arsenal inspection and state-changing, target-bound Hunt tools.
 - [Compatibility boundary](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/compatibility.md): Legacy input/read mappings that never create another engine or accept new raw secrets.
@@ -50,8 +50,8 @@ Source-of-truth and safety rules:
 ## Optional
 
 - [Functionality reference](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/functionality-reference.md): Exhaustive current-main product map and generated code-surface inventory; large and potentially ahead of stable.
-- [Agent operations reference](https://raw.githubusercontent.com/andriyze/shakerscan/main/AGENTS.md): Detailed API request examples, agent behavior, safety rules, and workflow contracts; large.
-- [Model Intake security review roadmap](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/model-intake-security-review-roadmap.md): Detailed controls, architecture, implementation status, limitations, and acceptance gates; distinguish shipped, configured, and future requirements.
+- [Agent operating guide](https://raw.githubusercontent.com/andriyze/shakerscan/main/AGENTS.md): Compact always-loaded architecture, safety, judgment, and workflow rules; use OpenAPI for mechanics.
+- [Model Intake security boundary](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/model-intake-security-review-roadmap.md): Current subject, acquisition, isolation, trust, and acceptance boundary.
 - [DAST and Continuous ASM architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/dast-asm-architecture.md): One-shot scans, scatter/gather execution, coverage inventory, and continuous scheduling.
 - [Multi-node architecture](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/multi-node-architecture.md): Fleet trust, transport, scheduling, leases, evidence, lifecycle, and acceptance design.
 - [OWASP coverage matrix](https://raw.githubusercontent.com/andriyze/shakerscan/main/docs/owasp-coverage-matrix.md): Implemented DAST mechanisms and named gaps; category coverage is not proof of recall, precision, or exploitability.

@@ -1544,6 +1544,7 @@ def test_http_baseline_binds_worker_private_primary_headers(monkeypatch):
             "auth_kind": "bearer_token",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": ["http.request"],
         }],
     }
     captured = {}
@@ -1612,6 +1613,7 @@ def test_passive_scan_establishes_approved_primary_session_as_a_capability(
             "auth_kind": "form_login",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": ["auth.session.establish"],
         }],
     }
     calls = []
@@ -1731,6 +1733,7 @@ def test_secondary_form_session_uses_its_own_reserved_action(monkeypatch):
             "auth_kind": "form_login",
             "principal_slot": "secondary",
             "scan_lane": "secondary",
+            "allowed_capabilities": ["auth.session.establish"],
         }],
     }
     session = SimpleNamespace(
@@ -1811,12 +1814,14 @@ def test_authz_proof_reserves_content_free_binding_before_differential(
             "auth_kind": "bearer_token",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": ["authz.verify"],
         }, {
             "profile_id": "profile-2",
             "profile_version": 4,
             "auth_kind": "bearer_token",
             "principal_slot": "secondary",
             "scan_lane": "secondary",
+            "allowed_capabilities": ["authz.verify"],
         }],
     }
     routes = ["/api/orders"]
@@ -1900,6 +1905,10 @@ def test_placed_http_tools_bind_primary_credentials_without_public_secrets(
             "auth_kind": "bearer_token",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": [
+                "web.probe", "web.crawl", "web.content_discover",
+                "templates.scan", "xss.verify", "sqli.verify",
+            ],
         }],
     }
     calls = []
@@ -2196,7 +2205,7 @@ def test_dns_posture_stage_uses_registered_inline_capability(monkeypatch):
     assert call["action_id"] == "deterministic_baseline.dns.inspect"
     assert call["target_binding"] == target
     assert call["reservation_limits"] == {
-        "hosts_attempted": 4,
+        "hosts_attempted": 5,
         "tool_wall_seconds": 15,
     }
     assert callable(call["inline_operation"])

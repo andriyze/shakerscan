@@ -213,7 +213,7 @@ def test_scan_worker_binding_keeps_primary_and_secondary_login_endpoints_distinc
         options, secondary, scan_lane="secondary",
     )
     secondary_credential = resolve_scan_interactive_credential(
-        options, lane="secondary",
+        options, lane="secondary", capability_name="auth.session.establish",
     )
 
     assert options["login_url"] == "/owner/login"
@@ -233,8 +233,9 @@ def test_scan_immediate_primary_principal_is_secret_free_and_digest_bound():
             "auth_kind": "bearer_token",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": ["http.request"],
         }],
-    })
+    }, capability_name="http.request")
 
     assert principal.authenticated is True
     assert principal.headers() == {
@@ -308,8 +309,9 @@ def test_scan_interactive_profile_builds_content_free_session_binding():
             "auth_kind": "oauth_client_credentials",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": ["auth.session.establish"],
         }],
-    })
+    }, capability_name="auth.session.establish")
 
     assert credential is not None
     assert credential.capability_args() == {
@@ -326,6 +328,20 @@ def test_scan_interactive_profile_builds_content_free_session_binding():
     assert "oauth-worker-private-secret" not in repr(credential.session_credential())
 
 
+def test_username_only_scan_session_never_turns_missing_secret_into_text():
+    credential = resolve_scan_interactive_credential({
+        "login_username": "operator",
+        "login_password": None,
+        "login_url": "/login",
+    })
+
+    assert credential is not None
+    session = credential.session_credential()
+    assert session.username == "operator"
+    assert session.secret == ""
+    assert session.secret != "None"
+
+
 def test_established_session_headers_become_an_immediate_primary_principal():
     options = bind_scan_session_headers(
         {
@@ -337,12 +353,15 @@ def test_established_session_headers_become_an_immediate_primary_principal():
                 "auth_kind": "form_login",
                 "principal_slot": "primary",
                 "scan_lane": "primary",
+                "allowed_capabilities": [
+                    "auth.session.establish", "http.request",
+                ],
             }],
         },
         {"Cookie": "session=worker-private-cookie"},
         lane="primary",
     )
-    principal = resolve_scan_http_principal(options)
+    principal = resolve_scan_http_principal(options, capability_name="http.request")
 
     assert principal.authenticated is True
     assert principal.headers() == {"Cookie": "session=worker-private-cookie"}

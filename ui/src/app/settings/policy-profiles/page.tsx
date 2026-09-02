@@ -83,7 +83,7 @@ function formToPayload(form: ProfileFormState): PolicyProfilePayload {
     environment: form.environment.trim().toLowerCase(),
     minimum_block_severity: form.minimum_block_severity,
     expires_days: Math.round(expiresDays),
-    strict_model_intake: form.strict_model_intake,
+    strict_model_intake: form.product_area === 'model_intake' && form.strict_model_intake,
     allow_active_exceptions: form.allow_active_exceptions,
     required_trust_anchor_ids: form.product_area === 'model_intake' && form.strict_model_intake
       ? form.required_trust_anchor_ids
@@ -175,6 +175,15 @@ export default function PolicyProfilesPage() {
 
   function updateForm<K extends keyof ProfileFormState>(key: K, value: ProfileFormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateProductArea(productArea: string) {
+    setForm((prev) => ({
+      ...prev,
+      product_area: productArea,
+      strict_model_intake: productArea === 'model_intake' ? prev.strict_model_intake : false,
+      required_trust_anchor_ids: productArea === 'model_intake' ? prev.required_trust_anchor_ids : [],
+    }))
   }
 
   function toggleRequiredAnchor(anchorId: string, checked: boolean) {
@@ -315,7 +324,7 @@ export default function PolicyProfilesPage() {
           </label>
           <label className="grid gap-1 text-sm text-gray-300">
             Product
-            <select value={form.product_area} onChange={(e) => updateForm('product_area', e.target.value)} className={selectClass}>
+            <select value={form.product_area} onChange={(e) => updateProductArea(e.target.value)} className={selectClass}>
               {PRODUCT_AREAS.map((area) => <option key={area} value={area}>{area.replace(/_/g, ' ')}</option>)}
             </select>
           </label>
@@ -353,10 +362,12 @@ export default function PolicyProfilesPage() {
         </div>
 
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {form.product_area === 'model_intake' && (
           <label className="flex items-center gap-2 text-sm text-gray-300">
             <input type="checkbox" checked={form.strict_model_intake} onChange={(e) => updateForm('strict_model_intake', e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
             Strict Model Intake
           </label>
+          )}
           <label className="flex items-center gap-2 text-sm text-gray-300">
             <input type="checkbox" checked={form.allow_active_exceptions} onChange={(e) => updateForm('allow_active_exceptions', e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
             Allow active exceptions

@@ -781,8 +781,8 @@ function FindingsContent() {
                       )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {finding.last_verification_verdict && (
-                        <RetestVerdictBadge verdict={finding.last_verification_verdict} />
+                      {finding.latest_retest_verdict && (
+                        <RetestVerdictBadge verdict={finding.latest_retest_verdict} />
                       )}
                       <FindingStatusBadge status={finding.status} />
                     </div>

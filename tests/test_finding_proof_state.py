@@ -53,11 +53,26 @@ import api as api_module  # noqa: E402
 pf = api_module.finding_proof_fields
 
 
-def test_exploited_verdict_is_verified():
-    r = pf({"severity": "high", "last_verification_verdict": "exploited"})
+def test_deterministic_exploited_retest_is_verified():
+    r = pf({
+        "severity": "high",
+        "last_verification_verdict": "exploited",
+        "latest_retest_mode": "deterministic",
+    })
     assert r["is_verified"] is True
     assert r["is_suspected"] is False
     assert r["proof_state"] == "verified"
+
+
+def test_ai_exploited_verdict_never_becomes_deterministic_proof():
+    r = pf({
+        "severity": "critical",
+        "last_verification_verdict": "exploited",
+        "latest_retest_mode": "ai_driven",
+    })
+    assert r["is_verified"] is False
+    assert r["is_suspected"] is True
+    assert r["proof_state"] == "suspected"
 
 
 def test_scan_time_generic_verified_flag_is_suspected():

@@ -299,7 +299,8 @@ async def mission_timeline(
             schedule_rows = await conn.fetch(
                 """
                 SELECT sc.id, sc.name, sc.target_id, t.url AS target_url,
-                       sc.frequency, sc.schedule_kind, sc.scan_type,
+                       sc.frequency, sc.day_of_week, sc.time_of_day, sc.timezone,
+                       sc.jitter_minutes, sc.schedule_kind, sc.scan_type,
                        sc.next_run_at, sc.last_run_at
                 FROM schedules sc
                 LEFT JOIN targets t ON sc.target_id = t.id
@@ -704,17 +705,29 @@ async def queue_stats():
     retest_failed = 0
 
     queue_entries = queue_payloads(r, QUEUE_NAME, include_leased=False)
-    queued_job_ids: set[str] = set()
-    malformed_queue_entries = 0
-    for raw in queue_entries:
-        try:
-            job_id = str((json.loads(raw) if isinstance(raw, str) else {}).get("job_id") or "").strip()
-        except (TypeError, ValueError, json.JSONDecodeError):
-            job_id = ""
-        if job_id:
-            queued_job_ids.add(job_id)
-        else:
-            malformed_queue_entries += 1
+    # Consistency must include work already leased by a worker.  Excluding
+    # leased Stream messages is correct for the waiting-work headline, but it
+    # made the short pending/queued -> running handoff look orphaned and wrote a
+    # false error into an otherwise healthy job hash.
+    queue_handoffs = queue_payloads(r, QUEUE_NAME, include_leased=True)
+
+    def queue_job_ids(payloads):
+        job_ids: set[str] = set()
+        malformed = 0
+        for raw in payloads:
+            try:
+                job_id = str((json.loads(raw) if isinstance(raw, str) else {}).get("job_id") or "").strip()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                job_id = ""
+            if job_id:
+                job_ids.add(job_id)
+            else:
+                malformed += 1
+        return job_ids, malformed
+
+    queued_job_ids, malformed_queue_entries = queue_job_ids(queue_entries)
+    handoff_job_ids, malformed_handoffs = queue_job_ids(queue_handoffs)
+    malformed_queue_entries += malformed_handoffs
     async with _pool().acquire() as conn:
         active_rows = await conn.fetch(
             """
@@ -747,6 +760,7 @@ async def queue_stats():
         if row["status"] == "running" and str(row.get("scan_role") or "") not in hidden_roles
     )
     reconciled_queued_job_ids = queued_job_ids & active_scan_job_ids
+    valid_handoff_job_ids = handoff_job_ids & active_scan_job_ids
     stale_queued_job_hashes = 0
     stale_running_job_hashes = 0
 
@@ -784,8 +798,11 @@ async def queue_stats():
             completed += 1
         elif status_str == 'queued':
             job_id = str(key).split("job:", 1)[-1]
-            if job_id in reconciled_queued_job_ids:
-                queued += 1
+            if job_id in valid_handoff_job_ids:
+                # A leased message is valid work but no longer waiting. Keep
+                # the queued headline limited to unleased handoffs.
+                if job_id in reconciled_queued_job_ids:
+                    queued += 1
             else:
                 stale_queued_job_hashes += 1
                 r.hset(key, mapping={
@@ -843,10 +860,10 @@ async def queue_stats():
         'retest_completed': retest_completed,
         'retest_failed': retest_failed,
         'queue_consistency': {
-            'reconciled': not malformed_queue_entries and not (queued_job_ids - active_scan_job_ids) and not (active_scan_job_ids - queued_job_ids) and not stale_queued_job_hashes and not stale_running_job_hashes,
+            'reconciled': not malformed_queue_entries and not (handoff_job_ids - active_scan_job_ids) and not (active_scan_job_ids - handoff_job_ids) and not stale_queued_job_hashes and not stale_running_job_hashes,
             'malformed_entries': malformed_queue_entries,
-            'queue_without_active_scan': len(queued_job_ids - active_scan_job_ids),
-            'active_scan_without_queue_entry': len(active_scan_job_ids - queued_job_ids),
+            'queue_without_active_scan': len(handoff_job_ids - active_scan_job_ids),
+            'active_scan_without_queue_entry': len(active_scan_job_ids - handoff_job_ids),
             'stale_queued_job_hashes': stale_queued_job_hashes,
             'stale_running_job_hashes': stale_running_job_hashes,
         },
@@ -982,7 +999,7 @@ def _set_cli_v1_deprecation_headers(response: Response) -> None:
 
 
 TIMELINE_STATUSES = (
-    "planned", "blocked", "approval_required", "approved", "queued", "running",
+    "planned", "accepted", "blocked", "approval_required", "approved", "queued", "running",
     "completed", "partial", "degraded", "failed", "cancelled", "evidence_bound",
     "retest_scheduled", "refuter_requested",
 )
@@ -1000,9 +1017,15 @@ def _command_result_timeline_event(row: Any) -> dict[str, Any]:
     r = row_to_dict(row)
     cr_status = str(r.get("status") or "")
     scan_status = r.get("scan_status")
+    blocked_by = _decode_json_value(r.get("blocked_by")) or []
     # A live scan status supersedes the frozen command-result status once a scan
     # exists; blocked/approval_required rows have no scan and keep their status.
-    status = _timeline_scan_status(scan_status) if scan_status else cr_status
+    status = _normalized_timeline_event_status(
+        cr_status,
+        command=r.get("command"),
+        scan_status=scan_status,
+        blocked_by=blocked_by,
+    )
     scan_id = str(r["scan_id"]) if r.get("scan_id") else None
     return {
         "event_id": str(r.get("id")),
@@ -1025,7 +1048,7 @@ def _command_result_timeline_event(row: Any) -> dict[str, Any]:
         "finding_ids": _decode_json_value(r.get("finding_ids")) or [],
         "evidence_object_ids": _decode_json_value(r.get("evidence_object_ids")) or [],
         "tool_receipt_ids": _decode_json_value(r.get("tool_receipt_ids")) or [],
-        "blocked_by": _decode_json_value(r.get("blocked_by")) or [],
+        "blocked_by": blocked_by,
         "next_action": r.get("next_action"),
         "operator_message": r.get("operator_message"),
         "created_at": r.get("created_at"),
@@ -1036,7 +1059,13 @@ def _campaign_action_timeline_event(row: Any) -> dict[str, Any]:
     r = row_to_dict(row)
     action_status = str(r.get("status") or "")
     scan_status = r.get("scan_status")
-    status = _timeline_scan_status(scan_status) if scan_status else action_status
+    blocked_by = _decode_json_value(r.get("blocked_by")) or []
+    status = _normalized_timeline_event_status(
+        action_status,
+        command=r.get("command"),
+        scan_status=scan_status,
+        blocked_by=blocked_by,
+    )
     scan_id = str(r["scan_id"]) if r.get("scan_id") else None
     target_id = r.get("target_id") or r.get("scan_target_id")
     return {
@@ -1060,7 +1089,7 @@ def _campaign_action_timeline_event(row: Any) -> dict[str, Any]:
         "hypothesis_ids": _decode_json_value(r.get("hypothesis_ids")) or [],
         "evidence_object_ids": _decode_json_value(r.get("evidence_object_ids")) or [],
         "tool_receipt_ids": _decode_json_value(r.get("tool_receipt_ids")) or [],
-        "blocked_by": _decode_json_value(r.get("blocked_by")) or [],
+        "blocked_by": blocked_by,
         "next_action": r.get("next_action"),
         "operator_message": r.get("operator_message"),
         "created_at": r.get("created_at"),
@@ -1105,6 +1134,12 @@ def _schedule_timeline_event(row: Any) -> dict[str, Any]:
         "target_id": str(r["target_id"]) if r.get("target_id") else None,
         "target_url": r.get("target_url"),
         "next_eligible_at": r.get("next_run_at"),
+        "dispatch_at": r.get("next_run_at"),
+        "frequency": r.get("frequency"),
+        "day_of_week": r.get("day_of_week"),
+        "time_of_day": r.get("time_of_day"),
+        "timezone": r.get("timezone"),
+        "jitter_minutes": int(r.get("jitter_minutes") or 0),
         "name": r.get("name"),
         "scan_type": r.get("scan_type"),
         "blocked_by": [],
@@ -1295,6 +1330,38 @@ def _public_export_event_row(row: Any) -> dict[str, Any]:
 def _timeline_scan_status(raw: Any) -> str:
     key = str(raw or "").strip().lower()
     return _SCAN_STATUS_TO_TIMELINE.get(key, key or "queued")
+
+
+_SUBMISSION_COMMANDS = {
+    "scan.submit", "scan.focused_family", "asm.improve", "asm.test",
+    "asm.recon", "finding.retest", "ai_gate.scan", "model_intake.scan",
+}
+
+
+def _normalized_timeline_event_status(
+    raw: Any,
+    *,
+    command: Any = None,
+    scan_status: Any = None,
+    blocked_by: Any = None,
+) -> str:
+    if scan_status:
+        return _timeline_scan_status(scan_status)
+    raw_status = str(raw or "").strip().lower()
+    status = {
+        "pending": "queued",
+        "dispatching": "queued",
+        "in_progress": "running",
+        "success": "completed",
+        "error": "failed",
+        "canceled": "cancelled",
+    }.get(raw_status, raw_status)
+    if not status:
+        blockers = [str(item) for item in (blocked_by or []) if str(item).strip()]
+        return "blocked" if blockers else "queued"
+    if str(command or "").strip().lower() in _SUBMISSION_COMMANDS and status == "completed":
+        return "accepted"
+    return status
 _SCAN_STATUS_TO_TIMELINE = {
     "pending": "queued",
     "queued": "queued",

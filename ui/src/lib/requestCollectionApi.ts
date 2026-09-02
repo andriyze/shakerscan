@@ -71,6 +71,7 @@ export interface RequestCollectionSelection {
   selected_request_count: number
   selected_mutating_count: number
   is_active: boolean
+  revoked_at?: string | null
   secret_values_visible: false
 }
 
@@ -208,5 +209,17 @@ export async function upsertRequestCollectionSelection(
     },
   )
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to save request selection'))
+  return response.json()
+}
+
+export async function deactivateRequestCollectionSelection(
+  collectionId: string,
+  selectionId: string,
+): Promise<{ status: 'deactivated'; selection: RequestCollectionSelection }> {
+  const response = await fetch(
+    `${API_URL}/request-collections/${encodeURIComponent(collectionId)}/selections/${encodeURIComponent(selectionId)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to deactivate request selection'))
   return response.json()
 }

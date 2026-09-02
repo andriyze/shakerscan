@@ -63,10 +63,12 @@ def _hunt_contract():
         "limits": {
             "goal_chars": 20_000, "capabilities": 128,
             "request_collections": 32, "credential_refs": 16,
+            "skill_ids": 4,
         },
         "patterns": {
             "identifier": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$",
             "capability": r"^[a-z0-9][a-z0-9_.:-]{0,127}$",
+            "skill_id": r"^[a-z0-9][a-z0-9_.:-]{0,159}$",
         },
         "budget_profiles": {
             "fast": budget,
@@ -135,6 +137,11 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
         "idempotentHint": True, "openWorldHint": True,
     }
     assert annotations["shakerscan_hunt_verify"]["openWorldHint"] is True
+    assert annotations["shakerscan_hunt_candidate_update"]["destructiveHint"] is True
+    assert annotations["shakerscan_hunt_candidate_delete"] == {
+        "readOnlyHint": False, "destructiveHint": True,
+        "idempotentHint": True, "openWorldHint": False,
+    }
     assert annotations["shakerscan_hunt_cancel"]["destructiveHint"] is True
 
     start = next(item for item in descriptors if item["name"] == "shakerscan_hunt_start")
@@ -146,6 +153,74 @@ def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
     assert "max_http_requests" in schema["properties"]["budgets"]["properties"]
     assert "primary_credential_profile_id" in schema["properties"]["credential_refs"]["properties"]
     assert schema["properties"]["request_collection_ids"]["maxItems"] == 32
+    assert schema["properties"]["skill_ids"]["maxItems"] == 4
+    assert annotations["shakerscan_hunt_skills"]["readOnlyHint"] is True
+    assert annotations["shakerscan_hunt_skill"]["idempotentHint"] is True
+    assert annotations["shakerscan_hunt_skill_suggestions"]["readOnlyHint"] is True
+    assert annotations["shakerscan_hunt_skill_read"]["readOnlyHint"] is False
+    assert annotations["shakerscan_hunt_skill_unbind"]["destructiveHint"] is True
+
+
+def test_mcp_hunt_methodology_catalog_and_detail_are_read_only_gets():
+    class SkillClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if path.startswith("/hunt/skills"):
+                self.calls.append((method, path, payload))
+                return {"path": path}
+            return super().request_json(method, path, payload)
+
+    client = SkillClient()
+    catalog = client.call_tool("shakerscan_hunt_skills", {
+        "target_kind": "web", "support": "supported",
+        "goal": "Cloudflare origin exposure",
+    })
+    detail = client.call_tool("shakerscan_hunt_skill", {
+        "skill_id": "skill.web.edge-waf-and-origin-exposure-validation",
+        "include_methodology": True,
+    })
+
+    assert catalog["structuredContent"]["path"].startswith("/hunt/skills?")
+    assert "goal=Cloudflare+origin+exposure" in catalog["structuredContent"]["path"]
+    assert detail["structuredContent"]["path"].endswith("?include_methodology=true")
+    assert all(call[0] == "GET" and call[2] is None for call in client.calls[-2:])
+
+
+def test_mcp_hunt_methodology_progressive_tools_send_bounded_payloads():
+    class SkillClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if "/skills" in path:
+                self.calls.append((method, path, payload))
+                return {"path": path, "payload": payload}
+            return super().request_json(method, path, payload)
+
+    client = SkillClient()
+    hunt_id = "11111111-1111-1111-1111-111111111111"
+    skill_id = "skill.web.graphql-testing"
+    client.call_tool("shakerscan_hunt_skill_suggestions", {
+        "hunt_id": hunt_id, "signals": ["graphql"],
+    })
+    client.call_tool("shakerscan_hunt_skill_read", {
+        "hunt_id": hunt_id, "skill_id": skill_id,
+    })
+    client.call_tool("shakerscan_hunt_skill_bind", {
+        "hunt_id": hunt_id, "skill_id": skill_id,
+        "reason": "GraphQL endpoint observed",
+    })
+    client.call_tool("shakerscan_hunt_skill_usage", {
+        "hunt_id": hunt_id, "skill_id": skill_id, "state": "deferred",
+        "reason": "No mutations authorized",
+    })
+
+    assert client.calls[-4] == (
+        "POST", f"/hunts/{hunt_id}/skills/suggestions", {"signals": ["graphql"]},
+    )
+    assert client.calls[-3] == (
+        "POST", f"/hunts/{hunt_id}/skills/{skill_id}/read", None,
+    )
+    assert client.calls[-2][2] == {
+        "reason": "GraphQL endpoint observed", "evidence_refs": [],
+    }
+    assert client.calls[-1][2]["state"] == "deferred"
 
 
 def test_mcp_catalog_drift_fails_closed():
@@ -291,6 +366,20 @@ def test_mcp_hunt_tools_wrap_canonical_api_and_validate_ids():
     assert result["structuredContent"]["hunt_id"] == hunt_id
     assert client.calls[-1] == ("POST", f"/hunts/{hunt_id}/query", {"kind": "endpoints", "limit": 25})
 
+    candidate_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    client.call_tool("shakerscan_hunt_candidate_update", {
+        "hunt_id": hunt_id, "candidate_id": candidate_id, "title": "Corrected",
+    })
+    assert client.calls[-1] == (
+        "PATCH", f"/hunts/{hunt_id}/candidates/{candidate_id}", {"title": "Corrected"},
+    )
+    client.call_tool("shakerscan_hunt_candidate_delete", {
+        "hunt_id": hunt_id, "candidate_id": candidate_id,
+    })
+    assert client.calls[-1] == (
+        "DELETE", f"/hunts/{hunt_id}/candidates/{candidate_id}", None,
+    )
+
     with pytest.raises(mcp.MCPError):
         client.call_tool("shakerscan_hunt_get", {"hunt_id": "not-a-uuid"})
 
@@ -330,10 +419,11 @@ def test_mcp_hunt_start_dispatches_complete_canonical_v2_request():
             },
             "budgets": {},
             "credential_refs": {},
-            "capabilities": [],
-            "request_collection_ids": [],
-        },
-    )
+                "capabilities": [],
+                "request_collection_ids": [],
+                "skill_ids": [],
+            },
+        )
 
 
 @pytest.mark.parametrize(

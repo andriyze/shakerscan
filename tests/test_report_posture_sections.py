@@ -114,6 +114,42 @@ def test_dns_posture_is_projected():
     assert dns["bound_addresses"]["A"] == ["192.0.2.10"]
 
 
+def test_infrastructure_context_is_projected_as_unscored_relationships():
+    obs = _observations()
+    obs["baseline.infrastructure"] = [{
+        "kind": "infrastructure_intelligence",
+        "informational_only": True,
+        "scoring_effect": "none",
+        "canonical_host": "app.example.test",
+        "registration_domain": "example.test",
+        "registration": {"registrar": {"name": "Example Registrar"}},
+        "addresses": [{
+            "address": "192.0.2.10",
+            "ptr_names": ["edge.example.test"],
+            "asn": {"asn": "64500", "name": "EXAMPLE-NET"},
+        }],
+        "related_names": [{
+            "name": "edge.example.test", "source": "ptr",
+            "scope": "external_unverified",
+        }],
+        "limitations": ["No related name was scanned by this capability."],
+        "errors": [],
+    }]
+    obs["baseline.tls"][0]["certificate_dns_names"] = [
+        "app.example.test", "shared.other.test",
+    ]
+
+    infrastructure = _posture_sections(obs)["infrastructure"]
+
+    assert infrastructure["informational_only"] is True
+    assert infrastructure["scoring_effect"] == "none"
+    assert infrastructure["registration"]["registrar"]["name"] == "Example Registrar"
+    related = {item["name"]: item for item in infrastructure["related_names"]}
+    assert related["app.example.test"]["scope"] == "likely_related"
+    assert related["shared.other.test"]["scope"] == "external_unverified"
+    assert related["edge.example.test"]["scope"] == "external_unverified"
+
+
 def test_technologies_are_collected_without_duplicates():
     obs = _observations()
     obs["discover.web_probe"].append(obs["discover.web_probe"][0])

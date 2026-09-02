@@ -236,9 +236,12 @@ def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_sur
     # List rows retain proof derivation but shed detail-only evidence blobs.
     assert "row_dict.update(finding_proof_fields(row_dict))" in endpoint
     assert "for key in _FINDING_DETAIL_ONLY_FIELDS" in endpoint
+    assert "'details_included': include_details" in endpoint
+    assert "'omitted_detail_fields':" in endpoint
 
     client = (ROOT / "ui" / "src" / "lib" / "api.ts").read_text()
     assert "params?.include_candidates === true" in client
+    assert "params?.include_details === true" in client
     findings_page = (ROOT / "ui" / "src" / "app" / "findings" / "page.tsx").read_text()
     assert "if (finding.is_candidate) return '/findings/candidates'" in findings_page
 

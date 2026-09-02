@@ -79,6 +79,7 @@ def test_degraded_result_is_self_describing_and_never_clean():
     assert r["findings"] == []
     # A degraded scan can never look like a clean security result.
     assert r["degraded"] is True
+    assert r["result"]["score_policy"] == "degraded_terminal/v1"
     assert r["result"]["grade_reliable"] is False
     meta = r["scan_metadata"]
     assert meta["degraded"] is True

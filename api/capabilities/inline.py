@@ -179,6 +179,14 @@ class DnsInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize one fixed-plan, target-name-bound DNS inspection."""
 
 
+class InfrastructureInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize bounded registration and network context observations."""
+
+
+class ArtifactInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize one bounded target-pinned artifact read or static analysis."""
+
+
 class AuthSessionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize a worker-private credential exchange to content-free evidence."""
 
@@ -244,13 +252,18 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             if succeeded
             else "failed"
         )
-        observation: dict[str, Any] = {
-            "kind": "request_collection_observation",
-            "capability": self.capability_name,
-            "status": status,
-        }
-        for key in ("collection_id", "selection_id", "count"):
-            if result.get(key) is not None:
+        observation_value = result.get("observation")
+        observation: dict[str, Any] = (
+            dict(observation_value)
+            if isinstance(observation_value, Mapping)
+            else {
+                "kind": "request_collection_observation",
+                "capability": self.capability_name,
+                "status": status,
+            }
+        )
+        for key in ("collection_id", "selection_id", "count", "finding_id"):
+            if result.get(key) is not None and key not in observation:
                 observation[key] = result[key]
         error = (
             _blocked_error(self.blocked_exception)

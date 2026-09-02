@@ -159,8 +159,13 @@ class Scorecard:
 
     def check(self, name: str, passed: bool, detail: str = "") -> bool:
         self.rows.append({"name": name, "passed": bool(passed), "skipped": False, "detail": detail})
-        mark = "PASS" if passed else "FAIL"
-        print(f"  [{mark}] {name}" + (" — detail recorded" if detail else ""), flush=True)
+        if passed:
+            print(f"  [PASS] {name}" + (" — detail recorded" if detail else ""), flush=True)
+        else:
+            # A failing assertion must be diagnosable from the run log alone. The PR
+            # smoke lane uploads no scorecard artifact, so hiding the detail behind
+            # "detail recorded" left every red check with no visible cause.
+            print(f"  [FAIL] {name}" + (f" — {detail}" if detail else ""), flush=True)
         return bool(passed)
 
     def skip(self, name: str, reason: str) -> None:

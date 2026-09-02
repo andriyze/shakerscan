@@ -5,6 +5,7 @@ import { buildVersionsMatch, deriveBuildIdentity, formatBuildIdentity } from './
 
 const uniformHealth = {
   scanner_version: 'abc1234',
+  build_fingerprint: 'fingerprint-a',
   worker_build: {
     available: true,
     expected_count: 4,
@@ -46,6 +47,17 @@ test('raw compose dev placeholder is unknown rather than a false mismatch', () =
   const identity = deriveBuildIdentity('dev', uniformHealth)
   assert.equal(identity.skew, false)
   assert.equal(formatBuildIdentity(identity), 'Version abc1234')
+})
+
+test('scoped UI build uses API source fingerprint instead of unrelated Git revision', () => {
+  const identity = deriveBuildIdentity('ui56789', uniformHealth, 'fingerprint-a')
+  assert.equal(identity.skew, false)
+  assert.equal(formatBuildIdentity(identity), 'UI ui56789 · API abc1234 · Workers abc1234')
+})
+
+test('scoped UI build still reports actual backend source skew', () => {
+  const identity = deriveBuildIdentity('abc1234', uniformHealth, 'fingerprint-old')
+  assert.equal(identity.skew, true)
 })
 
 test('fingerprint-authoritative stale workers produce an explicit mismatch', () => {

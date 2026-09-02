@@ -23,12 +23,25 @@ test('canonical Scan UI submits only opaque exact-target credential profile IDs'
 
 test('Scan credential selection is disabled for batches and requires explicit authority', () => {
   assert.match(scan, /Credential profiles are exact-target-bound and cannot be shared across a batch/)
-  assert.match(scan, /Credential use requires a target-bound approval receipt ID/)
+  assert.match(scan, /riskTier: credentialUse \? 'credential' : 'active'/)
+  assert.match(scan, /effectiveApprovalReceipt = createdApproval\.approvalReceiptId/)
   assert.match(scan, /selected permissions and identities/)
 })
 
-test('new generic profiles use generated semantic Scan capabilities by default', () => {
-  assert.match(credentials, /SCAN_PUBLIC_CONTRACT_SNAPSHOT\.credentials\.semantic_capabilities/)
+test('new generic profiles use canonical least-privilege capability selections', () => {
+  assert.match(credentials, /listCredentialCapabilities/)
+  assert.match(credentials, /safe_defaults/)
+  // The copy moved from JSX text into a conditional string literal, so the
+  // apostrophe is escaped rather than entity-encoded. Accept either form: the
+  // claim being asserted is the wording, not its quoting.
+  assert.match(credentials, /No selection resolves to the server(?:&apos;|\\')s safe defaults, never unrestricted access/)
+  // SSH profiles have no safe default, so the UI must refuse an empty selection
+  // rather than let the server reject it after submission.
+  assert.match(credentials, /Select at least one explicitly approved SSH capability/)
+  assert.match(credentials, /SSH profiles require an explicit capability selection and target-bound approval/)
+  assert.match(credentials, /no capabilities · legacy profile is unusable until narrowed explicitly/)
+  assert.match(credentials, /allow_active_capabilities: draft\.allowActiveCapabilities/)
+  assert.doesNotMatch(credentials, /blank permits any worker capability/)
   assert.doesNotMatch(credentials, /scan\.execute/)
   assert.match(credentials, /Client ID \(required for Scan\)/)
 })

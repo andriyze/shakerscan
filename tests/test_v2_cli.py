@@ -25,6 +25,7 @@ HUNT_CONTRACT = {
         {"name": "max_state_changing_requests", "minimum": 0, "zeroable": True},
         {"name": "max_hosts", "minimum": 0, "zeroable": True},
     ],
+    "limits": {"skill_ids": 4},
 }
 
 
@@ -39,6 +40,7 @@ def test_hunt_start_cli_uses_server_contract_and_preserves_explicit_zero():
         "--budget", "max_state_changing_requests=0",
         "--credential-ref", "primary_credential_profile_id=profile-1",
         "--collection-id", "collection-1",
+        "--skill-id", "skill.web.http-baselining-replay-and-differential-analysis",
     )
     payload = v2_cli._hunt_start_payload(args, HUNT_CONTRACT)
     assert payload["schema_version"] == "hunt-start/v2"
@@ -49,6 +51,9 @@ def test_hunt_start_cli_uses_server_contract_and_preserves_explicit_zero():
         "primary_credential_profile_id": "profile-1",
     }
     assert payload["request_collection_ids"] == ["collection-1"]
+    assert payload["skill_ids"] == [
+        "skill.web.http-baselining-replay-and-differential-analysis"
+    ]
     assert "scan_type" not in payload
 
 
@@ -76,8 +81,105 @@ def test_hunt_cli_help_is_first_class_and_non_mutating(capsys):
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "start" in output
+    assert "skills" in output
     assert "call" in output
     assert "deep-hunt" not in output
+
+
+def test_hunt_skills_cli_queries_server_suggestions():
+    args = _parse(
+        "hunt", "skills", "--target-kind", "web", "--support", "supported",
+        "--goal", "Cloudflare origin exposure",
+    )
+
+    class FakeClient:
+        def get(self, path):
+            return {"path": path}
+
+    result = v2_cli._run_hunt(args, FakeClient())
+    assert result["path"].startswith("/hunt/skills?")
+    assert "target_kind=web" in result["path"]
+    assert "goal=Cloudflare+origin+exposure" in result["path"]
+
+
+def test_hunt_cli_progressively_suggests_reads_binds_and_tracks_methodology():
+    calls = []
+
+    class FakeClient:
+        def post(self, path, payload, **_kwargs):
+            calls.append(("POST", path, payload))
+            return {"path": path, "payload": payload}
+
+        def delete(self, path):
+            calls.append(("DELETE", path, None))
+            return {"path": path}
+
+    client = FakeClient()
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-suggest", "hunt-1", "--signal", "graphql",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-read", "hunt-1", "skill.web.graphql-testing",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-bind", "hunt-1", "skill.web.graphql-testing",
+        "--reason", "GraphQL endpoint observed", "--evidence-ref", "evidence-1",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-usage", "hunt-1", "skill.web.graphql-testing", "used",
+        "--action-id", "11111111-1111-1111-1111-111111111111",
+    ), client)
+    v2_cli._run_hunt(_parse(
+        "hunt", "skill-unbind", "hunt-1", "skill.web.graphql-testing",
+    ), client)
+
+    assert calls[0] == (
+        "POST", "/hunts/hunt-1/skills/suggestions", {"signals": ["graphql"]},
+    )
+    assert calls[1][1].endswith("/skill.web.graphql-testing/read")
+    assert calls[2][2]["reason"] == "GraphQL endpoint observed"
+    assert calls[3][2]["state"] == "used"
+    assert calls[4] == (
+        "DELETE", "/hunts/hunt-1/skills/skill.web.graphql-testing", None,
+    )
+
+
+def test_hunt_skill_unbind_uses_real_api_client_delete(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read(_limit):
+            return b'{"removed":true}'
+
+    def urlopen(request, *, timeout):
+        captured.update(request=request, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(v2_cli.urllib.request, "urlopen", urlopen)
+    result = v2_cli._run_hunt(
+        _parse(
+            "hunt", "skill-unbind", "hunt/1", "skill.web/graphql-testing",
+            "--reason", "no longer applicable",
+        ),
+        v2_cli.ApiClient("http://localhost:8080", timeout=12.0),
+    )
+
+    request = captured["request"]
+    assert result == {"removed": True}
+    assert request.get_method() == "DELETE"
+    assert request.data is None
+    assert request.full_url == (
+        "http://localhost:8080/hunts/hunt%2F1/skills/"
+        "skill.web%2Fgraphql-testing?reason=no+longer+applicable"
+    )
+    assert captured["timeout"] == 12.0
 
 
 def test_credential_requests_are_checked_against_server_published_schema():
@@ -98,6 +200,29 @@ def test_credential_requests_are_checked_against_server_published_schema():
         )
 
 
+def test_credential_metadata_test_treats_empty_allowlist_as_no_authority():
+    class FakeClient:
+        def get(self, path):
+            assert path == "/credential-profiles/profile-1"
+            return {"profile": {
+                "profile_id": "profile-1",
+                "status": "active",
+                "execution_compatible": True,
+                "storage_encrypted": True,
+                "encryption_available": True,
+                "target_id": "target-1",
+                "target_kind": "web",
+                "allowed_capabilities": [],
+            }}
+
+    result = v2_cli._run_credentials(_parse(
+        "credentials", "test", "profile-1", "--capability", "http.request",
+    ), FakeClient())
+
+    assert result["checks"]["capability_allowed"] is False
+    assert result["passed"] is False
+
+
 def test_credentials_and_collections_are_first_class_commands():
     parser = v2_cli.build_parser()
     create = parser.parse_args([
@@ -112,11 +237,97 @@ def test_credentials_and_collections_are_first_class_commands():
     assert rotate.profile_id == "profile-1"
     select = parser.parse_args([
         "--api-url", "http://localhost:8080", "collections", "select",
-        "collection-1", "--method", "get", "--limit", "12",
+        "collection-1", "--binding-id", "binding-1", "--name", "baseline",
+        "--method", "get", "--limit", "12",
     ])
     assert select.collections_command == "select"
     assert select.method == ["get"]
     assert select.limit == 12
+
+
+def test_collection_select_saves_durable_selection_and_preview_is_explicit():
+    calls = []
+
+    class FakeClient:
+        def get(self, path):
+            assert path == "/openapi.json"
+            return {
+                "components": {"schemas": {
+                    "RequestCollectionSelectionUpsert": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["name", "binding_id"],
+                        "properties": {
+                            name: {} for name in (
+                                "name", "binding_id", "replay_policy", "request_ids",
+                                "folders", "methods", "path_regex", "tags",
+                                "safe_methods_only", "max_requests",
+                                "disposable_credentials",
+                            )
+                        },
+                    },
+                    "RequestCollectionSelect": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            name: {} for name in (
+                                "request_ids", "folders", "methods", "path_regex",
+                                "tags", "safe_methods_only", "limit",
+                            )
+                        },
+                    },
+                }},
+            }
+
+        def post(self, path, payload, **kwargs):
+            calls.append((path, payload, kwargs))
+            return {"path": path, "payload": payload}
+
+    client = FakeClient()
+    saved = v2_cli._run_collections(_parse(
+        "collections", "select", "collection/1", "--binding-id", "binding-1",
+        "--name", "baseline", "--method", "get", "--limit", "12",
+    ), client)
+    preview = v2_cli._run_collections(_parse(
+        "collections", "select", "collection/1", "--preview", "--method", "get",
+    ), client)
+
+    assert saved["path"] == "/request-collections/collection%2F1/selections"
+    assert saved["payload"] == {
+        "name": "baseline",
+        "binding_id": "binding-1",
+        "replay_policy": "safe_reads",
+        "request_ids": [],
+        "folders": [],
+        "methods": ["GET"],
+        "tags": [],
+        "safe_methods_only": True,
+        "max_requests": 12,
+        "disposable_credentials": False,
+    }
+    assert preview["path"] == "/request-collections/collection%2F1/select"
+    assert preview["payload"]["limit"] == 500
+    assert "name" not in preview["payload"]
+
+
+def test_collection_select_rejects_ambiguous_or_unsafe_shortcuts():
+    class FakeClient:
+        def get(self, _path):
+            return {"components": {"schemas": {
+                "RequestCollectionSelectionUpsert": {
+                    "properties": {}, "additionalProperties": False,
+                },
+            }}}
+
+    with pytest.raises(v2_cli.CliError, match="requires --name and --binding-id"):
+        v2_cli._run_collections(
+            _parse("collections", "select", "collection-1"), FakeClient(),
+        )
+    with pytest.raises(v2_cli.CliError, match="confirmed_active"):
+        v2_cli._run_collections(_parse(
+            "collections", "select", "collection-1", "--binding-id", "binding-1",
+            "--name", "active", "--include-mutating",
+        ), FakeClient())
 
 
 def test_collection_upload_document_accepts_json_or_openapi_yaml(tmp_path):
@@ -210,11 +421,17 @@ def test_hunt_cli_exposes_complete_lifecycle_and_uses_canonical_routes(tmp_path)
             self.calls.append(("POST", path, payload))
             return {"path": path, "payload": payload}
 
+        def request(self, method, path, *, payload=None, **_kwargs):
+            self.calls.append((method, path, payload))
+            return {"path": path, "payload": payload}
+
     cases = (
         (("hunt", "get", "hunt-1"), "GET", "/hunts/hunt-1"),
         (("hunt", "list", "--status", "active", "--limit", "10"), "GET", "/hunts?limit=10&status=active"),
         (("hunt", "query", "hunt-1", "candidates", "--limit", "8"), "POST", "/hunts/hunt-1/query"),
         (("hunt", "candidate", "hunt-1", "--request", str(candidate_request)), "POST", "/hunts/hunt-1/candidates"),
+        (("hunt", "candidate-update", "hunt-1", "candidate-1", "--title", "Corrected"), "PATCH", "/hunts/hunt-1/candidates/candidate-1"),
+        (("hunt", "candidate-delete", "hunt-1", "candidate-1"), "DELETE", "/hunts/hunt-1/candidates/candidate-1"),
         (("hunt", "verify", "hunt-1", "candidate-1"), "POST", "/hunts/hunt-1/candidates/candidate-1/verify"),
         (("hunt", "finish", "hunt-1", "--summary", "done"), "POST", "/hunts/hunt-1/finish"),
         (("hunt", "cancel", "hunt-1"), "POST", "/hunts/hunt-1/cancel"),

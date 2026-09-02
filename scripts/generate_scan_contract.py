@@ -11,6 +11,11 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The repo root lets `scanner.redaction` (the source-layout fallback inside
+# api/runtime/receipts.py) resolve; api/ lets `scan.contracts` resolve. Without
+# the root, this script only works in the flat container layout, so a bare CI
+# runner fails with "No module named 'scanner'".
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "api"))
 
 from scan.contracts import public_scan_contract  # noqa: E402

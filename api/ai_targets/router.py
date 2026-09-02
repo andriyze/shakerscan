@@ -383,8 +383,8 @@ async def get_ai_inventory(
         scans_query = """
             SELECT
                 s.id, s.target_id, s.ai_target_id, s.target_url, s.status,
-                s.scan_type, s.run_kind, s.result, s.created_at, s.completed_at,
-                t.root_domain
+                s.scan_type, s.run_kind, s.options, s.result, s.created_at, s.completed_at,
+                t.root_domain, t.discovery_source
             FROM scans s
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
@@ -555,6 +555,7 @@ async def create_ai_target(request: AITargetCreate):
         method=method,
         target_type=target_type,
     )
+    response_path = _normalize_ai_response_path(request.response_path, target_type=target_type)
     credential = _build_ai_credential_db_record(request.credential)
     target_name = request.name or urllib.parse.urlparse(endpoint_url).hostname or endpoint_url
 
@@ -578,7 +579,7 @@ async def create_ai_target(request: AITargetCreate):
                 method,
                 json.dumps(headers_template),
                 json.dumps(request_template),
-                request.response_path,
+                response_path,
                 streaming_mode,
                 request.rate_limit_rps,
                 request.token_budget,
@@ -630,6 +631,7 @@ async def update_ai_target(target_id: str, request: AITargetUpdate):
         if "endpoint_url" in payload and payload["endpoint_url"] is not None:
             update_data["endpoint_url"] = _normalize_ai_endpoint_url(payload["endpoint_url"])
         effective_method = _normalize_ai_method(payload.get("method") or existing["method"])
+        effective_target_type = str(existing["target_type"])
         if "method" in payload:
             update_data["method"] = effective_method
         if "headers_template" in payload:
@@ -639,11 +641,14 @@ async def update_ai_target(target_id: str, request: AITargetUpdate):
                 _normalize_ai_request_template(
                     payload.get("request_template"),
                     method=effective_method,
-                    target_type=existing["target_type"],
+                    target_type=effective_target_type,
                 )
             )
         if "response_path" in payload:
-            update_data["response_path"] = payload.get("response_path") or None
+            update_data["response_path"] = _normalize_ai_response_path(
+                payload.get("response_path"),
+                target_type=effective_target_type,
+            )
         if "streaming_mode" in payload and payload["streaming_mode"] is not None:
             update_data["streaming_mode"] = _normalize_ai_streaming_mode(payload["streaming_mode"])
         for key in ("rate_limit_rps", "token_budget", "request_budget"):
@@ -1901,7 +1906,7 @@ class AITargetCreate(BaseModel):
     method: str = "POST"
     headers_template: dict[str, Any] = Field(default_factory=dict)
     request_template: dict[str, Any] = Field(default_factory=dict)
-    response_path: Optional[str] = "$.answer"
+    response_path: Optional[str] = None
     streaming_mode: str = "json"
     rate_limit_rps: Optional[int] = Field(default=None, ge=1)
     token_budget: Optional[int] = Field(default=None, ge=1)
@@ -2055,6 +2060,16 @@ def _normalize_ai_request_template(value: Any, *, method: str, target_type: str)
             detail="request_template must contain a {{prompt}} placeholder for non-GET AI targets",
         )
     return value
+
+
+def _normalize_ai_response_path(value: Any, *, target_type: str) -> str | None:
+    path = str(value or "").strip() or None
+    if target_type != "widget" and not path:
+        raise HTTPException(
+            status_code=400,
+            detail="response_path is required; verify it from an observed response before saving the AI target",
+        )
+    return path
 
 
 def _build_ai_credential_db_record(

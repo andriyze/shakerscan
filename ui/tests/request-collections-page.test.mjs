@@ -49,3 +49,13 @@ test('Scan and Hunt attach exact saved selection IDs without manual UUID entry',
   assert.match(picker, /selection\.selection_digest\.slice/)
   assert.match(picker, /active testing and state-changing HTTP/)
 })
+
+test('saved selections expose an explicit immutable revision lifecycle', () => {
+  assert.match(page, /Ownership is exact target ID/)
+  assert.match(page, /exact scheme \+ hostname \+ port/)
+  assert.match(page, /Replace/)
+  assert.match(page, /Clone/)
+  assert.match(page, /Deactivate/)
+  assert.match(collectionApi, /method: 'DELETE'/)
+  assert.match(page, /Historical scan bindings remain immutable/)
+})

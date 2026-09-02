@@ -47,6 +47,13 @@ def test_every_surface_declares_a_valid_disposition_and_owner(manifest):
         assert surface.get("routes"), f"{sid} declares no routes"
 
 
+def test_manifest_baseline_and_release_boundary_are_explicit(manifest):
+    assert len(manifest["source_head"]) == 40
+    assert manifest["release_boundary"] == (
+        "canonical_scan_hunt_with_transitional_compatibility_writes"
+    )
+
+
 def test_surfaces_that_must_not_grow_declare_a_replacement(manifest):
     """A surface being removed has to say what replaces it."""
     for surface in manifest["surfaces"]:

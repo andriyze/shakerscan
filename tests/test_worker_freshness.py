@@ -382,19 +382,41 @@ def test_revoked_node_refusal_requeues_job_before_dispatch(monkeypatch):
 
     monkeypatch.setattr(worker, "_refuse_stale_job_if_needed", lambda _job: _async_value(False))
     monkeypatch.setattr(worker, "_attribute_job_execution", refuse)
-    monkeypatch.setattr(worker, "process_scan_job", dispatch)
+    monkeypatch.setattr(worker, "process_discovery_job", dispatch)
     monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(
         worker,
         "get_redis",
         lambda: types.SimpleNamespace(rpush=lambda queue, payload: pushed.append((queue, json.loads(payload)))),
     )
-    job = {"type": "scan", "job_id": "job-1", "scan_id": str(uuid.uuid4())}
+    job = {"type": "discovery", "job_id": "job-1", "scan_id": str(uuid.uuid4())}
 
     _run(worker.process_job(job))
 
     assert pushed == [(worker.QUEUE_NAME, job)]
     assert dispatched == []
+
+
+def test_standalone_scan_defers_worker_attribution_until_durable_claim(monkeypatch):
+    dispatched = []
+
+    async def forbidden_early_attribution(_job):
+        raise AssertionError("standalone attribution must follow the status claim")
+
+    async def dispatch(job):
+        dispatched.append(job)
+
+    monkeypatch.delenv("SHAKERSCAN_NODE_ID", raising=False)
+    monkeypatch.setattr(worker, "_fleet_node_accepts_work", lambda: _async_value(True))
+    monkeypatch.setattr(worker, "_refuse_stale_job_if_needed", lambda _job: _async_value(False))
+    monkeypatch.setattr(worker, "_attribute_job_execution", forbidden_early_attribution)
+    monkeypatch.setattr(worker, "process_scan_job", dispatch)
+
+    job = {"type": "scan", "job_id": "job-claim", "scan_id": str(uuid.uuid4())}
+    _run(worker.process_job(job))
+
+    assert len(dispatched) == 1
+    assert dispatched[0]["_deferred_execution_attribution"] is True
 
 
 def test_canonical_asm_batch_materializes_inner_authority_before_dispatch(monkeypatch):

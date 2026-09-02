@@ -1,6 +1,6 @@
 # ShakerScan DAST — OWASP Coverage Matrix
 
-**Status:** mechanism inventory reconciled 2026-07-11. This matrix records implemented check
+**Status:** mechanism inventory reconciled 2026-08-29. This matrix records implemented check
 families, not accepted recall, precision, or proof depth. Candidate acceptance belongs in
 [`release-readiness.md`](release-readiness.md); future detector priorities are in
 [`proposed-next-steps.md`](proposed-next-steps.md).
@@ -15,6 +15,11 @@ Legend: ✅ meaningful implemented checks exist · 🟡 partial, heuristic, or n
 > Note: ✅ means the engine ships meaningful checks for that category, not that
 > every sub-technique is covered. Several ✅ rows still carry named gaps in their
 > "Gaps" column.
+
+This matrix does not affect a scan score or grade. A category-level mechanism can produce
+unverified candidates, and a particular run may have weak assurance or may not examine the
+application at all. Use proof state, current coverage, and `risk_and_assurance/v8` result fields for
+run-specific claims.
 
 ## OWASP Top 10 (2021)
 

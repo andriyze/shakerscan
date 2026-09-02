@@ -142,12 +142,15 @@ export const HUNT_START_CONTRACT = {
   "limits": {
     "capabilities": 128,
     "credential_refs": 16,
+    "direct_origin_addresses": 8,
     "goal_chars": 20000,
-    "request_collections": 32
+    "request_collections": 32,
+    "skill_ids": 4
   },
   "patterns": {
     "capability": "^[a-z0-9][a-z0-9_.:-]{0,127}$",
-    "identifier": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
+    "identifier": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$",
+    "skill_id": "^skill\\.[a-z0-9][a-z0-9_.-]{0,127}$"
   },
   "policy_derived_zeros": {
     "mutation_disabled": [
@@ -170,6 +173,8 @@ export const HUNT_START_CONTRACT = {
   },
   "policy_fields": [
     "active_testing",
+    "allow_direct_origin",
+    "allow_identity_headers",
     "allow_oob_interactions",
     "allow_state_changing_http",
     "approval_receipt_id",
@@ -178,6 +183,7 @@ export const HUNT_START_CONTRACT = {
     "scope_receipt_id"
   ],
   "schema_version": "hunt-start/v2",
+  "skill_catalog": "/hunt/skills",
   "target_kinds": [
     "api",
     "device",

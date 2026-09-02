@@ -56,21 +56,21 @@ function documentationHref(href?: string): string {
 
 const markdownComponents: Components = {
   h1: ({ children }) => (
-    <h1 id={headingId(children)} className="mb-5 mt-2 scroll-mt-6 text-3xl font-bold tracking-tight text-white">
-      {children}
-    </h1>
-  ),
-  h2: ({ children }) => (
-    <h2 id={headingId(children)} className="mb-3 mt-10 scroll-mt-6 border-b border-gray-800 pb-2 text-2xl font-semibold text-white">
+    <h2 id={headingId(children)} className="mb-5 mt-2 scroll-mt-6 text-3xl font-bold tracking-tight text-white">
       {children}
     </h2>
   ),
-  h3: ({ children }) => (
-    <h3 id={headingId(children)} className="mb-2 mt-7 scroll-mt-6 text-xl font-semibold text-gray-100">
+  h2: ({ children }) => (
+    <h3 id={headingId(children)} className="mb-3 mt-10 scroll-mt-6 border-b border-gray-800 pb-2 text-2xl font-semibold text-white">
       {children}
     </h3>
   ),
-  h4: ({ children }) => <h4 className="mb-2 mt-6 text-base font-semibold text-gray-100">{children}</h4>,
+  h3: ({ children }) => (
+    <h4 id={headingId(children)} className="mb-2 mt-7 scroll-mt-6 text-xl font-semibold text-gray-100">
+      {children}
+    </h4>
+  ),
+  h4: ({ children }) => <h5 className="mb-2 mt-6 text-base font-semibold text-gray-100">{children}</h5>,
   p: ({ children }) => <p className="my-4 leading-7 text-gray-300">{children}</p>,
   a: ({ href, children }) => {
     const resolved = documentationHref(href)

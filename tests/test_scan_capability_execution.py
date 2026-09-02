@@ -381,7 +381,7 @@ def test_http_baseline_has_bounded_redirect_hold_and_redacted_path():
 
 def test_dns_posture_has_fixed_host_and_wall_hold():
     assert scan_dns_posture_capability_allocation(_budget()) == {
-        "hosts_attempted": 4,
+        "hosts_attempted": 5,
         "tool_wall_seconds": 15,
     }
     prepared = prepare_scan_inline_capability(
@@ -481,6 +481,24 @@ def test_scan_external_capability_requires_frozen_binding_and_active_approval():
             args={"argv": ["-target", "attacker.test"]},
             policy=policy,
         )
+
+
+def test_scan_xss_reserves_browser_budget_only_for_headless_proof():
+    specification = CAPABILITY_REGISTRY.require("xss.verify")
+    policy = ScanPolicy(active_testing=True, approval_receipt_id="approval-1")
+
+    reflected = prepare_scan_external_capability(
+        specification=specification, target=_target(), args={}, policy=policy,
+    )
+    headless = prepare_scan_external_capability(
+        specification=specification,
+        target=_target(),
+        args={"deep_domxss": True},
+        policy=policy,
+    )
+
+    assert "browser_actions" not in reflected.estimated_budget
+    assert headless.estimated_budget["browser_actions"] == 1
 
 
 def test_scan_session_capability_requires_approval_but_not_active_testing():

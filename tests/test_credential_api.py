@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -100,6 +100,13 @@ def client(monkeypatch):
         credential_api, "encrypt_secret", lambda _value: "enc:fernet:opaque-ciphertext"
     )
     monkeypatch.setattr(credential_api, "encryption_enabled", lambda: True)
+    async def validate_approval(_conn, receipt_id, **kwargs):
+        if receipt_id != "11111111-1111-4111-8111-111111111111":
+            raise HTTPException(status_code=400, detail="Approval receipt is required")
+        assert kwargs["require_target_binding"] is True
+        assert kwargs["risk_tier"] == "credential"
+
+    credential_api.configure_credential_api(approval_validator=validate_approval)
     app = FastAPI()
     app.state.db_pool = ApiCredentialPool()
     app.include_router(credential_api.router)
@@ -126,7 +133,7 @@ def _create_payload(**updates):
         "principal_slot": "primary",
         "secret": "never-return-this-secret",
         "expires_at": "2027-08-22T12:00:00Z",
-        "allowed_capabilities": ["request.replay"],
+        "allowed_capabilities": ["http.request"],
     }
     payload.update(updates)
     return payload
@@ -141,7 +148,7 @@ def test_metadata_only_crud_and_rotation_never_return_secret_material(client):
     profile_id = profile["id"]
     assert profile["auth_kind"] == "bearer_token"
     assert profile["configuration"]["username_configured"] is False
-    assert profile["allowed_capabilities"] == ["request.replay"]
+    assert profile["allowed_capabilities"] == ["http.request"]
     assert profile["secret_values_visible"] is False
     assert profile["storage_encrypted"] is True
     assert "never-return-this-secret" not in created.text
@@ -165,13 +172,13 @@ def test_metadata_only_crud_and_rotation_never_return_secret_material(client):
         json={
             "expected_record_version": 1,
             "name": "Primary API renamed",
-            "allowed_capabilities": ["request.replay", "web.probe"],
+            "allowed_capabilities": ["http.request", "web.probe"],
         },
     )
     assert patched.status_code == 200, patched.text
     assert patched.json()["profile"]["record_version"] == 2
     assert patched.json()["profile"]["allowed_capabilities"] == [
-        "request.replay", "web.probe"
+        "http.request", "web.probe"
     ]
 
     stale = http.patch(
@@ -199,6 +206,70 @@ def test_metadata_only_crud_and_rotation_never_return_secret_material(client):
     assert deleted.json()["profile"]["status"] == "inactive"
     assert pool.conn.binding["is_active"] is False
 
+
+def test_capability_registry_defaults_validate_names_and_require_active_elevation(client):
+    http, _ = client
+
+    catalog = http.get(
+        "/credential-profiles/capabilities",
+        params={"target_kind": "api", "auth_kind": "bearer_token"},
+    )
+    assert catalog.status_code == 200, catalog.text
+    assert catalog.json()["blank_semantics"] == "safe_server_defaults"
+    assert catalog.json()["safe_defaults"] == ["http.request"]
+
+    defaulted = http.post(
+        "/credential-profiles",
+        json=_create_payload(name="Defaulted", allowed_capabilities=[]),
+    )
+    assert defaulted.status_code == 201, defaulted.text
+    assert defaulted.json()["profile"]["allowed_capabilities"] == ["http.request"]
+
+    inert_ssh = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            target_kind="device", auth_kind="ssh_password",
+            principal_slot="ssh", username="root", allowed_capabilities=[],
+        ),
+    )
+    assert inert_ssh.status_code == 422
+    assert "has no safe default" in inert_ssh.text
+
+    unknown = http.post(
+        "/credential-profiles",
+        json=_create_payload(name="Unknown", allowed_capabilities=["made.up.capability"]),
+    )
+    assert unknown.status_code == 422
+    assert "unknown capability" in unknown.text
+
+    active = http.post(
+        "/credential-profiles",
+        json=_create_payload(name="Active", allowed_capabilities=["authz.verify"]),
+    )
+    assert active.status_code == 422
+    assert "explicit active-capability elevation" in active.text
+
+    self_asserted = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            name="Self asserted",
+            allowed_capabilities=["authz.verify"],
+            allow_active_capabilities=True,
+        ),
+    )
+    assert self_asserted.status_code == 400
+    assert "Approval receipt is required" in self_asserted.text
+
+    elevated = http.post(
+        "/credential-profiles",
+        json=_create_payload(
+            name="Elevated",
+            allowed_capabilities=["authz.verify"],
+            allow_active_capabilities=True,
+            approval_receipt_id="11111111-1111-4111-8111-111111111111",
+        ),
+    )
+    assert elevated.status_code == 201, elevated.text
 
 def test_creation_is_fail_closed_for_unknown_target_and_unsafe_material(client):
     http, pool = client
@@ -328,6 +399,9 @@ def test_migrated_device_profile_rotation_stays_synchronized_with_legacy_executi
             principal_slot="ssh",
             username="root",
             secret="original-password",
+            allowed_capabilities=["device.ssh.propose"],
+            allow_active_capabilities=True,
+            approval_receipt_id="11111111-1111-4111-8111-111111111111",
         ),
     )
     assert created.status_code == 201, created.text

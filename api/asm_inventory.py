@@ -114,6 +114,73 @@ ATTEMPT_TERMINAL_STATUSES = (
 )
 ATTEMPT_CLAIM_BLOCKING_STATUSES = ATTEMPT_TERMINAL_STATUSES + ("leased",)
 
+_RESPONSE_OBSERVED_SOURCES = frozenset({"scan_telemetry"})
+_SCANNER_DISCOVERED_SOURCES = frozenset({"scan", "coverage_discovery", "asm", "recon"})
+_DECLARED_SOURCES = frozenset({"openapi", "har", "manual", "postman"})
+
+
+def endpoint_inventory_semantics(row: Any) -> dict[str, Any]:
+    """Explain what one inventory row proves without turning it into a score.
+
+    Most rows are work candidates harvested from discovery, not confirmed server
+    routes.  Keep provenance, test execution, and reachability independent so API
+    clients and the UI cannot mistake a large wordlist-derived inventory for a
+    large application surface.
+    """
+    item = dict(row or {})
+    source = str(item.get("source") or "unknown").strip().lower()
+    if source in _RESPONSE_OBSERVED_SOURCES:
+        provenance = "response_observed"
+        provenance_label = "Response observed"
+        provenance_explanation = "Persisted from response-backed scan telemetry."
+    elif source in _DECLARED_SOURCES:
+        provenance = "declared_or_imported"
+        provenance_label = "Declared / imported"
+        provenance_explanation = "Declared by an imported specification or operator; reachability is separate."
+    elif source in _SCANNER_DISCOVERED_SOURCES:
+        provenance = "scanner_discovered"
+        provenance_label = "Scanner candidate"
+        provenance_explanation = "Harvested by scanner discovery; it is a test candidate, not proof of a live route."
+    else:
+        provenance = "unknown"
+        provenance_label = "Unknown source"
+        provenance_explanation = "The inventory source does not establish whether this route exists."
+
+    test_status = str(item.get("test_status") or "untested").strip().lower()
+    last_reachability_at = item.get("last_reachability_at")
+    unreachable_streak = max(0, int(item.get("unreachable_streak") or 0))
+    last_http_status = item.get("last_http_status")
+    if test_status == "gone":
+        reachability = "retired_unreachable"
+        reachability_label = "Retired"
+        reachability_explanation = "Repeated hard-404 or soft-404 controls retired this candidate."
+    elif last_reachability_at is None:
+        reachability = "not_checked"
+        reachability_label = "Not checked"
+        reachability_explanation = "No dedicated reachability control has been recorded."
+    elif unreachable_streak > 0:
+        reachability = "unreachable_observed"
+        reachability_label = "Unreachable observed"
+        reachability_explanation = "A hard-404 or soft-404 control matched; retirement requires confirmation."
+    elif last_http_status is not None:
+        reachability = "reachable_observed"
+        reachability_label = "Reachable response"
+        reachability_explanation = "A dedicated reachability probe received a non-not-found response."
+    else:
+        reachability = "inconclusive"
+        reachability_label = "Inconclusive"
+        reachability_explanation = "The last reachability attempt did not establish existence or absence."
+
+    return {
+        **item,
+        "provenance_kind": provenance,
+        "provenance_label": provenance_label,
+        "provenance_explanation": provenance_explanation,
+        "reachability_state": reachability,
+        "reachability_label": reachability_label,
+        "reachability_explanation": reachability_explanation,
+    }
+
 
 API_ENDPOINT_FILTER_SQL = """(
     {alias}.path = '/api'
@@ -1247,6 +1314,18 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         """
         SELECT
             count(*) AS total,
+            count(DISTINCT path) FILTER (WHERE test_status <> 'gone') AS canonical_routes,
+            count(DISTINCT path) FILTER (
+                WHERE test_status <> 'gone' AND last_tested_at IS NOT NULL
+            ) AS canonical_routes_ever_completed,
+            count(*) FILTER (
+                WHERE test_status <> 'gone' AND last_tested_at IS NOT NULL
+            ) AS variants_ever_completed,
+            count(*) FILTER (
+                WHERE test_status <> 'gone'
+                  AND LOWER(COALESCE(last_verdict, '')) IN ('verified','exploited','proven')
+            ) AS proof_bearing_variants,
+            COALESCE(sum(attempt_count) FILTER (WHERE test_status <> 'gone'), 0) AS execution_attempts,
             count(*) FILTER (WHERE test_status = 'tested') AS tested,
             count(*) FILTER (WHERE test_status = 'untested') AS untested,
             count(*) FILTER (WHERE test_status = 'in_progress') AS in_progress,
@@ -1254,7 +1333,8 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
             count(*) FILTER (WHERE test_status = 'gone') AS gone,
             count(*) FILTER (WHERE test_status = 'in_progress' AND lease_expires_at < NOW()) AS expired_leases,
             count(*) FILTER (WHERE last_attempt_status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
-            count(*) FILTER (WHERE last_attempt_status IN ('partial', 'partial_timeout', 'partial_findings', 'lease_expired')) AS partial
+            count(*) FILTER (WHERE last_attempt_status IN ('partial', 'partial_timeout', 'partial_findings', 'lease_expired')) AS partial,
+            clock_timestamp() AS snapshot_at
         FROM target_endpoints WHERE target_id = $1
         """,
         tid,
@@ -1316,6 +1396,48 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
     coverage_reconciles = (testable == 0 and tested == 0) or (
         testable > 0 and abs(coverage - round(tested / testable, 3)) <= 0.001
     )
+    row_get = row.get if hasattr(row, "get") else lambda key, default=None: row[key] if key in row else default
+    canonical_routes = int(row_get("canonical_routes", 0) or 0)
+    canonical_routes_ever_completed = int(row_get("canonical_routes_ever_completed", 0) or 0)
+    variants_ever_completed = int(row_get("variants_ever_completed", 0) or 0)
+    proof_bearing_variants = int(row_get("proof_bearing_variants", 0) or 0)
+    execution_attempts = int(row_get("execution_attempts", 0) or 0)
+    snapshot_at = row_get("snapshot_at")
+    metric_contract = {
+        "schema_version": "asm_coverage_metrics/v2",
+        "snapshot_at": snapshot_at.isoformat() if hasattr(snapshot_at, "isoformat") else snapshot_at,
+        "inventory": {
+            "canonical_routes": canonical_routes,
+            "route_variants": testable,
+            "retired_variants": int(row["gone"] or 0),
+        },
+        "examination": {
+            "canonical_routes_ever_completed": canonical_routes_ever_completed,
+            "variants_ever_completed": variants_ever_completed,
+            "current_fresh_variants": status_tested,
+            "stale_variants": int(row["stale"] or 0),
+            "never_attempted_variants": int(row["untested"] or 0),
+        },
+        "execution": {
+            "attempts": execution_attempts,
+            "latest_attempted_variants": attempted,
+            "latest_completed_variants": attempt_completed,
+            "latest_partial_variants": attempt_partial,
+            "latest_auth_blocked_variants": attempt_auth_blocked,
+            "latest_rate_limited_variants": attempt_rate_limited,
+            "latest_error_variants": attempt_error,
+        },
+        "proof": {
+            "proof_bearing_variants": proof_bearing_variants,
+        },
+        "definitions": {
+            "canonical_route": "one normalized application path; HTTP method, auth state, and parameter shape excluded",
+            "route_variant": "one method + normalized path + auth state + parameter-location/shape combination",
+            "attempt": "one durable scanner execution ledger row; retries and family checks are separate attempts",
+            "completed_variant": "a route variant with at least one completed examination; this historical count decreases only when the variant is explicitly retired",
+            "proof_bearing_variant": "a route variant whose latest deterministic verdict is verified, exploited, or proven",
+        },
+    }
     return {
         "total": total,
         "testable": testable,
@@ -1335,6 +1457,7 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         "coverage": coverage,
         "coverage_basis": "attempt_ledger" if use_attempts else "endpoint_status",
         "coverage_reconciles": coverage_reconciles,
+        "metric_contract": metric_contract,
         # Detail breakdowns (kept behind clearly-labeled keys so the headline shows
         # one number; the alternate-basis untested counts live here, not top-level).
         "detail": {
@@ -2009,6 +2132,9 @@ DEFAULT_ASM_CONFIG: dict[str, Any] = {
     "window_end_hour": None,               # int 0-23 UTC (exclusive); wraps midnight if < start
     "window_days": None,                   # list[int] 0=Mon..6=Sun, None = all days
     "max_requests_per_hour_per_domain": _DEFAULT_DOMAIN_RATE_PER_HOUR, # per-root-domain rate cap; 0 = unlimited (set via ASM_DEFAULT_DOMAIN_RATE_PER_HOUR)
+    # Opaque, expiring target-bound authority for active dispatcher batches.
+    # Revalidated immediately before every dispatch; never grants recon authority.
+    "approval_receipt_id": None,
 }
 
 _INT_BOUNDS = {
@@ -2058,6 +2184,10 @@ def merge_asm_config(config: Any) -> dict[str, Any]:
             cfg["window_days"] = sorted(valid) or None
         else:
             cfg["window_days"] = None
+    if "approval_receipt_id" in config:
+        cfg["approval_receipt_id"] = (
+            str(config.get("approval_receipt_id") or "").strip() or None
+        )
     return cfg
 
 

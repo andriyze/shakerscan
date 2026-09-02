@@ -128,6 +128,63 @@ def test_build_ai_inventory_skips_unsupported_ai_candidate_methods():
     assert inventory["candidates"] == []
 
 
+def test_path_only_search_and_chat_urls_are_speculative_leads_without_invented_contracts():
+    inventory = ai_assurance.build_ai_inventory(
+        targets=[], ai_targets=[],
+        scans=[{
+            "id": "scan-web", "target_url": "https://shop.example.com", "run_kind": "web_dast",
+            "result": {"discovery": {"browser_api_endpoints": [
+                {"method": "GET", "url": "/search", "params": ["q"]},
+                {"method": "POST", "url": "/rest/chat", "body_params": []},
+            ]}},
+        }],
+        findings=[],
+    )
+
+    assert inventory["candidates"] == []
+    assert inventory["summary"]["lead_count"] == 2
+    assert all(lead["qualification"] == "speculative_lead" for lead in inventory["leads"])
+    assert all(lead["suggested_target"] is None for lead in inventory["leads"])
+
+
+def test_corroborated_candidate_uses_observed_request_fields_and_no_invented_response_path():
+    inventory = ai_assurance.build_ai_inventory(
+        targets=[], ai_targets=[],
+        scans=[{
+            "id": "scan-web", "target_url": "https://app.example.com", "run_kind": "web_dast",
+            "result": {"discovery": {"openapi": {"endpoints": [{
+                "method": "POST", "path": "/v1/chat/completions", "body_params": ["messages", "model"],
+            }]}}},
+        }],
+        findings=[],
+    )
+
+    candidate = inventory["candidates"][0]
+    assert candidate["qualification"] == "corroborated_candidate"
+    assert candidate["suggested_target"]["request_template"] == {
+        "messages": [{"role": "user", "content": "{{prompt}}"}],
+        "model": "<observed-model-id>",
+    }
+    assert candidate["suggested_target"]["response_path"] is None
+
+
+def test_ai_inventory_quarantines_explicit_fixture_scans():
+    inventory = ai_assurance.build_ai_inventory(
+        targets=[], ai_targets=[],
+        scans=[{
+            "id": "scan-fixture", "target_url": "https://fixture.example.com", "run_kind": "calibration_web",
+            "result": {"discovery": {"openapi": {"endpoints": [{
+                "method": "POST", "path": "/chat/completions", "body_params": ["messages", "model"],
+            }]}}},
+        }],
+        findings=[],
+    )
+
+    assert inventory["candidates"] == []
+    assert inventory["leads"] == []
+    assert inventory["summary"]["quarantined_scan_count"] == 1
+
+
 def test_mcp_live_readiness_probe_uses_metadata_and_attestations(monkeypatch):
     captured = []
 

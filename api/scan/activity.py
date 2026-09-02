@@ -112,6 +112,15 @@ def scan_action_diagnostic_line(
     )
     reason = result.reason_code.value if result.reason_code is not None else "none"
     error_class = _diagnostic_error_class(public_receipt.get("errors"))
+    if (
+        result.status.value == "skipped"
+        and execution_started is False
+        and reason in {"insufficient_plan_budget", "not_applicable"}
+    ):
+        # Allocation/policy skips never launched an adapter. A retained internal
+        # diagnostic may explain the scheduler decision, but it is not an adapter
+        # error and must not be rendered as one in the operator log.
+        error_class = "none"
     label = _action_label(action.action_id)
     if not enforcement and not wire:
         if result.status.value == "success":

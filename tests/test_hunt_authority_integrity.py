@@ -63,7 +63,11 @@ def test_runtime_uses_validated_scope_and_independent_network_permission():
 
     assert "approval_context = await _validate_approval_receipt_for_action" in native_api
     assert "validated_approval_id, validated_scope_id = bind_validated_receipts" in native_api
-    assert '"scope_receipt_id": validated_scope_id' in native_api
+    # The persisted policy row is projected by HuntStartContract.persisted_policy, so the
+    # start handler proves it uses the validated scope by what it passes in. The property
+    # is unchanged: the client-submitted scope id never reaches the row.
+    assert "scope_receipt_id=validated_scope_id" in native_api
+    assert '"scope_receipt_id": scope_receipt_id' in native_api
     assert 'normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id' in native_api
     assert 'network_discovery=bool(policy.get("network_discovery"))' in native_api
     assert 'network_discovery=bool(policy.get("active_testing"))' not in native_api

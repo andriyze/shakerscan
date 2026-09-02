@@ -15,7 +15,11 @@ RUN set -eux; \
         arm64) docker_arch=aarch64; expected="$DOCKER_CLI_SHA256_AARCH64" ;; \
         *) echo "unsupported architecture for the Docker CLI" >&2; exit 1 ;; \
     esac; \
-    curl -fsSLo /tmp/docker.tgz \
+    # The Docker CDN can close a long ARM64 transfer early (curl exit 18).
+    # Retry transport failures only; the pinned checksum below still fails closed
+    # if any completed response is truncated or serves different bytes.
+    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 \
+        --max-time 300 -fsSLo /tmp/docker.tgz \
         "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
     echo "${expected}  /tmp/docker.tgz" | sha256sum -c -; \
     tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \

@@ -12,7 +12,11 @@ from typing import Any, Mapping, Sequence
 
 from .credential_resolver import CredentialResolutionError, ResolvedCredential
 from .credential_store import CredentialProfileMetadata
-from .credentials import HTTP_CREDENTIAL_KINDS, IMMEDIATE_HTTP_HEADER_KINDS
+from .credentials import (
+    HTTP_CREDENTIAL_KINDS,
+    IDENTITY_PAIR_KINDS,
+    IMMEDIATE_HTTP_HEADER_KINDS,
+)
 
 
 SCAN_CREDENTIAL_CAPABILITY = "scan.execute"
@@ -65,10 +69,7 @@ def scan_credential_resolution_capability(
         str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
     ))
     if not allowed:
-        return (
-            "auth.session.establish"
-            if auth_kind in _INTERACTIVE_HTTP_KINDS else "http.request"
-        )
+        return None
     if SCAN_CREDENTIAL_CAPABILITY in allowed:
         return SCAN_CREDENTIAL_CAPABILITY
     if auth_kind in _INTERACTIVE_HTTP_KINDS:
@@ -88,8 +89,7 @@ def scan_credential_allows_capability(
         str(item or "").strip() for item in allowed_capabilities if str(item or "").strip()
     }
     return (
-        not allowed
-        or SCAN_CREDENTIAL_CAPABILITY in allowed
+        SCAN_CREDENTIAL_CAPABILITY in allowed
         or str(capability_name or "").strip() in allowed
     )
 
@@ -301,7 +301,7 @@ def resolve_scan_http_principal(
         if not lane_matches:
             continue
         lane_refs.append(item)
-        if capability_name and not scan_credential_allows_capability(
+        if not capability_name or not scan_credential_allows_capability(
             item.get("allowed_capabilities") or (), capability_name,
         ):
             continue
@@ -317,7 +317,7 @@ def resolve_scan_http_principal(
                 if str(value)
             ),
         })
-    capability_denied = bool(capability_name and lane_refs and not refs)
+    capability_denied = bool(lane_refs and not refs)
     if capability_denied:
         safe_headers = {}
     binding = {
@@ -425,11 +425,16 @@ def resolve_scan_interactive_credential(
             "Scan interactive credential selects multiple session flows"
         )
     selected = candidates[0]
-    if not selected["username"] and selected["auth_kind"] in {
-        "form_login", "oauth_password",
-    }:
-        raise ScanCredentialError("Scan interactive credential username is missing")
-    if not selected["secret"] or not selected["endpoint_url"]:
+    if not selected["endpoint_url"]:
+        raise ScanCredentialError("Scan interactive credential material is incomplete")
+    if selected["auth_kind"] in IDENTITY_PAIR_KINDS:
+        # Mirrors the profile and session contracts: either half of the pair is a complete
+        # identity, and this lane must not be stricter than the store that fed it.
+        if not selected["username"] and not selected["secret"]:
+            raise ScanCredentialError(
+                "Scan interactive credential requires a username, a secret, or both"
+            )
+    elif not selected["secret"]:
         raise ScanCredentialError("Scan interactive credential material is incomplete")
     if (
         selected["auth_kind"] == "oauth_client_credentials"
@@ -452,7 +457,7 @@ def resolve_scan_interactive_credential(
         if not lane_matches:
             continue
         lane_refs.append(item)
-        if capability_name and not scan_credential_allows_capability(
+        if not capability_name or not scan_credential_allows_capability(
             item.get("allowed_capabilities") or (), capability_name,
         ):
             continue
@@ -468,7 +473,7 @@ def resolve_scan_interactive_credential(
                 if str(value)
             ),
         })
-    if capability_name and lane_refs and not refs:
+    if lane_refs and not refs:
         return None
     if len(refs) > 1:
         raise ScanCredentialError(
@@ -522,7 +527,11 @@ def resolve_scan_interactive_credential(
         _username=(
             str(selected["username"]) if selected["username"] is not None else None
         ),
-        _secret=str(selected["secret"]),
+        # Preserve an absent half of an admitted username/secret identity as empty.  str(None)
+        # would send the literal text "None" to a real login form.
+        _secret=(
+            str(selected["secret"]) if selected["secret"] is not None else ""
+        ),
         _client_id=(
             str(selected["client_id"]) if selected["client_id"] is not None else None
         ),

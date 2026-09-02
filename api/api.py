@@ -609,6 +609,7 @@ try:
         ScanStageCheckpointError,
     )
     from scan.parallel_compiler import summarize_parallel_action_coverage
+    from scan.scoring import project_current_score_policy
     from scan.surface_manifest import build_scan_surface_manifest
     from scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -734,6 +735,7 @@ except ModuleNotFoundError:
         ScanStageCheckpointError,
     )
     from api.scan.parallel_compiler import summarize_parallel_action_coverage
+    from api.scan.scoring import project_current_score_policy
     from api.scan.surface_manifest import build_scan_surface_manifest
     from api.scan.private_inputs import (
         BROKER_PRIVATE_SCAN_INPUT_SCHEMA,
@@ -812,6 +814,11 @@ try:
     from capabilities.http import execute_bound_http_request
     from capabilities.tls import inspect_tls_origin
     from hunt.contracts import allowed_capability_names
+    from hunt import skills as _hunt_skills
+    from runtime.http_archive_router import (
+        configure_http_archive_router as _configure_http_archive_router,
+        router as _http_archive_router,
+    )
     from hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
@@ -866,6 +873,11 @@ except ModuleNotFoundError:
     from api.capabilities.http import execute_bound_http_request
     from api.capabilities.tls import inspect_tls_origin
     from api.hunt.contracts import allowed_capability_names
+    from api.hunt import skills as _hunt_skills
+    from api.runtime.http_archive_router import (
+        configure_http_archive_router as _configure_http_archive_router,
+        router as _http_archive_router,
+    )
     from api.hunt.start_contract import (
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
@@ -1091,6 +1103,8 @@ except ModuleNotFoundError:
 
 try:
     from action_scope import (
+        approval_context_mismatch as _approval_context_mismatch,
+        approval_context_value_matches as _approval_context_value_matches,
         evaluate_runtime_destination_scope,
         evaluate_scope,
         receipt_to_dict,
@@ -1106,6 +1120,8 @@ except ModuleNotFoundError as exc:
     if exc.name not in {"command_arsenal", "action_scope"}:
         raise
     from api.action_scope import (
+        approval_context_mismatch as _approval_context_mismatch,
+        approval_context_value_matches as _approval_context_value_matches,
         evaluate_runtime_destination_scope,
         evaluate_scope,
         receipt_to_dict,
@@ -1841,82 +1857,6 @@ async def _require_approval_receipt_if_policy_enabled(
 
 
 
-def _scan_option_was_explicit(options: Any, field: str) -> bool:
-    return field in getattr(options, "model_fields_set", set())
-
-
-def _custom_endpoint_count(options_payload: dict[str, Any]) -> int:
-    endpoints = options_payload.get("custom_endpoints")
-    if not isinstance(endpoints, list):
-        return 0
-    seen: set[str] = set()
-    for endpoint in endpoints:
-        if not isinstance(endpoint, str):
-            continue
-        value = endpoint.strip()
-        if value:
-            seen.add(value)
-    return len(seen)
-
-
-def _auto_shard_eligibility(
-    active_testing: bool, options_payload: dict[str, Any],
-) -> tuple[bool, str]:
-    endpoint_count = _custom_endpoint_count(options_payload)
-    if endpoint_count >= 2:
-        return True, f"{endpoint_count} explicit endpoints can be split by scope"
-    # A focused check_family scan (sqli/xss/bola/auth) is a deep single-family
-    # pass. Auto-sharding it into broad `coverage` dilutes that family's budget
-    # and adds the slow recon+merge path (observed: a focused SQLi scan hung in
-    # coverage and found nothing, while the direct pass found the login SQLi).
-    # Focused scans therefore run DIRECT; only broad scans fan out.
-    family = check_registry.normalize_check_family(_scan_check_family_value(options_payload))
-    if family and family != "all":
-        return False, f"focused {family} scan runs direct (auto-sharding would dilute the family pass)"
-    if active_testing:
-        return True, "active Scan can fan out endpoint coverage across workers"
-    return False, "passive Scan has no endpoint list and no active families to shard"
-
-
-def _resolve_auto_parallel_strategy(
-    strategy: Any,
-    active_testing: bool,
-    options_payload: dict[str, Any],
-) -> str:
-    """Resolve auto-sharding to the concrete strategy we will store/execute."""
-    normalized = _normalize_parallel_strategy(strategy, default="auto")
-    # A focused check_family scan must never run the broad `coverage` strategy:
-    # that fans out broad/sqli/xss lanes and dilutes (or skips) the requested
-    # family. `coverage_family` with a single requested family runs ONLY that
-    # family across endpoint slices, so it parallelizes without diluting. This
-    # holds for both explicit `coverage` and the auto path below.
-    focused = bool(
-        (lambda fam: fam and fam != "all")(
-            check_registry.normalize_check_family(_scan_check_family_value(options_payload))
-        )
-    )
-    if focused and normalized == "coverage":
-        return "coverage_family"
-    if normalized != "auto":
-        return normalized
-    endpoint_count = _custom_endpoint_count(options_payload)
-    if endpoint_count >= 2:
-        return "scope"
-    # Authenticated active scans: prefer the additive auth split so a primary
-    # credential ADDS an authenticated pass on top of the anonymous baseline
-    # instead of REPLACING it (which silently drops anonymous-only findings like
-    # unauthenticated SQLi). Each auth_split shard is a full smart scan — no
-    # family/scope fragmentation of the global+browser checks — and the authed
-    # shard keeps user1+user2 so cross-user BOLA still runs. Focused-family scans
-    # keep coverage_family (they need per-family endpoint slicing).
-    has_primary_auth = any(options_payload.get(k) for k in parallel_scan._PRIMARY_AUTH_KEYS)
-    if has_primary_auth and not focused and active_testing:
-        return "auth_split"
-    if active_testing:
-        return "coverage_family" if focused else "coverage"
-    return "family"
-
-
 def _build_canonical_scan_options_payload(
     options: Any,
     contract: ResolvedScanContract,
@@ -1968,18 +1908,32 @@ def _apply_auto_sharding_policy(
     options: Any,
     options_payload: dict[str, Any],
     active_testing: bool,
+    max_workers: int | None = None,
 ) -> tuple[bool, int | None]:
     """Resolve whether this scan should become a parallel parent.
 
     Explicit per-scan intent wins. If `parallel` is omitted, the global
     scan-execution setting can turn eligible scans into parent scans.
+
+    A resolved ceiling of one worker is authority, not a hint: advanced
+    force_single_worker lowers max_workers to 1, and a parent that fans out to
+    a single worker is not what the caller asked for. Previously only the
+    deprecated `options.parallel` could prevent fan-out, so the canonical
+    control was accepted and silently ignored. The refusal is recorded rather
+    than applied quietly, so the resolved scan says why it did not shard.
     """
-    if _scan_option_was_explicit(options, "parallel"):
+    if max_workers is not None and int(max_workers) <= 1:
+        options_payload["parallel"] = False
+        options_payload["auto_sharding_reason"] = (
+            "auto-sharding skipped: the resolved budget allows one worker"
+        )
+        return False, None
+    if sharding_policy.scan_option_was_explicit(options, "parallel"):
         if options.parallel:
             options_payload["parallel"] = True
             if not options_payload.get("shards"):
                 options_payload["shards"] = "auto"
-            options_payload["shard_strategy"] = _resolve_auto_parallel_strategy(
+            options_payload["shard_strategy"] = sharding_policy.resolve_auto_parallel_strategy(
                 options_payload.get("shard_strategy"),
                 active_testing,
                 options_payload,
@@ -1995,7 +1949,7 @@ def _apply_auto_sharding_policy(
         options_payload["parallel"] = False
         return False, None
 
-    eligible, reason = _auto_shard_eligibility(active_testing, options_payload)
+    eligible, reason = sharding_policy.auto_shard_eligibility(active_testing, options_payload)
     if not eligible:
         options_payload["parallel"] = False
         return False, None
@@ -2010,13 +1964,13 @@ def _apply_auto_sharding_policy(
         )
         return False, worker_count
 
-    strategy = _resolve_auto_parallel_strategy(
+    strategy = sharding_policy.resolve_auto_parallel_strategy(
         settings.get("auto_sharding_strategy"),
         active_testing,
         options_payload,
     )
     max_shards = _normalize_auto_shard_count(settings.get("auto_sharding_max_shards"), default=4)
-    if _custom_endpoint_count(options_payload) < 2 and active_testing:
+    if sharding_policy.custom_endpoint_count(options_payload) < 2 and active_testing:
         if strategy == "family":
             max_shards = min(max_shards, len(parallel_scan.FAMILY_SHARD_LABELS))
     requested_shards: Any = "auto"
@@ -2049,14 +2003,6 @@ def _has_second_user_auth_context(options: dict[str, Any]) -> bool:
 
 
 
-def _scan_check_family_value(options_payload: dict[str, Any]) -> Any:
-    return (
-        options_payload.get("check_family")
-        or options_payload.get("asm_check_family")
-        or options_payload.get("coverage_attempt_family")
-    )
-
-
 def _apply_scan_check_family_policy(
     options_payload: dict[str, Any],
     *,
@@ -2066,7 +2012,7 @@ def _apply_scan_check_family_policy(
     try:
         opts, family = check_registry.apply_scan_focus(
             options_payload,
-            _scan_check_family_value(options_payload),
+            sharding_policy.scan_check_family_value(options_payload),
         )
         if enforce_preconditions:
             check_registry.enforce_family_preconditions(
@@ -2252,7 +2198,7 @@ def _normalize_scan_result_for_api(scan_result: Any) -> Any:
             coverage_gaps["issues"] = issues
             coverage_gaps["count"] = len(issues)
 
-    return scan_result
+    return project_current_score_policy(scan_result)
 
 
 def synthesize_degraded_result(
@@ -2296,6 +2242,7 @@ def synthesize_degraded_result(
         "scan_type": scan_type,
         "findings": findings,
         "result": {
+            "score_policy": "degraded_terminal/v1",
             "score": score,
             "grade": grade,
             "grade_reliable": False,
@@ -2508,10 +2455,20 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
             # Look for job with this scan_id
             job_keys = r.keys("job:*")
             heartbeat_found = False
+            delivery_reclaimed = False
+            delivery_attempts = 0
 
             for key in job_keys:
                 job_data = _decode_redis_hash(r.hgetall(key))
                 if job_data.get('scan_id') == scan_id or _redis_text(key).endswith(scan_id):
+                    try:
+                        delivery_attempts = int(job_data.get('queue_delivery_attempts') or 0)
+                    except (TypeError, ValueError):
+                        delivery_attempts = 0
+                    delivery_reclaimed = (
+                        str(job_data.get('queue_reclaimed') or '').strip().lower() == 'true'
+                        or delivery_attempts >= 2
+                    )
                     heartbeat_str = job_data.get('heartbeat')
                     if heartbeat_str:
                         try:
@@ -2521,11 +2478,18 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
 
                             if heartbeat_age > heartbeat_timeout_minutes:
                                 is_stale = True
-                                reason = (
-                                    f"No heartbeat for {heartbeat_age:.1f} minutes "
-                                    f"(timeout {heartbeat_timeout_minutes} min, "
-                                    f"phase={current_phase or 'unknown'}, progress={progress})"
-                                )
+                                if delivery_reclaimed:
+                                    reason = (
+                                        "Worker execution stopped after its queue lease was reclaimed "
+                                        f"(delivery attempt {delivery_attempts}); automatic replay was withheld "
+                                        "to avoid duplicate requests"
+                                    )
+                                else:
+                                    reason = (
+                                        f"Worker stopped heartbeating for {heartbeat_age:.1f} minutes "
+                                        f"(timeout {heartbeat_timeout_minutes} min, "
+                                        f"last phase={current_phase or 'unknown'}, progress={progress})"
+                                    )
                         except (ValueError, TypeError):
                             pass
                     break
@@ -2536,8 +2500,8 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                 if scan_age > heartbeat_timeout_minutes:
                     is_stale = True
                     reason = (
-                        f"No heartbeat found, scan started {scan_age:.1f} minutes ago "
-                        f"(timeout {heartbeat_timeout_minutes} min)"
+                        "The scan was claimed but no worker heartbeat was recorded; "
+                        f"claim age {scan_age:.1f} minutes (timeout {heartbeat_timeout_minutes} min)"
                     )
 
             # Check 2: Max duration exceeded (safety net)
@@ -3137,13 +3101,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
     r = get_redis()
     now = utc_now()
 
-    async with pool.acquire() as conn:
-        due_schedules = await conn.fetch("""
-            SELECT s.*, t.url as target_url
-            FROM schedules s
-            JOIN targets t ON s.target_id = t.id
-            WHERE s.is_active = true AND s.next_run_at <= $1
-        """, now)
+    due_schedules = await schedule_ops.fetch_due_schedules(pool, now=now)
 
     for schedule in due_schedules:
         schedule_id = schedule['id']
@@ -3153,19 +3111,33 @@ async def run_due_schedules(pool: asyncpg.Pool):
         try:
             schedule_kind = _schedule_kind_from_row(schedule)
         except ValueError as exc:
-            print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+            async with pool.acquire() as conn:
+                await schedule_ops.deactivate_schedule(conn, schedule_id=schedule_id, reason=str(exc))
             continue
         if schedule_kind == "evidence_retention_sweep":
             async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE schedules SET is_active = false, updated_at = NOW() WHERE id = $1",
-                    schedule_id,
+                await schedule_ops.deactivate_schedule(
+                    conn,
+                    schedule_id=schedule_id,
+                    reason=(
+                        "legacy evidence retention schedule; retention now requires "
+                        "an interactive exact-preview approval"
+                    ),
+                    clear_next_run=False,
                 )
-            print(
-                f"[scheduler] Disabled legacy evidence retention schedule {str(schedule_id)[:8]}; "
-                "retention now requires an interactive exact-preview approval",
-                flush=True,
+            continue
+
+        # Re-resolve immediately before dispatch. A saved hostname is not durable
+        # destination authority: DNS may have changed since creation or update.
+        try:
+            await validate_schedule_target_destination(str(target_url))
+        except ScheduleTargetSafetyError as exc:
+            await handle_schedule_target_failure(
+                pool, schedule_id=schedule_id, error=exc, now=now,
             )
+            continue
+
+        if not await schedule_ops.claim_due_schedule(pool, schedule_id=schedule_id, now=now):
             continue
 
         scan_options = dict(_schedule_options_dict(schedule['scan_options']))
@@ -3187,25 +3159,13 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             "action": "none",
                             "reason": "target already has an active scan",
                             "blocked_by": "active_scan",
-                            "next_eligible_at": None,
-                            "daily_cap_remaining": None,
-                            "rate_cap_remaining": None,
-                            "claimable": None,
-                            "tested_today": None,
                         },
                         source="schedule",
                     )
-                # Recalculate next_run_at anyway so we don't keep retrying every 60s
-                next_run = calculate_next_run(
-                    schedule['frequency'],
-                    schedule['day_of_week'],
-                    schedule['time_of_day'] or '02:00',
-                    schedule['timezone'] or 'UTC',
-                    schedule['jitter_minutes'] or 0
+                # Advance anyway so the claim lease does not retry every tick.
+                await schedule_ops.advance_schedule_cadence(
+                    conn, schedule, schedule_id=schedule_id,
                 )
-                await conn.execute("""
-                    UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
-                """, next_run, schedule_id)
                 continue
 
             # Create scan record + queue job (reuse scan submission logic)
@@ -3220,7 +3180,31 @@ async def run_due_schedules(pool: asyncpg.Pool):
             # "keep this target covered" cadence, spread across the schedule. Legacy
             # rows that still carry scan_options.kind are normalized before this point.
             if schedule_kind == 'asm_improve':
-                asm_opts = {k: v for k, v in scan_options.items() if k != 'kind'}
+                try:
+                    asm_opts = _resolve_asm_schedule_options(scan_options)
+                except (TypeError, ValueError) as exc:
+                    await schedule_ops.deactivate_schedule(
+                        conn, schedule_id=schedule_id, reason=f"invalid ASM options: {exc}",
+                    )
+                    continue
+                try:
+                    # Same authority the create/update path enforces, so a stored
+                    # schedule cannot dispatch active ASM work on weaker terms.
+                    approval_context = await schedule_ops.validate_schedule_asm_approval(
+                        conn,
+                        target_id=target_id,
+                        target_url=str(target_url),
+                        scan_options=asm_opts,
+                    )
+                except HTTPException as exc:
+                    await schedule_ops.deactivate_schedule(
+                        conn,
+                        schedule_id=schedule_id,
+                        reason=f"unauthorized ASM schedule: {exc.detail}",
+                    )
+                    continue
+                if approval_context:
+                    asm_opts.update(approval_context)
                 _asm_ok = False
                 try:
                     cfg_row = await conn.fetchrow(
@@ -3264,12 +3248,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                         {
                             "action": _asm_kind,
                             "reason": f"scheduled ASM {_asm_kind} queued",
-                            "blocked_by": None,
-                            "next_eligible_at": None,
-                            "daily_cap_remaining": None,
-                            "rate_cap_remaining": None,
                             "claimable": claimable,
-                            "tested_today": None,
                         },
                         source="schedule",
                         active_scan_ids=[str(enq.get("scan_id"))] if enq.get("scan_id") else None,
@@ -3283,31 +3262,21 @@ async def run_due_schedules(pool: asyncpg.Pool):
                             "action": "none",
                             "reason": f"scheduled ASM improve failed: {exc}",
                             "blocked_by": "enqueue_failed",
-                            "next_eligible_at": None,
-                            "daily_cap_remaining": None,
-                            "rate_cap_remaining": None,
-                            "claimable": None,
-                            "tested_today": None,
                         },
                         source="schedule",
                     )
                 if _asm_ok:
                     # Wave queued: advance to the normal cadence and stamp last_run_at.
-                    next_run = calculate_next_run(
-                        schedule["frequency"], schedule["day_of_week"],
-                        schedule["time_of_day"] or "02:00", schedule["timezone"] or "UTC",
-                        schedule["jitter_minutes"] or 0)
-                    await conn.execute(
-                        "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                        next_run, schedule_id)
+                    await schedule_ops.advance_schedule_cadence(
+                        conn, schedule, schedule_id=schedule_id, last_run_at=now,
+                    )
                 else:
-                    # Enqueue failed (no silent skip): retry on the next checker tick
-                    # via a short backoff, and do NOT stamp last_run_at so the missed
-                    # wave is visible and re-attempted instead of waiting a full cycle.
-                    retry_at = now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES)
-                    await conn.execute(
-                        "UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                        retry_at, schedule_id)
+                    # Enqueue failed (no silent skip): retry on the next checker tick.
+                    await schedule_ops.retry_schedule_at(
+                        conn,
+                        schedule_id=schedule_id,
+                        retry_at=now + timedelta(minutes=ASM_SCHEDULE_RETRY_MINUTES),
+                    )
                 continue
 
             # Normal schedules are canonical V2 admission inputs. Startup
@@ -3318,47 +3287,29 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 LEGACY_SCAN_WRITE_FIELDS.intersection(scan_options)
             )
             if scan_type != "scan" or legacy_schedule_fields:
-                print(
-                    f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
-                    "legacy Scan authority was not migrated",
-                    flush=True,
-                )
-                await conn.execute(
-                    "UPDATE schedules SET is_active=false, updated_at=NOW() WHERE id=$1",
-                    schedule_id,
+                await schedule_ops.deactivate_schedule(
+                    conn,
+                    schedule_id=schedule_id,
+                    reason="legacy Scan authority was not migrated",
                 )
                 continue
             try:
-                scan_contract = resolve_scan_contract(
-                    budget_profile=scan_options.get("budget_profile"),
-                    policy=scan_options.pop("policy", None),
-                    advanced=scan_options.pop("advanced", None),
-                    approval_receipt_id=scan_options.get("approval_receipt_id"),
+                scan_contract, scan_options_model = (
+                    _resolve_normal_schedule_options(scan_options)
                 )
-            except ValueError as exc:
-                print(f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: {exc}", flush=True)
+                scan_options["budget_profile"] = scan_contract.budget_profile
+                scan_options["active"] = scan_contract.policy.active_testing
+                scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
+            except (TypeError, ValueError, ValidationError) as exc:
+                await schedule_ops.deactivate_schedule(conn, schedule_id=schedule_id, reason=str(exc))
                 continue
-            scan_options["budget_profile"] = scan_contract.budget_profile
-            scan_options["active"] = scan_contract.policy.active_testing
-            scan_options["subfinder"] = scan_contract.policy.subdomain_discovery
-            scan_options_model = ScanOptions(**scan_options)
             active_testing = scan_contract.policy.active_testing
             if active_testing and scan_options_model.public:
-                print(
-                    f"[scheduler] Skipping schedule {str(schedule_id)[:8]}: "
-                    "public option is incompatible with active testing",
-                    flush=True,
+                await schedule_ops.deactivate_schedule(
+                    conn,
+                    schedule_id=schedule_id,
+                    reason="public option is incompatible with active testing",
                 )
-                next_run = calculate_next_run(
-                    schedule['frequency'],
-                    schedule['day_of_week'],
-                    schedule['time_of_day'] or '02:00',
-                    schedule['timezone'] or 'UTC',
-                    schedule['jitter_minutes'] or 0
-                )
-                await conn.execute("""
-                    UPDATE schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2
-                """, next_run, schedule_id)
                 continue
             scan_options = _build_canonical_scan_options_payload(
                 scan_options_model,
@@ -3369,6 +3320,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 scan_options_model,
                 scan_options,
                 active_testing,
+                max_workers=scan_contract.budget.max_workers,
             )
             scan_role = 'parent' if parallel_enabled else 'standalone'
 
@@ -3641,18 +3593,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 flush=True,
             )
 
-        next_run = calculate_next_run(
-            schedule['frequency'],
-            schedule['day_of_week'],
-            schedule['time_of_day'] or '02:00',
-            schedule['timezone'] or 'UTC',
-            schedule['jitter_minutes'] or 0
-        )
         async with pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE schedules SET last_run_at = $1, next_run_at = $2, updated_at = NOW()
-                WHERE id = $3
-            """, now, next_run, schedule_id)
+            await schedule_ops.advance_schedule_cadence(
+                conn, schedule, schedule_id=schedule_id, last_run_at=now,
+            )
 
         print(f"[scheduler] Triggered Scan {scan_id[:8]} for schedule {str(schedule_id)[:8]} ({target_url})", flush=True)
 
@@ -3732,9 +3676,10 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     )
                     continue
 
-                base_opts = _decode_json_value(t['scan_options']) or {}
-                if not isinstance(base_opts, dict):
-                    base_opts = {}
+                decoded_opts = _decode_json_value(t['scan_options']) or {}
+                base_opts = _clear_asm_approval_context(
+                    decoded_opts if isinstance(decoded_opts, dict) else {}
+                )
                 if action == 'recon':
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
                     await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
@@ -3747,6 +3692,34 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     )
                     print(f"[asm] recon queued for {target_url} -> scan {enq['scan_id'][:8]}", flush=True)
                 elif action == 'test':
+                    try:
+                        approval_context = await _validate_approval_receipt_for_action(
+                            conn,
+                            cfg.get("approval_receipt_id"),
+                            target_url=target_url,
+                            target_id=target_id,
+                            action_name="asm.continuous",
+                            risk_tier="active",
+                            record_blocked=False,
+                            always_require_receipt=True,
+                            require_target_binding=True,
+                            require_expiry=True,
+                        )
+                    except HTTPException as exc:
+                        await _persist_asm_decision(
+                            conn,
+                            target_id,
+                            {
+                                **decision,
+                                "action": "none",
+                                "reason": str(exc.detail),
+                                "blocked_by": "approval_required_or_invalid",
+                            },
+                            source="dispatcher",
+                        )
+                        continue
+                    if approval_context:
+                        base_opts.update(approval_context)
                     dispatch_batch_size = min(cfg['batch_size'], claimable)
                     daily_cap = cfg['daily_endpoint_cap']
                     if daily_cap > 0:
@@ -3968,10 +3941,10 @@ app = FastAPI(
 )
 
 try:
-    from credential_api import router as credential_router
+    from credential_api import configure_credential_api, router as credential_router
     from credential_api import public_credential_validation_errors
 except ModuleNotFoundError:
-    from api.credential_api import router as credential_router
+    from api.credential_api import configure_credential_api, router as credential_router
     from api.credential_api import public_credential_validation_errors
 
 try:
@@ -5105,6 +5078,7 @@ try:
         _canonical_asm_scan_options,
         _compile_asm_scan_authority,
         _confirm_asm_queue_handoff,
+        _clear_asm_approval_context,
         _current_research_dispatch_correlation,
         _decode_asm_config,
         _decode_target_scan_options,
@@ -5249,6 +5223,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _canonical_asm_scan_options,
         _compile_asm_scan_authority,
         _confirm_asm_queue_handoff,
+        _clear_asm_approval_context,
         _current_research_dispatch_correlation,
         _decode_asm_config,
         _decode_target_scan_options,
@@ -5481,6 +5456,7 @@ try:
         _refresh_device_active_finding_counts,
         _refresh_finding_owner_counts,
         _refresh_web_active_finding_counts,
+        _resolve_finding_mutation_id,
         _source_type_filter_sql,
         _strip_pagination_for_count,
         bulk_retest_findings,
@@ -5520,6 +5496,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _refresh_device_active_finding_counts,
         _refresh_finding_owner_counts,
         _refresh_web_active_finding_counts,
+        _resolve_finding_mutation_id,
         _source_type_filter_sql,
         _strip_pagination_for_count,
         bulk_retest_findings,
@@ -5552,46 +5529,63 @@ configure_findings_router(
 )
 app.include_router(findings_router)
 try:
+    from scan import sharding_policy
+    from schedules import router as schedule_ops
     from schedules.router import (
         SCHEDULE_HEALTH_LOOKBACK_DAYS,
         ScheduleCreate,
         ScheduleUpdate,
         VALID_SCHEDULE_KINDS,
         _normalize_schedule_kind,
+        _resolve_asm_schedule_options,
+        _resolve_normal_schedule_options,
         _schedule_health_from_failures,
         _schedule_health_map_for_schedules,
         _schedule_kind_from_row,
         _schedule_options_dict,
-        calculate_next_run,
         configure_schedule_router,
         create_schedule,
         delete_schedule,
         get_schedule,
         list_schedules,
+        handle_schedule_target_failure,
         router as schedule_router,
         update_schedule,
+        validate_schedule_target_destination,
+        ScheduleTargetResolutionError,
+        ScheduleTargetSafetyError,
     )
 except ModuleNotFoundError:  # package import in host-side tests
+    from api.scan import sharding_policy
+    from api.schedules import router as schedule_ops
     from api.schedules.router import (
         SCHEDULE_HEALTH_LOOKBACK_DAYS,
         ScheduleCreate,
         ScheduleUpdate,
         VALID_SCHEDULE_KINDS,
         _normalize_schedule_kind,
+        _resolve_asm_schedule_options,
+        _resolve_normal_schedule_options,
         _schedule_health_from_failures,
         _schedule_health_map_for_schedules,
         _schedule_kind_from_row,
         _schedule_options_dict,
-        calculate_next_run,
         configure_schedule_router,
         create_schedule,
         delete_schedule,
         get_schedule,
         list_schedules,
+        handle_schedule_target_failure,
         router as schedule_router,
         update_schedule,
+        validate_schedule_target_destination,
+        ScheduleTargetResolutionError,
+        ScheduleTargetSafetyError,
     )
-configure_schedule_router(lambda: db_pool)
+configure_schedule_router(
+    lambda: db_pool,
+    approval_validator=lambda *a, **k: _validate_approval_receipt_for_action(*a, **k),
+)
 app.include_router(schedule_router)
 try:
     from finding_exceptions.router import (
@@ -6827,7 +6821,6 @@ try:
         launch_research_campaign,
         launch_research_episode,
         list_research_episodes,
-        plan_research_episode_step,
         refresh_research_observation,
         research_episode_benchmark,
         research_readiness,
@@ -6949,7 +6942,6 @@ except ModuleNotFoundError:  # package import in host-side tests
         launch_research_campaign,
         launch_research_episode,
         list_research_episodes,
-        plan_research_episode_step,
         refresh_research_observation,
         research_episode_benchmark,
         research_readiness,
@@ -6978,8 +6970,6 @@ try:
         configure_agent_router,
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
-        AgentToolExecuteRequest,
-        AgentVerifyRequest,
         _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
         _AGENT_AUTO_VERIFY_LIMIT,
         _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT,
@@ -7023,21 +7013,17 @@ try:
         _resolve_hunt_origin,
         _resolve_hunt_tool_url,
         cancel_agent_hunt_session,
-        execute_agent_tool_endpoint,
         get_agent_context_pack,
         get_agent_hunt_session,
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
-        verify_suspected_agent_finding,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from api.agent_routes.router import (
         configure_agent_router,
         router as agent_router,
         AGENT_TOOL_WORKER_BUILD_REGISTRY_KEY,
-        AgentToolExecuteRequest,
-        AgentVerifyRequest,
         _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES,
         _AGENT_AUTO_VERIFY_LIMIT,
         _AGENT_AUTO_VERIFY_SKIP_REPORT_LIMIT,
@@ -7081,13 +7067,11 @@ except ModuleNotFoundError:  # package import in host-side tests
         _resolve_hunt_origin,
         _resolve_hunt_tool_url,
         cancel_agent_hunt_session,
-        execute_agent_tool_endpoint,
         get_agent_context_pack,
         get_agent_hunt_session,
         get_agent_tool_readiness,
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
-        verify_suspected_agent_finding,
     )
 configure_agent_router(
     lambda: db_pool,
@@ -8188,52 +8172,6 @@ def build_deployment_decision(
 # Edge types that are pure structural plumbing (endpoint enumeration). They
 # dominate edge volume and carry no exposure signal, so they are collapsed out
 # of the rendered subgraph unless endpoints are explicitly requested.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ============================================================
 # OWNED FLEET FOUNDATION
 # ============================================================
@@ -10260,7 +10198,7 @@ async def _generic_collection_refs(
                       s.selected_request_count, s.selected_mutating_count
                FROM request_collections rc
                LEFT JOIN request_collection_selections s
-                 ON s.collection_id=rc.id AND s.id=$1 AND s.is_active=true
+                 ON s.collection_id=rc.id AND s.id=$1 AND s.revoked_at IS NULL
                WHERE rc.is_active=true AND (rc.id=$1 OR s.id=$1)
                ORDER BY (s.id=$1) DESC LIMIT 1""",
             reference_id,
@@ -11428,6 +11366,7 @@ async def _submit_scan(
             execution_options,
             options_payload,
             scan_contract.policy.active_testing,
+            max_workers=scan_contract.budget.max_workers,
         )
         if parallel_worker_count is not None:
             parallel_worker_count = min(
@@ -11796,6 +11735,7 @@ async def list_scans(
         scan_columns = "s.*" if include_details else """
                    s.id, s.target_id, s.target_url, s.status, s.progress,
                    s.current_phase, s.options, s.scan_type, s.score, s.grade,
+                   s.assurance_score,
                    s.findings_count, s.created_at, s.started_at, s.completed_at,
                    s.duration_seconds, s.error_message, s.run_kind, s.ai_target_id,
                    s.device_target_id, s.parent_scan_id, s.scan_role,
@@ -12061,7 +12001,7 @@ async def get_scan_deployment_decision(scan_id: str):
             SELECT * FROM finding_exceptions
             WHERE status IN ('active','approved','accepted_risk')
               AND (expires_at IS NULL OR expires_at > NOW())
-              AND (target_id IS NULL OR target_id = $1)
+              AND target_id = $1
         """, target_id)
         # Unresolved (active) critical/high findings on the SAME canonical origin —
         # these gate deploy even if the current scan did not re-detect them and even if
@@ -13236,17 +13176,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     }
 
 
-def _resolve_hunt_allowed_capabilities(
-    contract: HuntStartContract,
-    *,
-    credential_access: bool,
-) -> tuple[str, ...]:
-    return allowed_capability_names(
-        contract,
-        credentials_available=credential_access,
-    )
-
-
 async def _validate_hunt_credential_references(
     conn: Any,
     contract: HuntStartContract,
@@ -13397,12 +13326,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         else:
             raise HTTPException(status_code=422, detail="unsupported target kind")
 
-        privileged = bool(
-            contract.policy.active_testing
-            or contract.policy.network_discovery
-            or contract.policy.allow_state_changing_http
-            or contract.policy.allow_oob_interactions
-            or credential_rows
+        privileged = contract.policy.is_privileged(
+            credentials_requested=bool(credential_rows)
         )
         if contract.policy.approval_receipt_id:
             approval_context = await _validate_approval_receipt_for_action(
@@ -13412,6 +13337,14 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 target_id=target_uuid,
                 action_name="hunt.start.v2",
                 command="hunt.start.v2",
+                # The addresses a hunt may reach outside its resolved target are part of
+                # what the operator authorized, not a free field on the request that
+                # accompanies the receipt. Binding them here means an approval covers the
+                # exact origins it was granted for.
+                required_action_context=(
+                    {"direct_origin_addresses": sorted(contract.direct_origin_addresses)}
+                    if contract.direct_origin_addresses else None
+                ),
                 risk_tier=(
                     "credential"
                     if credential_rows
@@ -13445,42 +13378,26 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             )
 
         credential_access = bool(credential_rows and approval_validated)
-        allowed_capabilities = _resolve_hunt_allowed_capabilities(
-            contract,
-            credential_access=credential_access,
+        allowed_capabilities = allowed_capability_names(
+            contract, credentials_available=credential_access,
         )
-        policy = {
-            "schema_version": "hunt-policy/v2",
-            "target_kind": contract.target_kind,
-            "active_testing": bool(
-                contract.policy.active_testing and approval_validated
-            ),
-            "credential_access": credential_access,
-            "mutation_allowed": bool(
-                contract.policy.allow_state_changing_http and approval_validated
-            ),
-            "allow_state_changing_http": bool(
-                contract.policy.allow_state_changing_http and approval_validated
-            ),
-            "network_discovery": bool(
-                contract.policy.network_discovery and approval_validated
-            ),
-            "allow_oob_interactions": bool(
-                contract.policy.allow_oob_interactions and approval_validated
-            ),
-            "authorization_confirmed": contract.policy.authorization_confirmed,
-            "approval_receipt_id": validated_approval_id,
-            "scope_receipt_id": validated_scope_id,
-            "device_fragility_profile": (
-                "authenticated_active"
-                if contract.target_kind == "device" and credential_access
-                else "safe_remote" if contract.target_kind == "device" else None
-            ),
-            "budget_profile": contract.budget_profile,
-            "budget_schema_version": HUNT_BUDGET_SCHEMA,
-            "budget": asdict(budget),
-            "allowed_capabilities": list(allowed_capabilities),
-        }
+        try:
+            bound = _hunt_skills.bind_skills_to_hunt(
+                contract.skill_ids, target_kind=contract.target_kind,
+                allowed_capabilities=allowed_capabilities, budget=budget,
+                goal=contract.goal,
+            )
+        except _hunt_skills.HuntSkillError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        allowed_capabilities, budget = bound.allowed_capabilities, bound.budget
+        policy = contract.persisted_policy(
+            approval_validated=approval_validated,
+            credential_access=credential_access,
+            approval_receipt_id=validated_approval_id,
+            scope_receipt_id=validated_scope_id,
+            budget=budget,
+            allowed_capabilities=allowed_capabilities,
+        )
         normalized_contract = contract.public_dict()
         normalized_contract["policy"]["approval_receipt_id"] = validated_approval_id
         normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id
@@ -13490,6 +13407,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 approval_context.get("runtime_scope_guard") or {}
             )
         context_pack["allowed_capabilities"] = list(allowed_capabilities)
+        context_pack["skills"] = dict(bound.context_section)
 
         row = await conn.fetchrow(
             """INSERT INTO hunt_runs (
@@ -13513,6 +13431,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             json.dumps(context_pack, default=str),
             _optional_uuid(validated_approval_id) if validated_approval_id else None,
         )
+        await _hunt_skills.record_initial_skill_bindings(conn, hunt_run_id=row["id"], specs=bound.specs, requested_skill_ids=contract.skill_ids)
     return _hunt_public(row)
 
 
@@ -13523,6 +13442,9 @@ configure_hunt_run_router(
     metrics_provider=lambda: HUNT_ACTION_SERVICE.metrics.snapshot(),
 )
 app.include_router(hunt_run_router)
+
+_configure_http_archive_router(lambda: db_pool)
+app.include_router(_http_archive_router)
 
 
 # =============================================================================
@@ -15349,13 +15271,9 @@ async def _validate_approval_receipt_for_action(
         )
     expected_context = required_action_context or {}
     actual_context = approval.get("action_context") if isinstance(approval.get("action_context"), dict) else {}
-    for key, expected in expected_context.items():
-        if str(actual_context.get(key) or "") != str(expected or ""):
-            await _deny(
-                "approval_receipt_context_mismatch",
-                f"Approval receipt is not bound to this {key}",
-                approval_ref=approval_ref,
-            )
+    mismatched_context = _approval_context_mismatch(actual_context, expected_context)
+    if mismatched_context:
+        await _deny("approval_receipt_context_mismatch", f"Approval receipt is not bound to this {mismatched_context}", approval_ref=approval_ref)
 
     scope_id = approval.get("scope_receipt_id")
     if not scope_id:
@@ -15395,6 +15313,9 @@ async def _validate_approval_receipt_for_action(
         "risk_tier": approval.get("risk_tier"),
         "runtime_scope_guard": _runtime_scope_guard_from_scope(scope),
     }
+
+
+configure_credential_api(approval_validator=_validate_approval_receipt_for_action)
 
 
 

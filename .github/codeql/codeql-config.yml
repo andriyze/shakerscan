@@ -1,0 +1,33 @@
+name: "ShakerScan CodeQL config"
+
+# ShakerScan IS a DAST security scanner, so a handful of security-extended rules
+# fire on behavior that is the product's purpose or on its own detector/test
+# heuristics. Each exclusion below is deliberate and scoped to a rule whose every
+# alert in this repository was reviewed as intended or a false positive; the full
+# security-extended suite still runs for every other class. Genuinely real
+# findings surfaced by these same rules were FIXED in code, not excluded (a
+# polynomial-ReDoS Postman variable regex and a cookie value logged in clear
+# text), so the exclusions cover only the residual intended cases.
+query-filters:
+  # A DAST scanner must reach targets that present self-signed, expired, or
+  # otherwise invalid certificates -- refusing them would blind the product to
+  # exactly the misconfigurations it exists to find. Every hit is in scanner
+  # request code, not in a client that trusts a remote server.
+  - exclude:
+      id: py/request-without-cert-validation
+  # The scanner classifies and matches targets by URL substrings as a detection
+  # heuristic, and its test suite asserts on URL fragments. These are not a web
+  # application making a trust decision from an unsanitized substring.
+  - exclude:
+      id: py/incomplete-url-substring-sanitization
+  # Model Intake copies untrusted model artifacts into a quarantine and marks
+  # them read-only (0o444) so an unprivileged scanner can never mutate the
+  # inode. Model files are not secrets; the world-readable bit is intended.
+  - exclude:
+      id: py/overly-permissive-file
+  # The flagged steps live in the release-candidate and E2E workflows, which run
+  # only on maintainer workflow_dispatch or protected-branch push -- never on a
+  # fork pull request -- so an untrusted actor cannot write the caches these
+  # steps restore. Fork-triggered workflows carry no such privileged steps.
+  - exclude:
+      id: actions/cache-poisoning/poisonable-step

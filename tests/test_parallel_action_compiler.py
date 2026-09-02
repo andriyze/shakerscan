@@ -1,6 +1,7 @@
 from dataclasses import replace
 import hashlib
 import json
+import uuid
 
 import pytest
 
@@ -254,7 +255,20 @@ def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():
     assert sum(child.budget.max_browser_actions for child in first.children) == (
         execution.budget.max_browser_actions
     )
-    assert first.children[1].budget.max_browser_actions == 0
+    # Browser proof runs against candidates, which live on the endpoint
+    # children. Pinning them to zero made xss.browser_prove_batch structurally
+    # unrunnable in every sharded Scan while the backbone held the whole
+    # allowance and had nothing to prove.
+    assert first.children[1].budget.max_browser_actions > 0
+    # The candidate-free backbone must own no browser budget: a weighted slice to
+    # it is dead allowance that, under a reduced ceiling, starves endpoint shards.
+    assert first.children[0].role == "global"
+    assert first.children[0].budget.max_browser_actions == 0
+    assert sum(
+        child.budget.max_browser_actions
+        for child in first.children if child.role == "endpoint"
+    ) == execution.budget.max_browser_actions
+    # tcp stays backbone-only: ports.discover is a target-wide producer.
     assert first.children[2].budget.max_tcp_ports == 0
     assert first.parent_owned_action_ids == ("finalize.report",)
     assert "finalize.report" not in first.globally_assigned_action_ids
@@ -921,6 +935,29 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
         scan_id: _canonical_child_report(plan)
         for scan_id, plan in plans.items()
     }
+    reports[CHILD_IDS[1]]["coverage"] = {
+        "candidate_coverage": {
+            "nuclei_passive": {
+                "status": "complete",
+                "batch_actions": 1,
+                "planned_candidates": 1,
+                "attempted_candidates": 1,
+                "completed_candidates": 1,
+                "incomplete_candidates": 0,
+                "unattempted_candidates": 0,
+            },
+        },
+        "family_coverage": [{
+            "family": "nuclei_passive",
+            "selected": True,
+            "required": True,
+            "coverage_status": "complete",
+            "planned_candidates": 1,
+            "attempted_candidates": 1,
+            "verified_findings": 0,
+            "suspected_findings": 1,
+        }],
+    }
     merged = merge_parallel_action_executions(
         record,
         child_results=reports,
@@ -935,9 +972,31 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
     assert len({
         action["occurrence_id"] for action in merged["actions"]
     }) == len(merged["actions"])
+    assert merged["candidate_coverage"]["nuclei_passive"][
+        "attempted_candidates"
+    ] == 1
+    assert merged["family_coverage"] == [{
+        "family": "nuclei_passive",
+        "selected": True,
+        "required": True,
+        "coverage_status": "complete",
+        "reason": None,
+        "batch_actions": 0,
+        "planned_candidates": 1,
+        "attempted_candidates": 1,
+        "completed_candidates": 0,
+        "incomplete_candidates": 0,
+        "unattempted_candidates": 0,
+        "verified_findings": 0,
+        "suspected_findings": 1,
+    }]
     coverage = summarize_parallel_action_coverage(merged)
     assert coverage["status"] == "complete"
     assert coverage["grade_reliability"] == {"reliable": True, "reasons": []}
+    assert coverage["candidate_coverage"]["nuclei_passive"][
+        "attempted_candidates"
+    ] == 1
+    assert coverage["family_coverage"][0]["coverage_status"] == "complete"
 
     lost = dict(reports)
     lost[CHILD_IDS[2]] = None
@@ -1161,3 +1220,102 @@ def test_partition_rejects_a_backbone_that_still_carries_stage_owned_discovery()
         )
     with pytest.raises(ParallelActionPlanError):
         partition.record(plans)
+
+
+def test_merged_family_reason_agrees_with_its_counters():
+    """A family the merged run attempted is incomplete, not unattempted.
+
+    Child reasons merge first-wins, and candidates cluster on whichever shard
+    owns the parameterised routes, so a shard with none for a family stamped its
+    own zero_attempts onto the parent. Measured on the benchmark application:
+    two of four shards ran sqli to success on 854 and 1,067 requests and the
+    parent still reported sqli as zero_attempts -- understating work that
+    demonstrably happened, which is the one thing coverage must never do.
+    """
+    from api.scan.parallel_compiler import _reconciled_family_coverage
+
+    # A shard that never attempted contributed the reason, but siblings did.
+    attempted = _reconciled_family_coverage({
+        "family": "sqli",
+        "reason": "zero_attempts",
+        "attempted_candidates": 9,
+        "coverage_status": "partial",
+    })
+    assert attempted["reason"] == "child_family_incomplete"
+
+    # Genuinely unattempted across every shard keeps the honest reason.
+    untouched = _reconciled_family_coverage({
+        "family": "sqli",
+        "reason": "zero_attempts",
+        "attempted_candidates": 0,
+        "coverage_status": "partial",
+    })
+    assert untouched["reason"] == "zero_attempts"
+
+    # Any other reason is left exactly as the children reported it.
+    other = _reconciled_family_coverage({
+        "family": "xss",
+        "reason": "action_incomplete",
+        "attempted_candidates": 9,
+        "coverage_status": "partial",
+    })
+    assert other["reason"] == "action_incomplete"
+
+
+def test_fan_out_width_is_bounded_by_injectable_surface():
+    """More children only help when there are candidates to give them.
+
+    Endpoint count decides how many children are possible; candidate count
+    decides whether more help. Active verifiers are candidate-driven, and
+    candidates come from parameterised routes -- a fraction of the crawl.
+    Splitting by endpoints alone fragments a small injectable surface AND
+    divides each child's verifier ledger, dropping every child to a smaller
+    batch tier at once.
+
+    Measured on the benchmark application: 138 endpoints yielded 9 candidates.
+    Unsharded those verified at the thorough tier and produced 13 verified
+    findings; split four ways they landed 5/4/0/0 -- three children with nothing
+    to do -- each at the fast tier, and the run produced none.
+    """
+    execution, parent = _endpoint_authority()
+    placements = (ParallelPlacementCapacity("local", 5, {"node_scope": "local"}),)
+
+    def endpoint_children(plan_execution, endpoints):
+        planned = ParallelActionPlanCompiler().plan_parent(
+            parent_execution_plan=plan_execution,
+            parent_action_plan=parent,
+            target_binding=_target(),
+            endpoint_manifest_entries=endpoints,
+            placements=placements,
+            discovery_owned_externally=True,
+        )
+        return [child for child in planned.children if child.role == "endpoint"]
+
+    # A wide crawl with a narrow injectable surface: one child, because a second
+    # could not fill a verifier batch and would only take budget from the first.
+    narrow = [f"GET /page{index}" for index in range(120)]
+    narrow += [f"GET /api/item{index}?id=1" for index in range(9)]
+    assert len(endpoint_children(execution, narrow)) == 1
+
+    # A genuinely wide injectable surface still fans out.
+    wide = [f"GET /api/item{index}?id=1" for index in range(120)]
+    assert len(endpoint_children(execution, wide)) > 1
+
+    # JSON/form bodies are injection surfaces too. Counting only '?' silently
+    # treated body-only APIs as non-injectable and fragmented their verifier
+    # budget by the crawl width instead of the actual candidate width.
+    narrow_body = [f"GET /page{index}" for index in range(120)]
+    narrow_body += [
+        f'POST /api/item{index} json:{{"id":1}}' for index in range(9)
+    ]
+    assert len(endpoint_children(execution, narrow_body)) == 1
+
+    wide_body = [
+        f"POST /api/item{index} form:id=1" for index in range(120)
+    ]
+    assert len(endpoint_children(execution, wide_body)) > 1
+
+    # Passive Scans are untouched by construction: the bound sits inside the
+    # active_testing branch, because template breadth scales with endpoints
+    # rather than candidates. Asserting that here would need a passive plan that
+    # carries endpoint-scoped work, which a recon-only plan does not.

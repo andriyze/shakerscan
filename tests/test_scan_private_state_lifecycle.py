@@ -19,7 +19,10 @@ from scan.private_state import (  # noqa: E402
 )
 
 
-def _checkpoint(*, now: datetime, expires_at: datetime):
+def _checkpoint(
+    *, now: datetime, expires_at: datetime,
+    compatible_capabilities=("auth.session.establish", "http.request"),
+):
     key = generate_scan_private_state_key()
     values = {
         "scan_id": str(uuid.uuid4()),
@@ -39,7 +42,7 @@ def _checkpoint(*, now: datetime, expires_at: datetime):
         established_at=now,
         expires_at=expires_at,
         refresh_after=now + timedelta(minutes=5),
-        compatible_capabilities=("auth.session.establish", "http.request"),
+        compatible_capabilities=compatible_capabilities,
         evidence_receipt_digest="d" * 64,
     )
     return key, values, checkpoint
@@ -94,5 +97,24 @@ def test_checkpoint_rejects_expiry_profile_rotation_and_revocation():
             key,
             revoked,
             **values,
+            now=now + timedelta(minutes=10),
+        )
+
+
+def test_checkpoint_empty_capability_allowlist_grants_nothing():
+    pytest.importorskip("cryptography")
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+    key, values, checkpoint = _checkpoint(
+        now=now,
+        expires_at=now + timedelta(hours=1),
+        compatible_capabilities=(),
+    )
+
+    with pytest.raises(ScanPrivateStateError, match="incompatible"):
+        open_scan_auth_session_state(
+            key,
+            checkpoint,
+            **values,
+            capability_name="http.request",
             now=now + timedelta(minutes=10),
         )

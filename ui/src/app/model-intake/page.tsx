@@ -1518,8 +1518,8 @@ function ModelIntakeSettingsContent() {
           <p className="mt-1 text-sm text-gray-400">
             Paste one Hugging Face link and click Start. ShakerScan pins the revision, acquires and hashes the complete
             model repository, derives the exact inference runtime, runs every applicable scanner, creates the technical
-            report and AIBOM, performs Firecracker
-            calibration and repeat inference, freezes the evidence, and prepares one technical report. The result clearly
+            report and AIBOM, freezes the evidence, and prepares one technical report. When the Firecracker runner is ready,
+            the same review also performs microVM calibration and repeat inference. The result clearly
             separates verified checks, issues to fix, and deployment follow-up.
           </p>
         </div>
@@ -1577,7 +1577,8 @@ function ModelIntakeSettingsContent() {
         {runnerReadiness !== null && runnerReadiness.status !== 'READY' && (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-700/50 bg-yellow-950/20 p-3 text-sm text-yellow-100">
             <span>
-              Static checks can run now, but isolated loading cannot run until the microVM runner is ready.
+              Static checks and the no-egress container sandbox can run now, but they are not microVM runtime qualification.
+              Isolated model loading cannot run until the Firecracker runner is ready.
             </span>
             <button
               type="button"
@@ -1606,12 +1607,12 @@ function ModelIntakeSettingsContent() {
         ) : (
           <div className="mt-4 grid gap-3">
             {automaticReviews.slice(0, showAllAutomaticReviews ? automaticReviews.length : 5).map((review, reviewIndex) => {
-              const terminal = ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
+              const terminal = review.workflow_terminal ?? ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
               const displayedProgress = review.effective_progress ?? review.progress
               const displayedStep = review.effective_current_step || review.current_step
               const workflowComplete = review.state === 'technical_review_complete'
               const outcome = (review.technical_outcome || '').toUpperCase()
-              const passed = workflowComplete && outcome === 'PASS'
+              const passed = review.required_technical_controls_complete ?? (workflowComplete && outcome === 'PASS')
               const blocked = workflowComplete && outcome === 'BLOCK'
               const incomplete = workflowComplete && outcome === 'INCOMPLETE'
               const queuedForRunner = review.active_runner_job_state === 'pending'
@@ -1650,7 +1651,9 @@ function ModelIntakeSettingsContent() {
                       <div className="mt-1 text-[11px] text-gray-500">Started {new Date(review.created_at).toLocaleString()} · {review.source_kind}</div>
                       <div className="mt-1 font-mono text-[11px] text-gray-600">review {review.id} · scan {review.scan_id}</div>
                     </div>
-                    <div className="text-right text-sm font-semibold text-white">{displayedProgress}%</div>
+                    <div className="text-right text-sm font-semibold text-white">
+                      {terminal ? 'Workflow ended' : `${displayedProgress}%`}
+                    </div>
                   </div>
                   {workflowComplete && (
                     <div className={`mt-3 rounded border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
@@ -1658,9 +1661,17 @@ function ModelIntakeSettingsContent() {
                       <div className="mt-1 opacity-80">{blocked ? 'One or more required technical checks failed. Open the report for evidence and next steps.' : passed ? 'All technical checks selected for this review completed successfully.' : incomplete ? 'One or more technical checks could not complete. Open the report for the exact prerequisite or retry.' : `${technicalFollowUp.length || 'Some'} check${technicalFollowUp.length === 1 ? '' : 's'} ${technicalFollowUp.length === 1 ? 'needs' : 'need'} review. Open the report for evidence and next steps.`}</div>
                     </div>
                   )}
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
-                    <div className={`h-full ${blocked ? 'bg-red-500' : terminal && !passed ? 'bg-yellow-500' : passed ? 'bg-green-500' : 'bg-cyan-500'}`} style={{ width: `${displayedProgress}%` }} />
-                  </div>
+                  {terminal && !workflowComplete && (
+                    <div className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
+                      <div className="font-semibold">Required technical controls are incomplete</div>
+                      <div className="mt-1 opacity-80">The workflow ended in {review.state.replace(/_/g, ' ')}. This is not 100% control completion.</div>
+                    </div>
+                  )}
+                  {!terminal && (
+                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800" aria-label={`Workflow progress ${displayedProgress}%`}>
+                      <div className="h-full bg-cyan-500" style={{ width: `${displayedProgress}%` }} />
+                    </div>
+                  )}
                   {review.error_json?.message && (
                     <div role="alert" className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
                       {review.error_json.message}

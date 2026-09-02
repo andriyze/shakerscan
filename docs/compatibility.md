@@ -1,5 +1,7 @@
 # Internal compatibility boundary
 
+**Status:** current migration boundary; reconciled 2026-08-29.
+
 This document describes migration behavior, not an alternate product surface. New clients use one
 deterministic Scan and one target-kind-aware Hunt. Their live contracts are `GET /scan/contracts`,
 `GET /hunts/contract`, and `/openapi.json`.
@@ -12,6 +14,8 @@ Those inputs are translated at the API/read boundary only:
   policy; they cannot select another engine or module registry;
 - retired Hunt write routes return `410 Gone`, while bounded historical reads and cancellation stay
   available during the migration window;
+- `/session*` remains callable by Command Arsenal and the `ai-security-session` compatibility skill,
+  but has no standalone 2.0 UI and must not be presented as another scanner engine;
 - old raw authentication fields remain internal deserialization fields for stored rows and migration.
   Canonical Scan, Hunt, CLI, UI, and MCP requests accept only opaque credential-profile and request-
   collection references;

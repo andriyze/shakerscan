@@ -14,7 +14,11 @@
 #   KEEP_CANONICAL        this is the V2 authority
 #   ARCHIVE_DOC_ONLY      historical context only
 schema_version: v2-surface-disposition/v1
-source_head: 061a6d40106104d17a8983feec01236bc7cf1c05
+# Audited convergence baseline. The checker requires this exact commit to exist
+# and remain an ancestor of the current checkout; later work may only shrink the
+# pending-write backlog unless this baseline is deliberately advanced.
+source_head: 11ecfdd7b29e5259ea07b10649a2c4f5872198ce
+release_boundary: canonical_scan_hunt_with_transitional_compatibility_writes
 
 surfaces:
   # ---------------------------------------------------------------- canonical
@@ -30,7 +34,16 @@ surfaces:
     disposition: KEEP_CANONICAL
     canonical_replacement: null
     new_writes_allowed: true
-    routes: ["/hunts", "/hunts/*"]
+    routes: ["/hunts", "/hunts/*", "/hunt/skills", "/hunt/skills/*"]
+
+  - id: http-archive
+    owner: scan
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/scans/*/http-transactions", "/hunts/*/http-transactions"]
+    # DELETE is how stored credentials are cleared; the evidence sweep reaches objects
+    # through a scan or finding, which a Hunt archive blob has neither of.
 
   - id: credentials
     owner: credentials
@@ -122,9 +135,7 @@ surfaces:
       - POST /research/episodes/{episode_id}/cancel
       - POST /research/episodes/{episode_id}/decisions
       - POST /research/episodes/{episode_id}/observe
-      - POST /research/episodes/{episode_id}/plan-step
       - POST /research/episodes/{episode_id}/settle
-      - POST /research/launch
       - PUT /research/episodes/{episode_id}/autopilot
     routes: ["/research", "/research/*"]
     files: ["api/research_routes/router.py"]
@@ -135,7 +146,6 @@ surfaces:
     canonical_replacement: operations capability catalog and Hunt context pack
     new_writes_allowed: false
     pending_write_removals:
-      - POST /agent/tools/{target_id}/execute
       - POST /agents/local/plan
       - POST /agents/local/plan/parse
       - POST /agents/local/test
@@ -147,8 +157,6 @@ surfaces:
     disposition: MERGE_THEN_DELETE
     canonical_replacement: /findings and the deterministic verifier
     new_writes_allowed: false
-    pending_write_removals:
-      - POST /agent/findings/{finding_id}/verify
     routes: ["/agent/findings/*"]
     files: ["api/agent_routes/router.py"]
 

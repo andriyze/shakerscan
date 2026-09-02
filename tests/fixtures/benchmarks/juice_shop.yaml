@@ -10,9 +10,12 @@ target_url: http://host.docker.internal:3001
 scan_options:
   parallel: false
   budget_profile: thorough
-# auth: optional bearer tokens minted at runtime (see benchmark_targets.py --auth).
+# auth: bearer tokens minted at runtime (see benchmark_targets.py --auth). BFLA is
+# a cross-principal differential, so qualification requires two fresh accounts.
 auth:
   user1_login: { url: /rest/user/login, email_field: email, password_field: password }
+  user2_login: { url: /rest/user/login, email_field: email, password_field: password }
+  requires_two_users: true
 
 # Per-target pass/fail gates.
 # The standard this benchmark exists to measure against. Evaluated and reported on EVERY run, and
@@ -24,8 +27,8 @@ quality_bar:
   require_browser_proven_xss: true   # Juice Shop's DOM XSS should be browser-proven
   require_reliable_grade: true       # coverage complete enough to trust the grade
   max_known_expectation_gaps: 0      # every declared gap is a debt against this bar
-  # Incremental binding remains empty for 2.0.0, but that is not permission for a
-  # vacuous pass. The release disposition below explicitly bounds the known debt.
+  # This subset is a developer progress signal only. Release qualification uses
+  # --enforce-quality, which always binds every check in the complete bar.
   # `grade_reliable` requires every selected
   # family complete AND no unproven critical/high, and a thorough scan cannot fund that
   # inside its 3,600-second wall ceiling -- funding the proof families enough time to
@@ -33,23 +36,9 @@ quality_bar:
   # into `insufficient_plan_budget`. That trade is correct (proof outranks breadth) and it
   # puts the check out of reach of budget tuning.
   #
-  # So the binding contract for 2.0.0 is the regression gates below, which catch DECAY,
-  # and the whole quality bar is reported as the declared shortfall. Moving a check back
-  # into this list is how a later release tightens the promise.
+  # The known shortfall therefore blocks 2.0.0 until the engine and evidence close it.
+  # Regression gates below still catch decay during ordinary development runs.
   enforced: []
-  release_disposition:
-    status: accepted_shortfall
-    release: 2.0.0
-    rationale: >-
-      The deterministic V2 runtime and regression floor are release-ready, while the
-      complete DAST quality target remains the published post-2.0 improvement backlog.
-      This exception accepts only the four named failures; any additional failed quality
-      check blocks release qualification.
-    accepted_failed_gates:
-      - quality:min_expected_recall
-      - quality:require_browser_proven_xss
-      - quality:grade_reliable
-      - quality:max_known_expectation_gaps
 
 # The expectations below are NOT reduced to what the engine currently proves: they describe what a
 # competent DAST should find on this app, and shrinking them would destroy the measurement. The
@@ -83,9 +72,9 @@ gates:
       needs: investigation
     - id: bfla-users
       reason: >-
-        BFLA is a cross-principal differential and this fixture mints one principal, so the family
-        is not selected. Measuring it needs a second principal declared here.
-      needs: a user2_login in this fixture, and authenticated state reaching the scan
+        Qualification now mints and validates two distinct principals and selects the BFLA family,
+        but the exact-SHA live benchmark has not yet proven this expectation.
+      needs: exact-SHA live differential proof, then detector investigation if the route still misses
     - id: nosqli-reviews
       reason: >-
         The family now has the state-changing authority it requires, but this route is still not

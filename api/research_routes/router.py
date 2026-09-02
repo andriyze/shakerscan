@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import asyncpg
 import copy
-import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -543,9 +542,8 @@ async def research_episode_benchmark(
     }
 
 
-@router.post("/research/launch")
 async def launch_research_episode(req: ResearchLaunchRequest):
-    """Launch or reopen a server-defined, subject-bound autonomous mission."""
+    """Launch or reopen a server-defined, subject-bound mission internally."""
     expected_subject_types = {
         "target_hunt": {"target"},
         "verify_finding": {"finding"},
@@ -1987,40 +1985,6 @@ async def submit_research_decision(episode_id: str, req: _settings_routes.Resear
             **detail,
         }
     return {"accepted": True, "dispatched": dispatched, "decision_id": str(decision_id), **detail}
-
-
-@router.post("/research/episodes/{episode_id}/plan-step")
-async def plan_research_episode_step(episode_id: str, req: ResearchPlannerStepRequest):
-    owner = f"manual-planner:{os.getpid()}:{uuid.uuid4()}"
-    async with _pool().acquire() as conn:
-        claimed = await conn.fetchval(
-            """
-            UPDATE research_episodes
-            SET lease_owner=$2,
-                lease_expires_at=NOW()+make_interval(secs => $3),
-                updated_at=NOW()
-            WHERE id=$1 AND status='awaiting_planner'
-              AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
-            RETURNING id
-            """,
-            _uuid_or_400(episode_id, "episode id"), owner, RESEARCH_AUTOPILOT_LEASE_SECONDS,
-        )
-    if not claimed:
-        raise HTTPException(status_code=409, detail="Episode planner is already running or not ready")
-    heartbeat_stop = asyncio.Event()
-    heartbeat_task = asyncio.create_task(
-        _research_lease_heartbeat(_pool(), episode_id, owner, heartbeat_stop)
-    )
-    try:
-        return await _plan_research_episode_step(episode_id, req)
-    finally:
-        heartbeat_stop.set()
-        await heartbeat_task
-        async with _pool().acquire() as conn:
-            await conn.execute(
-                "UPDATE research_episodes SET lease_owner=NULL, lease_expires_at=NULL WHERE id=$1 AND lease_owner=$2",
-                _uuid_or_400(episode_id, "episode id"), owner,
-            )
 
 
 @router.put("/research/episodes/{episode_id}/autopilot")

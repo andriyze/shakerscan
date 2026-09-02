@@ -26,6 +26,32 @@ sys.modules.setdefault("redis", types.SimpleNamespace(from_url=lambda *args, **k
 import worker  # noqa: E402
 
 
+def test_hunt_session_credential_empty_allowlist_grants_nothing():
+    resolved = types.SimpleNamespace(
+        interactive_http=lambda: types.SimpleNamespace(
+            endpoint_url=None,
+            username=None,
+            secret="worker-private",
+            client_id=None,
+            scopes=(),
+        ),
+        profile=types.SimpleNamespace(
+            profile_id="profile-1",
+            current_version=1,
+            principal_slot="primary",
+            principal_label="Primary",
+            auth_kind="bearer_token",
+        ),
+    )
+
+    with pytest.raises(worker.CredentialReferenceError, match="no session capabilities"):
+        worker._worker_session_credential(
+            resolved,
+            {"allowed_capabilities": []},
+            target=types.SimpleNamespace(digest="a" * 64),
+        )
+
+
 def test_scope_refusal_reconciles_terminal_shard_parent(monkeypatch):
     parent_id = uuid.uuid4()
     scan_id = uuid.uuid4()
@@ -201,7 +227,7 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
                 auth_kind="bearer_token",
                 principal_slot="primary",
                 target_kind="web",
-                allowed_capabilities=(),
+                allowed_capabilities=("scan.execute",),
             )
             yield types.SimpleNamespace(
                 profile=profile,
@@ -225,6 +251,8 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
             "principal_slot": "primary",
             "scan_lane": "primary",
             "auth_kind": "bearer_token",
+            "allowed_capabilities": ["scan.execute"],
+            "credential_resolution_capability": "scan.execute",
             "source": "credential_profiles",
             "secret_values_visible": False,
         }],
@@ -1316,13 +1344,66 @@ class _LostRetestClaimPool:
         return False
 
 
+def test_finding_retest_slot_exhaustion_updates_only_durable_bound_subject(monkeypatch):
+    verification_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    job_id = str(uuid.uuid4())
+    payload = worker.build_retest_job_payload(
+        job_id=job_id,
+        verification_id=str(verification_id),
+        finding_id=str(finding_id),
+        submitted_at=datetime.now(timezone.utc).isoformat(),
+        trigger="unit_test",
+    )
+
+    class Conn:
+        def __init__(self):
+            self.fetchrow_calls = []
+            self.execute_calls = []
+
+        async def fetchrow(self, query, *args):
+            self.fetchrow_calls.append((query, args))
+            return None
+
+        async def execute(self, query, *args):
+            self.execute_calls.append((query, args))
+            raise AssertionError("an unbound queue payload must not update a subject")
+
+    conn = Conn()
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _LostRetestClaimPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_try_acquire_retest_slot", lambda _redis: False)
+    monkeypatch.setattr(
+        worker,
+        "_slot_wait_state",
+        lambda *_args: (
+            datetime.now(timezone.utc),
+            1,
+            worker.RETEST_SLOT_WAIT_MAX_SECONDS,
+        ),
+    )
+
+    asyncio.run(worker.process_finding_retest_job(payload))
+
+    assert len(conn.fetchrow_calls) == 1
+    query, args = conn.fetchrow_calls[0]
+    assert "job_id = $4" in query
+    assert "finding_id=$5" in query
+    assert args[0] == verification_id
+    assert args[3:] == (job_id, finding_id, None)
+    assert conn.execute_calls == []
+
+
 def test_finding_retest_lost_atomic_claim_never_runs_provers(monkeypatch):
     verification_id = uuid.uuid4()
     finding_id = uuid.uuid4()
-    job_id = "lost-retest-claim"
+    job_id = str(uuid.uuid4())
     verification = {
         "id": verification_id,
         "finding_id": finding_id,
+        "candidate_id": None,
+        "job_id": job_id,
         "finding_type": "xss",
     }
     payload = worker.build_retest_job_payload(
@@ -1392,10 +1473,34 @@ def test_finding_retest_lost_atomic_claim_never_runs_provers(monkeypatch):
         )
         assert redis.expired[-1] == (f"retest_job:{job_id}", 86400)
 
+    mismatched = {**verification, "job_id": str(uuid.uuid4())}
+    conn = _LostRetestClaimConnection(
+        verification=mismatched,
+        current_status="queued",
+    )
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _LostRetestClaimPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_finding_retest_job(payload))
+
+    assert len(conn.fetchrow_calls) == 1
+    assert conn.fetchval_calls == []
+    assert conn.execute_calls == []
+    assert redis.hashes[-1] == (
+        f"retest_job:{job_id}",
+        (),
+        {
+            "status": "failed",
+            "error": "invalid_job_binding",
+            "verification_id": str(verification_id),
+        },
+    )
+
     assert work_calls == {
         "runtime_settings": 0,
         "deterministic": 0,
-        "slot_releases": 2,
+        "slot_releases": 3,
     }
 
 
@@ -2139,6 +2244,72 @@ def test_scan_worker_does_not_revive_failed_queue_handoff_during_claim(monkeypat
     assert redis.hashes[-1][2]["status"] == "failed"
 
 
+def test_reclaimed_running_scan_terminalizes_without_replaying_requests(monkeypatch):
+    scan_id = "22222222-2222-4222-8222-222222222222"
+
+    class ReclaimedConn:
+        def __init__(self):
+            self.executions = []
+
+        async def execute(self, query, *args):
+            self.executions.append((query, args))
+            assert "execution_lease_lost" in query
+            assert args[0] == uuid.UUID(scan_id)
+            return "UPDATE 1"
+
+    class ReclaimedRedis:
+        def __init__(self):
+            self.updates = []
+            self.expirations = []
+
+        def hgetall(self, key):
+            assert key == "job:reclaimed-job"
+            return {
+                b"queue_delivery_attempts": b"2",
+                b"queue_reclaimed": b"true",
+            }
+
+        def hset(self, key, *, mapping):
+            self.updates.append((key, mapping))
+
+        def expire(self, key, ttl):
+            self.expirations.append((key, ttl))
+
+    conn = ReclaimedConn()
+    redis = ReclaimedRedis()
+    run_calls = []
+
+    async def running_status(_scan_id):
+        return "running"
+
+    async def forbidden_run_scan(*args, **kwargs):
+        run_calls.append((args, kwargs))
+        raise AssertionError("a reclaimed uncertain execution must not replay")
+
+    async def forbidden_attribution(_job):
+        raise AssertionError("a reclaimed delivery must not replace original worker attribution")
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_confirmed_scan_handoff_status", running_status)
+    monkeypatch.setattr(worker, "run_scan", forbidden_run_scan)
+    monkeypatch.setattr(worker, "_attribute_job_execution", forbidden_attribution)
+
+    asyncio.run(worker.process_scan_job({
+        "job_id": "reclaimed-job",
+        "scan_id": scan_id,
+        "target": "https://example.test",
+        "options": {},
+        "_deferred_execution_attribution": True,
+    }))
+
+    assert run_calls == []
+    assert redis.updates[-1][1]["status"] == "failed"
+    assert redis.updates[-1][1]["current_phase"] == "execution_lease_lost"
+    assert redis.updates[-1][1]["delivery_attempts"] == "2"
+    assert redis.expirations == [("job:reclaimed-job", 86400)]
+
+
 def test_exploit_worker_does_not_claim_endpoints_for_failed_queue_handoff(monkeypatch):
     class FailedHandoffConn(_FakeAsmConn):
         def __init__(self):
@@ -2248,6 +2419,17 @@ class _FakePlanConn:
         self.persisted_manifest_rows = []
         self.parent_action_plan = parent_action_plan
         self.continuation_allocation = continuation_allocation
+        # Canonical discovery receipts the fan-out reads. Empty by default so the
+        # existing fixtures keep exercising the legacy report-shape fallback.
+        self.discovery_action_rows = []
+        self.discovery_observation_rows = []
+
+    async def fetch(self, query, *args):
+        if "FROM scan_capability_actions" in query:
+            return list(self.discovery_action_rows)
+        if "FROM scan_observation_manifests" in query:
+            return list(self.discovery_observation_rows)
+        return []
 
     async def fetchrow(self, query, *args):
         if "SELECT target_id, target_url, status FROM scans" in query:
@@ -3229,8 +3411,26 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
                     "status": "completed",
                     "result": {
                         "active_checks": {"active_worklist": [
-                            "GET /api/a?id=1", "GET /api/b?id=1",
-                            "GET /api/c?id=1", "GET /api/d?id=1",
+                            # Enough injectable surface to warrant fan-out:
+                            # a child that cannot fill one verifier batch is not
+                            # split off, so a 4-endpoint fixture would collapse
+                            # to a single endpoint child and stop exercising it.
+                            "GET /api/a?id=1",
+                            "GET /api/b?id=1",
+                            "GET /api/c?id=1",
+                            "GET /api/d?id=1",
+                            "GET /api/e?id=1",
+                            "GET /api/f?id=1",
+                            "GET /api/g?id=1",
+                            "GET /api/h?id=1",
+                            "GET /api/i?id=1",
+                            "GET /api/j?id=1",
+                            "GET /api/k?id=1",
+                            "GET /api/l?id=1",
+                            "GET /api/m?id=1",
+                            "GET /api/n?id=1",
+                            "GET /api/o?id=1",
+                            "GET /api/p?id=1",
                         ]}
                     },
                     "error_message": None,
@@ -3275,9 +3475,109 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
         for endpoint in json.loads(args[4])["custom_endpoints"]
     ]
     assert sorted(assigned) == sorted([
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     ])
+
+
+def test_scan_plan_fanout_harvests_canonical_discovery_observations(monkeypatch):
+    """Fan-out must read the discovery shard's canonical receipts.
+
+    The shard writes observation manifests keyed by discover.* action id; the
+    harvest read the V1 report shape, which a canonical shard never emits.
+    Measured on the benchmark application the shard recorded 35 browser-crawl
+    observations and fan-out logged "harvested 0 endpoints from recon
+    (0 discovered)", so every endpoint child planned against an empty candidate
+    manifest and reported xss, sqli and nosqli as zero_attempts.
+    """
+    parent_id = "53535353-5353-4353-8353-535353535353"
+    target_id = "54545454-5454-4454-8454-545454545454"
+    discovery_id = "63636363-6363-4363-8363-636363636363"
+
+    class CanonicalDiscoveryConn(_FakePlanConn):
+        async def fetchrow(self, query, *args):
+            if "SELECT id, status, result, error_message" in query:
+                # Deliberately V2-only: no active_checks, no discovery section.
+                return {
+                    "id": uuid.UUID(discovery_id),
+                    "status": "completed",
+                    "result": {"canonical_action_execution": {"actions": []}},
+                    "error_message": None,
+                }
+            return await super().fetchrow(query, *args)
+
+    parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
+        parent_id, target_id,
+        policy={"active_testing": True, "include_families": ["xss"]},
+    )
+    conn = CanonicalDiscoveryConn(
+        parent_id, target_id, uuid.uuid4(), parent_plan,
+    )
+    conn.discovery_action_rows = [
+        {"action_id": "discover.web_probe", "status": "success"},
+        {"action_id": "discover.browser_crawl", "status": "success"},
+    ]
+    conn.discovery_observation_rows = [{
+        "action_id": "discover.browser_crawl",
+        "observations_json": json.dumps([
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://example.test/rest/products/search?q=x",
+            },
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://example.test/api/BasketItems?id=1",
+            },
+            # Static assets are discovered but never injectable surface.
+            {
+                "kind": "discovered_route",
+                "method": "GET",
+                "url": "https://example.test/main.js",
+            },
+        ]),
+    }]
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakePlanPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+
+    asyncio.run(worker.process_scan_plan_job({
+        "job_id": parent_job.job_id,
+        "scan_id": parent_id,
+        "target": "https://example.test",
+        "plan_stage": "fanout",
+        "discovery_scan_id": discovery_id,
+        "parallel_worker_count": 3,
+        "options": options,
+        "_canonical_queue_payload": queue_payload,
+    }))
+
+    assigned = sorted({
+        endpoint
+        for args in conn.inserted_children[1:]
+        for endpoint in json.loads(args[4])["custom_endpoints"]
+    })
+    # The browser crawl's parameterised routes are what make xss testable.
+    assert "GET /rest/products/search?q=" in assigned
+    assert "GET /api/BasketItems?id=" in assigned
+    # Parameter names survive; discovered values and static assets do not.
+    assert not any("=x" in item or "=1" in item for item in assigned)
+    assert not any(item.endswith("/main.js") for item in assigned)
 
 
 def test_scan_plan_failed_discovery_runs_canonical_backbone_with_partial_coverage(monkeypatch):
@@ -3633,6 +3933,84 @@ def test_broker_shard_result_ingest_never_reclaims_execution_slots_or_budget(mon
     assert not redis.pushed
     assert worker._parallel_shard_slot_key("55555555-5555-4555-8555-555555555555") not in redis.values
     assert any(mapping.get("status") == "completed" for _key, _args, mapping in redis.hashes)
+
+
+def test_local_parallel_shard_archives_traffic_before_result_persistence(monkeypatch, tmp_path):
+    redis = _FakeJobRedis()
+    conn = _FakeAsmConn(child_status="running", parent_status="running")
+    calls = []
+
+    async def identity_options(options, _scan_id):
+        return options
+
+    async def execute_scan(*_args, **_kwargs):
+        calls.append("execute")
+        return {
+            "target": "https://example.test",
+            "result": {"score": 100, "grade": "A"},
+            "findings": [],
+            "coverage": {"status": "complete", "reasons": []},
+        }
+
+    def start_capture(capture, broker_result):
+        assert capture is worker.scanner_http_capture
+        assert broker_result is None
+        calls.append("capture-start")
+        return True
+
+    async def drain_capture(pool, capture, **kwargs):
+        assert pool is worker.db_pool
+        assert capture is worker.scanner_http_capture
+        assert kwargs["scan_id"] == "22222222-2222-4222-8222-222222222222"
+        assert kwargs["target_id"] == "33333333-3333-4333-8333-333333333333"
+        calls.append("archive")
+
+    def reset_capture(capture, active):
+        assert capture is worker.scanner_http_capture
+        assert active is False
+        calls.append("capture-reset")
+
+    async def persist_result(*_args, **_kwargs):
+        calls.append("persist")
+        return str(tmp_path / "result.json")
+
+    async def no_progress(*_args, **_kwargs):
+        return None
+
+    async def no_merge(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_try_acquire_parallel_shard_slot", lambda *_a, **_k: (True, 1))
+    monkeypatch.setattr(worker, "_release_parallel_shard_slot", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_hydrate_generic_scan_credentials", identity_options)
+    monkeypatch.setattr(worker, "_hydrate_managed_scan_credentials", identity_options)
+    monkeypatch.setattr(worker, "_execute_reserved_deterministic_scan", execute_scan)
+    monkeypatch.setattr(worker, "persist_result_artifact", persist_result)
+    monkeypatch.setattr(worker, "update_scan_progress", no_progress)
+    monkeypatch.setattr(worker, "send_heartbeats", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", no_merge)
+    monkeypatch.setattr(worker.http_archive, "start_scan_capture", start_capture)
+    monkeypatch.setattr(worker.http_archive, "drain_and_archive_scan_capture", drain_capture)
+    monkeypatch.setattr(worker.http_archive, "reset_scan_capture", reset_capture)
+    monkeypatch.setattr(worker, "RESULTS_DIR", tmp_path)
+
+    asyncio.run(worker.process_scan_shard_job({
+        "job_id": "job-local-shard",
+        "scan_id": "22222222-2222-4222-8222-222222222222",
+        "parent_scan_id": "55555555-5555-4555-8555-555555555555",
+        "target_id": "33333333-3333-4333-8333-333333333333",
+        "target": "https://example.test",
+        "options": {"scan_type": "smart"},
+        "shard_label": "scope[0]",
+        "shard_index": 0,
+        "shard_count": 1,
+    }))
+
+    assert calls == [
+        "capture-start", "execute", "archive", "persist", "capture-reset",
+    ]
 
 
 def test_hydrate_ai_gate_options_loads_secrets_only_in_worker(monkeypatch):
@@ -4992,8 +5370,22 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     target_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
     campaign_id = uuid.UUID("44444444-4444-4444-4444-444444444444")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
@@ -5042,7 +5434,8 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
         assert persisted["zero_rediscovery"] is True
         assert "custom_budget" not in persisted
         assert persisted["parallel_budget_partition"] == job.shard.sub_budget.payload()
-        assert len(persisted["custom_endpoints"]) == 2
+        # 16 injectable endpoints split across two endpoint children.
+        assert len(persisted["custom_endpoints"]) == 8
     assert redis.sets[0][0] == worker.parallel_scan.shards_remaining_key(parent_id)
     assert redis.sets[0][1] == 3
     parent_update = [
@@ -5065,8 +5458,22 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     target_id = uuid.UUID("34343434-3434-3434-3434-343434343434")
     campaign_id = uuid.UUID("45454545-4545-4545-4545-454545454545")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
@@ -5117,8 +5524,22 @@ def test_scan_plan_coverage_family_uses_static_family_shards(monkeypatch):
     target_id = uuid.UUID("35353535-3535-3535-3535-353535353535")
     campaign_id = uuid.UUID("46464646-4646-4646-4646-464646464646")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id,
@@ -5194,8 +5615,22 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
     target_id = uuid.UUID("36363636-3636-3636-3636-363636363636")
     campaign_id = uuid.UUID("47474747-4747-4747-4747-474747474747")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id,
@@ -5264,7 +5699,7 @@ def test_scan_plan_coverage_family_dynamic_request_uses_self_contained_family_sh
     assert parent_options["parallel_strategy"] == "coverage_family"
     assert parent_options["coverage_allocation"] == "static"
     assert parent_options["coverage_check_families"] == ["sqli", "xss"]
-    assert parent_options["coverage_expected_attempts"] == 8
+    assert parent_options["coverage_expected_attempts"] == 32
 
 
 def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypatch):
@@ -5272,8 +5707,22 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
     target_id = uuid.UUID("37373737-3737-3737-3737-373737373737")
     campaign_id = uuid.UUID("48484848-4848-4848-4848-484848484848")
     endpoints = (
-        "GET /api/a?id=1", "GET /api/b?id=1",
-        "GET /api/c?id=1", "GET /api/d?id=1",
+        "GET /api/a?id=1",
+        "GET /api/b?id=1",
+        "GET /api/c?id=1",
+        "GET /api/d?id=1",
+        "GET /api/e?id=1",
+        "GET /api/f?id=1",
+        "GET /api/g?id=1",
+        "GET /api/h?id=1",
+        "GET /api/i?id=1",
+        "GET /api/j?id=1",
+        "GET /api/k?id=1",
+        "GET /api/l?id=1",
+        "GET /api/m?id=1",
+        "GET /api/n?id=1",
+        "GET /api/o?id=1",
+        "GET /api/p?id=1",
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id,
@@ -5968,9 +6417,9 @@ def test_focused_parent_result_recomputed_from_merged_bola_findings():
 
     score, grade = worker._recompute_focused_parent_result(merged, findings, "bola")
 
-    assert score == 90
-    assert grade == "C"
-    assert merged["result"]["summary"] == "Focused BOLA Scan Grade: C (90/100) - 1 in-scope issue(s) found"
+    assert score == 85
+    assert grade == "B"
+    assert merged["result"]["summary"] == "Focused BOLA Scan Grade: B (85/100) - 1 in-scope issue(s) found"
     assert merged["result"]["focused_context_findings"] == 1
     assert merged["result"]["grade_reliable"] is True
     assert "grade_warning" not in merged["result"]
@@ -5996,6 +6445,80 @@ def test_parallel_parent_degraded_when_any_shard_fails():
     assert merged["result"]["grade"] == "C*"
     assert merged["result"]["original_grade"] == "C"
     assert merged["result"]["coverage_issues"]
+
+
+def test_parallel_parent_requested_discovery_failure_is_incomplete():
+    merged = {
+        "result": {"score": 94, "grade": "A", "grade_reliable": True},
+        "scan_metadata": {},
+        "coverage": {
+            "status": "partial",
+            "reasons": ["subdomain_discovery_failed"],
+            "grade_reliability": {"reliable": True, "reasons": []},
+        },
+    }
+
+    changed = worker._mark_parallel_parent_coverage_incomplete(merged)
+
+    assert changed is True
+    assert merged["scan_metadata"]["partial"] is True
+    assert merged["scan_metadata"]["grade_reliable"] is False
+    assert merged["result"]["grade_reliable"] is False
+    assert merged["result"]["grade"] == "A*"
+    assert merged["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["subdomain_discovery_failed"],
+    }
+
+
+def test_parallel_parent_assurance_is_recomputed_and_capped_by_all_shards():
+    merged = {
+        "result": {"assurance_score": 100, "assurance_band": "strong"},
+        "coverage": {
+            "planned_action_count": 8,
+            "terminal_action_count": 8,
+            "placement_executed": True,
+            "family_coverage": [
+                {
+                    "family": "xss", "selected": True, "status": "complete",
+                    "proof_escalation": {"attempted_candidates": 10},
+                },
+                {
+                    "family": "sqli", "selected": True, "status": "complete",
+                    "proof_escalation": {"attempted_candidates": 10},
+                },
+            ],
+            "candidate_coverage": {
+                "xss": {"planned_candidates": 10, "attempted_candidates": 10},
+                "sqli": {"planned_candidates": 10, "attempted_candidates": 10},
+            },
+        },
+        "smart_coverage": {"principal_contexts_exercised": 2},
+    }
+
+    score = worker.scan_scoring.recompute_parallel_parent_assurance(
+        merged, completed_count=1, total_count=6,
+    )
+
+    assert score <= 17
+    assert merged["result"]["assurance_score"] == score
+    assert merged["result"]["assurance_band"] != "strong"
+    assert "parallel_shards_incomplete" in merged["result"]["assurance_gaps"]
+
+
+def test_parallel_parent_assurance_clears_a_copied_score_without_coverage():
+    merged = {"result": {"assurance_score": 92, "assurance_band": "strong"}}
+    assert worker.scan_scoring.recompute_parallel_parent_assurance(
+        merged, completed_count=0, total_count=3,
+    ) == 0
+    assert merged["result"]["assurance_band"] == "none"
+
+
+def test_terminal_failure_stamps_zero_assurance_in_report():
+    report = {"error": "worker failed", "result": {"assurance_score": 99}}
+    assert worker.scan_scoring.stamp_terminal_assurance(report, status="failed") == 0
+    assert report["result"]["assurance_score"] == 0
+    assert report["result"]["assurance_band"] == "none"
 
 
 def test_parent_duplicate_merge_preserves_stronger_proof_and_instances():

@@ -71,6 +71,7 @@ required_files=(
   api/scan/execution.py
   api/scan/external_process.py
   api/scan/finalizer.py
+  api/scan/scoring.py
   api/scan/report_rebuild.py
   api/scan/surface_manifest.py
   api/scan/work_manifests.py
@@ -83,6 +84,9 @@ required_files=(
   api/runtime/observation_manifests.py
   api/runtime/receipts.py
   api/runtime/v2_runtime_hardening.py
+  scanner/ai_verdict_policy.py
+  scanner/risk_scoring.py
+  scanner/score_bands.py
   scanner/scanner_tools/__init__.py
   scanner/scanner_tools/build_fingerprint.py
   scanner/scanner_tools/device_postman.py

@@ -162,7 +162,7 @@ export const RISK_TIER_BADGE_STYLES: Record<RiskTier, string> = {
 
 // Cross-product mission timeline (GET /timeline) statuses[].
 export const TIMELINE_STATUSES = [
-  'planned', 'blocked', 'approval_required', 'approved', 'queued', 'running',
+  'planned', 'accepted', 'blocked', 'approval_required', 'approved', 'queued', 'running',
   'completed', 'partial', 'degraded', 'failed', 'cancelled', 'evidence_bound',
   'retest_scheduled', 'refuter_requested',
 ] as const
@@ -170,6 +170,7 @@ export type TimelineStatus = typeof TIMELINE_STATUSES[number]
 
 export const TIMELINE_STATUS_BADGE_STYLES: Record<TimelineStatus, string> = {
   planned: 'bg-gray-500/20 text-gray-400',
+  accepted: 'bg-cyan-500/20 text-cyan-300',
   blocked: 'bg-amber-500/20 text-amber-300',
   approval_required: 'bg-amber-500/20 text-amber-300',
   approved: 'bg-blue-500/20 text-blue-400',

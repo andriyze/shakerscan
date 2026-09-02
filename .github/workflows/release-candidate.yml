@@ -978,7 +978,6 @@ jobs:
           INSTALLED_STACK_SMOKE_BROWSER_JSON: ${{ github.workspace }}/artifacts/certification/playwright.json
           INSTALLED_STACK_SMOKE_DAST_RECALL_JSON: ${{ github.workspace }}/artifacts/certification/dast-recall.json
           INSTALLED_STACK_SMOKE_FAULT_DIR: ${{ github.workspace }}/artifacts/certification/fault
-          INSTALLED_STACK_SMOKE_E2E_EXCLUDE_AREAS: model_intake
         run: |
           npm --prefix ui ci
           npx --prefix ui playwright install --with-deps chromium
@@ -995,7 +994,6 @@ jobs:
             --junit artifacts/certification/v2-full-python.xml \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
             --playwright-json artifacts/certification/playwright.json \
-            --exclude-program model_intake \
             --source-sha "$CANDIDATE_SHA" \
             --image "scanner=$(jq -r '.images.scanner' "$receipt")" \
             --image "api=$(jq -r '.images.api' "$receipt")" \

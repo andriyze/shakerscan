@@ -24,6 +24,18 @@ export interface HuntActionV2 {
     timed_out: boolean
     observation_count: number
     budget_consumed: Record<string, number>
+    budget_accounting: {
+      schema_version: 'hunt-budget-settlement/v1'
+      basis: 'exact_settlement' | 'settlement_failed' | 'no_reservation' | 'legacy_reported_charge'
+      settlement_status: string
+      reservation_id?: string | null
+      charge_basis: 'capability_reported_settlement' | 'conservative_full_reservation' | 'legacy_unknown' | string
+      reserved: Record<string, number>
+      actual: Record<string, number>
+      released: Record<string, number>
+      overspent: Record<string, number>
+      used_after_reconciliation: Record<string, number>
+    }
     reference_ids: {
       scan_ids: string[]
       finding_ids: string[]
@@ -52,11 +64,73 @@ export interface HuntV2 {
     budget_cost: Record<string, number>
   }>
   actions?: HuntActionV2[]
+  outcome_summary?: {
+    schema_version: 'hunt-outcome-summary/v2' | 'hunt-outcome-summary/v3'
+    capability_calls: number
+    total_capability_calls: number
+    attempted_calls?: number
+    executed_calls?: number
+    successful_calls?: number
+    unsuccessful_calls?: number
+    indeterminate_calls?: number
+    partial_calls?: number
+    action_statuses: Record<string, number>
+    observation_count: number
+    finding_ids: string[]
+    candidate_ids: string[]
+    evidence_ids: string[]
+  }
   final_debrief?: { summary?: string; next_actions?: string[] }
   stop_reason?: string | null
   queued_scan?: { scan_id: string; job_id?: string; status: string; ui_url?: string }
   created_at?: string
   updated_at?: string
+  completed_at?: string | null
+  // Resolved by the list query's join; absent on a single-run read, where the caller
+  // already knows which target it asked about.
+  target_url?: string | null
+  target_name?: string | null
+  root_domain?: string | null
+  skills?: Array<{
+    skill_id: string
+    title: string
+    version?: string
+    body_sha256?: string
+    phase?: string
+    requested: boolean
+  }>
+  skill_activity?: HuntSkillActivity[]
+}
+
+export interface HuntSkillSuggestion {
+  skill_id: string
+  title: string
+  reason: string
+  methodology_url: string
+  bind_url: string
+  auto_bound: false
+}
+
+export interface HuntSkillSuggestions {
+  hunt_id: string
+  catalog_url: string
+  suggestions: HuntSkillSuggestion[]
+  count: number
+  signals_considered: number
+  methodology_bodies_loaded: 0
+  advisory_only: true
+}
+
+export interface HuntSkillActivity {
+  event_id: string
+  skill_id: string
+  event_type: 'read' | 'bound' | 'selection_removed' | 'unbound' | 'used' | 'completed' | 'deferred'
+  skill_version: string
+  body_sha256: string
+  reason?: string | null
+  evidence_refs: string[]
+  action_id?: string | null
+  created_at?: string
 }
 
 export interface HuntStartV2Request {
@@ -119,19 +193,104 @@ export async function getHuntV2(huntId: string): Promise<HuntV2> {
   return response.json()
 }
 
-export async function listHuntsV2(params: {
+export async function suggestHuntSkills(
+  huntId: string,
+  signals: string[] = [],
+): Promise<HuntSkillSuggestions> {
+  const response = await fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/suggestions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signals }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to suggest Hunt methodologies (${response.status})`))
+  }
+  return response.json()
+}
+
+export async function bindHuntSkill(
+  huntId: string,
+  skillId: string,
+  reason: string,
+): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/${encodeURIComponent(skillId)}/bind`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, evidence_refs: [] }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to apply Hunt methodology (${response.status})`))
+  }
+  return response.json()
+}
+
+export async function unbindHuntSkill(huntId: string, skillId: string): Promise<HuntV2> {
+  const response = await fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/skills/${encodeURIComponent(skillId)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    throw new Error(await getApiErrorMessage(response, `Failed to remove Hunt methodology (${response.status})`))
+  }
+  return response.json()
+}
+
+export type HuntSortField =
+  | 'created_at' | 'updated_at' | 'completed_at' | 'status' | 'objective' | 'target_url'
+
+export interface HuntListParams {
   targetId?: string
   status?: HuntV2['status']
+  targetKind?: HuntTargetKind
+  budgetProfile?: HuntBudgetProfile
+  rootDomain?: string
+  search?: string
+  sortBy?: HuntSortField
+  sortOrder?: 'asc' | 'desc'
   limit?: number
-} = {}): Promise<{ hunts: HuntV2[]; count: number }> {
+  offset?: number
+}
+
+export interface HuntListResult {
+  hunts: HuntV2[]
+  count: number
+  // Rows matching the filter before paging, so a view can say "51-100 of 240".
+  total: number
+  limit: number
+  offset: number
+}
+
+export async function listHuntsV2(params: HuntListParams = {}): Promise<HuntListResult> {
   const search = new URLSearchParams()
   if (params.targetId) search.set('target_id', params.targetId)
   if (params.status) search.set('status', params.status)
+  if (params.targetKind) search.set('target_kind', params.targetKind)
+  if (params.budgetProfile) search.set('budget_profile', params.budgetProfile)
+  if (params.rootDomain) search.set('root_domain', params.rootDomain)
+  if (params.search) search.set('search', params.search)
+  if (params.sortBy) search.set('sort_by', params.sortBy)
+  if (params.sortOrder) search.set('sort_order', params.sortOrder)
   if (params.limit) search.set('limit', String(params.limit))
+  if (params.offset) search.set('offset', String(params.offset))
   const suffix = search.size ? `?${search.toString()}` : ''
   const response = await fetch(`${API_URL}/hunts${suffix}`, { cache: 'no-store' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to list Hunts (${response.status})`))
-  return response.json()
+  const payload = await response.json()
+  // Older servers returned neither total nor offset; fall back to what was returned so a
+  // page renders rather than showing "undefined of undefined".
+  return {
+    hunts: payload.hunts || [],
+    count: payload.count ?? (payload.hunts || []).length,
+    total: payload.total ?? payload.count ?? (payload.hunts || []).length,
+    limit: payload.limit ?? params.limit ?? 50,
+    offset: payload.offset ?? params.offset ?? 0,
+  }
 }
 
 export async function cancelHuntV2(huntId: string): Promise<HuntV2> {

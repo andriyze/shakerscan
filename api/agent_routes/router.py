@@ -182,24 +182,12 @@ def worker_build_current(*a: Any, **k: Any) -> Any:
 
 
 __all__ = ["configure_agent_router", "router"]
-class AgentToolExecuteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    tool: str = Field(min_length=1, max_length=64)
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    approval_receipt_id: Optional[str] = None
 
 
 
 
 
 
-
-
-class AgentVerifyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    # Verification runs a gated credential-tier workflow, so a valid target-bound approval receipt
-    # is required (the same authorization the menu experiment.workflow path uses).
-    approval_receipt_id: str = Field(min_length=1)
 
 
 @router.get("/agent/tools/readiness")
@@ -254,29 +242,6 @@ async def get_agent_context_pack(
     }
 
 
-@router.post("/agent/tools/{target_id}/execute")
-async def execute_agent_tool_endpoint(target_id: str, req: AgentToolExecuteRequest):
-    """Execute ONE autonomous-agent tool against a target (read-only surface: http_request
-    is limited to safe methods here; state-changing writes flow through a gated research
-    episode with a validated approval receipt). Same building block the ReAct loop uses."""
-    target_uuid = _uuid_or_400(target_id, "target id")
-    async with _pool().acquire() as conn:
-        target = await conn.fetchrow("SELECT id, url, is_active FROM targets WHERE id=$1", target_uuid)
-        if not target or not target["is_active"]:
-            raise HTTPException(status_code=404, detail="Active target not found")
-        await _require_approval_receipt_if_policy_enabled(
-            conn, req.approval_receipt_id, action_name="agent.tool", risk_tier="active",
-            created_by="agent_tool_endpoint",
-        )
-    name = str(req.tool or "").strip()
-    if name not in agent_tools.CALLABLE_TOOL_NAMES:
-        raise HTTPException(status_code=400, detail=f"unknown tool; allowed {sorted(agent_tools.CALLABLE_TOOL_NAMES)}")
-    result = await _execute_agent_tool(
-        target_uuid, str(target["url"]), name, req.arguments,
-        created_by="agent_tool_endpoint", allow_write=False, allow_active=False,
-        authorized_addresses=await _resolve_agent_target_addresses(str(target["url"])),
-    )
-    return {"target_id": str(target_uuid), "tool": name, "result": result}
 
 
 
@@ -385,15 +350,6 @@ async def get_agent_two_tier_findings(target_id: str):
     }
 
 
-@router.post("/agent/findings/{finding_id}/verify")
-async def verify_suspected_agent_finding(finding_id: str, req: AgentVerifyRequest):
-    """Attempt to UPGRADE one SUSPECTED autonomous-agent finding to VERIFIED via the existing
-    family_proof two-run verification (Gap B). On success the SUSPECTED row becomes the VERIFIED one
-    (in place); otherwise it stays SUSPECTED. Requires gated execution (enabled by default) plus a
-    valid target-bound approval receipt. Supports the bola / auth_bypass / data_exposure families."""
-    finding_uuid = _uuid_or_400(finding_id, "finding id")
-    return await _verify_suspected_finding_workflow(
-        finding_uuid, req.approval_receipt_id, created_by="agent_verify_bridge")
 def _resolve_hunt_origin(primary_url: Any, origins: list[str], requested_origin: Any = None) -> str:
     """Choose a concrete Hunt origin inside the target's host boundary.
 
@@ -1801,8 +1757,8 @@ async def _agent_auto_verify(
         # OWNERSHIP — so an authenticated shared-behind-login collection (everyone may read any object)
         # passes every predicate and would false-VERIFY. Distinguishing "private, broken" from
         # "intentionally shared" is fundamentally a policy question no autonomous run can settle, so a
-        # suspected BOLA stays SUSPECTED for a human to promote. The manual /agent/findings/{id}/verify
-        # endpoint remains for an accountable human decision. (Zero-FP: unattended never promotes BOLA.)
+        # suspected BOLA stays SUSPECTED for an accountable canonical Hunt verification decision.
+        # (Zero-FP: unattended runs never promote BOLA.)
         if family in _AGENT_AUTO_VERIFY_EXCLUDED_FAMILIES:
             record_skip({"finding_id": str(record["id"]), "verified": False,
                          "skipped": "auto_verify_disabled_ownership_unprovable"})
@@ -2409,10 +2365,6 @@ def _agent_finding_locus(finding: dict[str, Any]) -> tuple[Optional[str], Option
     if len(operations) == 1:
         return operations[0]
     return None, None
-
-
-
-
 
 
 

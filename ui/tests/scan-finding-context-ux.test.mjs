@@ -29,7 +29,8 @@ test('scan result separates observations from findings not observed by this run'
 
 test('scan result does not bury the current run under historical target rows', () => {
   assert.match(detail, /const existingTotal = Math\.max/)
-  assert.match(detail, /current\.map\(\(finding: any\)/)
+  assert.match(detail, /current\.slice\(0, 6\)\.map\(\(finding: any\)/)
+  assert.match(detail, /Show \{current\.length - 6\} more findings observed in this scan/)
   assert.doesNotMatch(detail, /rows\.map\(\(finding: any\)/)
   assert.match(detail, /use the link above to review them/)
 })

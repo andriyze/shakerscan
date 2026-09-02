@@ -84,15 +84,24 @@ CREATE TABLE IF NOT EXISTS request_collection_selections (
     selected_request_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_request_count >= 0),
     selected_mutating_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_mutating_count >= 0),
     is_active BOOLEAN NOT NULL DEFAULT true,
+    revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT request_collection_selections_name_unique
-        UNIQUE (binding_id, name),
     CONSTRAINT request_collection_selections_binding_fk
         FOREIGN KEY (binding_id, collection_id)
         REFERENCES request_collection_bindings(id, collection_id)
         ON DELETE CASCADE
 );
+ALTER TABLE request_collection_selections
+DROP CONSTRAINT IF EXISTS request_collection_selections_name_unique;
+ALTER TABLE request_collection_selections
+ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+-- The legacy schema had only is_active, so an inactive row may have been
+-- explicitly revoked. Preserve the safe meaning across the upgrade. New
+-- superseded revisions are retired without revoked_at by the versioned API.
+UPDATE request_collection_selections
+SET revoked_at = COALESCE(revoked_at, updated_at, NOW())
+WHERE is_active=false AND revoked_at IS NULL;
 ALTER TABLE request_collection_selections
 DROP CONSTRAINT IF EXISTS request_collection_selections_replay_policy_check;
 ALTER TABLE request_collection_selections
@@ -101,6 +110,22 @@ ADD CONSTRAINT request_collection_selections_replay_policy_check CHECK (
 );
 CREATE INDEX IF NOT EXISTS idx_request_collection_selections_active
 ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
+WITH ranked_current_selections AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY binding_id, lower(name)
+               ORDER BY updated_at DESC, created_at DESC, id DESC
+           ) AS current_rank
+    FROM request_collection_selections
+    WHERE is_active=true AND revoked_at IS NULL
+)
+UPDATE request_collection_selections selection
+SET is_active=false, updated_at=NOW()
+FROM ranked_current_selections ranked
+WHERE selection.id=ranked.id AND ranked.current_rank > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_request_collection_selections_current_name
+ON request_collection_selections(binding_id, lower(name))
+WHERE is_active=true AND revoked_at IS NULL;
 
 INSERT INTO request_collection_bindings (
     collection_id, target_kind, target_id, allowed_origins

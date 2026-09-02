@@ -26,6 +26,7 @@ import urllib.parse
 from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.request_shape import public_request_body_shape
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     EnforcedProcessPlan,
@@ -34,29 +35,59 @@ from scan.external_process import (
 )
 from scan.work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
+    canonical_passive_nuclei_template_pack_digest,
     canonical_passive_nuclei_request_upper_bound,
 )
 from target_address_policy import MAX_FROZEN_ADDRESSES, primary_frozen_address
 
 try:
-    from scanner_tools.url_redaction import redact_url
+    from scanner_tools.url_redaction import redact_client_route, redact_url
 except ModuleNotFoundError:  # package import in host-side tests
-    from scanner.scanner_tools.url_redaction import redact_url
+    from scanner.scanner_tools.url_redaction import redact_client_route, redact_url
 
 # Methods the model may request. Reads are read-only; writes are credential/active-gated.
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 WRITE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 ALL_METHODS: frozenset[str] = READ_METHODS | WRITE_METHODS
 
-# Request headers the model may never set. Auth/identity headers come ONLY from a
-# server-resolved principal (as_principal); a Host/CL/hop-by-hop header would break
-# same-origin or smuggle. Anything matching a sensitive substring is also dropped.
-_FORBIDDEN_HEADERS: frozenset[str] = frozenset(
+# Headers the planner may never set, whatever the operator authorizes, because real auth
+# comes only from a server-resolved principal (as_principal). Letting a planner supply one
+# would put a credential outside the credential store and outside the evidence chain.
+_CREDENTIAL_HEADERS: frozenset[str] = frozenset(
+    {"authorization", "cookie", "proxy-authorization"}
+)
+# Message framing and routing owned by the executor. A planner-set value here does not test
+# anything; it produces a malformed or misrouted request. Deliberate framing manipulation is
+# request smuggling, which belongs to its own raw single-connection capability with its own
+# approval, not to a header field on a normal request.
+_TRANSPORT_HEADERS: frozenset[str] = frozenset(
     {
-        "authorization", "cookie", "host", "content-length", "connection",
-        "transfer-encoding", "proxy-authorization", "x-forwarded-for",
-        "x-forwarded-host", "x-real-ip", "forwarded",
+        "host", "content-length", "connection", "transfer-encoding",
+        "keep-alive", "te", "trailer", "upgrade",
+        # These alter the effective route or method while the canonical receipt continues
+        # to describe the bound path/method. They require a dedicated capability and proof
+        # contract rather than a normal request header, even with identity-forgery approval.
+        "x-original-url", "x-rewrite-url", "x-http-method-override",
     }
+)
+# Headers that assert who the client is. Forging one is a legitimate and important test --
+# an origin that trusts them while reachable outside its edge is exploitable -- but it is
+# also identity forgery, so it requires explicit operator authority rather than being
+# available by default.
+#
+# The Cloudflare and Akamai names belong here for the same reason as X-Forwarded-For. They
+# were previously absent, so the two headers an origin behind a major edge is most likely to
+# trust were the two a planner could always set.
+IDENTITY_HEADERS: frozenset[str] = frozenset(
+    {
+        "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+        "cf-connecting-ip", "true-client-ip", "x-client-ip", "x-originating-ip",
+        "x-cluster-client-ip", "x-remote-addr", "x-remote-ip",
+        "client-ip", "x-forwarded", "fastly-client-ip", "x-azure-clientip",
+    }
+)
+_FORBIDDEN_HEADERS: frozenset[str] = (
+    _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS | IDENTITY_HEADERS
 )
 _SENSITIVE_HEADER_SUBSTR: tuple[str, ...] = (
     "token", "secret", "auth", "session", "cookie", "password", "api-key", "apikey",
@@ -305,9 +336,9 @@ _AGENT_FFUF_WORDLISTS: dict[str, str] = {
 def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # Same-origin crawl + JS endpoint extraction. Read-only (GET only; form auto-fill stays OFF),
     # bounded: depth 2, 30s wall cap, 5 req/s, field-scope fqdn (same HOST only — never crosses
-    # origin), 8s per-request timeout, URL-only output. Katana's JSONL records embed raw
-    # request/response bodies and can exhaust the worker output cap after only a few pages.
-    # The compact stream is sufficient for route discovery and keeps planner evidence bounded.
+    # origin), 8s per-request timeout. JSONL is required to retain observed methods and
+    # request-body shape. Raw requests, headers, and responses are excluded at the process;
+    # the parser projects any remaining request body into field names before persistence.
     #
     # -jsluice and -kb-endpoints parse the JavaScript this crawl already fetched, so they
     # cost no additional HTTP request and stay inside the rate-derived reservation below.
@@ -321,7 +352,9 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "5",
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
-            "-timeout", "8", "-retry", "0", "-disable-redirects", "-silent"]
+            "-timeout", "8", "-retry", "0", "-disable-redirects",
+            "-jsonl", "-omit-raw", "-omit-body",
+            "-exclude-output-fields", "headers,response,raw", "-silent"]
 
 
 def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
@@ -344,7 +377,9 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
             "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
             "-depth", "2", "-concurrency", "4",
             "-rate-limit", "5", "-crawl-duration", "45s", "-field-scope", "fqdn",
-            "-timeout", "10", "-retry", "0", "-disable-redirects", "-silent"]
+            "-timeout", "10", "-retry", "0", "-disable-redirects",
+            "-jsonl", "-omit-raw", "-omit-body",
+            "-exclude-output-fields", "headers,response,raw", "-silent"]
 
 
 # An inert placeholder for every body field the engine sends. The scanner supplies the attack; a
@@ -386,8 +421,9 @@ def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
 
 
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
-    # Bounded XSS scan of a single URL. GET-based: no data body, no blind callback, no headless,
-    # no WAF evasion, no parameter mining beyond the URL itself. json output for the typed parser.
+    # Bounded XSS scan of a single URL. GET-based: no blind callback, no WAF evasion,
+    # no parameter mining beyond the URL itself. Headless verification is opt-in and
+    # remains behind the active/browser budget plus the pinned transport.
     severity = str(opts.get("severity") or "").strip().lower()
     severity_args: list[str] = []
     if severity == "low":
@@ -396,10 +432,25 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
         severity_args = ["--only-poc", "r,v"]
     else:
         severity_args = ["--only-poc", "v"]
+    # --force-headless-verification alone drives the real browser and settles a
+    # DOM-based finding in seconds. --deep-domxss additionally crawls the DOM
+    # exhaustively and does not converge inside this capability's wall ceiling,
+    # so the tool was cut off before emitting any verdict at all.
+    headless_args = (
+        ["--force-headless-verification"]
+        if opts.get("deep_domxss") is True else ["--skip-headless"]
+    )
+    # Browser verification is a single-URL proof attempt, not a crawl. The
+    # ordinary 1s/3-worker crawl profile repeatedly reaches the 120s supervisor
+    # wall before Dalfox settles. The pinned proxy still enforces the reserved
+    # request ceiling, while this measured profile lets the browser terminate
+    # and return its verdict inside that reservation.
+    headless = opts.get("deep_domxss") is True
+    delay_ms, workers = ("0", "10") if headless else ("1000", "3")
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
-             "--timeout", "8", "--delay", "1000", "--worker", "3",
-             "--skip-bav", "--skip-grepping", "--skip-headless",
-             "--skip-mining-all"] + severity_args)
+             "--timeout", "8", "--delay", delay_ms, "--worker", workers,
+             "--skip-bav", "--skip-grepping", "--skip-mining-all"]
+            + headless_args + severity_args)
     injection = _injection_body(opts)
     if injection is not None:
         method, body, fields = injection
@@ -607,14 +658,50 @@ def validate_private_interactsh_server(url: Any) -> str | None:
     return f"{scheme}://{authority}"
 
 
-def resolve_hunt_interactsh_config(*, allow_active: bool) -> tuple[str | None, str | None]:
+def canonical_hunt_scanner_options(
+    capability_name: str,
+    planner_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive worker scanner options from the bounded planner projection.
+
+    Body candidates remain available to deterministic Scan through the full
+    capability input schema. Hunt sees only ``planner_input_schema`` and this
+    worker-side projection validates that narrower schema again before a process
+    is built. Nuclei selection is replaced with the reviewed immutable GET-only
+    pack so planner tags can never select mutating or OOB templates.
+    """
+    name = str(capability_name or "").strip().lower()
+    options = CAPABILITY_REGISTRY.validate_hunt_input(name, planner_input)
+    if name != "templates.scan":
+        return options
+    return {
+        **options,
+        "severity": "critical,high,medium,low,info",
+        "template_ids": _CANONICAL_PASSIVE_NUCLEI_IDS,
+        "template_pack_digest": canonical_passive_nuclei_template_pack_digest(),
+        "template_request_cost_upper_bound": (
+            canonical_passive_nuclei_request_upper_bound()
+        ),
+    }
+
+
+def resolve_hunt_interactsh_config(
+    *,
+    allow_active: bool,
+    allow_oob: bool,
+    reserved_oob_interactions: int,
+) -> tuple[str | None, str | None]:
     """Resolve the operator-configured private OOB server for a gated hunt, or (None, None).
 
-    Only a gated-execution (credential-tier approved) hunt may use OOB, and only when the
-    operator has set ``SHAKERSCAN_HUNT_INTERACTSH_SERVER`` to their own private server. This is
-    off by default, so no hunt gains external OOB egress without an explicit operator opt-in.
+    Active approval, persisted OOB authority, a durable nonzero OOB reservation, and an
+    operator-owned private server are all required. This is off by default, so deployment
+    configuration alone can never grant a Hunt external OOB egress.
     """
-    if not allow_active:
+    if (
+        not allow_active
+        or not allow_oob
+        or int(reserved_oob_interactions) <= 0
+    ):
         return None, None
     server = validate_private_interactsh_server(os.environ.get("SHAKERSCAN_HUNT_INTERACTSH_SERVER"))
     if not server:
@@ -623,6 +710,24 @@ def resolve_hunt_interactsh_config(*, allow_active: bool) -> tuple[str | None, s
     if token and (any(ch in token for ch in "\r\n") or len(token) > 512):
         token = None
     return server, token
+
+
+def canonical_hunt_scanner_execution(
+    capability_name: str,
+    planner_input: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    requested_budget: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None, str | None]:
+    """Return the server-derived scanner options and independently gated OOB config."""
+    options = canonical_hunt_scanner_options(capability_name, planner_input)
+    server, token = resolve_hunt_interactsh_config(
+        allow_active=bool(policy.get("active_testing")),
+        allow_oob=bool(policy.get("allow_oob_interactions")),
+        reserved_oob_interactions=int(
+            requested_budget.get("oob_interactions") or 0
+        ),
+    )
+    return options, server, token
 
 
 def _apply_nuclei_interactsh(argv: list[str], server: str | None, token: str | None) -> list[str]:
@@ -1035,6 +1140,8 @@ def build_enforced_scanner_plan(
             )
     elif scanner == "dalfox":
         http = int(reservation.get("http_requests") or 0)
+        deep_domxss = bool(options.get("deep_domxss"))
+        dalfox_workers = 10 if deep_domxss else 3
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
                 http, wall, minimum_seconds=0.05,
@@ -1047,7 +1154,8 @@ def build_enforced_scanner_plan(
                 "profile": "batch_attempt", "targets": 1,
                 "connection_ceiling": affordable, "wall_seconds": wall,
                 "delay_ms": max(1, int(delay_seconds * 1_000)),
-                "workers": 3, "headless": False, "blind_oob": False,
+                "workers": dalfox_workers, "headless": deep_domxss,
+                "blind_oob": False,
             }
         elif (
             http >= EXTERNAL_VERIFICATION_FLOORS["dalfox"]["http_requests"]
@@ -1058,8 +1166,9 @@ def build_enforced_scanner_plan(
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
             proof_inputs = {
-                "profile": "full", "targets": 1, "workers": 3,
-                "delay_ms": 1_000, "headless": False,
+                "profile": "full", "targets": 1, "workers": dalfox_workers,
+                "delay_ms": 0 if deep_domxss else 1_000,
+                "headless": deep_domxss,
                 "parameter_mining": False, "blind_oob": False,
             }
         else:
@@ -1252,9 +1361,14 @@ def validate_scanner_execution_target(registered_target: str, execution_target: 
         raise AgentToolError("scanner execution target must not contain user information")
     if execution_host != registered_host:
         raise AgentToolError("scanner execution target must use the selected target host")
-    return urllib.parse.urlunsplit(
-        (execution.scheme.lower(), execution.netloc, execution.path or "/", execution.query, "")
-    )
+    # The fragment is retained deliberately. It never reaches a server and cannot
+    # change the validated destination, but for a browser-driven DOM check it *is*
+    # the vulnerable surface: dropping it reduced every SPA route to the origin
+    # root, so a fragment-routed DOM XSS could not be verified at all.
+    return urllib.parse.urlunsplit((
+        execution.scheme.lower(), execution.netloc,
+        execution.path or "/", execution.query, execution.fragment,
+    ))
 
 
 def validate_pinned_scanner_address(pinned_address: Any, authorized_addresses: Any) -> str:
@@ -1386,6 +1500,15 @@ def _public_observed_url(value: Any) -> str | None:
         return None
 
 
+def _public_discovered_url(value: Any) -> str | None:
+    """Retain a value-free SPA route for discovery while applying normal URL redaction."""
+    public_url = _public_observed_url(value)
+    if public_url is None:
+        return None
+    client_route = redact_client_route(value)
+    return f"{public_url}#{client_route}" if client_route else public_url
+
+
 def parse_scanner_output(
     name: str, stdout: str, *, allowed_host: str | None = None,
 ) -> dict[str, Any]:
@@ -1427,7 +1550,9 @@ def parse_scanner_output(
                     decoded.append({"url": candidate, "method": "GET"})
 
     records: list[dict[str, Any]] = []
-    seen_katana_urls: set[str] = set()
+    seen_katana_requests: set[
+        tuple[str, str, str | None, tuple[str, ...]]
+    ] = set()
     for item in decoded[:MAX_TOOL_RECORDS]:
         if scanner == "nuclei":
             info = item.get("info") if isinstance(item.get("info"), dict) else {}
@@ -1449,7 +1574,7 @@ def parse_scanner_output(
             })
         elif scanner in KATANA_TOOLS:
             request = item.get("request") if isinstance(item.get("request"), dict) else {}
-            observed_url = _public_observed_url(
+            observed_url = _public_discovered_url(
                 item.get("url") or item.get("endpoint") or request.get("endpoint")
             )
             if not observed_url:
@@ -1461,15 +1586,28 @@ def parse_scanner_output(
                     continue
                 if observed_host != str(allowed_host).lower().rstrip("."):
                     continue
-            if observed_url in seen_katana_urls:
+            method = str(item.get("method") or request.get("method") or "GET").upper()[:16]
+            content_type, body_field_names = public_request_body_shape(
+                request.get("body")
+            )
+            request_identity = (
+                observed_url, method, content_type, body_field_names,
+            )
+            if request_identity in seen_katana_requests:
                 continue
-            seen_katana_urls.add(observed_url)
-            records.append({
+            seen_katana_requests.add(request_identity)
+            record = {
                 "kind": "discovered_route",
                 "url": observed_url,
-                "method": str(item.get("method") or request.get("method") or "GET").upper()[:16],
+                "method": method,
                 "source": _public_observed_url(item.get("source") or item.get("from")),
-            })
+            }
+            if body_field_names:
+                record.update({
+                    "content_type": content_type,
+                    "body_field_names": list(body_field_names),
+                })
+            records.append(record)
         elif scanner == "ffuf":
             records.append({
                 "kind": "content_discovery",
@@ -1490,17 +1628,30 @@ def parse_scanner_output(
             })
         elif scanner == "dalfox":
             data = item.get("data") if isinstance(item.get("data"), dict) else item
+            observed_url = (
+                data.get("address") or data.get("url") or data.get("target")
+                or (item.get("data") if isinstance(item.get("data"), str) else None)
+            )
+            payload_material = str(data.get("payload") or "")
+            if not payload_material and str(data.get("type") or "").lower() == "v":
+                # Dalfox 2.13 emits verified headless PoCs with the injected URL in
+                # the top-level `data` string and an empty payload field. Hash that
+                # private URL as the proof receipt while exposing only the redacted URL.
+                payload_material = str(item.get("data") or "")
             message = str(data.get("message") or data.get("poc") or "")[:500] or None
             record = {
                 "kind": "xss_alert",
                 "alert_type": str(data.get("type") or item.get("type") or "")[:40] or None,
-                "url": _public_observed_url(data.get("address") or data.get("url") or data.get("target")),
+                "url": _public_observed_url(observed_url),
                 "param": str(data.get("param") or "")[:200] or None,
                 # Payload text is receipt-side only; hunt reasoning gets its shape, not the body.
-                "payload_sha256": hashlib.sha256(str(data.get("payload") or "").encode()).hexdigest() if data.get("payload") else None,
+                "payload_sha256": hashlib.sha256(payload_material.encode()).hexdigest() if payload_material else None,
                 "message": message,
                 "proof_state": "verified" if str(data.get("type") or "").lower() == "v" else "candidate",
             }
+            client_route = redact_client_route(observed_url)
+            if client_route:
+                record["client_route"] = client_route
             records.append(record)
         elif scanner == "naabu":
             # JSON lines: {"host":"10.0.0.4","port":8443,"protocol":"tcp"} (port may be a
@@ -1597,27 +1748,62 @@ def validate_same_origin_path(path: Any) -> str:
     return text
 
 
-def filter_request_headers(headers: Any) -> dict[str, str]:
-    """Drop any header the model must not set (auth/identity/hop-by-hop/sensitive). Real
-    auth comes only from a server-resolved principal. Returns the surviving benign headers."""
+def classify_request_headers(
+    headers: Any, *, allow_identity_headers: bool = False,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return accepted headers plus value-free rejection reasons.
+
+    ``allow_identity_headers`` is the operator's explicit decision that forging a client
+    address against this target is in scope. It never unlocks credential or transport
+    headers: those are refused because of how ShakerScan handles secrets and frames
+    requests, which is not the operator's to waive.
+    """
     out: dict[str, str] = {}
+    rejected: dict[str, str] = {}
     if not isinstance(headers, dict):
-        return out
+        return out, rejected
+    refused = (
+        _CREDENTIAL_HEADERS | _TRANSPORT_HEADERS
+        if allow_identity_headers else _FORBIDDEN_HEADERS
+    )
     for name, value in headers.items():
         lname = str(name).strip().lower()
-        if not lname or lname in _FORBIDDEN_HEADERS:
+        if not lname:
+            continue
+        if lname in _CREDENTIAL_HEADERS:
+            rejected[lname] = "managed_principal_required"
+            continue
+        if lname in _TRANSPORT_HEADERS:
+            rejected[lname] = "executor_owned_header"
+            continue
+        if lname in IDENTITY_HEADERS and lname in refused:
+            rejected[lname] = "identity_header_approval_required"
             continue
         if any(sub in lname for sub in _SENSITIVE_HEADER_SUBSTR):
+            rejected[lname] = "sensitive_header_name_forbidden"
             continue
         sval = str(value)
         if not lname.isascii() or not sval.isascii():
+            rejected[lname] = "non_ascii_header_forbidden"
             continue
         if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name + sval):
+            rejected[lname] = "control_character_forbidden"
             continue
         if len(sval.encode("utf-8")) > 2000:
+            rejected[lname] = "header_value_too_large"
             continue
         out[str(name)] = sval
-    return out
+    return out, rejected
+
+
+def filter_request_headers(
+    headers: Any, *, allow_identity_headers: bool = False,
+) -> dict[str, str]:
+    """Compatibility view returning only planner headers safe to send."""
+    accepted, _ = classify_request_headers(
+        headers, allow_identity_headers=allow_identity_headers,
+    )
+    return accepted
 
 
 def normalize_principal_slot(value: Any) -> str:

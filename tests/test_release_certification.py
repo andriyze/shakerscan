@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from scripts.certify_release_receipt import CertificationError, certify_receipt
+from scripts.validate_promotion_receipt import (
+    PromotionReceiptError,
+    validate_certification_checks,
+)
 
 
 SOURCE = "a" * 40
@@ -50,7 +54,7 @@ def _evidence(tmp_path: Path):
         "status": "pass",
         "source_sha": SOURCE,
         "images": dict(sorted(IMAGES.items())),
-        "scope_exclusions": ["model_intake"],
+        "scope_exclusions": [],
     }
     e2e = {
         "schema_version": "shakerscan-e2e-scorecard/v1",
@@ -63,23 +67,27 @@ def _evidence(tmp_path: Path):
             "images": dict(sorted(IMAGES.items())),
         },
         "areas": [
-            {"area": area, "gate": "pass", "rows": []}
-            for area in ("platform", "ai_gate", "dast", "hunt")
+            {
+                "area": area,
+                "gate": "pass",
+                "rows": ([{
+                    "name": "H-18 adaptive real-target methodology produces a verified finding",
+                    "passed": True,
+                    "skipped": False,
+                    "detail": "",
+                }] if area == "hunt" else []),
+            }
+            for area in ("platform", "ai_gate", "dast", "hunt", "model_intake")
         ],
     }
     external_values = {
         "dast_quality": {
             "passed": True,
             "regression_gates_passed": True,
-            "quality_bar_passed": False,
+            "quality_bar_passed": True,
             "quality_bar_enforced": True,
             "release_quality_contract_passed": True,
-            "quality_release_dispositions": [{
-                "status": "accepted_shortfall",
-                "valid": True,
-                "accepted_failed_gates": ["quality:min_expected_recall"],
-                "observed_failed_gates": ["quality:min_expected_recall"],
-            }],
+            "quality_release_dispositions": [],
         },
         "fault_cancellation": {
             "schema_version": "scan-cancellation-race-receipt/v1", "passed": True,
@@ -132,9 +140,8 @@ def test_certification_binds_exact_manifests_and_all_acceptance_evidence(tmp_pat
         "exact_manifest_e2e_scorecard",
         *paths["external_evidence"].keys(),
     }
-    assert receipt["certification"]["checks"]["complete_dast_quality_bar"] == (
-        "accepted_shortfall"
-    )
+    assert receipt["certification"]["checks"]["complete_dast_quality_bar"] == "pass"
+    validate_certification_checks(receipt)
 
 
 def test_optional_physical_boundaries_are_recorded_as_not_run(tmp_path):
@@ -151,22 +158,52 @@ def test_optional_physical_boundaries_are_recorded_as_not_run(tmp_path):
         **paths,
     )
     assert receipt["certification"]["scope_exclusions"] == [
-        "model_intake_e2e_and_preservation", "real_fleet_parity",
-        "model_intake_physical", "device_physical",
+        "real_fleet_parity", "model_intake_physical", "device_physical",
     ]
     assert receipt["certification"]["checks"]["real_fleet_parity"] == (
         "not_run_optional_boundary"
     )
+    validate_certification_checks(receipt)
 
 
-def test_a_vacuous_dast_shortfall_cannot_certify(tmp_path):
+def test_promotion_rejects_unaccepted_or_mismatched_check_states(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+        source_sha=SOURCE, **paths,
+    )
+    receipt["certification"]["checks"]["fault_cancellation"] = "accepted_shortfall"
+    with pytest.raises(PromotionReceiptError, match="fault_cancellation"):
+        validate_certification_checks(receipt)
+
+
+def test_promotion_rejects_optional_not_run_without_matching_scope_exclusion(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+        source_sha=SOURCE, **paths,
+    )
+    receipt["certification"]["checks"]["real_fleet_parity"] = (
+        "not_run_optional_boundary"
+    )
+    with pytest.raises(PromotionReceiptError, match="scope exclusions"):
+        validate_certification_checks(receipt)
+
+
+def test_a_dast_shortfall_cannot_certify(tmp_path):
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
     dast, dast_path = paths["external_evidence"]["dast_quality"]
-    dast["quality_release_dispositions"][0]["accepted_failed_gates"] = []
+    dast["quality_bar_passed"] = False
+    dast["quality_release_dispositions"] = [{
+        "status": "accepted_shortfall",
+        "valid": True,
+        "accepted_failed_gates": ["quality:min_expected_recall"],
+        "observed_failed_gates": ["quality:min_expected_recall"],
+    }]
     paths["external_evidence"]["dast_quality"] = (
         dast, _write(tmp_path, dast_path.name, dast),
     )
-    with pytest.raises(CertificationError, match="absent, vacuous, or unbounded"):
+    with pytest.raises(CertificationError, match="complete DAST quality bar"):
         certify_receipt(
             candidate=candidate,
             upgrade=upgrade,
@@ -234,6 +271,18 @@ def test_an_e2e_scorecard_from_other_images_cannot_certify(tmp_path):
         certify_receipt(
             candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
             source_sha=SOURCE, **paths,
+        )
+
+
+def test_an_e2e_scorecard_without_real_target_hunt_proof_cannot_certify(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    hunt = next(item for item in e2e["areas"] if item["area"] == "hunt")
+    hunt["rows"][0]["skipped"] = True
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError, match="adaptive real-target"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation,
+            e2e=e2e, source_sha=SOURCE, **paths,
         )
 
 

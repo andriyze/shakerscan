@@ -3,7 +3,26 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Activity, BookOpen, Bot, Boxes, Braces, Compass, FileArchive, KeyRound, Menu, Network, PackageCheck, Radar, Router, ServerCog, ShieldCheck, TriangleAlert, X } from 'lucide-react'
+import {
+  Activity,
+  BookOpen,
+  Bot,
+  Boxes,
+  Braces,
+  Compass,
+  FileArchive,
+  History,
+  KeyRound,
+  Menu,
+  Network,
+  PackageCheck,
+  Radar,
+  Router,
+  ServerCog,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+} from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
 import {
@@ -91,6 +110,7 @@ const navGroups: {
     badge: 'Agentic',
     items: [
       { href: '/hunt', label: 'Agent Hunt', icon: <Compass className="w-5 h-5" /> },
+      { href: '/hunts', label: 'Hunt History', icon: <History className="w-5 h-5" /> },
     ],
   },
   {
@@ -289,7 +309,7 @@ function NavContent({
             GitHub
           </a>
           <div className="flex items-center gap-2">
-          <span title="Show all sections (Interactive Testing, Leads, Records, Governance, Developer)" className="inline-flex">
+          <span title="Show advanced sections (Records, Governance, Developer)" className="inline-flex">
             <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
           </span>
           <Link
@@ -325,6 +345,7 @@ export default function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
   const bakedVersion = process.env.NEXT_PUBLIC_APP_VERSION
+  const bakedExpectedApiFingerprint = process.env.NEXT_PUBLIC_EXPECTED_API_BUILD_FINGERPRINT
   const [buildIdentity, setBuildIdentity] = useState<BuildIdentity>({ ui: bakedVersion, skew: false })
   const [fleetEnabled, setFleetEnabled] = useState(false)
   const openerRef = useRef<HTMLButtonElement>(null)
@@ -337,7 +358,7 @@ export default function Sidebar() {
     const refresh = (force = false) => {
       loadHealthBuildIdentity(force).then((health) => {
         if (cancelled) return
-        setBuildIdentity(deriveBuildIdentity(bakedVersion, health))
+        setBuildIdentity(deriveBuildIdentity(bakedVersion, health, bakedExpectedApiFingerprint))
         setFleetEnabled(health?.fleet?.enabled === true)
       })
     }
@@ -347,7 +368,7 @@ export default function Sidebar() {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [bakedVersion])
+  }, [bakedExpectedApiFingerprint, bakedVersion])
 
   // Persist the "show all sections" preference across reloads (default off).
   useEffect(() => {

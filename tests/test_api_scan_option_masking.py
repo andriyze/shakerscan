@@ -1303,6 +1303,23 @@ async def _noop_persist_asm_scan_authority(*_args, **_kwargs):
     return None
 
 
+_ASM_APPROVAL_ID = "11111111-1111-4111-8111-111111111111"
+_ASM_SCOPE_ID = "22222222-2222-4222-8222-222222222222"
+
+
+async def _allow_asm_approval(_conn, approval_receipt_id, **kwargs):
+    assert approval_receipt_id == _ASM_APPROVAL_ID
+    assert kwargs["always_require_receipt"] is True
+    assert kwargs["require_target_binding"] is True
+    assert kwargs["require_expiry"] is True
+    return {
+        "approval_receipt_id": _ASM_APPROVAL_ID,
+        "scope_receipt_id": _ASM_SCOPE_ID,
+        "approved_by": "test-operator",
+        "approval_confirmations": ["confirm_authorized"],
+    }
+
+
 def _asm_claim_rows(count):
     return [
         {
@@ -1380,6 +1397,7 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", _allow_asm_approval)
     monkeypatch.setattr(targets_router_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
     monkeypatch.setattr(
         api_module.asm_inventory,
@@ -1394,7 +1412,10 @@ def test_asm_improve_queues_claimable_test_batch(monkeypatch):
 
     result = asyncio.run(api_module.asm_improve(
         target_id,
-        api_module.AsmImproveRequest(check_family="sqli"),
+        api_module.AsmImproveRequest(
+            check_family="sqli",
+            approval_receipt_id=_ASM_APPROVAL_ID,
+        ),
     ))
 
     assert result["action"] == "test"
@@ -1441,6 +1462,7 @@ def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
     monkeypatch.setattr(api_module, "get_redis", lambda: redis_client)
     monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
     monkeypatch.setattr(api_module.asm_inventory, "claimable_count", fake_claimable)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", _allow_asm_approval)
     monkeypatch.setattr(targets_router_module, "_persist_asm_scan_authority", _noop_persist_asm_scan_authority)
     monkeypatch.setattr(
         api_module.asm_inventory,
@@ -1455,7 +1477,11 @@ def test_asm_improve_can_scope_next_batch_to_api_endpoints(monkeypatch):
 
     result = asyncio.run(api_module.asm_improve(
         target_id,
-        api_module.AsmImproveRequest(batch_size=100, endpoint_filter="apis"),
+        api_module.AsmImproveRequest(
+            batch_size=100,
+            endpoint_filter="apis",
+            approval_receipt_id=_ASM_APPROVAL_ID,
+        ),
     ))
 
     assert result["action"] == "test"
@@ -1508,6 +1534,57 @@ def test_asm_improve_endpoint_filter_does_not_queue_when_no_matching_work(monkey
 def test_asm_endpoint_filter_rejects_unknown_values():
     with pytest.raises(ValidationError, match="unsupported endpoint_filter"):
         api_module.AsmImproveRequest(endpoint_filter="all-the-things")
+
+
+def test_active_asm_request_requires_receipt_even_in_compatibility_mode(monkeypatch):
+    target_id = str(uuid.uuid4())
+    conn = _AsmActionConn()
+
+    async def fake_coverage(_conn, _target_id):
+        return {"total": 1, "tested": 0, "untested": 1, "in_progress": 0, "stale": 0, "gone": 0, "coverage": 0}
+
+    monkeypatch.setattr(api_module, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(api_module, "get_redis", lambda: _RecordingAsmRedis())
+    monkeypatch.setattr(api_module.asm_inventory, "coverage_summary", fake_coverage)
+
+    with pytest.raises(api_module.HTTPException, match="Approval receipt is required") as excinfo:
+        asyncio.run(api_module.asm_test(target_id, api_module.AsmTestRequest()))
+
+    assert excinfo.value.status_code == 400
+    assert not any("INSERT INTO scans" in query for query, _args in conn.executes)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"unknown": 1},
+        {"batch_size": "50"},
+        {"exploit_depth": 1},
+        {"window_days": [0, 7]},
+        {"approval_receipt_id": "not-a-uuid"},
+    ],
+)
+def test_continuous_asm_policy_rejects_unknown_or_coerced_config(config):
+    with pytest.raises(ValidationError):
+        api_module.AsmPolicyUpdate(config=config)
+
+
+def test_asm_actions_never_inherit_saved_approval_context():
+    cleaned = targets_router_module._clear_asm_approval_context({
+        "approval_receipt_id": "stale-top-level",
+        "scope_receipt_id": "stale-scope",
+        "scan_policy": {
+            "approval_receipt_id": "stale-policy",
+            "scope_receipt_id": "stale-policy-scope",
+            "active_testing": True,
+        },
+        "budget_profile": "balanced",
+    })
+
+    assert cleaned == {
+        "scan_policy": {"active_testing": True},
+        "budget_profile": "balanced",
+    }
 
 
 def test_asm_test_rejects_concurrent_target_work(monkeypatch):

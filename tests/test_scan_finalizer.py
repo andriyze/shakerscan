@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import uuid
@@ -12,6 +13,7 @@ from api.scan.capability_result import (
     CapabilityResultStatus,
 )
 from api.scan.finalizer import finalize_scan_report
+from api.scan import finalizer as finalizer_module
 from api.scan.continuation import ScanPlanRevision
 from tests.test_scan_orchestrator import SCAN_ID, _action, _plan, _result
 
@@ -236,6 +238,131 @@ def test_finalizer_projects_pinned_http_header_posture_findings():
     )
 
 
+def test_finalizer_does_not_grade_headers_from_an_auth_challenge():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {"status": 401, "security_headers": {}},
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["findings"] == []
+    assert report["http"]["posture_observed"] is False
+    assert report["http"]["missing_security_headers"] == []
+    assert report["result"]["posture_penalty"] == 0
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["grade_reliable"] is False
+    assert report["result"]["grade"].endswith("*")
+    assert report["coverage"]["grade_reliability"] == {
+        "reliable": False,
+        "reasons": ["application_not_observed"],
+    }
+
+
+def test_finalizer_suppresses_missing_header_template_matches_from_auth_challenge():
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    templates = _action(
+        "passive.templates", 1,
+        dependencies=(baseline.action_id,),
+        capability_name="templates.passive_batch",
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(templates.action_id,),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        templates.action_id: _result_with_observation_count(templates, 1),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"origin": "https://app.example.test"},
+            "response": {"status": 401, "security_headers": {}},
+        },),
+        templates.action_id: ({
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": "referrer-policy",
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert report["findings"] == []
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+
+
+def test_finalizer_names_the_specific_header_reported_by_nuclei():
+    templates = _action(
+        "passive.templates", 0, capability_name="templates.passive_batch",
+    )
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    results = {templates.action_id: _result_with_observation_count(templates, 1)}
+    observations = {templates.action_id: ({
+        "kind": "template_match",
+        "template_id": "http-missing-security-headers",
+        "name": "HTTP Missing Security Headers",
+        "severity": "info",
+        "matched_at": "https://app.example.test/",
+        "matcher_name": "x-permitted-cross-domain-policies",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+    assert finding["title"] == (
+        "Missing HTTP response header: X-Permitted-Cross-Domain-Policies"
+    )
+    assert finding["evidence"]["header_name"] == (
+        "x-permitted-cross-domain-policies"
+    )
+
+
 def test_finalizer_promotes_only_deterministic_proof_contracts():
     xss = _action("verify.xss", 0, capability_name="xss.verify")
     sqli = _action(
@@ -277,14 +404,19 @@ def test_finalizer_promotes_only_deterministic_proof_contracts():
     assert report["verification_summary"] == {
         "verified": 1, "suspected": 1, "unproven_critical_high": 1,
     }
-    assert report["result"] == {
-        "score": 70,
-        # 70 is the C band: one high-severity finding now caps the grade there rather than
-        # denting a 100 down to a still-passing 90.
-        "grade": "C*",
-        "grade_reliable": False,
-        "score_policy": "verified_and_suspected_severity_ceiling/v2",
-    }
+    result = report["result"]
+    # Two axes. One proven high caps risk at the C band rather than denting a 100 down to a
+    # still-passing 90; the suspected critical alongside it is real evidence but does not
+    # cap as if it were confirmed.
+    assert (result["risk_score"], result["risk_grade"]) == (70, "C")
+    assert result["score_policy"] == "risk_and_assurance/v8"
+    assert result["grade"] == "C*" and result["grade_reliable"] is False
+    assert result["score"] == result["risk_score"], "compatibility alias is the risk axis"
+    assert "proven_high:1" in result["score_reasons"]
+    # This plan ran two actions over no candidate slices, so almost nothing was examined.
+    # The old single number could not say that at all.
+    assert result["assurance_score"] < 60
+    assert result["assurance_band"] in {"none", "weak", "limited"}
     assert report["coverage"]["grade_reliability"]["reasons"] == [
         "unproven_critical_high"
     ]
@@ -502,6 +634,11 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
         "dom_marker_executed": True,
         "sanitized_screenshot_sha256": "e" * 64,
         "browser_build": "Chromium test",
+        "injection_location": "fragment",
+        "request_url": "https://app.example.test/#/search?q=",
+        "related_request_urls": [
+            "https://app.example.test/rest/products/search?q=%3Credacted%3E",
+        ],
     },)}
     report = finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
@@ -510,8 +647,20 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
     finding = report["findings"][0]
     assert finding["tool"] == "shakerscan_browser_proof"
     assert finding["verified"] is True
+    assert finding["url"] == "https://app.example.test/#/search?q="
+    assert finding["evidence"]["related_request_urls"] == [
+        "https://app.example.test/rest/products/search?q=%3Credacted%3E",
+    ]
     assert finding["evidence"]["proof_producer"] == "shakerscan"
     assert finding["evidence"]["sanitized_screenshot_sha256"] == "e" * 64
+    assert finding["evidence"]["browser_proof"] == {
+        "proven": True,
+        "proof_producer": "shakerscan",
+        "evidence_type": "dom_execution",
+        "technique": "headless_xss_dom",
+        "dom_marker_executed": True,
+        "verifier_build": "Chromium test",
+    }
 
 
 def test_finalizer_explains_required_action_degradation():
@@ -567,6 +716,72 @@ def test_finalizer_explains_required_action_degradation():
     row = report["canonical_action_execution"]["actions"][0]
     assert row["status"] == "failed"
     assert row["reason_code"] == "adapter_failed"
+
+
+def test_infrastructure_observations_never_affect_score_grade_or_coverage(monkeypatch):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    infrastructure = replace(
+        _action("baseline.infrastructure", 1, capability_name="infrastructure.inspect"),
+        capability_args={},
+        requested_budget={"hosts_attempted": 40, "tool_wall_seconds": 30},
+        required=False,
+        output_schema="infrastructure-intelligence/v1",
+        action_digest=None,
+    )
+    final = _action(
+        "finalize.report", 2,
+        dependencies=(baseline.action_id, infrastructure.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, infrastructure, final),
+    )
+    results = _results(plan)
+    results[infrastructure.action_id] = _result_with_observation_count(infrastructure, 1)
+    observations = {
+        baseline.action_id: (),
+        infrastructure.action_id: ({
+            "kind": "infrastructure_intelligence",
+            "informational_only": True,
+            "scoring_effect": "none",
+            "canonical_host": "app.example.test",
+            "registration_domain": "example.test",
+            "registration": {"registrar": {"name": "Example Registrar"}},
+            "addresses": [{"address": "192.0.2.10"}],
+            "related_names": [],
+            "limitations": [],
+            "errors": [],
+        },),
+    }
+    captured = {}
+
+    def score_scan(findings, coverage, *, smart_coverage, posture, grade_reliable):
+        captured["posture"] = posture
+        return {"score": 100, "grade": "A", "grade_reliable": grade_reliable}
+
+    monkeypatch.setattr(finalizer_module.scoring, "score_scan", score_scan)
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    assert "infrastructure" in report
+    assert "infrastructure" not in captured["posture"]
+    assert report["coverage"]["planned_action_count"] == 1
+    assert report["coverage"]["terminal_action_count"] == 1
+    assert report["coverage"]["capability_coverage"]["total"] == 1
+    assert report["coverage"]["optional_gaps"] == []
+    assert report["coverage"]["grade_reliability"] == {
+        "reliable": True, "reasons": [],
+    }
+    assert any(
+        row["capability_name"] == "infrastructure.inspect"
+        for row in report["canonical_action_execution"]["actions"]
+    )
 
 
 def test_finalizer_promotes_only_typed_pinned_tls_posture_issues():

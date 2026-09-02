@@ -8,10 +8,11 @@ from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
+from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
     MAX_HUNT_BODY_BYTES,
@@ -28,6 +29,8 @@ class HuntStartV2PolicyRequest(BaseModel):
     allow_state_changing_http: bool = False
     network_discovery: bool = False
     allow_oob_interactions: bool = False
+    allow_identity_headers: bool = False
+    allow_direct_origin: bool = False
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
@@ -49,6 +52,8 @@ class HuntStartV2Request(BaseModel):
     credential_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
     capabilities: list[str] = Field(default_factory=list, max_length=128)
     request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
+    skill_ids: list[str] = Field(default_factory=list, max_length=4)
+    direct_origin_addresses: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
 
@@ -67,6 +72,7 @@ class HuntStartV2Response(BaseModel):
     budget: dict[str, Any] = Field(default_factory=dict)
     budget_used: dict[str, Any] = Field(default_factory=dict)
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    skills: list[dict[str, Any]] = Field(default_factory=list)
     context_pack: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -74,6 +80,25 @@ class HuntFinishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = Field(min_length=1, max_length=20_000)
     next_actions: list[str] = Field(default_factory=list, max_length=100)
+
+
+class HuntSkillSuggestionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    signals: list[str] = Field(default_factory=list, max_length=20)
+
+
+class HuntSkillBindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(default="", max_length=500)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+
+
+class HuntSkillUsageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: Literal["used", "completed", "deferred"]
+    action_id: str | None = Field(default=None, max_length=256)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+    reason: str = Field(default="", max_length=500)
 
 
 router = APIRouter()
@@ -184,6 +209,52 @@ async def get_hunt_contract():
     return hunt_start_public_contract()
 
 
+@router.get("/hunt/skills", tags=["Hunt"])
+async def list_hunt_skills(
+    target_kind: str | None = Query(None),
+    support: str | None = Query(None),
+    goal: str | None = Query(None, max_length=2000),
+):
+    """List the testing methodology a hunt can bind, with an honest support level.
+
+    Unbindable skills are listed too. ShakerScan has no capability for several adapters the
+    methodology assumes, and naming that gap here is what stops a planner committing to a
+    procedure it cannot execute.
+    """
+    library = skill_library()
+    try:
+        specs = library.list(target_kind=target_kind, support=support)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = {
+        "skills": [spec.catalog_entry() for spec in specs],
+        "count": len(specs),
+        "bindable_count": sum(1 for spec in specs if spec.bindable),
+        "catalog": library.health(),
+    }
+    if goal is not None:
+        result["suggested"] = list(library.suggest(
+            goal=goal, target_kind=target_kind or "web",
+        ))
+        result["suggestions_are_advisory"] = True
+    return result
+
+
+@router.get("/hunt/skills/{skill_id}", tags=["Hunt"])
+async def get_hunt_skill(skill_id: str, include_methodology: bool = Query(True)):
+    """Return one skill, with its methodology text unless the caller opts out."""
+    try:
+        spec = skill_library().require(skill_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown skill {skill_id}") from exc
+    try:
+        return spec.public(include_body=include_methodology)
+    except (OSError, UnicodeError, HuntSkillError) as exc:
+        raise HTTPException(
+            status_code=503, detail="skill methodology is unavailable"
+        ) from exc
+
+
 @router.get("/hunts/lifecycle-metrics", tags=["Hunt"])
 async def get_hunt_lifecycle_metrics():
     if _metrics_provider is None:
@@ -191,19 +262,84 @@ async def get_hunt_lifecycle_metrics():
     return dict(_metrics_provider())
 
 
+@router.post("/hunts/{hunt_id}/skills/suggestions", tags=["Hunt"])
+async def suggest_hunt_skills(
+    hunt_id: str, request: HuntSkillSuggestionRequest,
+):
+    """Return a compact, evidence-aware shortlist without loading skill bodies."""
+    return await _service().skill_suggestions(hunt_id, signals=request.signals)
+
+
+@router.post("/hunts/{hunt_id}/skills/{skill_id}/read", tags=["Hunt"])
+async def read_hunt_skill(hunt_id: str, skill_id: str):
+    """Load exactly one methodology and record the explicit context spend."""
+    return await _service().read_skill(hunt_id, skill_id)
+
+
+@router.post("/hunts/{hunt_id}/skills/{skill_id}/bind", tags=["Hunt"])
+async def bind_hunt_skill(
+    hunt_id: str, skill_id: str, request: HuntSkillBindRequest,
+):
+    return await _service().bind_skill(
+        hunt_id, skill_id, reason=request.reason,
+        evidence_refs=request.evidence_refs,
+    )
+
+
+@router.delete("/hunts/{hunt_id}/skills/{skill_id}", tags=["Hunt"])
+async def unbind_hunt_skill(
+    hunt_id: str, skill_id: str,
+    reason: str = Query("", max_length=500),
+):
+    return await _service().unbind_skill(hunt_id, skill_id, reason=reason)
+
+
+@router.post("/hunts/{hunt_id}/skills/{skill_id}/usage", tags=["Hunt"])
+async def record_hunt_skill_usage(
+    hunt_id: str, skill_id: str, request: HuntSkillUsageRequest,
+):
+    return await _service().record_skill_usage(
+        hunt_id, skill_id, state=request.state, action_id=request.action_id,
+        evidence_refs=request.evidence_refs, reason=request.reason,
+    )
+
+
 @router.get("/hunts/{hunt_id}")
 async def get_hunt(hunt_id: str):
     return await _service().get(hunt_id)
+
+
+@router.get("/hunts/{hunt_id}/record", tags=["Hunt"])
+async def export_hunt_record(hunt_id: str):
+    """Download the redacted explicit decision trace plus archived HTTP calls."""
+    document = await _service().export_record(hunt_id)
+    return JSONResponse(
+        document,
+        headers={
+            "content-disposition": f'attachment; filename="shakerscan-hunt-{hunt_id}.json"',
+            "x-shakerscan-trace-kind": "explicit_decision_trace",
+        },
+    )
 
 
 @router.get("/hunts")
 async def list_hunts(
     target_id: str | None = Query(None),
     status: str | None = Query(None),
+    target_kind: str | None = Query(None),
+    budget_profile: str | None = Query(None),
+    root_domain: str | None = Query(None),
+    search: str | None = Query(None, max_length=200),
+    sort_by: str = Query("created_at"),
+    sort_order: str = Query("desc"),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
+    """List hunts across every target, filtered, sorted and paged."""
     return await _service().list(
-        target_id=target_id, status=status, limit=limit
+        target_id=target_id, status=status, target_kind=target_kind,
+        budget_profile=budget_profile, root_domain=root_domain, search=search,
+        sort_by=sort_by, sort_order=sort_order, limit=limit, offset=offset,
     )
 
 
@@ -229,15 +365,25 @@ __all__ = [
     "HuntStartV2PolicyRequest",
     "HuntStartV2Request",
     "HuntStartV2Response",
+    "HuntSkillBindRequest",
+    "HuntSkillSuggestionRequest",
+    "HuntSkillUsageRequest",
+    "bind_hunt_skill",
     "cancel_hunt",
     "configure_hunt_run_router",
     "finish_hunt",
     "get_hunt",
     "get_hunt_contract",
     "get_hunt_lifecycle_metrics",
+    "get_hunt_skill",
+    "list_hunt_skills",
     "list_hunts",
     "parse_hunt_start_body",
     "resume_hunt",
+    "read_hunt_skill",
+    "record_hunt_skill_usage",
     "router",
     "start_hunt",
+    "suggest_hunt_skills",
+    "unbind_hunt_skill",
 ]

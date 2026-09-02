@@ -155,7 +155,7 @@ def test_device_detail_makes_exact_scan_open_ports_prominent():
     assert "Previously observed on this device" in ui
     assert "This does not prove they are currently closed." in ui
     assert "Confirmed responses only. Silent or ambiguous probes are never shown as open." in ui
-    assert "show open ports" in ui
+    assert "review this scan&apos;s confirmed responses" in ui
     assert "Track scan activity" in ui
     assert "export async function getScan(id: string): Promise<Scan>" in api_client
 
@@ -181,12 +181,16 @@ def test_device_overviews_preserve_latest_posture_completeness():
     api = api_tree_source()
     detail_ui = (ROOT / "ui" / "src" / "app" / "devices" / "[id]" / "page.tsx").read_text()
     list_ui = (ROOT / "ui" / "src" / "app" / "devices" / "page.tsx").read_text()
+    presentation = (ROOT / "ui" / "src" / "lib" / "deviceScanPresentation.mjs").read_text()
 
     assert api.count("AS last_posture_complete") >= 2
     assert api.count("AS last_posture_decision") >= 2
     assert "deviceTargetScorePresentation(device)" in detail_ui
     assert "deviceTargetScorePresentation(device)" in list_ui
     assert "Provisional ${posture.grade}" in list_ui
+    assert "No reliable score" in list_ui
+    assert "last_reachability" in presentation
+    assert "DEVICE_POSTURE_FRESHNESS_DAYS" in presentation
 
 
 def test_device_list_uses_bounded_reachability_summary():

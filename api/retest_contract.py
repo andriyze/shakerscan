@@ -8,13 +8,14 @@ payload semantics, type normalization, and retry classification consistent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.auth_session_store import PostgresAuthSessionStore
@@ -36,6 +37,7 @@ ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
 TARGET_HOST_IDENTITY_MIGRATION = "target_host_identity_v1"
 LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"
+EVIDENCE_SCAN_IDENTITY_MIGRATION = "evidence_scan_identity_v2"
 
 
 class SchemaMigrationError(RuntimeError):
@@ -954,7 +956,89 @@ async def _reconcile_active_finding_counts(conn) -> None:
     """)
 
 
+async def _migrate_evidence_scan_identity(conn) -> None:
+    """Install scan-scoped evidence identity exactly once without rewriting history.
+
+    Older releases kept one mutable evidence row per finding/object type. The first
+    scan-scoped rollout repaired that legacy row correctly, but left the repair as
+    an unconditional startup UPDATE. Once later scans wrote their own observations,
+    the UPDATE tried to move every historical row onto the finding's latest scan and
+    collided with the new unique index. An already-present index is authoritative
+    evidence that the one-time repair completed before this ledger entry existed.
+    """
+    applied = await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1",
+        EVIDENCE_SCAN_IDENTITY_MIGRATION,
+    )
+    if applied:
+        return
+
+    index_present = await conn.fetchval(
+        "SELECT to_regclass('idx_evidence_objects_finding_type_scan_unique') IS NOT NULL"
+    )
+    if index_present:
+        await conn.execute(
+            "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+            EVIDENCE_SCAN_IDENTITY_MIGRATION,
+        )
+        return
+
+    # On a true legacy database there is at most one row per finding/object type.
+    # The NOT EXISTS guard also makes a partially upgraded database safe: a row
+    # already attached to the current scan wins and older scan observations remain
+    # untouched rather than being deleted or relabelled.
+    await conn.execute("""
+        UPDATE evidence_objects evidence
+        SET scan_id=findings.scan_id
+        FROM findings
+        WHERE evidence.finding_id=findings.id
+          AND evidence.scan_id IS NOT NULL
+          AND findings.scan_id IS NOT NULL
+          AND evidence.scan_id IS DISTINCT FROM findings.scan_id
+          AND evidence.object_type ~ '(^finding_evidence$|_evidence$)'
+          AND evidence.retention_delete_pending_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM evidence_objects current_observation
+              WHERE current_observation.finding_id=evidence.finding_id
+                AND current_observation.object_type=evidence.object_type
+                AND current_observation.scan_id=findings.scan_id
+          )
+    """)
+    await conn.execute("""
+        ALTER TABLE evidence_objects
+        DROP CONSTRAINT IF EXISTS evidence_objects_finding_type_unique
+    """)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_scan_unique
+        ON evidence_objects(finding_id, object_type, scan_id)
+        WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL
+    """)
+    await conn.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        EVIDENCE_SCAN_IDENTITY_MIGRATION,
+    )
+
+
 async def run_schema_migrations(pool) -> None:
+    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock.
+
+    The advisory lock serializes new ShakerScan processes, but during a rolling
+    rebuild an older API can still be using a relation while the first new
+    worker applies idempotent DDL. PostgreSQL may choose the migrator as the
+    deadlock victim. Retry in-process so a healthy worker does not crash-loop.
+    """
+    for attempt in range(3):
+        try:
+            await _run_schema_migrations_once(pool)
+            return
+        except Exception as exc:
+            if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
+                raise
+            await asyncio.sleep(0.2 * (attempt + 1))
+
+
+async def _run_schema_migrations_once(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
     Called from both API and worker startup. Uses pg_advisory_lock so only one
@@ -1053,6 +1137,7 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS verification_count INTEGER DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS ai_classification_source TEXT,
                 ADD COLUMN IF NOT EXISTS ai_target_id UUID,
+                ADD COLUMN IF NOT EXISTS hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS analyst_verdict TEXT,
                 ADD COLUMN IF NOT EXISTS analyst_verdict_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS analyst_verdict_notes TEXT
@@ -1060,6 +1145,10 @@ async def run_schema_migrations(pool) -> None:
             await conn.execute("""
                 UPDATE findings SET verification_count = 0
                 WHERE verification_count IS NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_findings_hunt_run_id
+                ON findings(hunt_run_id) WHERE hunt_run_id IS NOT NULL
             """)
 
             # Ownership/accountability metadata for the exposure inventory,
@@ -1150,7 +1239,12 @@ async def run_schema_migrations(pool) -> None:
 
             # Parallel scan orchestration (parent/shard/merge fan-out).
             await conn.execute("""
+                ALTER TABLE targets
+                ADD COLUMN IF NOT EXISTS last_assurance_score INTEGER
+            """)
+            await conn.execute("""
                 ALTER TABLE scans
+                ADD COLUMN IF NOT EXISTS assurance_score INTEGER,
                 ADD COLUMN IF NOT EXISTS parent_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
                 ADD COLUMN IF NOT EXISTS scan_role TEXT NOT NULL DEFAULT 'standalone',
                 ADD COLUMN IF NOT EXISTS run_kind TEXT DEFAULT 'web_dast',
@@ -1530,6 +1624,7 @@ async def run_schema_migrations(pool) -> None:
                             last_scanned_at = NEW.completed_at,
                             last_score = NEW.score,
                             last_grade = NEW.grade,
+                            last_assurance_score = NEW.assurance_score,
                             total_scans = total_scans + 1,
                             active_findings_count = (
                                 SELECT COUNT(*) FROM findings
@@ -3100,6 +3195,132 @@ async def run_schema_migrations(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_hunt_runs_status
                 ON hunt_runs(status, updated_at DESC)
             """)
+            # The existing indexes are all partial or status-scoped, so a cross-target
+            # history page ordered by recency had no index to use.
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_runs_created
+                ON hunt_runs(created_at DESC)
+            """)
+            # One row per HTTP call a Scan or Hunt made. Bodies and headers live in the
+            # content-addressed evidence store, so identical payloads collapse to one
+            # object and the row stays narrow enough to page through.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS http_transactions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    plane TEXT NOT NULL CHECK (plane IN ('scan','hunt','device','interactive')),
+                    sequence INTEGER NOT NULL DEFAULT 0,
+                    scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+                    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE CASCADE,
+                    hunt_action_id UUID,
+                    scan_action_id TEXT,
+                    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+                    device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL,
+                    capability_name TEXT,
+                    adapter TEXT,
+                    principal_slot TEXT,
+                    method TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    http_version TEXT,
+                    status_code INTEGER,
+                    request_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    request_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    request_body_sha256 TEXT,
+                    request_body_bytes INTEGER NOT NULL DEFAULT 0,
+                    response_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    response_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+                    response_body_sha256 TEXT,
+                    response_body_bytes INTEGER NOT NULL DEFAULT 0,
+                    remote_ip TEXT,
+                    direct_origin BOOLEAN NOT NULL DEFAULT false,
+                    redirect_of UUID,
+                    started_at TIMESTAMPTZ,
+                    elapsed_ms INTEGER,
+                    error TEXT,
+                    truncated BOOLEAN NOT NULL DEFAULT false,
+                    retention_class TEXT NOT NULL DEFAULT 'sensitive',
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT http_transactions_owner_check CHECK (
+                        num_nonnulls(scan_id, hunt_run_id) = 1
+                    )
+                )
+            """)
+            # Earlier schemas allowed a row to name both owner namespaces. Repair
+            # any such row according to its execution plane before tightening the
+            # constraint; retaining both lets one archive appear in two unrelated
+            # exports and gives either retention path authority over the same row.
+            await conn.execute("""
+                DO $migration$
+                DECLARE
+                    owner_constraint TEXT;
+                BEGIN
+                    SELECT pg_get_constraintdef(oid)
+                    INTO owner_constraint
+                    FROM pg_constraint
+                    WHERE conrelid='http_transactions'::regclass
+                      AND conname='http_transactions_owner_check';
+
+                    IF owner_constraint IS NULL
+                       OR position('num_nonnulls' IN owner_constraint) = 0 THEN
+                        UPDATE http_transactions
+                        SET scan_id=NULL
+                        WHERE plane='hunt'
+                          AND scan_id IS NOT NULL AND hunt_run_id IS NOT NULL;
+
+                        UPDATE http_transactions
+                        SET hunt_run_id=NULL
+                        WHERE plane<>'hunt'
+                          AND scan_id IS NOT NULL AND hunt_run_id IS NOT NULL;
+
+                        ALTER TABLE http_transactions
+                        DROP CONSTRAINT IF EXISTS http_transactions_owner_check;
+                        ALTER TABLE http_transactions
+                        ADD CONSTRAINT http_transactions_owner_check
+                        CHECK (num_nonnulls(scan_id, hunt_run_id) = 1);
+                    END IF;
+                END;
+                $migration$
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_http_transactions_scan
+                ON http_transactions(scan_id, sequence) WHERE scan_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_http_transactions_hunt
+                ON http_transactions(hunt_run_id, sequence) WHERE hunt_run_id IS NOT NULL
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_http_transactions_target
+                ON http_transactions(target_id, started_at DESC) WHERE target_id IS NOT NULL
+            """)
+            # What the archive attempted versus what it holds. Recording and persistence
+            # failures are swallowed so they cannot fail a scan, which means the row count
+            # alone cannot say whether an archive is the whole run; without this an export
+            # would call one surviving transaction "complete".
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS http_archive_stats (
+                    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
+                    owner_id UUID NOT NULL,
+                    attempted INTEGER NOT NULL DEFAULT 0,
+                    stored INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0,
+                    dropped INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (owner_kind, owner_id)
+                )
+            """)
+            await conn.execute("""
+                UPDATE evidence_objects SET retention_class='sensitive'
+                WHERE retention_class='http_archive'
+            """)
+            await conn.execute("""
+                UPDATE http_transactions SET retention_class='sensitive'
+                WHERE retention_class='http_archive'
+            """)
+            await conn.execute("""
+                ALTER TABLE http_transactions
+                ALTER COLUMN retention_class SET DEFAULT 'sensitive'
+            """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_cancellable_jobs (
                     hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -3135,6 +3356,30 @@ async def run_schema_migrations(pool) -> None:
                         status IN ('reserved','running','completed','blocked','cancelled','failed','partial')
                     )
                 )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS hunt_skill_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+                    skill_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    skill_version TEXT NOT NULL,
+                    body_sha256 TEXT NOT NULL,
+                    reason TEXT,
+                    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT hunt_skill_events_type_check CHECK (
+                        event_type IN (
+                            'read','bound','selection_removed','unbound',
+                            'used','completed','deferred'
+                        )
+                    )
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hunt_skill_events_run
+                ON hunt_skill_events(hunt_run_id, created_at, id)
             """)
             await conn.execute("""
                 DO $$
@@ -3663,8 +3908,7 @@ async def run_schema_migrations(pool) -> None:
                     content JSONB,
                     retention_delete_preview_id UUID,
                     retention_delete_pending_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+                    created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             await conn.execute("""
@@ -3672,8 +3916,45 @@ async def run_schema_migrations(pool) -> None:
                 ADD COLUMN IF NOT EXISTS retention_delete_preview_id UUID,
                 ADD COLUMN IF NOT EXISTS retention_delete_pending_at TIMESTAMPTZ
             """)
+            await _migrate_evidence_scan_identity(conn)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_objects_finding_type_unscoped_unique
+                ON evidence_objects(finding_id, object_type)
+                WHERE finding_id IS NOT NULL AND scan_id IS NULL
+            """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_finding ON evidence_objects(finding_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_objects_scan ON evidence_objects(scan_id)")
+            await conn.execute("""
+                ALTER TABLE findings
+                ADD COLUMN IF NOT EXISTS first_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS last_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL
+            """)
+            await conn.execute("""
+                UPDATE findings
+                SET first_seen_scan_id=COALESCE(first_seen_scan_id, scan_id),
+                    last_seen_scan_id=COALESCE(last_seen_scan_id, scan_id)
+                WHERE scan_id IS NOT NULL
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_first_seen_scan_id ON findings(first_seen_scan_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_last_seen_scan_id ON findings(last_seen_scan_id)")
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION bind_finding_observation_scans()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF NEW.scan_id IS NOT NULL THEN
+                        NEW.first_seen_scan_id = COALESCE(NEW.first_seen_scan_id, NEW.scan_id);
+                        NEW.last_seen_scan_id = NEW.scan_id;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            await conn.execute("DROP TRIGGER IF EXISTS trg_bind_finding_observation_scans ON findings")
+            await conn.execute("""
+                CREATE TRIGGER trg_bind_finding_observation_scans
+                BEFORE INSERT OR UPDATE OF scan_id ON findings
+                FOR EACH ROW EXECUTE FUNCTION bind_finding_observation_scans()
+            """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_evidence_objects_retention_pending
                 ON evidence_objects(retention_delete_pending_at)
@@ -4667,7 +4948,7 @@ def validate_retest_job_payload(payload: Any) -> tuple[bool, str]:
         return False, "missing_retest_subject"
     if payload.get("finding_id") and payload.get("candidate_id"):
         return False, "ambiguous_retest_subject"
-    for field in ("verification_id", "finding_id", "candidate_id"):
+    for field in ("job_id", "verification_id", "finding_id", "candidate_id"):
         if not payload.get(field):
             continue
         try:
@@ -4689,3 +4970,85 @@ def validate_retest_job_payload(payload: Any) -> tuple[bool, str]:
         return False, "invalid_attempt"
 
     return True, ""
+
+
+async def mark_candidate_inconclusive(
+    conn: Any, candidate_id: Any, *, verification_id: Any, error: str,
+) -> None:
+    """Record that a retest ended without a verdict for its candidate subject.
+
+    An abandoned retest must not leave a candidate stuck in a verifying state:
+    it is settled inconclusive with the reason attached, which is distinct from
+    a refutation and never becomes proof.
+    """
+    await conn.execute(
+        """UPDATE investigation_candidates
+           SET status='inconclusive',
+               verification_context=verification_context || jsonb_build_object(
+                   'error',$2::text,'verification_id',$3::text
+               ), updated_at=NOW()
+           WHERE id=$1""",
+        candidate_id, str(error)[:160], str(verification_id),
+    )
+
+
+async def mark_finding_verification_error(conn: Any, finding_id: Any) -> None:
+    """Record an attempted-but-failed verification without changing the finding.
+
+    The attempt is counted and the verdict is 'error', so a retest that never
+    produced evidence can never read as a fix, a refutation, or fresh proof.
+    """
+    await conn.execute(
+        """UPDATE findings
+           SET last_verification_status='error',
+               last_verification_verdict='error',
+               last_verification_confidence=NULL,
+               last_verified_at=NOW(),
+               verification_count=COALESCE(verification_count, 0) + 1,
+               updated_at=NOW()
+           WHERE id=$1""",
+        finding_id,
+    )
+
+
+async def settle_retest_subject_error(
+    conn: Any, subject: Any, *, verification_id: Any, error: str,
+) -> None:
+    """Settle whichever subject a verification row names, after a failed attempt.
+
+    ``subject`` is the row returned by the guarded verification UPDATE, so it
+    names exactly one of finding_id/candidate_id. Passing the row rather than
+    two ids keeps the caller from settling a subject the durable record did not
+    actually claim.
+    """
+    if not subject:
+        return
+    if subject.get("finding_id") is not None:
+        await mark_finding_verification_error(conn, subject["finding_id"])
+    if subject.get("candidate_id") is not None:
+        await mark_candidate_inconclusive(
+            conn, subject["candidate_id"],
+            verification_id=verification_id, error=error,
+        )
+
+
+def retest_queue_binding_matches(
+    verification: Mapping[str, Any] | Any, payload: Mapping[str, Any] | Any,
+) -> bool:
+    """Whether a queued retest names exactly the durable verification's subject.
+
+    A queue message is untrusted input: it can be replayed, hand-written, or
+    left over from an earlier row that reused the verification id. The durable
+    ``finding_verifications`` row is the authority for which job and which
+    single subject this retest belongs to, so every identity must agree before
+    the worker mutates a finding or candidate.
+    """
+    def _text(source: Any, field: str) -> str:
+        getter = getattr(source, "get", None)
+        value = getter(field) if callable(getter) else None
+        return str(value or "").strip()
+
+    return all(
+        _text(verification, field) == _text(payload, field)
+        for field in ("job_id", "finding_id", "candidate_id")
+    )

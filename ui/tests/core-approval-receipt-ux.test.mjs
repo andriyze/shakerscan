@@ -8,7 +8,7 @@ const hunt = fs.readFileSync(new URL('../src/app/hunt/page.tsx', import.meta.url
 const api = fs.readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'utf8')
 
 test('core privileged workflows create target-bound approval receipts in place', () => {
-  assert.match(scan, /<ApprovalReceiptField/)
+  assert.doesNotMatch(scan, /<ApprovalReceiptField/)
   assert.match(hunt, /<ApprovalReceiptField/)
   assert.match(component, /Create approval for this target/)
   assert.match(component, /Confirm that you are authorized to test this target first/)
@@ -24,6 +24,15 @@ test('core privileged workflows create target-bound approval receipts in place',
 test('receipt creation carries the scope binding into Hunt and stays duration-bounded', () => {
   assert.match(hunt, /onScopeReceiptIdChange=\{setScopeReceipt\}/)
   assert.match(hunt, /approvalTtlMinutes/)
-  assert.match(scan, /disabledReason=\{batchMode \? 'Create approvals from a single-target Scan; receipts are target-bound\.'/)
   assert.match(component, /Valid for about/)
+})
+
+test('authorized active Scan creates its required target-bound receipt during submission', () => {
+  assert.match(scan, /const approvalRequired = activeTesting \|\| networkDiscovery \|\| credentialUse \|\| allowStateChanging/)
+  assert.match(scan, /if \(approvalRequired && !effectiveApprovalReceipt\)/)
+  assert.match(scan, /await createTargetPolicyApprovalReceipt\(\{/)
+  assert.match(scan, /environment: scanScopeEnvironment\(submittedTargets\[0\]\)/)
+  assert.match(scan, /Active testing is available for one target at a time\./)
+  assert.doesNotMatch(scan, /Approval receipt ID|Create approval & run scan|Approval scope environment/)
+  assert.doesNotMatch(scan, /if \(credentialUse && !approvalReceipt\.trim\(\)\)/)
 })

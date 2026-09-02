@@ -227,9 +227,96 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         {},
     ),
     HuntMCPTool(
+        "shakerscan_hunt_skills", "GET", "/hunt/skills",
+        "List server-shipped Hunt methodologies or get advisory suggestions for an objective.",
+        {
+            "target_kind": {"type": "string", "enum": ["web", "api", "network", "device"]},
+            "support": {"type": "string", "enum": ["supported", "partial", "reference"]},
+            "goal": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+        read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill", "GET", "/hunt/skills/{skill_id}",
+        "Read one server-shipped Hunt methodology and its runtime limitations.",
+        {
+            "skill_id": {
+                "type": "string", "minLength": 1, "maxLength": 160,
+                "pattern": DEFAULT_CAPABILITY_PATTERN,
+            },
+            "include_methodology": {"type": "boolean"},
+        },
+        ("skill_id",), read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
         "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}", "Read a Hunt and its capability manifest.",
         {"hunt_id": {"type": "string", "format": "uuid"}},
         ("hunt_id",), read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_suggestions", "POST",
+        "/hunts/{hunt_id}/skills/suggestions",
+        "Get at most three adaptive methodology suggestions without loading their bodies.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "signals": {
+                "type": "array", "items": {"type": "string", "maxLength": 160},
+                "maxItems": 20, "uniqueItems": True,
+            },
+        },
+        ("hunt_id",), read_only=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_read", "POST",
+        "/hunts/{hunt_id}/skills/{skill_id}/read",
+        "Load exactly one relevant methodology and record that context spend.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+        ("hunt_id", "skill_id"), idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_bind", "POST",
+        "/hunts/{hunt_id}/skills/{skill_id}/bind",
+        "Bind one reviewed methodology; this never changes Hunt scope, authority, or budget.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+            "reason": {"type": "string", "maxLength": 500},
+            "evidence_refs": {
+                "type": "array", "items": {"type": "string", "maxLength": 256},
+                "maxItems": 20, "uniqueItems": True,
+            },
+        },
+        ("hunt_id", "skill_id"), idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_unbind", "DELETE",
+        "/hunts/{hunt_id}/skills/{skill_id}",
+        "Remove one explicitly selected methodology without changing Hunt authority.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        },
+        ("hunt_id", "skill_id"), destructive=True, idempotent=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_skill_usage", "POST",
+        "/hunts/{hunt_id}/skills/{skill_id}/usage",
+        "Record evidenced methodology use, completion, or deferral.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
+            "state": {"type": "string", "enum": ["used", "completed", "deferred"]},
+            "action_id": {"type": "string", "format": "uuid"},
+            "evidence_refs": {
+                "type": "array", "items": {"type": "string", "maxLength": 256},
+                "maxItems": 20, "uniqueItems": True,
+            },
+            "reason": {"type": "string", "maxLength": 500},
+        },
+        ("hunt_id", "skill_id", "state"), idempotent=True,
     ),
     HuntMCPTool(
         "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query bounded Hunt context.",
@@ -270,6 +357,31 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
             "verifier_contract_id": {"type": "string"},
         },
         ("hunt_id", "family", "locus", "title", "claim", "evidence_refs"),
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_candidate_update", "PATCH",
+        "/hunts/{hunt_id}/candidates/{candidate_id}",
+        "Correct metadata on a non-terminal candidate produced by this Hunt; proof state cannot be changed.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "candidate_id": {"type": "string", "format": "uuid"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 300},
+            "claim": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+            "evidence_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100},
+            "verifier_contract_id": {"type": "string", "maxLength": 160},
+        },
+        ("hunt_id", "candidate_id"), destructive=True,
+    ),
+    HuntMCPTool(
+        "shakerscan_hunt_candidate_delete", "DELETE",
+        "/hunts/{hunt_id}/candidates/{candidate_id}",
+        "Remove a non-terminal candidate produced by this Hunt while retaining its immutable audit record.",
+        {
+            "hunt_id": {"type": "string", "format": "uuid"},
+            "candidate_id": {"type": "string", "format": "uuid"},
+        },
+        ("hunt_id", "candidate_id"), destructive=True, idempotent=True,
     ),
     HuntMCPTool(
         "shakerscan_hunt_verify", "POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
@@ -344,6 +456,7 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
 
     identifier_pattern = str(patterns.get("identifier") or DEFAULT_IDENTIFIER_PATTERN)
     capability_pattern = str(patterns.get("capability") or DEFAULT_CAPABILITY_PATTERN)
+    skill_pattern = str(patterns.get("skill_id") or DEFAULT_CAPABILITY_PATTERN)
     identifier_schema = {
         "type": "string", "minLength": 1, "maxLength": 256,
         "pattern": identifier_pattern,
@@ -397,6 +510,15 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
             "type": "array",
             "items": dict(identifier_schema),
             "maxItems": _positive_int(limits.get("request_collections"), 32),
+            "uniqueItems": True,
+        },
+        "skill_ids": {
+            "type": "array",
+            "items": {
+                "type": "string", "minLength": 1, "maxLength": 160,
+                "pattern": skill_pattern,
+            },
+            "maxItems": _positive_int(limits.get("skill_ids"), 4),
             "uniqueItems": True,
         },
     }
@@ -635,11 +757,29 @@ class ArsenalClient:
                 payload.setdefault("credential_refs", {})
                 payload.setdefault("capabilities", [])
                 payload.setdefault("request_collection_ids", [])
+                payload.setdefault("skill_ids", [])
+            elif name == "shakerscan_hunt_skill_suggestions":
+                payload.setdefault("signals", [])
+            elif name == "shakerscan_hunt_skill_bind":
+                payload.setdefault("reason", "")
+                payload.setdefault("evidence_refs", [])
+            elif name == "shakerscan_hunt_skill_usage":
+                payload.setdefault("action_id", None)
+                payload.setdefault("evidence_refs", [])
+                payload.setdefault("reason", "")
             path = hunt_tool.path_template
-            for key in ("hunt_id", "capability_name", "candidate_id"):
+            for key in ("hunt_id", "capability_name", "candidate_id", "skill_id"):
                 marker = "{" + key + "}"
                 if marker in path:
                     path = path.replace(marker, urllib.parse.quote(str(payload.pop(key)), safe=""))
+            if name in {"shakerscan_hunt_skills", "shakerscan_hunt_skill"}:
+                query = urllib.parse.urlencode({
+                    key: str(value).lower() if isinstance(value, bool) else value
+                    for key, value in payload.items()
+                })
+                if query:
+                    path = f"{path}?{query}"
+                payload = {}
             generated_idempotency_key: str | None = None
             if name == "shakerscan_hunt_capability":
                 hunt_id = str(arguments["hunt_id"])

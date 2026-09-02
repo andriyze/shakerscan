@@ -63,6 +63,7 @@ try:
         bind_scan_scope_receipt, raw_scan_authentication_keys, resolve_scan_contract,
     )
     from action_scope import scope_origin_matches_target
+    from asset_cohorts import target_cohort, target_exposure_class
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -89,6 +90,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
     )
+    from ..asset_cohorts import target_cohort, target_exposure_class
     from ..runtime.credential_store import CredentialStoreError
     from ..runtime.models import TargetBinding
     from ..scan.action_plan import ScanActionPlanError
@@ -263,7 +265,7 @@ async def list_targets(
                    LEFT(t.url, 2049) AS url,
                    LEFT(t.name, 512) AS name,
                    LEFT(t.root_domain, 253) AS root_domain,
-                   t.is_root, t.discovery_source, t.is_active,
+                   t.is_root, t.discovery_source, t.is_active, t.metadata_json,
                    t.last_scanned_at, t.last_score, t.last_grade,
                    t.total_scans, t.active_findings_count, t.created_at,
                    fs.total_active as active_findings,
@@ -377,7 +379,7 @@ async def list_targets_grouped(
                 LEFT(t.name, 512) AS name,
                 LEFT(t.root_domain, 253) AS root_domain,
                 t.is_root,
-                t.discovery_source, t.is_active,
+                t.discovery_source, t.is_active, t.metadata_json,
                 t.last_scanned_at, t.last_score, t.last_grade,
                 t.total_scans, t.active_findings_count,
                 t.created_at
@@ -534,7 +536,7 @@ async def list_targets_grouped(
                 'subdomains': []
             }
 
-        target_data = _attach_asm(row_to_dict(row))
+        target_data = _attach_asm(_public_target_row(row))
         if row['is_root']:
             grouped[rd]['root_target'] = target_data
         else:
@@ -633,6 +635,7 @@ async def create_target(request: TargetCreate):
         raise HTTPException(status_code=400, detail="Invalid target URL")
     root_domain = extract_root_domain(normalized_target)
     is_root = is_root_domain(normalized_target)
+    requested_cohort = getattr(request, "cohort", None)
 
     async with _pool().acquire() as conn:
         try:
@@ -640,12 +643,14 @@ async def create_target(request: TargetCreate):
             # origin reuses that target instead of creating a duplicate. xmax = 0 is
             # true only for a freshly INSERTed row, so we can report created vs reused.
             row = await conn.fetchrow("""
-                INSERT INTO targets (url, name, root_domain, is_root, scan_options, asm_enabled, asm_config)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
-                RETURNING id, url, root_domain, is_root, (xmax = 0) AS created
+                RETURNING id, url, name, discovery_source, metadata_json,
+                          root_domain, is_root, (xmax = 0) AS created
             """, normalized_target, request.name, root_domain, is_root,
                  json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                 json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
                  _default_asm_enabled_for_new_web_target("manual"),
                  json.dumps(_default_asm_config_for_new_web_target("manual")))
 
@@ -657,6 +662,12 @@ async def create_target(request: TargetCreate):
                 # from the just-submitted origin.
                 'root_domain': row['root_domain'],
                 'is_root': row['is_root'],
+                'cohort': target_cohort(
+                    url=row['url'],
+                    name=row.get('name'),
+                    discovery_source=row.get('discovery_source'),
+                    metadata=_decode_json_value(row.get('metadata_json')) or {},
+                ),
                 'status': 'created' if row['created'] else 'already_exists'
             }
             # Surface warning if path/query was stripped
@@ -747,6 +758,11 @@ async def update_target(target_id: str, request: TargetUpdate):
         if request.metadata_json is not None:
             updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
             params.append(json.dumps(request.metadata_json))
+            param_idx += 1
+
+        if request.cohort is not None:
+            updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
+            params.append(json.dumps({"cohort": request.cohort}))
             param_idx += 1
 
         if not updates:
@@ -2074,7 +2090,8 @@ async def asm_list_endpoints(
         params: list[Any] = [uuid.UUID(target_id)]
         q = """SELECT id, method, path, param_shape, param_location, replay_spec, content_type,
                       source, auth_state, priority_score, test_status, last_attempt_status,
-                      last_verdict, first_seen_at, last_seen_at, last_tested_at
+                      last_verdict, last_http_status, unreachable_streak,
+                      last_reachability_at, first_seen_at, last_seen_at, last_tested_at
                FROM target_endpoints WHERE target_id = $1"""
         if status:
             params.append(status)
@@ -2086,7 +2103,33 @@ async def asm_list_endpoints(
         q += f" OFFSET ${len(params)}"
         rows = await conn.fetch(q, *params)
         coverage = await asm_inventory.coverage_summary(conn, target_id)
-    return {"endpoints": [row_to_dict(r) for r in rows], "coverage": coverage}
+    endpoints = [
+        asm_inventory.endpoint_inventory_semantics(row_to_dict(row))
+        for row in rows
+    ]
+    provenance_counts: dict[str, int] = {}
+    reachability_counts: dict[str, int] = {}
+    for endpoint in endpoints:
+        provenance = str(endpoint["provenance_kind"])
+        reachability = str(endpoint["reachability_state"])
+        provenance_counts[provenance] = provenance_counts.get(provenance, 0) + 1
+        reachability_counts[reachability] = reachability_counts.get(reachability, 0) + 1
+    return {
+        "endpoints": endpoints,
+        "coverage": coverage,
+        "inventory_semantics": {
+            "schema_version": "asm-inventory-presentation/v1",
+            "informational_only": True,
+            "affects_score_or_grade": False,
+            "route_claim": (
+                "Rows are route variants queued for examination. Scanner-discovered "
+                "or imported rows are not confirmed application routes unless response "
+                "or reachability evidence says so."
+            ),
+            "provenance_counts_on_page": provenance_counts,
+            "reachability_counts_on_page": reachability_counts,
+        },
+    }
 
 
 @router.get("/targets/{target_id}/asm/coverage")
@@ -2122,13 +2165,24 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
         coverage = await asm_inventory.coverage_summary(conn, target_id)
         if coverage["total"] == 0:
             raise HTTPException(status_code=400, detail="No endpoints in inventory yet; run a scan or coverage recon first")
-        base_opts = _decode_target_scan_options(target["scan_options"])
+        base_opts = _clear_asm_approval_context(
+            _decode_target_scan_options(target["scan_options"])
+        )
+        risk_tier = (
+            "credential"
+            if _normalize_asm_check_family(request.check_family) in {"auth", "bola"}
+            else "active"
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
             target_url=target["url"],
             target_id=target_id,
             action_name="asm.test",
+            risk_tier=risk_tier,
+            always_require_receipt=True,
+            require_target_binding=True,
+            require_expiry=True,
         )
         if approval_context:
             base_opts.update(approval_context)
@@ -2143,7 +2197,7 @@ async def asm_test(target_id: str, request: AsmTestRequest = None):
             conn,
             command="asm.test",
             status="queued",
-            risk_tier="credential" if _normalize_asm_check_family(request.check_family) in {"auth", "bola"} else "active",
+            risk_tier=risk_tier,
             campaign_id=enq.get("campaign_id"),
             scan_id=enq.get("scan_id"),
             scope_receipt_id=base_opts.get("scope_receipt_id"),
@@ -2191,7 +2245,9 @@ async def asm_recon(target_id: str, request: AsmReconRequest = None):
                     "'Show ASM/internal scans' on the Scans page."
                 ),
             )
-        base_opts = _decode_target_scan_options(target["scan_options"])
+        base_opts = _clear_asm_approval_context(
+            _decode_target_scan_options(target["scan_options"])
+        )
         approval_context = await _validate_approval_receipt_for_action(
             conn,
             request.approval_receipt_id,
@@ -2330,17 +2386,19 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "scheduler_state": scheduler_state,
             }
 
-        base_opts = _decode_target_scan_options(target["scan_options"])
-        approval_context = await _validate_approval_receipt_for_action(
-            conn,
-            request.approval_receipt_id,
-            target_url=target["url"],
-            target_id=target_id,
-            action_name="asm.improve",
+        base_opts = _clear_asm_approval_context(
+            _decode_target_scan_options(target["scan_options"])
         )
-        if approval_context:
-            base_opts.update(approval_context)
         if rec["next_action"] == "recon":
+            approval_context = await _validate_approval_receipt_for_action(
+                conn,
+                request.approval_receipt_id,
+                target_url=target["url"],
+                target_id=target_id,
+                action_name="asm.improve",
+            )
+            if approval_context:
+                base_opts.update(approval_context)
             enq = await _enqueue_asm_recon(conn, r, target_id, target["url"], base_opts, triggered_by="improve")
             await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", uuid.UUID(target_id))
             command_result = await _record_command_result(
@@ -2374,6 +2432,24 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
                 "operation_id": command_result["id"],
             }
 
+        risk_tier = (
+            "credential"
+            if _normalize_asm_check_family(request.check_family) in {"auth", "bola"}
+            else "active"
+        )
+        approval_context = await _validate_approval_receipt_for_action(
+            conn,
+            request.approval_receipt_id,
+            target_url=target["url"],
+            target_id=target_id,
+            action_name="asm.improve",
+            risk_tier=risk_tier,
+            always_require_receipt=True,
+            require_target_binding=True,
+            require_expiry=True,
+        )
+        if approval_context:
+            base_opts.update(approval_context)
         batch_size = request.batch_size if request.batch_size is not None else cfg["batch_size"]
         if claimable > 0:
             batch_size = min(batch_size, claimable)
@@ -2390,7 +2466,7 @@ async def asm_improve(target_id: str, request: AsmImproveRequest = None):
             conn,
             command="asm.improve",
             status="queued",
-            risk_tier="credential" if _normalize_asm_check_family(request.check_family) in {"auth", "bola"} else "active",
+            risk_tier=risk_tier,
             campaign_id=enq.get("campaign_id"),
             scan_id=enq.get("scan_id"),
             scope_receipt_id=base_opts.get("scope_receipt_id"),
@@ -2448,17 +2524,40 @@ async def asm_get_policy(target_id: str):
 
 @router.put("/targets/{target_id}/asm/policy")
 async def asm_set_policy(target_id: str, body: AsmPolicyUpdate):
-    """Enable/disable continuous ASM and update the per-target policy (validated
-    + clamped to safe bounds)."""
+    """Enable/disable continuous ASM and update its validated target policy."""
     r = get_redis()
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow("SELECT asm_config FROM targets WHERE id = $1", uuid.UUID(target_id))
+        row = await conn.fetchrow(
+            "SELECT url, asm_enabled, asm_config FROM targets WHERE id = $1",
+            uuid.UUID(target_id),
+        )
         if not row:
             raise HTTPException(status_code=404, detail="Target not found")
         current = _decode_asm_config(row["asm_config"])
-        new_config = asm_inventory.merge_asm_config(
-            {**current, **body.config} if isinstance(body.config, dict) else current
+        config_patch = (
+            body.config.model_dump(mode="python", exclude_unset=True)
+            if body.config is not None
+            else {}
         )
+        new_config = asm_inventory.merge_asm_config(
+            {**current, **config_patch}
+        )
+        resulting_enabled = (
+            bool(body.enabled) if body.enabled is not None else bool(row["asm_enabled"])
+        )
+        receipt_id = new_config.get("approval_receipt_id")
+        if resulting_enabled:
+            await _validate_approval_receipt_for_action(
+                conn,
+                receipt_id,
+                target_url=row["url"],
+                target_id=target_id,
+                action_name="asm.continuous",
+                risk_tier="active",
+                always_require_receipt=True,
+                require_target_binding=True,
+                require_expiry=True,
+            )
         await conn.execute(
             """UPDATE targets
                SET asm_enabled = COALESCE($1, asm_enabled), asm_config = $2, updated_at = NOW()
@@ -2810,6 +2909,22 @@ def _public_target_row(row: Any) -> dict[str, Any]:
             target[key] = value[:limit]
     if "scan_options" in target:
         target["scan_options"] = _sanitize_scan_options(target.get("scan_options"))
+    metadata = _decode_json_value(target.get("metadata_json")) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    target.pop("metadata_json", None)
+    target["owner"] = str(metadata.get("owner") or metadata.get("asset_owner") or "").strip() or None
+    target["environment"] = str(metadata.get("environment") or "").strip().lower() or None
+    target["risk_tier"] = str(metadata.get("risk_tier") or "").strip().lower() or None
+    exposure_class = target_exposure_class(target.get("url"))
+    target["exposure_class"] = exposure_class
+    target["cohort"] = target_cohort(
+        url=target.get("url"),
+        name=target.get("name"),
+        discovery_source=target.get("discovery_source"),
+        metadata=metadata,
+        exposure_class=exposure_class,
+    )
     if str(target.get("discovery_source") or "").lower() != "model-intake":
         values = _decode_json_value(target.get("origins")) or []
         if not isinstance(values, list):
@@ -2852,6 +2967,7 @@ class TargetCreate(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     name: Optional[str] = Field(default=None, max_length=512)
     scan_options: Optional[dict] = None
+    cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal"]] = None
 
 
 class TargetUpdate(BaseModel):
@@ -2861,6 +2977,14 @@ class TargetUpdate(BaseModel):
     # Merged into the existing metadata (JSONB ||), so partial ownership
     # updates don't clobber unrelated keys. Set a key to "" to clear it.
     metadata_json: Optional[dict] = None
+    cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal", "unclassified"]] = None
+
+    @field_validator("metadata_json")
+    @classmethod
+    def metadata_cannot_bypass_cohort_validation(cls, value: Optional[dict]) -> Optional[dict]:
+        if value and "cohort" in value:
+            raise ValueError("set cohort through the validated cohort field")
+        return value
 
 
 class TargetPrincipalAutoProvisionRequest(BaseModel):
@@ -3713,10 +3837,74 @@ class AsmImproveRequest(BaseModel):
         return _validate_asm_endpoint_filter_value(value)
 
 
+class AsmConfigUpdate(BaseModel):
+    """Typed partial Continuous ASM policy; omitted fields retain current values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_size: Optional[int] = Field(default=None, ge=1, le=1000, strict=True)
+    stale_days: Optional[int] = Field(default=None, ge=0, le=3650, strict=True)
+    min_interval_minutes: Optional[int] = Field(default=None, ge=5, le=10080, strict=True)
+    daily_endpoint_cap: Optional[int] = Field(default=None, ge=0, le=1_000_000, strict=True)
+    recon_interval_hours: Optional[int] = Field(default=None, ge=0, le=8760, strict=True)
+    exploit_depth: Optional[bool] = Field(default=None, strict=True)
+    window_start_hour: Optional[int] = Field(default=None, ge=0, le=23, strict=True)
+    window_end_hour: Optional[int] = Field(default=None, ge=0, le=23, strict=True)
+    window_days: Optional[list[int]] = None
+    max_requests_per_hour_per_domain: Optional[int] = Field(
+        default=None, ge=0, le=1_000_000, strict=True,
+    )
+    approval_receipt_id: Optional[str] = None
+
+    @field_validator("window_days", mode="before")
+    @classmethod
+    def validate_window_days(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(
+            isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6
+            for day in value
+        ):
+            raise ValueError("window_days must be a list of weekdays 0-6")
+        return sorted(set(value)) or None
+
+    @field_validator("approval_receipt_id")
+    @classmethod
+    def validate_approval_receipt_id(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            return str(uuid.UUID(str(value)))
+        except ValueError as exc:
+            raise ValueError("approval_receipt_id must be a UUID") from exc
+
+
 class AsmPolicyUpdate(BaseModel):
     """Per-target Continuous ASM policy (docs §16 Phase 3/4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     enabled: Optional[bool] = None
-    config: Optional[dict] = None
+    config: Optional[AsmConfigUpdate] = None
+
+
+_ASM_APPROVAL_CONTEXT_KEYS = {
+    "approval_receipt_id", "scope_receipt_id", "approved_by", "approval_confirmations",
+}
+
+
+def _clear_asm_approval_context(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Never inherit a receipt from generic target options into a new ASM action."""
+    cleaned = dict(options or {})
+    for key in _ASM_APPROVAL_CONTEXT_KEYS:
+        cleaned.pop(key, None)
+    policy = cleaned.get("scan_policy")
+    if isinstance(policy, Mapping):
+        cleaned["scan_policy"] = {
+            key: value for key, value in policy.items()
+            if key not in _ASM_APPROVAL_CONTEXT_KEYS
+        }
+    return cleaned
 
 
 def _decode_target_scan_options(raw) -> dict:
@@ -4143,6 +4331,10 @@ async def _enqueue_asm_exploit_batch(
         base_options=opts,
         check_family=family,
     )
+    if not scan_contract.policy.approval_receipt_id:
+        raise ScanActionPlanError(
+            "Active ASM batches require a validated approval receipt"
+        )
     opts["run_kind"] = "asm_batch"
     endpoint_filter = _validate_asm_endpoint_filter_value(endpoint_filter)
     _enforce_asm_family_preconditions(family, opts, exploit_depth=exploit_depth)

@@ -60,34 +60,29 @@ const TARGET_TYPES: Array<{ value: AITargetType; label: string; probePack: AIPro
     value: 'api_chat',
     label: 'Chat API',
     probePack: 'shaker-ai-smoke',
-    responsePath: '$.answer',
-    template: { message: '{{prompt}}', session_id: '{{session_id}}' },
+    responsePath: '',
+    template: {},
   },
   {
     value: 'rag',
     label: 'RAG API',
     probePack: 'shaker-rag-lite',
-    responsePath: '$.answer',
-    template: { message: '{{prompt}}', session_id: '{{session_id}}' },
+    responsePath: '',
+    template: {},
   },
   {
     value: 'agent_trace',
     label: 'Agent Trace API',
     probePack: 'shaker-agent-abuse',
-    responsePath: '$',
-    template: { message: '{{prompt}}', session_id: '{{session_id}}' },
+    responsePath: '',
+    template: {},
   },
   {
     value: 'mcp_trace',
     label: 'MCP HTTP/SSE',
     probePack: 'shaker-mcp-security',
-    responsePath: '$.result',
-    template: {
-      jsonrpc: '2.0',
-      method: 'tools/list',
-      params: { cursor: '{{prompt}}' },
-      id: '{{session_id}}',
-    },
+    responsePath: '',
+    template: {},
   },
 ]
 
@@ -631,6 +626,14 @@ export default function AIGateSettingsPage() {
       setError('Fix the highlighted fields before saving.')
       return
     }
+    if (!contractReady) {
+      setError('Verify the request injection point and response extraction path before saving.')
+      return
+    }
+    if (!productionGovernanceReady) {
+      setError('Complete the applicable governance controls before saving a production target.')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -750,6 +753,10 @@ export default function AIGateSettingsPage() {
 
   function applyInventoryCandidate(candidate: AIInventoryCandidate) {
     const payload = candidate.suggested_target
+    if (!payload) {
+      toast.error('This is a speculative lead, not a validated request contract.')
+      return
+    }
     setFieldErrors({})
     setName(payload.name || `Discovered ${candidate.target_type}`)
     setTargetType(payload.target_type)
@@ -830,10 +837,21 @@ export default function AIGateSettingsPage() {
     () => (inventory?.candidates || []).slice(0, 5),
     [inventory]
   )
+  const inventoryLeads = useMemo(
+    () => (inventory?.leads || []).slice(0, 5),
+    [inventory]
+  )
   const hiddenCalibrationCount = targets.length - visibleTargets.length
   const shouldShowCreate = showAddTarget
   const hasFieldErrors = Object.values(fieldErrors).some(Boolean)
-  const promptWarning = targetType === 'api_chat' && !requestTemplate.includes('{{prompt}}')
+  const promptWarning = method !== 'GET' && !requestTemplate.includes('{{prompt}}')
+  const contractIssues = [
+    promptWarning ? `Request template must contain {{prompt}} for ${method} targets.` : null,
+    !responsePath.trim() ? 'Response path must be verified from an observed response.' : null,
+  ].filter((issue): issue is string => Boolean(issue))
+  const contractReady = contractIssues.length === 0
+  const productionGovernanceReady = !productionMode || !formControlSummary?.missing.length
+  const saveDisabled = saving || hasFieldErrors || !contractReady || !productionGovernanceReady
   const confirmProductionConfig = confirmProductionTarget
     ? runConfigs[confirmProductionTarget.id] || defaultRunConfig(confirmProductionTarget)
     : null
@@ -897,7 +915,11 @@ export default function AIGateSettingsPage() {
               </div>
               <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-400">
                 <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.asset_count} assets</span>
-                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.candidate_count} candidates</span>
+                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.candidate_count} corroborated candidates</span>
+                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.lead_count || 0} speculative leads</span>
+                {!!inventory.summary.quarantined_scan_count && (
+                  <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.quarantined_scan_count} fixture scans quarantined</span>
+                )}
                 <span className="rounded bg-gray-950 px-2 py-1">blast radius {inventory.summary.highest_blast_radius_score}</span>
                 {inventory.summary.coverage_gaps.slice(0, 3).map((gap) => (
                   <span key={gap} className="rounded bg-yellow-500/10 px-2 py-1 text-yellow-200">{gap.replaceAll('_', ' ')}</span>
@@ -910,7 +932,9 @@ export default function AIGateSettingsPage() {
             </button>
           </div>
           {inventoryCandidates.length > 0 && (
-            <div className="mt-4 grid gap-2 sm:grid-cols-1 lg:grid-cols-2">
+            <div className="mt-4">
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-emerald-300">Corroborated request schemas</div>
+              <div className="grid gap-2 sm:grid-cols-1 lg:grid-cols-2">
               {inventoryCandidates.map((candidate) => {
                 const confidencePct = Number.isFinite(candidate.confidence)
                   ? Math.round(candidate.confidence * 100)
@@ -930,9 +954,27 @@ export default function AIGateSettingsPage() {
                       )}
                     </div>
                     <div className="mt-2 break-words text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
+                    <div className="mt-2 text-xs text-amber-300">Response extraction still requires verification before save.</div>
                   </button>
                 )
               })}
+              </div>
+            </div>
+          )}
+          {inventoryLeads.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Speculative leads — not loadable</div>
+              <div className="grid gap-2 sm:grid-cols-1 lg:grid-cols-2">
+                {inventoryLeads.map((lead) => (
+                  <div key={lead.candidate_id} className="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="min-w-0 break-all text-sm font-medium text-gray-200">{lead.method} {lead.endpoint_url}</span>
+                      <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">path hint only</span>
+                    </div>
+                    <div className="mt-2 text-xs text-gray-500">Needs request-schema or observed behavior evidence before it can become an AI target candidate.</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </Card>
@@ -1050,7 +1092,7 @@ export default function AIGateSettingsPage() {
                     />
                     {fieldErrors.requestTemplate && <span role="alert" className="text-sm text-red-400">{fieldErrors.requestTemplate}</span>}
                     {!fieldErrors.requestTemplate && promptWarning && (
-                      <span className="text-sm text-amber-400">Chat API targets usually need {'{{prompt}}'} in the request template so probes can inject prompts.</span>
+                      <span className="text-sm text-red-400">Request template must contain {'{{prompt}}'} so probes have a defined injection point.</span>
                     )}
                   </label>
                   <label className="grid gap-1 text-sm text-gray-300">
@@ -1110,7 +1152,7 @@ export default function AIGateSettingsPage() {
           </div>
 
           <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-            <Button type="submit" disabled={saving || hasFieldErrors} className="w-full">
+            <Button type="submit" disabled={saveDisabled} className="w-full">
               {saving ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Plus className="h-4 w-4" aria-hidden="true" />}
               Save AI Target
             </Button>
@@ -1121,6 +1163,17 @@ export default function AIGateSettingsPage() {
           </div>
           {hasFieldErrors && (
             <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to save this target.</p>
+          )}
+          {!hasFieldErrors && !contractReady && (
+            <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200">
+              <div className="font-medium">Contract validation incomplete</div>
+              <ul className="mt-1 list-disc space-y-1 pl-5">
+                {contractIssues.map((issue) => <li key={issue}>{issue}</li>)}
+              </ul>
+            </div>
+          )}
+          {!hasFieldErrors && contractReady && !productionGovernanceReady && (
+            <p role="alert" className="text-sm text-amber-300">Production targets require all applicable governance controls before save.</p>
           )}
         </form>
 
@@ -1158,7 +1211,7 @@ export default function AIGateSettingsPage() {
 
               <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
                 <div className="mb-2 flex items-center justify-between gap-3">
-                  <div className="text-sm font-medium text-gray-200">Form readiness</div>
+                  <div className="text-sm font-medium text-gray-200">Governance readiness</div>
                   {formControlSummary && (
                     <span className={`rounded px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
                       {formControlSummary.present}/{formControlSummary.required}

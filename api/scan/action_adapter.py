@@ -21,12 +21,14 @@ try:
         verify_target_bound_object_authorization,
     )
     from capabilities.dns import inspect_dns_posture
+    from capabilities.infrastructure import inspect_infrastructure_intelligence
     from capabilities.http import execute_bound_http_request
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
+        InfrastructureInspectionExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -78,12 +80,14 @@ except (ImportError, ModuleNotFoundError):
         verify_target_bound_object_authorization,
     )
     from ..capabilities.dns import inspect_dns_posture
+    from ..capabilities.infrastructure import inspect_infrastructure_intelligence
     from ..capabilities.http import execute_bound_http_request
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
+        InfrastructureInspectionExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -139,6 +143,7 @@ except (ImportError, ModuleNotFoundError):
     from scanner.redaction import redact_text
 
 try:
+    from scanner_tools import http_archive_capture as _scan_capture
     from scanner_tools.common import run_streaming
     from scanner_tools.request_replay import (
         ReplayPlan,
@@ -146,6 +151,7 @@ try:
         bind_replay_credential_headers,
     )
 except (ImportError, ModuleNotFoundError):
+    from scanner.scanner_tools import http_archive_capture as _scan_capture
     from scanner.scanner_tools.common import run_streaming
     from scanner.scanner_tools.request_replay import (
         ReplayPlan,
@@ -235,6 +241,57 @@ class ObservationBackend(Protocol):
 _BODY_PROOF_PLACEHOLDER = "shakerscan"
 
 
+def _nested_proof_body(fields: Sequence[str]) -> dict[str, Any]:
+    """Rebuild a JSON proof body from dotted/flattened field names.
+
+    Discovery records nested body shape as dotted paths (``profile.email``) and an
+    array of objects as ``items`` plus ``items.id``. A proof body of literal flat
+    keys would make the verifier's dotted-path mutator traverse a missing node and
+    raise, and would send XSS/SQL proofs the wrong schema, so rebuild the nesting
+    the mutator and the target actually expect. Mirrors the fan-out worklist
+    renderer in api/scan/continuation.py so both paths agree on one shape.
+    """
+    body: dict[str, Any] = {}
+    for raw_name in fields:
+        parts = [part for part in str(raw_name).split(".") if part]
+        if not parts:
+            continue
+        cursor: Any = body
+        for part in parts[:-1]:
+            child = cursor.get(part)
+            if isinstance(child, list):
+                if not child or not isinstance(child[0], dict):
+                    child[:] = [{}]
+                cursor = child[0]
+                continue
+            if isinstance(child, dict):
+                cursor = child
+                continue
+            nested: dict[str, Any] = {}
+            # A parent name plus child names is the flattened shape emitted for an
+            # array of objects (items, items.id).
+            cursor[part] = [nested] if child is not None else nested
+            cursor = nested
+        if not isinstance(cursor.get(parts[-1]), (dict, list)):
+            cursor[parts[-1]] = _BODY_PROOF_PLACEHOLDER
+    return body
+
+
+def _candidate_for_synthetic_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop an exact-request claim when proof uses a reconstructed request.
+
+    Endpoint candidates retain request references as ranking provenance, but the
+    generic candidate lane reconstructs a value-free body from the endpoint
+    manifest. Passing that provenance ref to an exact-request proof adapter made
+    the adapter correctly reject the synthetic request as a different private
+    request. Exact request candidates use their separate private-request lane;
+    this copy prevents the generic lane from claiming that authority.
+    """
+    proof_candidate = dict(candidate)
+    proof_candidate["request_ref_id"] = None
+    return proof_candidate
+
+
 def proof_request_for_candidate(
     endpoint_manifest: Any,
     candidate_manifest: Any,
@@ -268,7 +325,7 @@ def proof_request_for_candidate(
     content_type = str(resolved.get("content_type") or "").lower()
     if "json" in content_type:
         payload = json.dumps(
-            {field: _BODY_PROOF_PLACEHOLDER for field in fields},
+            _nested_proof_body(fields),
             sort_keys=True, separators=(",", ":"),
         )
         media_type = "application/json"
@@ -752,6 +809,9 @@ class DatabaseNeutralScanActionDispatcher:
                 args,
                 target=self.target,
                 allow_write=False,
+                # The deterministic Scan plane records here for the same reason Hunt does:
+                # without it a scan export was empty while the endpoint claimed coverage.
+                transaction_recorder=_scan_capture.record_scan_call,
                 timeout_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
                 allow_bound_origin_redirects=follow,
                 trusted_headers=(
@@ -829,6 +889,18 @@ class DatabaseNeutralScanActionDispatcher:
 
         adapter = self._prepared_inline(
             action, {}, operation, DnsInspectionExecutionAdapter,
+        )
+        return await self._execute_adapter(action, adapter, heartbeat)
+
+    async def _infrastructure(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        async def operation() -> Mapping[str, Any]:
+            return await inspect_infrastructure_intelligence(
+                self.target,
+                timeout_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
+            )
+
+        adapter = self._prepared_inline(
+            action, {}, operation, InfrastructureInspectionExecutionAdapter,
         )
         return await self._execute_adapter(action, adapter, heartbeat)
 
@@ -1364,6 +1436,17 @@ class DatabaseNeutralScanActionDispatcher:
                     not in {"not_proven", "unproven", ""}
                 ):
                     candidate_signals.add(str(item["candidate_id"]))
+        # A URL fragment never reaches a server-side verifier, so requiring an upstream reflection
+        # signal makes DOM-only XSS impossible to prove. The immutable fragment candidate itself is
+        # sufficient authority for a bounded same-origin browser attempt.
+        candidate_signals.update(
+            str(candidate.get("candidate_id") or "")
+            for _index, candidate in rows
+            if candidate.get("browser_fragment_query_parameter_names")
+            and str(candidate.get("parameter_name") or "")
+            in candidate.get("browser_fragment_query_parameter_names", ())
+        )
+        candidate_signals.discard("")
         if not candidate_signals:
             return self._skip(action, "no_xss_candidate_observation")
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
@@ -1566,6 +1649,12 @@ class DatabaseNeutralScanActionDispatcher:
         )
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
+            # A fragment-located candidate (family_hints: ["xss"]) lives only in the
+            # SPA hash route the server never receives, so a server-side SQL proof
+            # would waste budget on a parameter the origin never sees. It belongs to
+            # the browser XSS proof; skip it here.
+            if candidate.get("browser_fragment_path"):
+                continue
             if candidate_id not in candidate_signals:
                 continue
             attempt_id = hashlib.sha256(
@@ -1597,6 +1686,7 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
             else:
+                proof_candidate = _candidate_for_synthetic_proof(candidate)
                 # A body candidate mutates, so it needs the same authority the private
                 # request path above demands before it may be replayed.
                 if (
@@ -1953,6 +2043,12 @@ class DatabaseNeutralScanActionDispatcher:
         )
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
+            # A fragment-located candidate (family_hints: ["xss"]) never reaches the
+            # server, so its parameter is absent from the server query/body and the
+            # NoSQL differential would search for a parameter that does not exist and
+            # block. It belongs to the browser XSS proof; skip it here.
+            if candidate.get("browser_fragment_path"):
+                continue
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:nosqli:{candidate_id}".encode()
             ).hexdigest()
@@ -1968,6 +2064,7 @@ class DatabaseNeutralScanActionDispatcher:
             if self.cancelled():
                 break
             request_class = str(candidate.get("request_class") or "safe_read")
+            proof_candidate = dict(candidate)
             if request_mode:
                 request = self._private_requests.get(str(candidate.get("request_ref_id") or ""))
                 if request is None:
@@ -1981,6 +2078,7 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
             else:
+                proof_candidate = _candidate_for_synthetic_proof(candidate)
                 # A body candidate mutates, so it needs the same authority the private
                 # request path above demands before it may be replayed.
                 if (
@@ -2016,7 +2114,7 @@ class DatabaseNeutralScanActionDispatcher:
                 specification=specification,
                 target=self.target,
                 request=request,
-                candidate=candidate,
+                candidate=proof_candidate,
                 transport=PinnedAiohttpReplayTransport(),
                 requested_budget=sub_budget,
             )
@@ -2825,6 +2923,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._http(action, heartbeat)
         if action.capability_name == "dns.inspect":
             return await self._dns(action, heartbeat)
+        if action.capability_name == "infrastructure.inspect":
+            return await self._infrastructure(action, heartbeat)
         if action.capability_name == "tls.inspect":
             return await self._tls(action, heartbeat)
         if action.capability_name in {

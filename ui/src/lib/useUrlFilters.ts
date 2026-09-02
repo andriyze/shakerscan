@@ -1,7 +1,7 @@
 'use client'
 
 import { useSearchParams, usePathname } from 'next/navigation'
-import { useCallback, useMemo, useEffect } from 'react'
+import { useCallback, useMemo, useEffect, useState } from 'react'
 
 export type FilterValue = string | number | undefined
 
@@ -20,8 +20,11 @@ export interface UseUrlFiltersOptions<T extends FilterState> {
 // push against the prerendered entry and silently reverts it — breaking every
 // filter interaction after opening a deep link.
 function shallowNavigate(url: string, mode: 'push' | 'replace') {
-  if (mode === 'push') window.history.pushState(null, '', url)
-  else window.history.replaceState(null, '', url)
+  // Preserve the App Router's private history payload. Replacing it with null
+  // can leave popstate showing a new URL while React keeps the previous page.
+  const state = { ...(window.history.state || {}), __shakerscanFilterEntry: true }
+  if (mode === 'push') window.history.pushState(state, '', url)
+  else window.history.replaceState(state, '', url)
 }
 
 export function useUrlFilters<T extends FilterState = FilterState>(options: UseUrlFiltersOptions<T> = {}) {
@@ -31,11 +34,31 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
   // Memoize defaults to prevent infinite re-renders
   // Empty deps is intentional - we capture initial defaults only
   const defaultsRecord = useMemo(() => defaults as FilterState, [])
+  // Next's useSearchParams can lag behind native history.pushState/replaceState
+  // in a production App Router build. Keep an optimistic local copy so controls
+  // update in the same interaction, then reconcile it when Next navigation or
+  // browser Back/Forward supplies a different URL.
+  const nextSearchString = searchParams.toString()
+  const [searchString, setSearchString] = useState(nextSearchString)
+
+  useEffect(() => {
+    setSearchString(nextSearchString)
+  }, [nextSearchString])
+
+  useEffect(() => {
+    const syncFromBrowserHistory = () => {
+      setSearchString(window.location.search.replace(/^\?/, ''))
+    }
+    window.addEventListener('popstate', syncFromBrowserHistory)
+    return () => window.removeEventListener('popstate', syncFromBrowserHistory)
+  }, [])
+
+  const activeSearchParams = useMemo(() => new URLSearchParams(searchString), [searchString])
 
   // Parse filters from URL with defaults
   const filters = useMemo(() => {
     const result: FilterState = { ...defaultsRecord }
-    searchParams.forEach((value, key) => {
+    activeSearchParams.forEach((value, key) => {
       if (key === 'page') {
         // Page is 1-based; treat 0 and invalid values as page 1 for backwards compatibility
         const parsed = parseInt(value, 10)
@@ -45,26 +68,27 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
       }
     })
     return result as T
-  }, [searchParams, defaultsRecord])
+  }, [activeSearchParams, defaultsRecord])
 
   // Normalize invalid page values in URL (e.g., ?page=0 -> remove page param)
   useEffect(() => {
-    const urlPage = searchParams.get('page')
+    const urlPage = activeSearchParams.get('page')
     if (urlPage !== null) {
       const parsed = parseInt(urlPage, 10)
       // If page is invalid (0, negative, NaN) or equals the default, remove it from URL
       if (isNaN(parsed) || parsed < 1 || parsed === defaultsRecord['page']) {
-        const params = new URLSearchParams(searchParams.toString())
+        const params = new URLSearchParams(searchString)
         params.delete('page')
         const queryString = params.toString()
         shallowNavigate(queryString ? `${pathname}?${queryString}` : pathname, 'replace')
+        setSearchString(queryString)
       }
     }
-  }, [searchParams, pathname, defaultsRecord])
+  }, [activeSearchParams, searchString, pathname, defaultsRecord])
 
   // Update a single filter
   const setFilter = useCallback((key: string, value: string | number | undefined) => {
-    const params = new URLSearchParams(searchParams.toString())
+    const params = new URLSearchParams(searchString)
 
     if (value === undefined || value === '' || value === defaultsRecord[key]) {
       params.delete(key)
@@ -79,11 +103,12 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
 
     const queryString = params.toString()
     shallowNavigate(queryString ? `${pathname}?${queryString}` : pathname, 'push')
-  }, [searchParams, pathname, defaultsRecord])
+    setSearchString(queryString)
+  }, [searchString, pathname, defaultsRecord])
 
   // Update multiple filters at once
   const setFilters = useCallback((updates: FilterState) => {
-    const params = new URLSearchParams(searchParams.toString())
+    const params = new URLSearchParams(searchString)
 
     Object.entries(updates).forEach(([key, value]) => {
       if (value === undefined || value === '' || value === defaultsRecord[key]) {
@@ -100,7 +125,8 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
 
     const queryString = params.toString()
     shallowNavigate(queryString ? `${pathname}?${queryString}` : pathname, 'push')
-  }, [searchParams, pathname, defaultsRecord])
+    setSearchString(queryString)
+  }, [searchString, pathname, defaultsRecord])
 
   // Build a URL with given filters, preserving current context
   const buildUrl = useCallback((path: string, overrides: FilterState = {}) => {
@@ -109,7 +135,7 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
     // Include current filters as "return" params if we're linking to a detail page
     const isDetailPage = path.includes('[id]') || /\/[a-f0-9-]{36}$/.test(path)
     if (isDetailPage) {
-      searchParams.forEach((value, key) => {
+      activeSearchParams.forEach((value, key) => {
         params.set(`return_${key}`, value)
       })
     }
@@ -123,14 +149,14 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
 
     const queryString = params.toString()
     return queryString ? `${path}?${queryString}` : path
-  }, [searchParams])
+  }, [activeSearchParams])
 
   // Build return URL from detail page back to list
   const buildReturnUrl = useCallback((basePath: string) => {
     const params = new URLSearchParams()
 
     // Extract return params and restore them
-    searchParams.forEach((value, key) => {
+    activeSearchParams.forEach((value, key) => {
       if (key.startsWith('return_')) {
         params.set(key.replace('return_', ''), value)
       }
@@ -138,18 +164,18 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
 
     const queryString = params.toString()
     return queryString ? `${basePath}?${queryString}` : basePath
-  }, [searchParams])
+  }, [activeSearchParams])
 
   // Get all return params as an object
   const returnParams = useMemo(() => {
     const result: FilterState = {}
-    searchParams.forEach((value, key) => {
+    activeSearchParams.forEach((value, key) => {
       if (key.startsWith('return_')) {
         result[key.replace('return_', '')] = value
       }
     })
     return result
-  }, [searchParams])
+  }, [activeSearchParams])
 
   return {
     filters,
@@ -158,6 +184,6 @@ export function useUrlFilters<T extends FilterState = FilterState>(options: UseU
     buildUrl,
     buildReturnUrl,
     returnParams,
-    searchParams
+    searchParams: activeSearchParams
   }
 }

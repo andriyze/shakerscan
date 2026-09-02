@@ -46,6 +46,7 @@ CREATE TABLE targets (
     last_scanned_at TIMESTAMPTZ,
     last_score INTEGER,
     last_grade TEXT,
+    last_assurance_score INTEGER,
     total_scans INTEGER DEFAULT 0,
     active_findings_count INTEGER DEFAULT 0,
 
@@ -128,6 +129,9 @@ CREATE TABLE scans (
     result JSONB,
     score INTEGER,
     grade TEXT,
+    -- How much of the application was examined, scored independently of how bad the
+    -- findings are. A clean scan that looked nowhere must not read as a safe one.
+    assurance_score INTEGER,
     findings_count INTEGER DEFAULT 0,
 
     -- Delta (change detection)
@@ -835,14 +839,17 @@ CREATE TABLE request_collection_selections (
     selected_request_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_request_count >= 0),
     selected_mutating_count INTEGER NOT NULL DEFAULT 0 CHECK (selected_mutating_count >= 0),
     is_active BOOLEAN NOT NULL DEFAULT true,
+    revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT request_collection_selections_name_unique UNIQUE (binding_id, name),
     CONSTRAINT request_collection_selections_binding_fk FOREIGN KEY (binding_id, collection_id)
         REFERENCES request_collection_bindings(id, collection_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_request_collection_selections_active
 ON request_collection_selections(collection_id, binding_id, is_active, lower(name));
+CREATE UNIQUE INDEX idx_request_collection_selections_current_name
+ON request_collection_selections(binding_id, lower(name))
+WHERE is_active=true AND revoked_at IS NULL;
 
 CREATE TABLE device_credential_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -986,15 +993,37 @@ CREATE TABLE hunt_actions (
 );
 CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
 
+-- Methodology lifecycle is separate from the planner context so the complete catalog and
+-- historical event stream never consume the model's working context.
+CREATE TABLE hunt_skill_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    skill_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (
+        event_type IN ('read','bound','selection_removed','unbound','used','completed','deferred')
+    ),
+    skill_version TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    reason TEXT,
+    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_hunt_skill_events_run
+ON hunt_skill_events(hunt_run_id, created_at, id);
+
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered
 -- ============================================================
 CREATE TABLE findings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+    first_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
+    last_seen_scan_id UUID REFERENCES scans(id) ON DELETE SET NULL,
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
     ai_target_id UUID REFERENCES ai_targets(id) ON DELETE CASCADE,
     device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
 
     -- Finding identification (for deduplication)
     fingerprint TEXT NOT NULL,
@@ -1082,11 +1111,16 @@ CREATE TABLE evidence_objects (
     content JSONB,
     retention_delete_preview_id UUID,
     retention_delete_pending_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    CONSTRAINT evidence_objects_finding_type_unique UNIQUE (finding_id, object_type)
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX idx_evidence_objects_finding ON evidence_objects(finding_id);
 CREATE INDEX idx_evidence_objects_scan ON evidence_objects(scan_id);
+CREATE UNIQUE INDEX idx_evidence_objects_finding_type_scan_unique
+    ON evidence_objects(finding_id, object_type, scan_id)
+    WHERE finding_id IS NOT NULL AND scan_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_evidence_objects_finding_type_unscoped_unique
+    ON evidence_objects(finding_id, object_type)
+    WHERE finding_id IS NOT NULL AND scan_id IS NULL;
 CREATE INDEX idx_evidence_objects_retention_pending ON evidence_objects(retention_delete_pending_at)
     WHERE retention_delete_pending_at IS NOT NULL;
 
@@ -1469,6 +1503,23 @@ CREATE INDEX idx_ai_targets_created ON ai_targets(created_at DESC);
 
 -- Findings
 CREATE INDEX idx_findings_scan_id ON findings(scan_id);
+CREATE INDEX idx_findings_first_seen_scan_id ON findings(first_seen_scan_id);
+CREATE INDEX idx_findings_last_seen_scan_id ON findings(last_seen_scan_id);
+
+CREATE OR REPLACE FUNCTION bind_finding_observation_scans()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.scan_id IS NOT NULL THEN
+        NEW.first_seen_scan_id = COALESCE(NEW.first_seen_scan_id, NEW.scan_id);
+        NEW.last_seen_scan_id = NEW.scan_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_bind_finding_observation_scans
+BEFORE INSERT OR UPDATE OF scan_id ON findings
+FOR EACH ROW EXECUTE FUNCTION bind_finding_observation_scans();
 CREATE INDEX idx_findings_target_id ON findings(target_id);
 CREATE INDEX idx_findings_ai_target_id ON findings(ai_target_id) WHERE ai_target_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_findings_device_fingerprint ON findings(device_target_id, fingerprint) WHERE device_target_id IS NOT NULL;
@@ -1481,6 +1532,7 @@ CREATE INDEX idx_findings_first_seen ON findings(first_seen_at DESC);
 CREATE INDEX idx_findings_last_seen ON findings(last_seen_at DESC NULLS LAST);
 CREATE INDEX idx_findings_source ON findings(source);
 CREATE INDEX idx_findings_session_id ON findings(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX idx_findings_hunt_run_id ON findings(hunt_run_id) WHERE hunt_run_id IS NOT NULL;
 CREATE INDEX idx_findings_last_verified_at ON findings(last_verified_at DESC) WHERE last_verified_at IS NOT NULL;
 CREATE INDEX idx_findings_last_verification_verdict ON findings(last_verification_verdict);
 -- Dedup hot path: save_findings looks up by (target_id, fingerprint) on every
@@ -2110,3 +2162,67 @@ CREATE TABLE IF NOT EXISTS public_api_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_public_api_idempotency_updated
     ON public_api_idempotency(updated_at);
+
+
+-- One row per HTTP call a Scan or Hunt made. Bodies and headers live in the
+-- content-addressed evidence store; the row carries the identity of the work that
+-- made the call so a scan or hunt can be replayed and audited after the fact.
+CREATE TABLE IF NOT EXISTS http_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    plane TEXT NOT NULL CHECK (plane IN ('scan','hunt','device','interactive')),
+    sequence INTEGER NOT NULL DEFAULT 0,
+    scan_id UUID REFERENCES scans(id) ON DELETE CASCADE,
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    hunt_action_id UUID,
+    scan_action_id TEXT,
+    target_id UUID REFERENCES targets(id) ON DELETE SET NULL,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE SET NULL,
+    capability_name TEXT,
+    adapter TEXT,
+    principal_slot TEXT,
+    method TEXT NOT NULL,
+    url TEXT NOT NULL,
+    http_version TEXT,
+    status_code INTEGER,
+    request_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+    request_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+    request_body_sha256 TEXT,
+    request_body_bytes INTEGER NOT NULL DEFAULT 0,
+    response_headers_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+    response_body_object_id UUID REFERENCES evidence_objects(id) ON DELETE SET NULL,
+    response_body_sha256 TEXT,
+    response_body_bytes INTEGER NOT NULL DEFAULT 0,
+    remote_ip TEXT,
+    direct_origin BOOLEAN NOT NULL DEFAULT false,
+    redirect_of UUID,
+    started_at TIMESTAMPTZ,
+    elapsed_ms INTEGER,
+    error TEXT,
+    truncated BOOLEAN NOT NULL DEFAULT false,
+    retention_class TEXT NOT NULL DEFAULT 'sensitive',
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT http_transactions_owner_check CHECK (
+        num_nonnulls(scan_id, hunt_run_id) = 1
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_http_transactions_scan
+    ON http_transactions(scan_id, sequence) WHERE scan_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_http_transactions_hunt
+    ON http_transactions(hunt_run_id, sequence) WHERE hunt_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_http_transactions_target
+    ON http_transactions(target_id, started_at DESC) WHERE target_id IS NOT NULL;
+
+-- What the archive attempted versus what it holds. Capture and persistence failures are
+-- swallowed so they cannot fail a scan, so the row count alone cannot say whether an
+-- archive is the whole run.
+CREATE TABLE IF NOT EXISTS http_archive_stats (
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
+    owner_id UUID NOT NULL,
+    attempted INTEGER NOT NULL DEFAULT 0,
+    stored INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    dropped INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner_kind, owner_id)
+);

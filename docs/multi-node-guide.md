@@ -1,5 +1,8 @@
 # Multi-Node Fleet Guide
 
+**Status:** current broker operations guide; reconciled 2026-08-29. WireGuard sections document an
+implemented preview and do not expand the supported production boundary.
+
 This guide explains how to operate one ShakerScan control plane with worker nodes on other Linux
 hosts. For the trust model and implementation details, see
 [Multi-Node Architecture](multi-node-architecture.md).

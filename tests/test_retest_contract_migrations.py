@@ -85,6 +85,38 @@ class _FakePool:
         return _FakePoolAcquire(self.conn)
 
 
+class _EvidenceIdentityMigrationConn(_FakeMigrationConn):
+    def __init__(self, *, applied=False, index_present=False):
+        super().__init__([], applied=None)
+        self.migration_applied = applied
+        self.index_present = index_present
+
+    async def fetchval(self, query, *args):
+        if "app_schema_migrations" in query:
+            return self.migration_applied
+        if "to_regclass('idx_evidence_objects_finding_type_scan_unique')" in query:
+            return self.index_present
+        return None
+
+
+def test_schema_migration_retries_a_transient_postgres_deadlock(monkeypatch):
+    class DeadlockDetectedError(RuntimeError):
+        pass
+
+    calls = 0
+
+    async def migrate_once(_pool):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise DeadlockDetectedError("injected DDL deadlock")
+
+    monkeypatch.setattr(retest_contract, "_run_schema_migrations_once", migrate_once)
+    asyncio.run(retest_contract.run_schema_migrations(object()))
+
+    assert calls == 2
+
+
 def _endpoint_row(**overrides):
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
     row = {
@@ -219,6 +251,43 @@ def test_active_finding_count_reconciliation_repairs_web_and_device_badges():
     assert "f.target_id=t.id" in statements[0]
     assert "UPDATE device_targets" in statements[1]
     assert "f.device_target_id=d.id" in statements[1]
+
+
+def test_evidence_scan_identity_migration_marks_existing_index_without_rewriting_history():
+    conn = _EvidenceIdentityMigrationConn(index_present=True)
+
+    asyncio.run(retest_contract._migrate_evidence_scan_identity(conn))
+
+    statements = [query for query, _args in conn.executed]
+    assert not any("UPDATE evidence_objects" in query for query in statements)
+    assert not any("DROP CONSTRAINT" in query for query in statements)
+    assert any(
+        "INSERT INTO app_schema_migrations" in query
+        and args == (retest_contract.EVIDENCE_SCAN_IDENTITY_MIGRATION,)
+        for query, args in conn.executed
+    )
+
+
+def test_evidence_scan_identity_legacy_repair_is_one_time_and_collision_safe():
+    conn = _EvidenceIdentityMigrationConn()
+
+    asyncio.run(retest_contract._migrate_evidence_scan_identity(conn))
+
+    statements = [query for query, _args in conn.executed]
+    repair_index = next(i for i, query in enumerate(statements) if "UPDATE evidence_objects" in query)
+    index_index = next(i for i, query in enumerate(statements) if "CREATE UNIQUE INDEX" in query)
+    ledger_index = next(i for i, query in enumerate(statements) if "INSERT INTO app_schema_migrations" in query)
+    assert repair_index < index_index < ledger_index
+    assert "NOT EXISTS" in statements[repair_index]
+    assert "current_observation.scan_id=findings.scan_id" in statements[repair_index]
+
+
+def test_evidence_scan_identity_migration_skips_after_ledger_entry():
+    conn = _EvidenceIdentityMigrationConn(applied=True)
+
+    asyncio.run(retest_contract._migrate_evidence_scan_identity(conn))
+
+    assert conn.executed == []
 
 
 def test_canonical_key_invariant_repairs_rewrites_and_recreates_index(monkeypatch):

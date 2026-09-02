@@ -33,6 +33,7 @@ _SUCCESS_RECEIPT_STATUSES = frozenset({"completed", "success", "succeeded"})
 # its own copy of the key-set; the two drifted, and the copy here is what masked the
 # TLS certificate block. There is now one implementation, imported from receipts.
 _key_is_sensitive = _receipts.key_is_sensitive
+_native_redact_string = _receipts._redact_string
 
 
 def _redact_url_path(path: str) -> str:
@@ -44,7 +45,10 @@ def _redact_url_path(path: str) -> str:
 
 
 def _redact_string(value: str) -> str:
-    text = str(value)
+    # Start with the native receipt redactor. The compatibility patch used to
+    # replace it with its older URL-only implementation, silently removing new
+    # shared free-text coverage from the actual runtime.
+    text = _native_redact_string(str(value))
     parsed = urllib.parse.urlsplit(text)
     if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
         query = urllib.parse.urlencode([

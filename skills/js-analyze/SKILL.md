@@ -35,7 +35,9 @@ Collect inputs in this order:
 3. Any JS bundle URLs, local JS files, or source-map URLs the user provides.
 4. Existing findings or session notes if they help explain a route or auth flow.
 
-If there is no useful scan context, prefer asking whether to queue a `standard` or `deep` scan. Do not queue `smart`, `full`, or `aggressive` without explicit permission.
+If there is no useful scan context, ask whether to queue the canonical Scan with a `balanced` or
+`thorough` budget. Keep active testing off unless the user separately confirms ownership or explicit
+authorization and asks for active probes.
 
 ## Read When Needed
 

@@ -825,8 +825,6 @@ async def test_api_security(
     def _has_privileged_content(path: str, html: str) -> bool:
         sample = (html or "")[:12000].lower()
         path_lower = path.lower()
-        if path_lower.startswith(("/api/", "/graphql", "/graphiql")):
-            return True
         privileged_markers = (
             "admin dashboard",
             "user management",
@@ -838,9 +836,44 @@ async def test_api_security(
             "impersonate",
             "privileged",
         )
-        return any(marker in sample for marker in privileged_markers)
+        if any(marker in sample for marker in privileged_markers):
+            return True
+        # Protocol paths are not proof by themselves: a SPA catch-all commonly serves the
+        # same HTML at /graphql.  Actual GraphQL/GraphiQL content normally identifies the
+        # protocol or IDE somewhere in the response, so use content rather than path as the
+        # positive signal.
+        if path_lower.startswith(("/graphql", "/graphiql", "/api/graphql")):
+            return any(marker in sample for marker in ("graphql", "graphiql", "__schema"))
+        return False
 
     homepage_fingerprint = content_fingerprint(homepage_content)
+    sibling_control_cache: dict[str, tuple[str, bool]] = {}
+
+    def _parent_path(path: str) -> str:
+        normalized = "/" + "/".join(part for part in path.split("/") if part)
+        parent = normalized.rsplit("/", 1)[0]
+        return parent or ""
+
+    async def _sibling_control(path: str) -> tuple[str, bool]:
+        """Return a same-parent nonexistent-path fingerprint and whether it was observed.
+
+        A homepage is a weak soft-404 control because a marketing root may intentionally
+        differ from the application's catch-all.  One impossible sibling per parent is a
+        substantially better oracle and keeps the added traffic bounded.
+        """
+        parent = _parent_path(path)
+        if parent in sibling_control_cache:
+            return sibling_control_cache[parent]
+        control_url = f"{base_url}{parent}/shakerscan-not-real-zzqx7"
+        control_out, _, control_rc = await run(
+            ["curl", "-sS", "-L", "-k", "--max-time", "5",
+             "-H", "User-Agent: Mozilla/5.0 (Security Scanner)"] + auth_args + [control_url],
+            timeout=10,
+        )
+        observed = control_rc == 0 and bool(control_out)
+        value = (content_fingerprint(control_out) if observed else "", observed)
+        sibling_control_cache[parent] = value
+        return value
 
     # Test BFLA endpoints
     for path in bfla_paths:
@@ -860,8 +893,7 @@ async def test_api_security(
                 # 200 = accessible, 403 = exists but forbidden, 401 = needs auth
                 if status in [200, 403, 401]:
                     is_accessible = status == 200
-                    is_spa_false_positive = False
-
+                    validation_state = "not_applicable" if not is_accessible else "inconclusive"
                     validation_reason = None
                     body_out = ""
                     # For 200 responses, validate it's not just a frontend shell.
@@ -875,11 +907,13 @@ async def test_api_security(
                             timeout=10
                         )
                         if body_rc == 0 and body_out:
+                            validation_state = "confirmed_accessible"
                             body_fingerprint = content_fingerprint(body_out)
+                            sibling_fingerprint, sibling_observed = await _sibling_control(path)
                             # If content is same as homepage, it's SPA routing (false positive)
                             if body_fingerprint and homepage_fingerprint:
                                 if body_fingerprint == homepage_fingerprint:
-                                    is_spa_false_positive = True
+                                    validation_state = "confirmed_soft_404"
                                     validation_reason = "same_as_homepage_shell"
                                 # Also check if it has the same SPA shell markers
                                 elif (
@@ -889,29 +923,44 @@ async def test_api_security(
                                 ):
                                     # SPA shell without actual admin content
                                     if not re.search(r'admin|dashboard|management|console', body_out[500:], re.I):
-                                        is_spa_false_positive = True
+                                        validation_state = "confirmed_soft_404"
                                         validation_reason = "spa_shell_without_privileged_content"
                             if (
-                                not is_spa_false_positive
+                                sibling_observed
+                                and body_fingerprint
+                                and body_fingerprint == sibling_fingerprint
+                            ):
+                                validation_state = "confirmed_soft_404"
+                                validation_reason = "same_as_nonexistent_sibling"
+                            if (
+                                validation_state == "confirmed_accessible"
                                 and _looks_like_spa_shell(body_out)
                                 and not _has_privileged_content(path, body_out)
                             ):
-                                is_spa_false_positive = True
+                                validation_state = "confirmed_soft_404"
                                 validation_reason = "generic_html_shell"
+                        else:
+                            validation_reason = (
+                                "body_fetch_failed" if body_rc != 0 else "empty_response_body"
+                            )
 
-                    # Only report as accessible if not a SPA false positive
-                    if not is_spa_false_positive:
+                    # A transport/header success is not proof of endpoint access.  A 200 is
+                    # reported as accessible only after its body was observed and rejected by
+                    # neither the sibling control nor the SPA heuristics.  Validation failure is
+                    # retained as honest partial evidence but cannot create a finding.
+                    if not is_accessible or validation_state == "confirmed_accessible":
                         results["bfla_endpoints"].append({
                             "url": test_url,
                             "path": path,
                             "status": status,
                             "status_code": status,
                             "accessible": is_accessible,
-                            "risk": "high" if is_accessible else "medium"
+                            "risk": "high" if is_accessible else "medium",
+                            "verification_state": validation_state,
                         })
                         if is_accessible:
                             results["vulnerable"] = True
-                    elif is_accessible:
+                    elif validation_state == "confirmed_soft_404":
                         results["bfla_endpoints"].append({
                             "url": test_url,
                             "path": path,
@@ -921,6 +970,19 @@ async def test_api_security(
                             "risk": "info",
                             "false_positive_detected": True,
                             "validation_reason": validation_reason or "frontend_shell",
+                            "verification_state": validation_state,
+                        })
+                    else:
+                        results["bfla_endpoints"].append({
+                            "url": test_url,
+                            "path": path,
+                            "status": status,
+                            "status_code": status,
+                            "accessible": False,
+                            "risk": "info",
+                            "needs_verification": True,
+                            "validation_reason": validation_reason or "validation_incomplete",
+                            "verification_state": "inconclusive",
                         })
 
         await asyncio.sleep(0.05)

@@ -188,3 +188,76 @@ def test_phase4_api_security_keeps_public_credential_catalog_tokens(monkeypatch)
     assert result["vulnerable"] is True
     assert exposure["verified"] is True
     assert set(exposure["sensitive_markers"]) == {"password", "token"}
+
+
+def test_phase4_bfla_body_fetch_failure_is_inconclusive_not_accessible(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if url == "https://example.test":
+            return ("<html><body>home</body></html>", "", 0)
+        if "-I" in command:
+            status = 200 if url.endswith("/graphql") else 404
+            return (f"HTTP/1.1 {status} Test\r\n\r\n", "", 0)
+        if url.endswith("/graphql"):
+            return ("", "timeout", 28)
+        return ("not found", "", 0)
+
+    monkeypatch.setattr(phase4_checks.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(phase4_checks, "run", fake_run)
+
+    result = asyncio.run(phase4_checks.test_api_security("https://example.test"))
+
+    graphql = next(item for item in result["bfla_endpoints"] if item["path"] == "/graphql")
+    assert result["vulnerable"] is False
+    assert graphql["accessible"] is False
+    assert graphql["verification_state"] == "inconclusive"
+    assert graphql["validation_reason"] == "body_fetch_failed"
+
+
+def test_phase4_bfla_uses_nonexistent_sibling_when_homepage_differs(monkeypatch):
+    shell = '<!doctype html><html><body><div id="root"></div><script type="module"></script></body></html>'
+
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if url == "https://example.test":
+            return ("<html><body>marketing homepage</body></html>", "", 0)
+        if "-I" in command:
+            status = 200 if url.endswith("/internal") else 404
+            return (f"HTTP/1.1 {status} Test\r\n\r\n", "", 0)
+        if url.endswith("/internal") or url.endswith("/shakerscan-not-real-zzqx7"):
+            return (shell, "", 0)
+        return ("not found", "", 0)
+
+    monkeypatch.setattr(phase4_checks.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(phase4_checks, "run", fake_run)
+
+    result = asyncio.run(phase4_checks.test_api_security("https://example.test"))
+
+    internal = next(item for item in result["bfla_endpoints"] if item["path"] == "/internal")
+    assert result["vulnerable"] is False
+    assert internal["accessible"] is False
+    assert internal["verification_state"] == "confirmed_soft_404"
+    assert internal["validation_reason"] == "same_as_nonexistent_sibling"
+
+
+def test_phase4_bfla_keeps_real_graphql_content(monkeypatch):
+    async def fake_run(command, *args, **kwargs):
+        url = command[-1]
+        if url == "https://example.test":
+            return ("<html><body>home</body></html>", "", 0)
+        if "-I" in command:
+            status = 200 if url.endswith("/graphql") else 404
+            return (f"HTTP/1.1 {status} Test\r\n\r\n", "", 0)
+        if url.endswith("/graphql"):
+            return ('{"data":{"__schema":{"queryType":{"name":"Query"}}}}', "", 0)
+        return ("not found", "", 0)
+
+    monkeypatch.setattr(phase4_checks.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(phase4_checks, "run", fake_run)
+
+    result = asyncio.run(phase4_checks.test_api_security("https://example.test"))
+
+    graphql = next(item for item in result["bfla_endpoints"] if item["path"] == "/graphql")
+    assert result["vulnerable"] is True
+    assert graphql["accessible"] is True
+    assert graphql["verification_state"] == "confirmed_accessible"

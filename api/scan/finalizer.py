@@ -8,6 +8,7 @@ import urllib.parse
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
+from . import scoring
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus
 from .continuation import (
@@ -18,19 +19,8 @@ from .continuation import (
 
 
 SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
-_SEVERITY_WEIGHT = {
-    "critical": 20,
-    "high": 10,
-    "medium": 5,
-    "low": 2,
-    "info": 0,
-}
-# The best score a scan can hold once a finding of this severity exists. Grade bands are
-# A>=90, B>=80, C>=70, D>=60, F<60 -- so one critical is an F however few findings there are, one
-# high cannot exceed C, and one medium cannot exceed B. Low and informational have no ceiling: a
-# single low-severity issue is not a reason to fail an application, though it still costs weight.
-# Reported as missing when absent from a response, so the report says what is not there rather
-# than only what is.
+# Reported as missing when absent from a response, so the report says what is not there
+# rather than only what is.
 _EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
     "content-security-policy",
     "referrer-policy",
@@ -38,11 +28,6 @@ _EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
     "x-content-type-options",
     "x-frame-options",
 )
-_SEVERITY_SCORE_CEILING = {
-    "critical": 40,
-    "high": 70,
-    "medium": 85,
-}
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
@@ -55,6 +40,9 @@ _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
     "tcp_ports_attempted", "hosts_attempted",
 })
+# Context collection is retained in the action ledger but cannot improve or
+# weaken vulnerability coverage, assurance, score, or grade.
+_INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
 # Every selected-family capability collapsed to the canonical family it serves,
 # so coverage and grade reliability are reported per resolved family.
 # Proof escalation runs over the candidates a verifier already attempted, so it
@@ -123,9 +111,35 @@ def _base_finding(
     }
 
 
+def _observed_url_key(value: Any) -> str | None:
+    """Canonicalize one exact response URL for cross-capability comparison."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or ""))
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower().rstrip(".")
+    port = parsed.port
+    authority = host if port is None else f"{host}:{port}"
+    path = (parsed.path or "/").rstrip("/") or "/"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), authority, path, parsed.query, ""))
+
+
+def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
+    template_id = str(item.get("template_id") or "").strip().lower()
+    matcher = str(item.get("matcher_name") or "").strip().lower() or None
+    if template_id == "http-missing-security-headers" and matcher:
+        display = "-".join(part.capitalize() for part in matcher.split("-"))
+        return f"Missing HTTP response header: {display}", matcher
+    return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
+    *,
+    unobserved_response_urls: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     receipt = _receipt(result)
@@ -219,6 +233,31 @@ def _findings_for_action(
                     })
                     findings.append(finding)
         elif kind == "xss_alert" and item.get("proof_state") == "verified":
+            proof_contract = {
+                "schema_version": "proof-contract/v2",
+                "contract_id": "dast.xss_alert_execution",
+                "contract_version": "1.0.0",
+                "family": "xss",
+                "subject": {
+                    "url": item.get("url"),
+                    "method": "GET",
+                    "parameter": item.get("param"),
+                },
+                "reexecution": {
+                    "required": False,
+                    "performed": True,
+                    "verifier_build": result.capability_name,
+                },
+                "predicate": {
+                    "satisfied": True,
+                    "requirements": ["structured_xss_execution_alert"],
+                    "met": ["structured_xss_execution_alert"],
+                    "missing": [],
+                    "refuted_by": [],
+                },
+                "verdict": "verified",
+                "promotable": True,
+            }
             finding = _base_finding(
                 tool="dalfox",
                 title="Verified cross-site scripting",
@@ -233,6 +272,7 @@ def _findings_for_action(
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                     "detail": {"verified": True, "type": "verified"},
+                    "proof_contract_v2": proof_contract,
                 },
             )
             finding.update({
@@ -241,6 +281,7 @@ def _findings_for_action(
                 "needs_verification": False,
                 "proof_state": "verified",
                 "verification_reason": "Deterministic alert execution proof satisfied",
+                "proof_contract_v2": proof_contract,
             })
             findings.append(finding)
         elif (
@@ -256,10 +297,15 @@ def _findings_for_action(
                 title="Verified cross-site scripting",
                 severity="high",
                 cwe="CWE-79",
-                url=None,
+                url=item.get("request_url"),
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "parameter_name": item.get("parameter_name"),
+                    "injection_location": item.get("injection_location"),
+                    "request_url": item.get("request_url"),
+                    "related_request_urls": list(
+                        item.get("related_request_urls") or ()
+                    ),
                     "payload_sha256": item.get("payload_sha256"),
                     "marker_sha256": item.get("marker_sha256"),
                     "proof_producer": "shakerscan",
@@ -271,6 +317,14 @@ def _findings_for_action(
                         "sanitized_screenshot_sha256"
                     ),
                     "browser_build": item.get("browser_build"),
+                    "browser_proof": {
+                        "proven": True,
+                        "proof_producer": "shakerscan",
+                        "evidence_type": item.get("evidence_type"),
+                        "technique": item.get("technique"),
+                        "dom_marker_executed": item.get("dom_marker_executed"),
+                        "verifier_build": item.get("browser_build"),
+                    },
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
@@ -659,19 +713,31 @@ def _findings_for_action(
                 })
                 findings.append(finding)
         elif kind == "template_match":
+            template_id = str(item.get("template_id") or "").strip().lower()
+            matched_url = item.get("matched_at") or item.get("url")
+            # A missing-header template matching the same 401/403/error response that
+            # the posture projector rejected is not application evidence.  Keeping it
+            # would reintroduce the exact phantom weakness removed from the score path.
+            if (
+                template_id == "http-missing-security-headers"
+                and _observed_url_key(matched_url) in unobserved_response_urls
+            ):
+                continue
             severity = str(item.get("severity") or "info").strip().lower()
-            if severity not in _SEVERITY_WEIGHT:
+            if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
+            title, header_name = _header_template_title(item)
             finding = _base_finding(
                 tool="nuclei",
-                title=str(item.get("name") or item.get("template_id") or "Template match")[:300],
+                title=title,
                 severity=severity,
                 cwe=str(item.get("cwe") or "") or None,
-                url=item.get("matched_at") or item.get("url"),
+                url=matched_url,
                 evidence={
                     "template_id": item.get("template_id"),
                     "matcher_name": item.get("matcher_name"),
-                    "matched_at": item.get("matched_at") or item.get("url"),
+                    **({"header_name": header_name} if header_name else {}),
+                    "matched_at": matched_url,
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
@@ -780,26 +846,6 @@ def _runtime_destinations(
     return destinations
 
 
-def _score(findings: Sequence[Mapping[str, Any]]) -> tuple[int, str]:
-    """Score a scan so the worst thing found sets the ceiling and the count moves it within.
-
-    Subtracting a weight per finding from 100 made severity a dent rather than a verdict: one
-    proven critical injection scored 80 and graded B, one high scored 90 and graded A. On a
-    deliberately vulnerable application that produced pages of A grades beside proven injections.
-    A security grade has to answer "how bad is the worst thing here", so severity caps the score
-    and the subtractive weight then differentiates within that cap.
-    """
-    severities = [str(item.get("severity") or "info").strip().lower() for item in findings]
-    score = max(0, 100 - sum(_SEVERITY_WEIGHT.get(name, 0) for name in severities))
-    ceiling = min(
-        (_SEVERITY_SCORE_CEILING[name] for name in severities if name in _SEVERITY_SCORE_CEILING),
-        default=100,
-    )
-    score = min(score, ceiling)
-    grade = "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D" if score >= 60 else "F"
-    return score, grade
-
-
 # The report contract the UI and AGENTS.md both name, mapped from the header the
 # capability actually captured.
 _UI_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
@@ -880,6 +926,7 @@ def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
 
     section: dict[str, Any] = {
         "records": dict(records),
+        "record_metadata": dict(row.get("record_metadata") or {}),
         "bound_addresses": dict(addresses),
         "query_count": row.get("query_count"),
         "errors": list(row.get("errors") or ()),
@@ -888,6 +935,14 @@ def _dns_section(row: Mapping[str, Any]) -> dict[str, Any]:
         section["a"] = list(addresses["A"])
     if addresses.get("AAAA"):
         section["aaaa"] = list(addresses["AAAA"])
+    if answered("host_cname"):
+        section["cname"] = answered("host_cname")
+    if answered("root_ns"):
+        section["ns"] = answered("root_ns")
+    if answered("root_soa"):
+        section["soa"] = answered("root_soa")[0]
+    if answered("root_ds"):
+        section["ds"] = answered("root_ds")
     if answered("host_mx"):
         section["mx"] = answered("host_mx")
     if answered("host_caa"):
@@ -930,6 +985,7 @@ def _posture_sections(
     technologies: list[dict[str, Any]] = []
     server_versions: dict[str, Any] = {}
     seen_tech: set[str] = set()
+    infrastructure_observation: dict[str, Any] = {}
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -937,6 +993,7 @@ def _posture_sections(
                 continue
             kind = str(row.get("kind") or "")
             if kind == "http_observation" and str(action_id) == "baseline.http":
+                request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
                 response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
                 headers = (
                     response.get("security_headers")
@@ -947,10 +1004,19 @@ def _posture_sections(
                 # findings from a failure -- the UI renders each one red -- so posture is
                 # published only behind an observed status. Absent is not failing; that
                 # rule already governed the TLS and CSP sections and this one skipped it.
-                if response.get("status") in (None, ""):
+                status = response.get("status")
+                if status in (None, ""):
                     continue
+                posture_observed = isinstance(status, int) and 200 <= status < 400
+                origin = request.get("origin") or response.get("final_url")
+                is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
+                expected_headers = tuple(
+                    name for name in _EXPECTED_SECURITY_HEADERS
+                    if name != "strict-transport-security" or is_https
+                )
                 http_section = {
-                    "status": response.get("status"),
+                    "status": status,
+                    "posture_observed": posture_observed,
                     "security_headers": {
                         key: headers[header]
                         for key, header in _UI_SECURITY_HEADERS
@@ -958,8 +1024,8 @@ def _posture_sections(
                     },
                     "observed_headers": dict(headers),
                     "missing_security_headers": sorted(
-                        name for name in _EXPECTED_SECURITY_HEADERS if name not in headers
-                    ),
+                        name for name in expected_headers if name not in headers
+                    ) if posture_observed else [],
                     # Only a policy that exists gets graded: an absent CSP rendered as a
                     # scoring card reading "/100", which states nothing. Its absence is
                     # carried by the missing-header list instead.
@@ -992,6 +1058,8 @@ def _posture_sections(
                     tls_section = candidate
             elif kind == "dns_posture":
                 dns_section = _dns_section(row)
+            elif kind == "infrastructure_intelligence":
+                infrastructure_observation = dict(row)
             elif kind == "http_fingerprint":
                 for item in row.get("technologies") or ():
                     name = str((item or {}).get("name") if isinstance(item, Mapping) else item)
@@ -1021,6 +1089,66 @@ def _posture_sections(
         sections["tls"] = tls_section
     if dns_section:
         sections["dns"] = dns_section
+    if infrastructure_observation or dns_section or tls_section.get("certificate"):
+        registration_domain = str(
+            infrastructure_observation.get("registration_domain") or ""
+        ).lower().rstrip(".")
+        related: list[dict[str, Any]] = [
+            dict(item) for item in infrastructure_observation.get("related_names") or ()
+            if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+        ]
+        certificate = (
+            dict(tls_section.get("certificate") or {})
+            if isinstance(tls_section.get("certificate"), Mapping) else {}
+        )
+        for raw_name in certificate.get("sans") or ():
+            name = str(raw_name or "").lower().rstrip(".")
+            comparison = name.removeprefix("*.")
+            if not name:
+                continue
+            related.append({
+                "name": name,
+                "source": "tls_certificate_san",
+                "scope": (
+                    "likely_related"
+                    if registration_domain and (
+                        comparison == registration_domain
+                        or comparison.endswith("." + registration_domain)
+                    )
+                    else "external_unverified"
+                ),
+            })
+        deduped_related: list[dict[str, Any]] = []
+        seen_related: set[tuple[str, str]] = set()
+        for item in related:
+            key = (str(item.get("name") or ""), str(item.get("source") or ""))
+            if key in seen_related:
+                continue
+            seen_related.add(key)
+            deduped_related.append(item)
+        sections["infrastructure"] = {
+            "informational_only": True,
+            "scoring_effect": "none",
+            "canonical_host": infrastructure_observation.get("canonical_host"),
+            "registration_domain": infrastructure_observation.get("registration_domain"),
+            "observed_at": infrastructure_observation.get("observed_at"),
+            "registration": infrastructure_observation.get("registration"),
+            "addresses": list(infrastructure_observation.get("addresses") or ()),
+            "dns": {
+                "addresses": {
+                    "A": list(dns_section.get("a") or ()),
+                    "AAAA": list(dns_section.get("aaaa") or ()),
+                },
+                "cname": list(dns_section.get("cname") or ()),
+                "nameservers": list(dns_section.get("ns") or ()),
+                "soa": dns_section.get("soa"),
+                "record_metadata": dict(dns_section.get("record_metadata") or {}),
+            },
+            "certificate": certificate or None,
+            "related_names": deduped_related[:200],
+            "limitations": list(infrastructure_observation.get("limitations") or ()),
+            "errors": list(infrastructure_observation.get("errors") or ()),
+        }
     if technologies or server_versions:
         discovery: dict[str, Any] = {}
         if technologies:
@@ -1108,6 +1236,17 @@ def finalize_scan_report(
     findings_by_id: dict[str, dict[str, Any]] = {}
     action_rows: list[dict[str, Any]] = []
     runtime_destinations: list[dict[str, Any]] = []
+    unobserved_response_urls: set[str] = set()
+    for row in observations.get("baseline.http", ()):
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        if isinstance(status, int) and not 200 <= status < 400:
+            key = _observed_url_key(request.get("origin") or response.get("final_url"))
+            if key:
+                unobserved_response_urls.add(key)
     for action in expected_actions:
         result = action_results[action.action_id]
         if result.action_digest != action.action_digest:
@@ -1120,7 +1259,11 @@ def finalize_scan_report(
             and len(rows) != result.observation_manifest_ref.count
         ):
             raise ScanFinalizationError("observation count differs from its action manifest")
-        for finding in _findings_for_action(result, rows):
+        for finding in _findings_for_action(
+            result,
+            rows,
+            unobserved_response_urls=frozenset(unobserved_response_urls),
+        ):
             findings_by_id.setdefault(_finding_identity(finding), finding)
         runtime_destinations.extend(_runtime_destinations(
             action_id=action.action_id,
@@ -1146,7 +1289,6 @@ def finalize_scan_report(
             "budget_consumed": dict(result.budget_consumed),
         })
     findings = list(findings_by_id.values())
-    score, grade = _score(findings)
 
     # Family-aware coverage: every selected family (one that produced a batch or
     # verifier action) is reported with attempts, findings, budget, and a status.
@@ -1312,9 +1454,13 @@ def finalize_scan_report(
             row["reason"] = None
     selected_family_gaps.sort()
 
+    coverage_actions = [
+        action for action in expected_actions
+        if action.capability_name not in _INFORMATIONAL_CAPABILITIES
+    ]
     required_rows = [
         (action, action_results[action.action_id])
-        for action in expected_actions if action.required
+        for action in coverage_actions if action.required
     ]
     statuses = {result.status for _action, result in required_rows}
     cancelled = CapabilityResultStatus.CANCELLED in statuses
@@ -1339,7 +1485,7 @@ def finalize_scan_report(
     )
     zero_attempt_actions = [
         action.action_id
-        for action in expected_actions
+        for action in coverage_actions
         if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES
         and candidate_count > 0
         and action_results[action.action_id].status in {
@@ -1353,7 +1499,7 @@ def finalize_scan_report(
     ]
     placement_gaps = [
         action.action_id
-        for action in expected_actions
+        for action in coverage_actions
         if (
             action_results[action.action_id].reason_code is not None
             and action_results[action.action_id].reason_code.value
@@ -1370,6 +1516,24 @@ def finalize_scan_report(
         for action, result in required_rows
         if result.status is not CapabilityResultStatus.SUCCESS
     ]
+    posture_sections = _posture_sections(observations)
+    http_posture = (
+        posture_sections.get("http")
+        if isinstance(posture_sections.get("http"), Mapping) else {}
+    )
+    explicit_http_status = http_posture.get("status")
+    application_proof_observed = any(
+        item.get("verified") is True
+        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect"}
+        for item in findings
+    )
+    risk_assessment_state = (
+        "observed"
+        if http_posture.get("posture_observed") is True or application_proof_observed
+        else "not_examined"
+        if isinstance(explicit_http_status, int)
+        else "unknown"
+    )
     reliability_reasons = sorted({
         (
             result.reason_code.value
@@ -1380,15 +1544,19 @@ def finalize_scan_report(
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
-      | ({"unproven_critical_high"} if unproven_critical_high else set()))
+      | ({"unproven_critical_high"} if unproven_critical_high else set())
+      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set()))
     grade_reliable = not reliability_reasons
-    rendered_grade = grade if grade_reliable else f"{grade}*"
     coverage_reasons = sorted(
         set(reasons)
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"placement_unavailable"} if placement_gaps else set())
     )
-    action_status_counts = Counter(row["status"] for row in action_rows)
+    coverage_action_rows = [
+        row for row in action_rows
+        if row["capability_name"] not in _INFORMATIONAL_CAPABILITIES
+    ]
+    action_status_counts = Counter(row["status"] for row in coverage_action_rows)
     optional_gaps = [
         {
             "action_id": action.action_id,
@@ -1400,12 +1568,12 @@ def finalize_scan_report(
                 else None
             ),
         }
-        for action in expected_actions
+        for action in coverage_actions
         if not action.required
         and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
     ]
     capability_coverage = {
-        "total": len(expected_actions),
+        "total": len(coverage_actions),
         "required": len(required_rows),
         "completed": action_status_counts.get("success", 0),
         "partial": (
@@ -1422,7 +1590,7 @@ def finalize_scan_report(
             "required": row["required"],
             "status": row["status"],
             "reason_code": row["reason_code"],
-        } for row in action_rows],
+        } for row in coverage_action_rows],
     }
     principal_contexts = sorted({
         str(item.get("lane"))
@@ -1500,52 +1668,71 @@ def finalize_scan_report(
         coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
+    coverage_block = {
+        "status": coverage_status,
+        "reasons": coverage_reasons,
+        "planned_action_count": len(coverage_actions),
+        "terminal_action_count": len(coverage_action_rows),
+        "finalization_action_id": finalization_action.action_id,
+        "placement_executed": bool(coverage_action_rows) and not placement_gaps,
+        "capability_coverage": capability_coverage,
+        "grade_reliability": {
+            "reliable": grade_reliable,
+            "reasons": reliability_reasons,
+        },
+        "optional_gaps": optional_gaps,
+        "active_zero_attempt_actions": zero_attempt_actions,
+        "candidate_coverage": candidate_coverage,
+        "family_coverage": sorted(
+            family_coverage.values(), key=lambda row: row["family"],
+        ),
+        "selected_family_gaps": selected_family_gaps,
+    }
+    smart_coverage_block = {
+        "auth_states_tested": auth_states_tested,
+        "principal_contexts_exercised": principal_contexts,
+        "principal_context_semantics": (
+            "server_observed_authenticated_target_traffic"
+        ),
+    }
+    # Scored after coverage exists, because the assurance axis reads it. The severity-only
+    # scorer ran ~350 lines earlier and every one of these signals was computed and then
+    # used for nothing but appending a star to the letter.
+    scored_posture_sections = {
+        name: value for name, value in posture_sections.items()
+        if name != "infrastructure"
+    }
+    result_block = scoring.score_scan(
+        findings, coverage_block,
+        smart_coverage=smart_coverage_block,
+        posture=scored_posture_sections,
+        grade_reliable=grade_reliable,
+    )
+    result_block.update({
+        "risk_assessment_state": risk_assessment_state,
+        "application_observed": (
+            True if risk_assessment_state == "observed"
+            else False if risk_assessment_state == "not_examined"
+            else None
+        ),
+    })
     report = {
         "schema_version": SCAN_REPORT_SCHEMA,
         "target": str(target_url),
         "runtime_destinations": runtime_destinations,
         "findings": findings,
-        "result": {
-            "score": score,
-            "grade": rendered_grade,
-            "grade_reliable": grade_reliable,
-            "score_policy": "verified_and_suspected_severity_ceiling/v2",
-        },
+        "result": result_block,
         # Posture belongs on the envelope, not inside the nested "result": the stored
         # `result_json` IS what a client reads as `scan.result`, so a section nested one
         # level deeper is documented as `result.tls` and served as `result.result.tls`.
-        **_posture_sections(observations),
-        "coverage": {
-            "status": coverage_status,
-            "reasons": coverage_reasons,
-            "planned_action_count": len(plan.actions),
-            "terminal_action_count": len(action_rows),
-            "finalization_action_id": finalization_action.action_id,
-            "capability_coverage": capability_coverage,
-            "grade_reliability": {
-                "reliable": grade_reliable,
-                "reasons": reliability_reasons,
-            },
-            "optional_gaps": optional_gaps,
-            "active_zero_attempt_actions": zero_attempt_actions,
-            "candidate_coverage": candidate_coverage,
-            "family_coverage": sorted(
-                family_coverage.values(), key=lambda row: row["family"],
-            ),
-            "selected_family_gaps": selected_family_gaps,
-        },
+        **posture_sections,
+        "coverage": coverage_block,
         "verification_summary": {
             "verified": verified,
             "suspected": suspected,
             "unproven_critical_high": unproven_critical_high,
         },
-        "smart_coverage": {
-            "auth_states_tested": auth_states_tested,
-            "principal_contexts_exercised": principal_contexts,
-            "principal_context_semantics": (
-                "server_observed_authenticated_target_traffic"
-            ),
-        },
+        "smart_coverage": smart_coverage_block,
         "canonical_action_execution": {
             "schema_version": "canonical-scan-action-execution/v1",
             "plan_digest": plan.plan_digest,

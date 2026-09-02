@@ -42,9 +42,9 @@ import {
   type AsmCheckFamily,
   type AsmConfig,
   type AsmCoverage,
-  type AsmCoverageRollup,
   type AsmEndpoint,
   type AsmGaps,
+  type AsmInventorySemantics,
   type AsmPolicy,
   type AsmSchedulerState,
   type AsmTimelineEvent,
@@ -56,6 +56,11 @@ import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { normalizeFamilyCoverage, safeRemediationHref } from '@/lib/deferredWorkContracts'
 import {
+  asmCoverageDenominator,
+  currentCompletedVariantCount,
+  resolvedCoverage,
+} from '@/lib/asmCoverage'
+import {
   Badge,
   Button,
   Card,
@@ -66,6 +71,7 @@ import {
   TableSkeleton,
   useToast,
 } from '@/components/ui'
+import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 
 interface AsmFilters {
   [key: string]: string | number | undefined
@@ -99,23 +105,23 @@ const METHOD_BADGE: Record<string, string> = {
   DELETE: 'bg-red-500/15 text-red-400',
 }
 
+const PROVENANCE_BADGE: Record<string, string> = {
+  response_observed: 'bg-emerald-500/15 text-emerald-300',
+  declared_or_imported: 'bg-violet-500/15 text-violet-300',
+  scanner_discovered: 'bg-sky-500/15 text-sky-300',
+  unknown: 'bg-gray-700/50 text-gray-300',
+}
+
+const REACHABILITY_BADGE: Record<string, string> = {
+  reachable_observed: 'bg-emerald-500/15 text-emerald-300',
+  unreachable_observed: 'bg-amber-500/15 text-amber-300',
+  retired_unreachable: 'bg-red-500/15 text-red-300',
+  not_checked: 'bg-gray-700/50 text-gray-300',
+  inconclusive: 'bg-yellow-500/15 text-yellow-300',
+}
+
 function pct(coverage: number): string {
   return `${(coverage * 100).toFixed(1)}%`
-}
-
-type CoverageSummary = AsmCoverage | AsmCoverageRollup
-
-function asmCoverageDenominator(coverage: CoverageSummary | null | undefined): { value: number; label: string } {
-  if (!coverage) return { value: 0, label: 'testable' }
-  const value = coverage.denominator ?? coverage.testable ?? Math.max(coverage.total - ('gone' in coverage ? coverage.gone : 0), 0)
-  const label = coverage.denominator_label || (coverage.denominator !== undefined || coverage.testable !== undefined ? 'testable' : 'total - gone')
-  return { value, label }
-}
-
-function resolvedCoverage(coverage: CoverageSummary | null | undefined): number {
-  if (!coverage) return 0
-  const denominator = asmCoverageDenominator(coverage).value
-  return denominator > 0 ? Math.max(0, Math.min(1, coverage.tested / denominator)) : 0
 }
 
 // The ASM scheduling window is stored/evaluated in UTC; these helpers surface
@@ -245,7 +251,7 @@ function RollupView({
               <tr className="border-b border-gray-800 text-left text-xs uppercase text-gray-500">
                 <th className="px-3 py-2 font-medium">Target</th>
                 <th className="px-3 py-2 font-medium">Coverage</th>
-                <th className="px-3 py-2 font-medium text-right">Tested / Testable</th>
+                <th className="px-3 py-2 font-medium text-right">Completed / Route variants</th>
                 <th className="px-3 py-2 font-medium text-right">Remaining</th>
                 <th className="px-3 py-2" />
               </tr>
@@ -255,7 +261,8 @@ function RollupView({
                 const cov = target.asm_coverage!
                 const denominator = asmCoverageDenominator(cov)
                 const currentCoverage = resolvedCoverage(cov)
-                const remaining = Math.max(denominator.value - cov.tested, 0)
+                const completed = currentCompletedVariantCount(cov)
+                const remaining = Math.max(denominator.value - completed, 0)
                 return (
                   <tr key={target.id} className="border-b border-gray-800/60 hover:bg-gray-800/30">
                     <td className="px-3 py-2">
@@ -275,7 +282,7 @@ function RollupView({
                       </div>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-300">
-                      {cov.tested} / {denominator.value}
+                      {completed} / {denominator.value}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-400">{remaining}</td>
                     <td className="px-3 py-2 text-right">
@@ -450,7 +457,7 @@ function toAsmCheckFamilyOptions(
   return options.length ? options : FALLBACK_ASM_CHECK_FAMILY_OPTIONS
 }
 
-function ContinuousCard({ targetId }: { targetId: string }) {
+function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: string }) {
   const toast = useToast()
   const [policy, setPolicy] = useState<AsmPolicy | null>(null)
   const [cfg, setCfg] = useState<AsmConfig | null>(null)
@@ -458,6 +465,7 @@ function ContinuousCard({ targetId }: { targetId: string }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
 
   const load = useCallback(() => {
     setError(false)
@@ -474,6 +482,10 @@ function ContinuousCard({ targetId }: { targetId: string }) {
 
   const save = async () => {
     if (!cfg) return
+    if (enabled && !cfg.approval_receipt_id?.trim()) {
+      toast.error('A current target-bound approval receipt is required to enable active background batches.')
+      return
+    }
     setSaving(true)
     try {
       const updated = await updateAsmPolicy(targetId, { enabled, config: cfg })
@@ -522,8 +534,33 @@ function ContinuousCard({ targetId }: { targetId: string }) {
 
       <p className="text-xs text-gray-500">
         When enabled, ShakerScan refreshes discovery and tests untested/stale endpoints in small
-        background batches. It chooses one action at a time and respects the caps below.
+        background batches. It chooses one action at a time and respects the caps below. Active
+        batches stop when their saved approval expires; recon remains passive.
       </p>
+
+      {(enabled || Boolean(cfg.approval_receipt_id)) && (
+        <div className="space-y-3">
+          <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+            <input
+              className="mt-1"
+              type="checkbox"
+              checked={authorizationConfirmed}
+              onChange={(event) => setAuthorizationConfirmed(event.target.checked)}
+            />
+            <span>I own or have explicit authorization to run recurring active checks against this target.</span>
+          </label>
+          <ApprovalReceiptField
+            targetId={targetId}
+            targetUrl={targetUrl}
+            authorizationConfirmed={authorizationConfirmed}
+            receiptId={cfg.approval_receipt_id || ''}
+            onReceiptIdChange={(approval_receipt_id) => set({ approval_receipt_id: approval_receipt_id || null })}
+            ttlMinutes={7 * 24 * 60}
+            riskTier="active"
+            required
+          />
+        </div>
+      )}
 
       <div className="grid gap-2 sm:grid-cols-3">
         {ASM_PRESETS.map((preset) => (
@@ -687,14 +724,24 @@ function NewSurfaceCard({ targetId }: { targetId: string }) {
 
 function CoverageAdvisorCard({
   targetId,
+  targetUrl,
   coverage,
   gaps,
   onRefresh,
+  authorizationConfirmed,
+  approvalReceiptId,
+  onAuthorizationConfirmedChange,
+  onApprovalReceiptIdChange,
 }: {
   targetId: string
+  targetUrl: string
   coverage: AsmCoverage | null
   gaps: AsmGaps | null
   onRefresh: () => void
+  authorizationConfirmed: boolean
+  approvalReceiptId: string
+  onAuthorizationConfirmedChange: (confirmed: boolean) => void
+  onApprovalReceiptIdChange: (receiptId: string) => void
 }) {
   const toast = useToast()
   const [busy, setBusy] = useState<'improve' | 'recon' | 'prune' | null>(null)
@@ -722,9 +769,10 @@ function CoverageAdvisorCard({
   const queueImprove = async () => {
     setBusy('improve')
     try {
-      const opts: { check_family?: string; endpoint_filter?: string } = {}
+      const opts: { check_family?: string; endpoint_filter?: string; approval_receipt_id?: string } = {}
       if (checkFamily !== 'all') opts.check_family = checkFamily
       if (endpointFilter) opts.endpoint_filter = endpointFilter
+      if (next === 'test' && approvalReceiptId) opts.approval_receipt_id = approvalReceiptId
       const res = await improveAsmTarget(targetId, Object.keys(opts).length ? opts : undefined)
       if (res.action === 'wait') {
         toast.success(res.reason || 'ASM work is already active for this target')
@@ -793,7 +841,7 @@ function CoverageAdvisorCard({
   const currentCoverage = resolvedCoverage(coverage)
   const coveragePct = coverage ? pct(currentCoverage) : '—'
   const coverageDenominatorText = coverage
-    ? `${coverage.tested} of ${denominator.value} testable endpoint${denominator.value === 1 ? '' : 's'} checked`
+    ? `${currentCompletedVariantCount(coverage)} of ${denominator.value} route variant${denominator.value === 1 ? '' : 's'} currently completed`
     : 'No coverage data'
   const recommendationReason = (rec?.reason || 'Load a target inventory to see the next coverage action.')
     .replace(/^1 endpoint\(s\)/, '1 endpoint')
@@ -804,9 +852,33 @@ function CoverageAdvisorCard({
   const decision = scheduler?.decision
   const lastDecision = scheduler?.last_decision
   const activeScanId = decision?.active_scan_id || scheduler?.active_scan_ids?.[0] || lastDecision?.active_scan_id
+  const activeApprovalMissing = next === 'test' && !approvalReceiptId.trim()
 
   return (
     <Card className="p-4 space-y-4">
+      {next === 'test' && (
+        <div className="space-y-3">
+          <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+            <input
+              className="mt-1"
+              type="checkbox"
+              checked={authorizationConfirmed}
+              onChange={(event) => onAuthorizationConfirmedChange(event.target.checked)}
+            />
+            <span>I own or have explicit authorization to run active endpoint checks against this target.</span>
+          </label>
+          <ApprovalReceiptField
+            targetId={targetId}
+            targetUrl={targetUrl}
+            authorizationConfirmed={authorizationConfirmed}
+            receiptId={approvalReceiptId}
+            onReceiptIdChange={onApprovalReceiptIdChange}
+            ttlMinutes={120}
+            riskTier={checkFamily === 'auth' || checkFamily === 'bola' ? 'credential' : 'active'}
+            required
+          />
+        </div>
+      )}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="space-y-3">
           <div className="flex items-center gap-2">
@@ -916,6 +988,7 @@ function CoverageAdvisorCard({
                   )
                 })}
               </div>
+              <p className="text-[11px] text-gray-500">Each badge is <strong>proved / completed / attempted</strong>. These are family-specific test cases, not endpoint counts.</p>
             </div>
           )}
           {gaps?.confidence_distribution && Object.keys(gaps.confidence_distribution).length > 0 && (
@@ -952,7 +1025,7 @@ function CoverageAdvisorCard({
         </div>
 
         <div className="flex flex-col gap-2">
-          <Button onClick={queueImprove} disabled={!!busy || next === 'wait'}>
+          <Button onClick={queueImprove} disabled={!!busy || next === 'wait' || activeApprovalMissing}>
             <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
           </Button>
           <details className="rounded-lg border border-gray-800 bg-gray-950/40">
@@ -1136,12 +1209,14 @@ function ActivityCard({
   schedulerState,
   timeline,
   onRefresh,
+  approvalReceiptId,
 }: {
   targetId: string
   activity: AsmActivity[]
   schedulerState?: AsmSchedulerState | null
   timeline?: AsmTimelineEvent[]
   onRefresh: () => void
+  approvalReceiptId: string
 }) {
   const toast = useToast()
   const [improving, setImproving] = useState(false)
@@ -1155,7 +1230,12 @@ function ActivityCard({
   async function improveFromTimeline() {
     setImproving(true)
     try {
-      const result = await improveAsmTarget(targetId)
+      const needsActiveApproval = decision?.action === 'test'
+      const result = await improveAsmTarget(targetId, (
+        needsActiveApproval && approvalReceiptId
+          ? { approval_receipt_id: approvalReceiptId }
+          : undefined
+      ))
       toast.success(result.action === 'wait' ? (result.reason || 'ASM work is already active') : 'Queued ASM coverage work', {
         link: result.scan_id ? { href: `/scans/${result.scan_id}`, label: 'View activity' } : undefined,
       })
@@ -1380,6 +1460,7 @@ function TargetView({ targetId }: { targetId: string }) {
   const toast = useToast()
   const [target, setTarget] = useState<Target | null>(null)
   const [endpoints, setEndpoints] = useState<AsmEndpoint[]>([])
+  const [inventorySemantics, setInventorySemantics] = useState<AsmInventorySemantics | null>(null)
   const [coverage, setCoverage] = useState<AsmCoverage | null>(null)
   const [gaps, setGaps] = useState<AsmGaps | null>(null)
   const [activity, setActivity] = useState<AsmActivity[]>([])
@@ -1391,6 +1472,13 @@ function TargetView({ targetId }: { targetId: string }) {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [testing, setTesting] = useState(false)
   const [workerCount, setWorkerCount] = useState<number | null>(null)
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
+  const [approvalReceiptId, setApprovalReceiptId] = useState('')
+
+  useEffect(() => {
+    setAuthorizationConfirmed(false)
+    setApprovalReceiptId('')
+  }, [targetId])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -1402,6 +1490,7 @@ function TargetView({ targetId }: { targetId: string }) {
     ])
       .then(([endpointData, gapData, activityData]) => {
         setEndpoints(endpointData.endpoints)
+        setInventorySemantics(endpointData.inventory_semantics || null)
         setCoverage(endpointData.coverage)
         setGaps(gapData)
         setActivity(activityData.activity)
@@ -1434,9 +1523,17 @@ function TargetView({ targetId }: { targetId: string }) {
   }, [targetId])
 
   const runTest = async () => {
+    if (!approvalReceiptId.trim()) {
+      toast.error('A current target-bound approval receipt is required for active ASM testing.')
+      return
+    }
     setTesting(true)
     try {
-      const res = await testAsmTarget(targetId, { batch_size: 100, stale_days: 30 })
+      const res = await testAsmTarget(targetId, {
+        batch_size: 100,
+        stale_days: 30,
+        approval_receipt_id: approvalReceiptId,
+      })
       toast.success(`Queued ASM test batch over ${res.batch_size} endpoints`, {
         link: { href: `/scans/${res.scan_id}`, label: 'View batch scan' },
       })
@@ -1494,7 +1591,17 @@ function TargetView({ targetId }: { targetId: string }) {
         </div>
       </div>
 
-      <CoverageAdvisorCard targetId={targetId} coverage={coverage} gaps={gaps} onRefresh={load} />
+      <CoverageAdvisorCard
+        targetId={targetId}
+        targetUrl={target?.url || ''}
+        coverage={coverage}
+        gaps={gaps}
+        onRefresh={load}
+        authorizationConfirmed={authorizationConfirmed}
+        approvalReceiptId={approvalReceiptId}
+        onAuthorizationConfirmedChange={setAuthorizationConfirmed}
+        onApprovalReceiptIdChange={setApprovalReceiptId}
+      />
 
       {coverage && (
         <Card className="p-4 space-y-3">
@@ -1502,22 +1609,34 @@ function TargetView({ targetId }: { targetId: string }) {
             <span className="text-sm font-medium text-gray-400">Coverage</span>
             <div className="text-right">
               <div className="text-sm text-gray-300">
-                {pct(resolvedCoverage(coverage))} · {coverage.tested} of {coverageDenominator.value} checked
+                {pct(resolvedCoverage(coverage))} · {currentCompletedVariantCount(coverage)} of {coverageDenominator.value} route variants currently completed
               </div>
               <div className="text-xs text-gray-500">
-                {coverage.coverage_basis === 'attempt_ledger' ? 'Based on completed scanner attempts' : 'Based on endpoint status'}
+                Current examination coverage · snapshot {coverage.metric_contract?.snapshot_at ? formatDate(coverage.metric_contract.snapshot_at) : 'time unavailable'}
               </div>
             </div>
           </div>
           <CoverageBar coverage={resolvedCoverage(coverage)} />
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
-            <CoverageStat label="Testable" value={coverageDenominator.value} />
-            <CoverageStat label="Tested" value={coverage.tested} accent="text-green-400" />
-            <CoverageStat label="Remaining" value={Math.max(coverageDenominator.value - coverage.tested, 0)} accent="text-gray-300" />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
+            <CoverageStat label="Canonical routes" value={coverage.metric_contract?.inventory.canonical_routes ?? coverageDenominator.value} />
+            <CoverageStat label="Route variants" value={coverageDenominator.value} />
+            <CoverageStat label="Ever completed" value={coverage.metric_contract?.examination.variants_ever_completed ?? coverage.tested} accent="text-green-400" />
+            <CoverageStat label="Fresh now" value={coverage.metric_contract?.examination.current_fresh_variants ?? coverage.tested} accent="text-blue-400" />
             <CoverageStat label="In progress" value={coverage.in_progress} accent="text-blue-400" />
             <CoverageStat label="Stale" value={coverage.stale} accent="text-yellow-400" />
-            <CoverageStat label="Removed" value={coverage.gone} accent="text-red-400" />
+            <CoverageStat label="Attempts" value={coverage.metric_contract?.execution.attempts ?? coverage.attempted ?? 0} />
+            <CoverageStat label="Proof-bearing variants" value={coverage.metric_contract?.proof.proof_bearing_variants ?? 0} accent="text-emerald-400" />
           </div>
+          <details className="rounded border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-400">
+            <summary className="cursor-pointer font-medium text-gray-300">How coverage is counted</summary>
+            <div className="mt-2 space-y-1">
+              <p><strong>Canonical route</strong>: one normalized path.</p>
+              <p><strong>Route variant</strong>: method, path, auth state, and parameter shape/location.</p>
+              <p><strong>Attempt</strong>: one scanner ledger execution; retries and family checks count separately.</p>
+              <p><strong>Proof-bearing</strong>: a deterministic verified/exploited/proven verdict. Synthetic variants are never called endpoints.</p>
+              <p>Historical completed totals only fall when a variant is explicitly retired; fresh coverage may fall when completed work becomes stale.</p>
+            </div>
+          </details>
         </Card>
       )}
 
@@ -1529,6 +1648,7 @@ function TargetView({ targetId }: { targetId: string }) {
           schedulerState={activitySchedulerState}
           timeline={timeline}
           onRefresh={load}
+          approvalReceiptId={approvalReceiptId}
         />
       </div>
 
@@ -1539,7 +1659,7 @@ function TargetView({ targetId }: { targetId: string }) {
         <div className="space-y-4 border-t border-gray-800 p-4">
           <HypothesisLeadsCard report={hypothesisSituation} targetId={targetId} />
           <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-            <ContinuousCard targetId={targetId} />
+            <ContinuousCard targetId={targetId} targetUrl={target?.url || ''} />
             <NewSurfaceCard targetId={targetId} />
           </div>
         </div>
@@ -1550,6 +1670,13 @@ function TargetView({ targetId }: { targetId: string }) {
           Endpoint inventory <span className="ml-2 text-xs font-normal text-gray-500">({endpoints.length} shown)</span>
         </summary>
         <div className="space-y-4 border-t border-gray-800 p-4">
+        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-gray-300">
+          <div className="font-medium text-blue-200">Inventory is a worklist, not a list of confirmed routes</div>
+          <p className="mt-1 text-gray-400">
+            {inventorySemantics?.route_claim || 'Discovery and imported route variants remain candidates until response or reachability evidence establishes them.'}
+            {' '}This information does not affect the DAST score or grade.
+          </p>
+        </div>
         <div className="flex flex-wrap items-center gap-3">
           <select
             value={filters.status ?? ''}
@@ -1584,7 +1711,8 @@ function TargetView({ targetId }: { targetId: string }) {
                   <th className="px-3 py-2 font-medium">Path</th>
                   <th className="px-3 py-2 font-medium">Status</th>
                   <th className="px-3 py-2 font-medium text-right">Priority</th>
-                  <th className="px-3 py-2 font-medium">Source</th>
+                  <th className="px-3 py-2 font-medium">Provenance</th>
+                  <th className="px-3 py-2 font-medium">Reachability</th>
                   <th className="px-3 py-2 font-medium">Auth</th>
                   <th className="px-3 py-2 font-medium">Last tested</th>
                   <th className="px-3 py-2 font-medium">Verdict</th>
@@ -1606,7 +1734,20 @@ function TargetView({ targetId }: { targetId: string }) {
                       </Badge>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-400">{e.priority_score}</td>
-                    <td className="px-3 py-2 text-gray-400">{e.source || '—'}</td>
+                    <td className="px-3 py-2" title={e.provenance_explanation}>
+                      <Badge className={PROVENANCE_BADGE[e.provenance_kind || 'unknown'] || PROVENANCE_BADGE.unknown}>
+                        {e.provenance_label || 'Unknown source'}
+                      </Badge>
+                      <div className="mt-1 text-[11px] text-gray-600">{e.source || 'unspecified'}</div>
+                    </td>
+                    <td className="px-3 py-2" title={e.reachability_explanation}>
+                      <Badge className={REACHABILITY_BADGE[e.reachability_state || 'not_checked'] || REACHABILITY_BADGE.not_checked}>
+                        {e.reachability_label || 'Not checked'}
+                      </Badge>
+                      {e.last_http_status ? (
+                        <div className="mt-1 text-[11px] text-gray-600">HTTP {e.last_http_status}</div>
+                      ) : null}
+                    </td>
                     <td className="px-3 py-2 text-gray-400">{e.auth_state || '—'}</td>
                     <td className="px-3 py-2 text-gray-400">{e.last_tested_at ? formatDate(e.last_tested_at) : '—'}</td>
                     <td className="px-3 py-2 text-gray-400">{e.last_verdict || '—'}</td>
@@ -1635,6 +1776,25 @@ function TargetView({ targetId }: { targetId: string }) {
                 No workers are running — the batch will stay pending until you scale workers up.
               </p>
             )}
+            <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
+              <input
+                className="mt-1"
+                type="checkbox"
+                checked={authorizationConfirmed}
+                onChange={(event) => setAuthorizationConfirmed(event.target.checked)}
+              />
+              <span>I own or have explicit authorization to run these active checks.</span>
+            </label>
+            <ApprovalReceiptField
+              targetId={targetId}
+              targetUrl={target?.url || ''}
+              authorizationConfirmed={authorizationConfirmed}
+              receiptId={approvalReceiptId}
+              onReceiptIdChange={setApprovalReceiptId}
+              ttlMinutes={120}
+              riskTier="active"
+              required
+            />
           </div>
         }
         onConfirm={runTest}

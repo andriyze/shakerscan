@@ -25,12 +25,14 @@ def test_source_fingerprint_natively_includes_every_v2_authority_package(tmp_pat
     _write(root / "scanner" / "scanner.py")
     _write(root / "api" / "worker.py")
     _write(root / "scanner" / "scanner_tools" / "base.py")
+    _write(root / "skills" / "web" / "01-baseline.md", "methodology = one\n")
     for package in V2_API_RUNTIME_PACKAGES:
         _write(root / "api" / package / "contract.py", f"PACKAGE = {package!r}\n")
 
     files = source_file_map(str(root))
     for package in V2_API_RUNTIME_PACKAGES:
         assert f"{package}/contract.py" in files
+    assert "hunt_skills/01-baseline.md" in files
     assert getattr(source_file_map, "_shakerscan_v2_package_fingerprint", False) is True
 
     before = hash_source_files(files, require_all=True)
@@ -38,11 +40,17 @@ def test_source_fingerprint_natively_includes_every_v2_authority_package(tmp_pat
     after = hash_source_files(source_file_map(str(root)), require_all=True)
     assert before and after and before != after
 
+    before_skill = after
+    _write(root / "skills" / "web" / "01-baseline.md", "methodology = two\n")
+    after_skill = hash_source_files(source_file_map(str(root)), require_all=True)
+    assert after_skill and after_skill != before_skill
+
 
 def test_runtime_fingerprint_uses_same_logical_v2_package_keys(tmp_path):
     root = tmp_path / "app"
     _write(root / "worker.py")
     _write(root / "scanner_tools" / "base.py")
+    _write(root / "skills" / "web" / "01-baseline.md", "methodology = one\n")
     for package in V2_API_RUNTIME_PACKAGES:
         _write(root / package / "contract.py", f"PACKAGE = {package!r}\n")
 
@@ -53,4 +61,5 @@ def test_runtime_fingerprint_uses_same_logical_v2_package_keys(tmp_path):
     )
     for package in V2_API_RUNTIME_PACKAGES:
         assert f"{package}/contract.py" in files
+    assert "hunt_skills/01-baseline.md" in files
     assert getattr(runtime_file_map, "_shakerscan_v2_package_fingerprint", False) is True

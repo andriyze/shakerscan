@@ -24,8 +24,10 @@ import {
   confirmHuntShellPlan,
   getHuntV2,
   listHuntsV2,
+  suggestHuntSkills,
   startHuntV2Native,
   type HuntBudgetProfile,
+  type HuntSkillSuggestion,
   type HuntTargetKind,
   type HuntV2,
 } from '@/lib/huntV2'
@@ -38,6 +40,7 @@ import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/c
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+import HttpArchiveExport from '@/components/HttpArchiveExport'
 import { usableWebTargets } from '@/lib/targetChoices'
 
 type TargetChoice = {
@@ -73,14 +76,32 @@ function huntActionStatusClass(status: string): string {
   return 'bg-blue-500/10 text-blue-300'
 }
 
+function formatHuntDuration(startedAt?: string, completedAt?: string | null): string | null {
+  if (!startedAt) return null
+  const start = Date.parse(startedAt)
+  const end = completedAt ? Date.parse(completedAt) : Date.now()
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
+  const seconds = Math.max(0, Math.round((end - start) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  if (minutes < 60) return `${minutes}m ${remainder}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
 function HuntHistory({
   targetId,
   runs,
   loading,
+  total,
+  error,
 }: {
   targetId: string
   runs: HuntV2[]
   loading: boolean
+  total: number
+  error: string | null
 }) {
   return (
     <Card className="p-5">
@@ -89,10 +110,14 @@ function HuntHistory({
           <h2 className="font-medium text-white">Recent Hunts for this target</h2>
           <p className="mt-1 text-xs text-gray-500">Open a durable run to inspect its policy, budget use, capabilities, scans, and outcome.</p>
         </div>
-        <span className="text-xs text-gray-500">{runs.length} shown</span>
+        <Link href={`/hunts?search=${encodeURIComponent(targetId)}`} className="text-xs text-blue-400 hover:text-blue-300">
+          {total > runs.length ? `View all ${total}` : 'View all hunts'}
+        </Link>
       </div>
       {loading ? (
         <p className="mt-4 text-sm text-gray-500">Loading Hunt history…</p>
+      ) : error ? (
+        <p role="alert" className="mt-4 text-sm text-amber-300">{error}</p>
       ) : runs.length === 0 ? (
         <p className="mt-4 text-sm text-gray-500">No canonical Hunts have been recorded for this target.</p>
       ) : (
@@ -156,8 +181,12 @@ function HuntContent() {
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
+  const [skillSuggestions, setSkillSuggestions] = useState<HuntSkillSuggestion[]>([])
+  const [skillSuggestionsError, setSkillSuggestionsError] = useState<string | null>(null)
   const [huntHistory, setHuntHistory] = useState<HuntV2[]>([])
   const [huntHistoryLoading, setHuntHistoryLoading] = useState(false)
+  const [huntHistoryTotal, setHuntHistoryTotal] = useState(0)
+  const [huntHistoryError, setHuntHistoryError] = useState<string | null>(null)
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -230,6 +259,28 @@ function HuntContent() {
     return () => { cancelled = true }
   }, [searchParams])
 
+  useEffect(() => {
+    if (!hunt?.hunt_id) {
+      setSkillSuggestions([])
+      setSkillSuggestionsError(null)
+      return
+    }
+    let cancelled = false
+    suggestHuntSkills(hunt.hunt_id)
+      .then((result) => {
+        if (!cancelled) {
+          setSkillSuggestions(result.suggestions || [])
+          setSkillSuggestionsError(null)
+        }
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setSkillSuggestionsError(cause instanceof Error ? cause.message : 'Failed to load methodology suggestions')
+        }
+      })
+    return () => { cancelled = true }
+  }, [hunt?.hunt_id, hunt?.skills?.length])
+
   const choices = useMemo<TargetChoice[]>(() => [
     ...webTargets.map((target) => ({
       id: target.id,
@@ -258,8 +309,21 @@ function HuntContent() {
     }
     setHuntHistoryLoading(true)
     listHuntsV2({ targetId: selectedChoice.id, limit: 12 })
-      .then(({ hunts }) => { if (!cancelled) setHuntHistory(hunts) })
-      .catch(() => { if (!cancelled) setHuntHistory([]) })
+      .then(({ hunts, total }) => {
+        if (cancelled) return
+        setHuntHistory(hunts)
+        setHuntHistoryTotal(total)
+        setHuntHistoryError(null)
+      })
+      // A swallowed failure rendered as "no hunts recorded", which is a different and
+      // reassuring claim than "we could not load them".
+      .catch((cause) => {
+        if (cancelled) return
+        setHuntHistory([])
+        setHuntHistoryError(
+          cause instanceof Error ? cause.message : 'Failed to load Hunt history',
+        )
+      })
       .finally(() => { if (!cancelled) setHuntHistoryLoading(false) })
     return () => { cancelled = true }
   }, [selectedChoice?.id])
@@ -744,6 +808,8 @@ function HuntContent() {
               targetId={selectedChoice.id}
               runs={huntHistory}
               loading={huntHistoryLoading}
+              total={huntHistoryTotal}
+              error={huntHistoryError}
             />
           )}
         </>
@@ -774,23 +840,45 @@ function HuntContent() {
                   <code className="break-all text-xs text-gray-300">{hunt.hunt_id}</code>
                 </div>
               </div>
-              {hunt.created_at && <p className="text-xs text-gray-500">Started {new Date(hunt.created_at).toLocaleString()}</p>}
+              {hunt.created_at && (
+                <div className="space-y-1 text-xs text-gray-500">
+                  <p>Started {new Date(hunt.created_at).toLocaleString()}</p>
+                  {hunt.completed_at && <p>Completed {new Date(hunt.completed_at).toLocaleString()}</p>}
+                  {formatHuntDuration(hunt.created_at, hunt.completed_at) && (
+                    <p>{hunt.completed_at ? 'Elapsed' : 'Elapsed so far'} {formatHuntDuration(hunt.created_at, hunt.completed_at)}</p>
+                  )}
+                </div>
+              )}
               {hunt.status === 'active' && (
                 <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
                   {HUNT_SESSION_NON_AUTONOMOUS_NOTICE}
                 </p>
               )}
               {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
+              <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} compact />
               {hunt.queued_scan?.scan_id && (
                 <Link href={`/scans/${hunt.queued_scan.scan_id}`} className="block rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-200 hover:bg-blue-500/10">
                   Open queued Scan {hunt.queued_scan.scan_id.slice(0, 8)} · {hunt.queued_scan.status}
                 </Link>
               )}
-              {hunt.final_debrief?.summary && (
+              {hunt.outcome_summary && (
                 <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
                   <p className="text-xs uppercase tracking-wide text-gray-500">Final debrief</p>
-                  <p className="mt-2 text-sm text-gray-300">{hunt.final_debrief.summary}</p>
-                  {hunt.final_debrief.next_actions && hunt.final_debrief.next_actions.length > 0 && (
+                  <p className="mt-2 text-sm font-medium text-gray-200">Factual run record</p>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400 sm:grid-cols-3">
+                    <span>{hunt.outcome_summary.successful_calls ?? hunt.outcome_summary.capability_calls} succeeded</span>
+                    <span>{hunt.outcome_summary.unsuccessful_calls ?? 0} unsuccessful</span>
+                    {(hunt.outcome_summary.indeterminate_calls ?? 0) > 0 && <span>{hunt.outcome_summary.indeterminate_calls} outcome unknown</span>}
+                    {(hunt.outcome_summary.partial_calls ?? 0) > 0 && <span>{hunt.outcome_summary.partial_calls} partial</span>}
+                    <span>{hunt.outcome_summary.executed_calls ?? hunt.outcome_summary.total_capability_calls} executed · {hunt.outcome_summary.total_capability_calls} attempted</span>
+                    <span>{hunt.outcome_summary.observation_count} observations</span>
+                    <span>{hunt.outcome_summary.finding_ids.length} findings</span>
+                    <span>{hunt.outcome_summary.candidate_ids.length} candidates</span>
+                    <span>{hunt.outcome_summary.evidence_ids.length} evidence objects</span>
+                    <span>{Object.entries(hunt.outcome_summary.action_statuses).map(([status, count]) => `${count} ${status.replaceAll('_', ' ')}`).join(' · ')}</span>
+                  </div>
+                  {hunt.final_debrief?.summary && <p className="mt-3 text-sm text-gray-300"><span className="text-gray-500">Planner debrief:</span> {hunt.final_debrief.summary}</p>}
+                  {hunt.final_debrief?.next_actions && hunt.final_debrief.next_actions.length > 0 && (
                     <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-400">
                       {hunt.final_debrief.next_actions.map((action) => <li key={action}>{action}</li>)}
                     </ul>
@@ -807,6 +895,47 @@ function HuntContent() {
               <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
                 Back to launcher and history
               </Link>
+            </Card>
+
+            <Card className="space-y-4 p-5">
+              <div>
+                <h2 className="font-medium text-white">Methodologies</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  Compact recommendations only. Your agent loads one full methodology when target evidence makes it relevant.
+                </p>
+                <p className="mt-1 text-xs text-gray-600">
+                  Methodologies guide investigation; applying one does not grant or restrict the Hunt&apos;s existing capabilities.
+                </p>
+              </div>
+              {(hunt.skills || []).length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Applied</p>
+                  {(hunt.skills || []).map((skill) => (
+                    <div key={skill.skill_id} className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
+                      <p className="text-sm font-medium text-violet-200">{skill.title}</p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {skill.requested ? 'Selected explicitly' : 'Required prerequisite'}
+                        {skill.phase ? ` · ${skill.phase}` : ''}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">No methodology is applied. The agent can begin with ordinary discovery.</p>
+              )}
+              {skillSuggestions.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Suggested now</p>
+                  {skillSuggestions.map((suggestion) => (
+                    <div key={suggestion.skill_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
+                      <p className="text-sm text-gray-200">{suggestion.title}</p>
+                      <p className="mt-1 text-xs text-gray-500">{suggestion.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {skillSuggestionsError && <p className="text-xs text-amber-300">{skillSuggestionsError}</p>}
+              <p className="text-xs text-gray-600">At most three suggestions are returned; methodology bodies are never preloaded.</p>
             </Card>
 
             {hunt.target_kind === 'device' && shellPlans.length > 0 && (
@@ -861,7 +990,14 @@ function HuntContent() {
                 <div className="mt-4 space-y-3">
                   {(hunt.actions || []).map((action) => {
                     const references = action.result.reference_ids
-                    const budget = Object.entries(action.result.budget_consumed)
+                    const accounting = action.result.budget_accounting
+                    const actualBudget = Object.entries(accounting.actual)
+                    const reservedBudget = Object.entries(accounting.reserved)
+                    const releasedBudget = Object.entries(accounting.released).filter(([, amount]) => amount > 0)
+                    const legacyBudget = Object.entries(action.result.budget_consumed)
+                    const formatBudget = (entries: Array<[string, number]>) => entries
+                      .map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`)
+                      .join(' · ')
                     return (
                       <div key={action.action_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -875,10 +1011,28 @@ function HuntContent() {
                           {action.started_at && <span>Started {new Date(action.started_at).toLocaleString()}</span>}
                           {action.completed_at && <span>Finished {new Date(action.completed_at).toLocaleString()}</span>}
                         </div>
-                        {budget.length > 0 && (
-                          <p className="mt-2 text-xs text-gray-500">
-                            Used {budget.map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`).join(' · ')}
+                        {accounting.basis === 'exact_settlement' && (
+                          <div className="mt-2 space-y-1 text-xs text-gray-500">
+                            <p>Settled charge: {actualBudget.length > 0 ? formatBudget(actualBudget) : 'none'}</p>
+                            <p>
+                              Charge basis: {accounting.charge_basis === 'conservative_full_reservation'
+                                ? 'conservative upper bound; measured consumption was unavailable'
+                                : 'capability-reported settlement'}
+                            </p>
+                            {reservedBudget.length > 0 && <p>Temporarily reserved: {formatBudget(reservedBudget)}</p>}
+                            {releasedBudget.length > 0 && <p>Released after settlement: {formatBudget(releasedBudget)}</p>}
+                          </div>
+                        )}
+                        {accounting.basis === 'legacy_reported_charge' && legacyBudget.length > 0 && (
+                          <p className="mt-2 text-xs text-amber-300/80">
+                            Legacy reported charge: {formatBudget(legacyBudget)} · reservation versus actual was not retained
                           </p>
+                        )}
+                        {accounting.basis === 'settlement_failed' && (
+                          <p className="mt-2 text-xs text-red-300">Budget settlement failed; no released amount is asserted. Review the action receipt.</p>
+                        )}
+                        {accounting.basis === 'no_reservation' && (
+                          <p className="mt-2 text-xs text-amber-300/80">No durable reservation existed; displayed usage is reported execution data, not an exact settlement.</p>
                         )}
                         {(references.scan_ids.length > 0 || references.finding_ids.length > 0) && (
                           <div className="mt-3 flex flex-wrap gap-3">

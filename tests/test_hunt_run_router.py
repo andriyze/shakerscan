@@ -8,7 +8,13 @@ import uuid
 import pytest
 
 from api.hunt import run_router
-from api.hunt.run_service import HuntRunService, public_hunt_action, public_hunt_run
+from api.hunt.run_service import (
+    HuntRunService,
+    hunt_action_outcome_summary,
+    public_hunt_action,
+    public_hunt_action_trace,
+    public_hunt_run,
+)
 
 
 def _row(**overrides):
@@ -49,6 +55,8 @@ class _Acquire:
 class _Pool:
     def __init__(self, connection):
         self.connection = connection
+        if not hasattr(connection, "transaction"):
+            connection.transaction = lambda: _Acquire(connection)
 
     def acquire(self):
         return _Acquire(self.connection)
@@ -86,6 +94,15 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
             "secret": "must-not-leak",
             "observations": [{"message": "must-not-leak"}],
             "budget_consumed": {"agent_actions": 1, "invalid": "hidden"},
+                "budget_accounting": {
+                    "charge_basis": "capability_reported_settlement",
+                    "settlement_status": "succeeded",
+                    "reservation_id": "reservation-1",
+                "reserved": {"agent_actions": 1, "http_requests": 24},
+                "actual": {"agent_actions": 1, "http_requests": 1},
+                "released": {"http_requests": 23},
+                "used_after_reconciliation": {"agent_actions": 4, "http_requests": 7},
+            },
             "data": {
                 "scan_id": str(scan_id),
                 "finding_ids": [str(finding_id), "not-a-uuid"],
@@ -100,7 +117,22 @@ def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content
     assert "must-not-leak" not in serialized
     assert action["input_digest"] == "input-digest"
     assert action["result"]["observation_count"] == 1
-    assert action["result"]["budget_consumed"] == {"agent_actions": 1}
+    assert action["result"]["budget_consumed"] == {
+        "agent_actions": 1,
+        "http_requests": 1,
+    }
+    assert action["result"]["budget_accounting"] == {
+        "schema_version": "hunt-budget-settlement/v1",
+        "basis": "exact_settlement",
+        "settlement_status": "succeeded",
+        "reservation_id": "reservation-1",
+        "charge_basis": "capability_reported_settlement",
+        "reserved": {"agent_actions": 1, "http_requests": 24},
+        "actual": {"agent_actions": 1, "http_requests": 1},
+        "released": {"http_requests": 23},
+        "overspent": {},
+        "used_after_reconciliation": {"agent_actions": 4, "http_requests": 7},
+    }
     assert action["result"]["reference_ids"]["scan_ids"] == [str(scan_id)]
     assert action["result"]["reference_ids"]["finding_ids"] == [str(finding_id)]
 
@@ -139,6 +171,90 @@ def test_public_hunt_action_prefers_canonical_worker_observation_count():
         "http_requests": 1,
         "agent_actions": 1,
     }
+    assert action["result"]["budget_accounting"]["basis"] == "legacy_reported_charge"
+    assert action["result"]["budget_accounting"]["charge_basis"] == "legacy_unknown"
+    assert action["result"]["budget_accounting"]["actual"] == {}
+
+
+def test_accounting_without_a_reservation_is_not_labeled_exact():
+    action = public_hunt_action({
+        "id": uuid.uuid4(),
+        "capability_name": "web.crawl",
+        "status": "completed",
+        "input_summary": {},
+        "result_summary": {
+            "budget_consumed": {"http_requests": 3},
+            "budget_accounting": {
+                "settlement_status": "worker_managed",
+                "actual": {"http_requests": 3},
+            },
+        },
+    })
+
+    assert action["result"]["budget_accounting"]["basis"] == "no_reservation"
+
+
+def test_factual_hunt_outcome_excludes_unsuccessful_action_claims():
+    finding_id = str(uuid.uuid4())
+    summary = hunt_action_outcome_summary([
+        {
+            "status": "completed",
+            "result": {"ok": True, "observation_count": 2, "reference_ids": {"finding_ids": [finding_id]}},
+        },
+        {
+            "status": "blocked",
+            "result": {"observation_count": 99, "reference_ids": {"finding_ids": [str(uuid.uuid4())]}},
+        },
+    ])
+
+    assert summary["capability_calls"] == 1
+    assert summary["total_capability_calls"] == 2
+    assert summary["observation_count"] == 2
+    assert summary["finding_ids"] == [finding_id]
+    assert summary["action_statuses"] == {"completed": 1, "blocked": 1}
+    assert summary["successful_calls"] == 1
+    assert summary["executed_calls"] == 1
+    assert summary["indeterminate_calls"] == 0
+
+
+def test_hunt_outcome_does_not_call_unknown_or_false_results_successful():
+    summary = hunt_action_outcome_summary([
+        {"status": "completed", "result": {"ok": False, "observation_count": 1}},
+        {"status": "completed", "result": {"ok": None, "observation_count": 2}},
+        {"status": "partial", "result": {"ok": True, "observation_count": 3}},
+        {"status": "blocked", "result": {"ok": False, "observation_count": 99}},
+    ])
+
+    assert summary["schema_version"] == "hunt-outcome-summary/v3"
+    assert summary["capability_calls"] == 0
+    assert summary["successful_calls"] == 0
+    assert summary["unsuccessful_calls"] == 1
+    assert summary["indeterminate_calls"] == 1
+    assert summary["partial_calls"] == 1
+    assert summary["executed_calls"] == 3
+    assert summary["attempted_calls"] == 4
+    assert summary["observation_count"] == 6
+
+
+def test_explicit_hunt_trace_preserves_decision_without_secrets_or_hidden_thoughts():
+    trace = public_hunt_action_trace({
+        "id": uuid.uuid4(),
+        "capability_name": "http.request",
+        "status": "completed",
+        "input_summary": {
+            "input": {"method": "POST", "path": "/login", "password": "opaque"},
+            "input_digest": "input-digest",
+            "idempotency_key_sha256": "key-digest",
+        },
+        "result_summary": {"ok": True, "secret": "response-secret"},
+    })
+
+    assert trace["decision"]["kind"] == "explicit_capability_selection"
+    assert trace["decision"]["input"]["path"] == "/login"
+    assert trace["decision"]["input"]["password"] == "***"
+    assert trace["outcome"]["secret"] == "***"
+    assert "opaque" not in json.dumps(trace)
+    assert "response-secret" not in json.dumps(trace)
 
 
 def test_hunt_run_service_get_includes_canonical_action_ledger():
@@ -150,6 +266,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
             return _row(id=uuid.UUID(hunt_id))
 
         async def fetch(self, query, *args):
+            if "FROM hunt_skill_events" in query:
+                return []
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
             assert args == (uuid.UUID(hunt_id),)
             return [{
@@ -168,29 +286,119 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
+    assert result["outcome_summary"] == {
+        "schema_version": "hunt-outcome-summary/v3",
+        "capability_calls": 0,
+        "total_capability_calls": 1,
+        "attempted_calls": 1,
+        "executed_calls": 1,
+        "successful_calls": 0,
+        "unsuccessful_calls": 0,
+        "indeterminate_calls": 1,
+        "partial_calls": 0,
+        "action_statuses": {"completed": 1},
+        "observation_count": 0,
+        "finding_ids": [],
+        "candidate_ids": [],
+        "evidence_ids": [],
+    }
+
+
+def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                return _row(
+                    id=uuid.UUID(hunt_id), status="completed",
+                    notes=[{"note": "Review authorization"}],
+                    final_debrief={
+                        "summary": "Admin token LEAKED_TOKEN_ABC123 exposed",
+                        "next_actions": ["mysql -u root -pHunter2"],
+                    },
+                    context_pack={"ssh_plan": "mysql -u root -pHunter2"},
+                )
+            if "FROM http_archive_stats" in query:
+                return {"attempted": 0, "stored": 0, "failed": 0, "dropped": 0}
+            raise AssertionError(query)
+
+        async def fetchval(self, query, *args):
+            if query.startswith("SELECT COUNT(*) FROM http_transactions"):
+                return 0
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            if "FROM hunt_skill_events" in query:
+                return []
+            if "FROM hunt_actions WHERE hunt_run_id=$1" in query:
+                return [{
+                    "id": uuid.uuid4(),
+                    "capability_name": "http.request",
+                    "status": "completed",
+                    "input_summary": {"input": {"method": "GET", "path": "/health"}},
+                    "result_summary": {"ok": True},
+                    "receipt_id": uuid.uuid4(),
+                    "started_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+                    "completed_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+                }]
+            if "FROM http_transactions t" in query:
+                return []
+            if "FROM hunt_actions action" in query:
+                return []
+            raise AssertionError(query)
+
+    service = HuntRunService(lambda: _Pool(Connection()))
+    record = asyncio.run(service.export_record(hunt_id))
+
+    assert record["schema_version"] == "hunt-record/v1"
+    assert record["trace_policy"]["kind"] == "explicit_decision_trace"
+    assert "hidden_model_chain_of_thought" in record["trace_policy"]["excludes"]
+    assert record["decision_trace"][0]["decision"]["input"]["path"] == "/health"
+    assert "LEAKED_TOKEN_ABC123" not in json.dumps(record)
+    assert "Hunter2" not in json.dumps(record)
+    assert "context_pack" not in record["hunt"]
+    assert record["trace_policy"]["residual_secret_risk"] is True
+    assert record["http_archive"]["fidelity"] == "unavailable"
 
 
 def test_hunt_run_service_lists_without_context_or_capability_expansion():
     class Connection:
+        async def fetchval(self, query, *args):
+            # Counted before paging so a client can report "51-100 of 240" rather than
+            # only how many rows this page happened to return.
+            assert query.startswith("SELECT COUNT(*)")
+            assert "LIMIT" not in query
+            return 240
+
         async def fetch(self, query, *args):
-            assert "target_id=$1 OR device_target_id=$1" in query
-            assert "status=$2" in query
-            assert "LIMIT $3" in query
-            assert args[1:] == ("active", 25)
+            assert "h.target_id=$1 OR h.device_target_id=$1" in query
+            assert "h.status=$2" in query
+            assert "LEFT JOIN targets t" in query
+            assert "LIMIT $3 OFFSET $4" in query
+            assert args[1:] == ("active", 25, 50)
             return [_row()]
 
     service = HuntRunService(lambda: _Pool(Connection()))
     result = asyncio.run(service.list(
-        target_id=str(uuid.uuid4()), status="active", limit=25
+        target_id=str(uuid.uuid4()), status="active", limit=25, offset=50,
     ))
 
     assert result["count"] == 1
+    assert result["total"] == 240
+    assert result["offset"] == 50
     assert "context_pack" not in result["hunts"][0]
     assert "capabilities" not in result["hunts"][0]
 
-    with pytest.raises(run_router.HTTPException) as exc:
-        asyncio.run(service.list(target_id=None, status="invented", limit=25))
-    assert exc.value.status_code == 400
+    for kwargs in (
+        {"status": "invented"},
+        {"target_kind": "invented"},
+        {"budget_profile": "invented"},
+        {"sort_by": "objective; DROP TABLE"},
+    ):
+        with pytest.raises(run_router.HTTPException) as exc:
+            asyncio.run(service.list(limit=25, **kwargs))
+        assert exc.value.status_code == 400, kwargs
 
 
 def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
@@ -201,13 +409,16 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
             self.status = "active"
 
         async def fetchrow(self, query, *args):
-            if "SET status='completed'" in query:
+            if query.startswith("SELECT * FROM hunt_runs"):
+                return _row(id=uuid.UUID(hunt_id), status=self.status)
+            if "FROM hunt_actions" in query:
+                assert "FROM budget_reservations" in query
+                return {"actions": False, "reservations": False}
+            if "UPDATE hunt_runs" in query and "final_debrief=$2" in query:
                 self.status = "completed"
                 return _row(id=uuid.UUID(hunt_id), status=self.status)
             if "SET status='cancelled'" in query:
                 return None
-            if query.startswith("SELECT * FROM hunt_runs"):
-                return _row(id=uuid.UUID(hunt_id), status=self.status)
             raise AssertionError(query)
 
     connection = Connection()
@@ -221,6 +432,75 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
     assert cancelled_after_finish["status"] == "completed"
 
 
+def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                return _row(
+                    id=uuid.UUID(hunt_id), status="budget_exhausted",
+                    stop_reason="budget_exhausted:http_requests",
+                )
+            if "FROM hunt_actions" in query:
+                return {"actions": False, "reservations": False}
+            assert "'budget_exhausted'" in query
+            assert "COALESCE(stop_reason, 'budget_exhausted')" in query
+            assert json.loads(args[1]) == {
+                "summary": "Budget ended after the useful checks.",
+                "next_actions": ["Increase only the HTTP request ceiling."],
+            }
+            return _row(
+                id=uuid.UUID(hunt_id), status="budget_exhausted",
+                stop_reason="budget_exhausted:http_requests",
+                final_debrief=args[1],
+            )
+
+    result = asyncio.run(HuntRunService(lambda: _Pool(Connection())).finish(
+        hunt_id,
+        summary="Budget ended after the useful checks.",
+        next_actions=["Increase only the HTTP request ceiling."],
+    ))
+
+    assert result["status"] == "budget_exhausted"
+    assert result["stop_reason"] == "budget_exhausted:http_requests"
+    assert result["final_debrief"]["summary"].startswith("Budget ended")
+
+
+@pytest.mark.parametrize("source", ["action", "reservation"])
+def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        updated = False
+
+        async def fetchrow(self, query, *_args):
+            if query.startswith("SELECT * FROM hunt_runs"):
+                assert "FOR UPDATE" in query
+                return _row(id=uuid.UUID(hunt_id), status="active")
+            if "FROM hunt_actions" in query:
+                assert "FROM budget_reservations" in query
+                assert "status IN ('reserved','running')" in query
+                return {
+                    "actions": source == "action",
+                    "reservations": source == "reservation",
+                }
+            if "UPDATE hunt_runs" in query:
+                self.updated = True
+                return _row(id=uuid.UUID(hunt_id), status="completed")
+            raise AssertionError(query)
+
+    connection = Connection()
+    with pytest.raises(run_router.HTTPException) as exc:
+        asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
+            hunt_id, summary="Premature", next_actions=[],
+        ))
+
+    assert exc.value.status_code == 409
+    assert "reserved or running" in exc.value.detail
+    assert connection.updated is False
+
+
 def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
     paths = {
         (frozenset(route.methods or ()), route.path, route.name)
@@ -229,12 +509,20 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
     assert paths == {
         (frozenset({"POST"}), "/hunts", "start_hunt"),
         (frozenset({"GET"}), "/hunts/contract", "get_hunt_contract"),
+        (frozenset({"GET"}), "/hunt/skills", "list_hunt_skills"),
+        (frozenset({"GET"}), "/hunt/skills/{skill_id}", "get_hunt_skill"),
         (
             frozenset({"GET"}),
             "/hunts/lifecycle-metrics",
             "get_hunt_lifecycle_metrics",
         ),
         (frozenset({"GET"}), "/hunts/{hunt_id}", "get_hunt"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/record", "export_hunt_record"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/suggestions", "suggest_hunt_skills"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/read", "read_hunt_skill"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/bind", "bind_hunt_skill"),
+        (frozenset({"DELETE"}), "/hunts/{hunt_id}/skills/{skill_id}", "unbind_hunt_skill"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/usage", "record_hunt_skill_usage"),
         (frozenset({"GET"}), "/hunts", "list_hunts"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/finish", "finish_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/cancel", "cancel_hunt"),

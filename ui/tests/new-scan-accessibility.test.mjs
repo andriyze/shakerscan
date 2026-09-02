@@ -26,3 +26,25 @@ test('New Scan clears stale validation when the operator edits the form', () => 
   assert.match(page, /onChange=\{\(\) => \{ if \(error\) setError\(null\) \}\}/)
   assert.match(page, /setBudgetProfile\(budget\.value\); setError\(null\)/)
 })
+
+test('ordinary active scans need one runnable worker, not release-fleet uniformity', () => {
+  assert.match(page, /execution_capacity\?\.total_available \?\? currentWorkerCount/)
+  assert.match(page, /require_current_workers: false/)
+  assert.match(page, /placementPreviewLabel\(topology, currentWorkerCount\)/)
+  assert.match(page, /Expected build:/)
+  assert.match(page, /Reported running builds:/)
+  assert.match(page, /activeTesting && !activeWorkerAvailable/)
+  assert.doesNotMatch(page, /Active testing is paused until the worker fleet is uniformly current/)
+})
+
+test('active testing expresses active coverage intent and requires ownership before submit', () => {
+  assert.match(page, /if \(familyPreset === 'passive'\) setFamilyPreset\('standard_active'\)/)
+  assert.match(page, /\(activeTesting \|\| credentialUse\) && !authorized/)
+  assert.match(page, /\(activeTesting \|\| credentialUse\) && !authorized/)
+})
+
+test('submission waits for the family preview matching the current controls', () => {
+  assert.match(page, /setContractPreviewLoading\(true\)/)
+  assert.match(page, /contractPreviewLoading \|\| contractPreviewError \|\| !contractPreview/)
+  assert.match(page, /disabled=\{contractPreviewLoading \|\| !contractPreview/)
+})

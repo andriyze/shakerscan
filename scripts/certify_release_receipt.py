@@ -15,6 +15,26 @@ from typing import Any, Mapping
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
+CERTIFICATION_CHECKS_SCHEMA_VERSION = "release-certification-checks/v1"
+CERTIFICATION_CHECK_ACCEPTED_STATES: dict[str, frozenset[str]] = {
+    "exact_manifest_installed_stack_e2e": frozenset({"pass"}),
+    "stateful_previous_stable_upgrade": frozenset({"pass"}),
+    "database_restart_idempotency": frozenset({"pass"}),
+    "backup_restore_rollback_boundary": frozenset({"pass"}),
+    "mature_subsystem_preservation": frozenset({"pass"}),
+    "model_intake_acceptance": frozenset({"pass"}),
+    "source_and_image_identity": frozenset({"pass"}),
+    "e2e_subject_binding": frozenset({"pass"}),
+    "complete_dast_quality_bar": frozenset({"pass"}),
+    "dast_release_quality_contract": frozenset({"pass"}),
+    "fault_cancellation": frozenset({"pass"}),
+    "fault_reservation_identity": frozenset({"pass"}),
+    "fault_action_resume": frozenset({"pass"}),
+    "real_fleet_parity": frozenset({"pass", "not_run_optional_boundary"}),
+    "model_intake_physical": frozenset({"pass", "not_run_optional_boundary"}),
+    "device_physical": frozenset({"pass", "not_run_optional_boundary"}),
+}
+
 
 class CertificationError(RuntimeError):
     """Release evidence is incomplete, inconsistent, or not candidate-bound."""
@@ -94,14 +114,14 @@ def certify_receipt(
         raise CertificationError("mature-subsystem preservation did not pass for this source")
     if preservation.get("images") != dict(sorted(images.items())):
         raise CertificationError("preservation receipt does not bind the final image digests")
-    if preservation.get("scope_exclusions") != ["model_intake"]:
-        raise CertificationError("preservation scope must explicitly exclude Model Intake")
+    if preservation.get("scope_exclusions") != []:
+        raise CertificationError("preservation receipt must include deterministic Model Intake")
 
     if e2e.get("schema_version") != "shakerscan-e2e-scorecard/v1" or e2e.get("gate") != "pass":
         raise CertificationError("exact-manifest installed-stack E2E did not pass")
     areas = e2e.get("areas")
     if not isinstance(areas, list) or {item.get("area") for item in areas if isinstance(item, Mapping)} != {
-        "platform", "ai_gate", "dast", "hunt",
+        "platform", "ai_gate", "dast", "hunt", "model_intake",
     }:
         raise CertificationError("exact-manifest E2E did not cover every release area")
     if any(
@@ -110,6 +130,21 @@ def certify_receipt(
         if isinstance(item, Mapping)
     ):
         raise CertificationError("an exact-manifest E2E area did not pass")
+    hunt_area = next(
+        item for item in areas
+        if isinstance(item, Mapping) and item.get("area") == "hunt"
+    )
+    hunt_rows = hunt_area.get("rows")
+    if not isinstance(hunt_rows, list) or not any(
+        isinstance(row, Mapping)
+        and str(row.get("name") or "").startswith("H-18 ")
+        and row.get("passed") is True
+        and row.get("skipped") is False
+        for row in hunt_rows
+    ):
+        raise CertificationError(
+            "exact-manifest Hunt E2E lacks adaptive real-target verified-finding proof"
+        )
     # The other three receipts each bind the source they ran against; the E2E scorecard did not,
     # so a run that exercised a different deployment could certify this candidate. Require it to
     # name the revision it actually tested, and the images when it recorded them.
@@ -142,24 +177,8 @@ def certify_receipt(
         or dast.get("release_quality_contract_passed") is not True
     ):
         raise CertificationError("DAST did not satisfy the release quality contract")
-    dispositions = dast.get("quality_release_dispositions")
-    full_quality = dast.get("quality_bar_passed") is True
-    accepted_shortfall = (
-        isinstance(dispositions, list)
-        and bool(dispositions)
-        and all(
-            isinstance(item, Mapping)
-            and item.get("status") == "accepted_shortfall"
-            and item.get("valid") is True
-            and bool(item.get("accepted_failed_gates"))
-            and set(item.get("observed_failed_gates") or ()).issubset(
-                set(item.get("accepted_failed_gates") or ())
-            )
-            for item in dispositions
-        )
-    )
-    if not full_quality and not accepted_shortfall:
-        raise CertificationError("DAST quality shortfall is absent, vacuous, or unbounded")
+    if dast.get("quality_bar_passed") is not True:
+        raise CertificationError("complete DAST quality bar did not pass")
     fault_contracts = {
         "fault_cancellation": "scan-cancellation-race-receipt/v1",
         "fault_reservation_identity": "scan-reservation-identity-receipt/v1",
@@ -188,6 +207,7 @@ def certify_receipt(
     result["schema_version"] = "shakerscan-release-candidate/v2"
     result["certification"] = {
         "status": "pass",
+        "checks_schema_version": CERTIFICATION_CHECKS_SCHEMA_VERSION,
         "source_sha": source_sha,
         "images": dict(sorted(images.items())),
         "checks": {
@@ -196,10 +216,10 @@ def certify_receipt(
             "database_restart_idempotency": "pass",
             "backup_restore_rollback_boundary": "pass",
             "mature_subsystem_preservation": "pass",
-            "model_intake_acceptance": "not_run_scope_exclusion",
+            "model_intake_acceptance": "pass",
             "source_and_image_identity": "pass",
             "e2e_subject_binding": "pass",
-            "complete_dast_quality_bar": "pass" if full_quality else "accepted_shortfall",
+            "complete_dast_quality_bar": "pass",
             "dast_release_quality_contract": "pass",
             "fault_cancellation": "pass",
             "fault_reservation_identity": "pass",
@@ -215,7 +235,6 @@ def certify_receipt(
             ),
         },
         "scope_exclusions": [
-            "model_intake_e2e_and_preservation",
             *[
             name for name in (
                 "real_fleet_parity", "model_intake_physical", "device_physical",

@@ -123,3 +123,38 @@ def test_matching_still_honours_severity_and_proof_requirements():
     assert benchmark.match_expectation(
         dict(base, min_severity="high", proof="browser"),
         [dict(strong, verified=True)], set()) is None
+
+
+def test_browser_proof_route_can_be_attributed_by_its_redacted_network_request():
+    fixture = {
+        "name": "unit",
+        "expected": [{
+            "id": "reflected-xss", "family": "xss",
+            "route": "/rest/track-order", "min_severity": "high",
+            "proof": "browser",
+        }],
+        "gates": {},
+    }
+    card = benchmark.collect_scorecard({
+        "findings": [{
+            "id": "finding-1",
+            "title": "Verified cross-site scripting",
+            "url": "https://app.test/#/track-result?id=",
+            "severity": "high",
+            "verified": True,
+            "evidence": {
+                "request_url": "https://app.test/#/track-result?id=",
+                "related_request_urls": [
+                    "https://app.test/rest/track-order/<redacted>",
+                ],
+                "browser_proof": {
+                    "proven": True,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "dom_execution",
+                    "technique": "headless_xss_dom",
+                },
+            },
+        }],
+    }, fixture)
+
+    assert [item["id"] for item in card["expected_found"]] == ["reflected-xss"]

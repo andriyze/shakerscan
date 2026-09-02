@@ -89,7 +89,7 @@ def test_quarantine_preserves_cancel_with_deprecation_headers():
     assert headers[b"link"] == b'</hunts>; rel="successor-version"'
 
 
-def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
+def test_legacy_hunt_routes_are_isolated_and_research_launch_alias_is_deleted():
     root = Path(__file__).resolve().parents[1]
     api = (root / "api" / "api.py").read_text()
     product = (root / "docs" / "product-model.md").read_text()
@@ -102,9 +102,31 @@ def test_legacy_hunt_routes_are_isolated_and_research_remains_specialized():
     # middleware remains for the surfaces still pending removal (Research).
     assert not route_is_declared("POST", "/agent/hunt/{target_id}")
     assert not route_is_declared("POST", "/devices/{device_id}/agent/session")
-    assert route_is_declared("POST", "/research/launch")
+    assert not route_is_declared("POST", "/research/launch")
+    assert route_is_declared("POST", "/research/campaigns/launch")
     assert "It is not a Hunt launcher" in product
     assert "A Hunt request creates one `/hunts` run" in product
+
+
+def test_deleted_research_launch_alias_keeps_internal_campaign_launcher():
+    """Campaign supervision still reuses the launcher without exposing its alias."""
+    tree = api_tree_source()
+    source = definition_source("launch_research_episode")
+
+    assert '@router.post("/research/launch")' not in tree
+    assert "async def launch_research_episode" in source
+
+
+def test_deleted_research_plan_step_keeps_internal_autopilot_planner():
+    """Only the server-owned autopilot may invoke configured-provider planning."""
+    tree = api_tree_source()
+
+    assert not route_is_declared(
+        "POST", "/research/episodes/{episode_id}/plan-step",
+    )
+    assert "async def plan_research_episode_step" not in tree
+    assert "async def _plan_research_episode_step" in tree
+    assert "await _plan_research_episode_step(" in tree
 
 
 def test_no_non_cancel_write_exists_under_the_legacy_agent_hunt_surface():
@@ -140,6 +162,32 @@ def test_deleted_legacy_agent_hunt_symbols_are_gone_from_the_api_tree():
         "class AgentHuntReplyRequest",
     ):
         assert symbol not in source, f"{symbol} survived the legacy Hunt deletion"
+
+
+def test_legacy_agent_finding_verification_write_is_deleted():
+    """Candidate reads remain, but verification uses canonical Hunt/finding flows."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "agent_routes" / "router.py").read_text()
+    ui_client = (root / "ui" / "src" / "lib" / "api.ts").read_text()
+
+    assert not route_is_declared("POST", "/agent/findings/{finding_id}/verify")
+    assert route_is_declared("GET", "/agent/findings/{target_id}")
+    assert route_is_declared("POST", "/findings/{finding_id:path}/retest")
+    assert "verify_suspected_agent_finding" not in source
+    assert "verifySuspectedAgentFinding" not in ui_client
+
+
+def test_legacy_direct_agent_tool_execution_write_is_deleted():
+    """Tool metadata remains readable; execution belongs to a canonical Hunt."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "api" / "agent_routes" / "router.py").read_text()
+
+    assert not route_is_declared("POST", "/agent/tools/{target_id}/execute")
+    assert route_is_declared("GET", "/agent/tools/readiness")
+    assert route_is_declared(
+        "POST", "/hunts/{hunt_id}/capabilities/{capability_name:path}",
+    )
+    assert "execute_agent_tool_endpoint" not in source
 
 
 def test_legacy_agent_hunt_writes_return_410_without_invoking_the_old_engine():

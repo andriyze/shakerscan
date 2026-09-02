@@ -121,6 +121,7 @@ def _mcp_start(**updates):
                 "secondary_credential_profile_id": "principal-secondary",
             },
             "request_collection_ids": ["collection-api-1"],
+            "skill_ids": ["skill.web.http-baselining-replay-and-differential-analysis"],
             "policy": {
                 "authorization_confirmed": True,
                 "approval_receipt_id": "approval-api-1",
@@ -160,6 +161,7 @@ def test_mcp_hunt_start_is_accepted_by_real_asgi_models(hunt_asgi, updates):
     assert captured[0].schema_version == "hunt-start/v2"
     assert captured[0].target_kind == updates.get("target_kind", "web")
     assert captured[0].goal == "Inspect the exact authorized target."
+    assert list(captured[0].skill_ids) == list(updates.get("skill_ids", []))
 
 
 def test_mcp_hunt_start_preserves_explicit_zero_ceilings_at_asgi_boundary(hunt_asgi):

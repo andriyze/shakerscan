@@ -327,7 +327,7 @@ print_next_steps() {
     say "     \"Red team my chatbot API with AI Gate smoke tests\""
     say ""
     say "2) Or run it yourself from the CLI:"
-    say "     $(sk) scan https://example.com   # quick scan"
+    say "     $(sk) scan https://example.com   # default passive Scan"
     say "     $(sk) status                     # what's running + UI/API URLs"
     say "     $(sk) stop                       # stop everything"
     say ""
@@ -410,6 +410,7 @@ mkdir -p "$INSTALL_STAGE/skills/device-triage/agents" "$INSTALL_STAGE/skills/hun
 mkdir -p "$INSTALL_STAGE/skills/js-analyze/agents" "$INSTALL_STAGE/skills/js-analyze/references"
 mkdir -p "$INSTALL_STAGE/skills/review-skills/agents" "$INSTALL_STAGE/skills/research-agent/agents"
 mkdir -p "$INSTALL_STAGE/skills/shakerscan/agents" "$INSTALL_STAGE/skills/shakerscan/references"
+mkdir -p "$INSTALL_STAGE/skills/web/core"
 mkdir -p "$INSTALL_STAGE/.claude/agents" "$INSTALL_STAGE/.claude/commands" "$INSTALL_STAGE/.claude/hooks"
 touch "$INSTALL_STAGE/.env"
 : > "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
@@ -484,6 +485,7 @@ download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/contin
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
+download "$REPO_RAW_BASE/api/scan/scoring.py" "$INSTALL_DIR/api/scan/scoring.py"
 download "$REPO_RAW_BASE/api/scan/report_rebuild.py" "$INSTALL_DIR/api/scan/report_rebuild.py"
 download "$REPO_RAW_BASE/api/scan/surface_manifest.py" "$INSTALL_DIR/api/scan/surface_manifest.py"
 download "$REPO_RAW_BASE/api/scan/work_manifests.py" "$INSTALL_DIR/api/scan/work_manifests.py"
@@ -496,6 +498,7 @@ download "$REPO_RAW_BASE/api/runtime/credentials.py" "$INSTALL_DIR/api/runtime/c
 download "$REPO_RAW_BASE/api/runtime/models.py" "$INSTALL_DIR/api/runtime/models.py"
 download "$REPO_RAW_BASE/api/runtime/observation_manifests.py" "$INSTALL_DIR/api/runtime/observation_manifests.py"
 download "$REPO_RAW_BASE/api/runtime/receipts.py" "$INSTALL_DIR/api/runtime/receipts.py"
+download "$REPO_RAW_BASE/api/runtime/request_shape.py" "$INSTALL_DIR/api/runtime/request_shape.py"
 download "$REPO_RAW_BASE/api/runtime/json_fields.py" "$INSTALL_DIR/api/runtime/json_fields.py"
 download "$REPO_RAW_BASE/api/agent_tools.py" "$INSTALL_DIR/api/agent_tools.py"
 download "$REPO_RAW_BASE/api/check_registry.py" "$INSTALL_DIR/api/check_registry.py"
@@ -510,6 +513,10 @@ download "$REPO_RAW_BASE/api/runtime/credential_store.py" "$INSTALL_DIR/api/runt
 download "$REPO_RAW_BASE/api/runtime/scan_credentials.py" "$INSTALL_DIR/api/runtime/scan_credentials.py"
 download "$REPO_RAW_BASE/api/runtime/request_collection_store.py" "$INSTALL_DIR/api/runtime/request_collection_store.py"
 download "$REPO_RAW_BASE/api/runtime/target_bound_socket.py" "$INSTALL_DIR/api/runtime/target_bound_socket.py"
+download "$REPO_RAW_BASE/scanner/ai_verdict_policy.py" "$INSTALL_DIR/scanner/ai_verdict_policy.py"
+download "$REPO_RAW_BASE/scanner/redaction.py" "$INSTALL_DIR/scanner/redaction.py"
+download "$REPO_RAW_BASE/scanner/risk_scoring.py" "$INSTALL_DIR/scanner/risk_scoring.py"
+download "$REPO_RAW_BASE/scanner/score_bands.py" "$INSTALL_DIR/scanner/score_bands.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/__init__.py" "$INSTALL_DIR/scanner/scanner_tools/__init__.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/build_fingerprint.py" "$INSTALL_DIR/scanner/scanner_tools/build_fingerprint.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/device_postman.py" "$INSTALL_DIR/scanner/scanner_tools/device_postman.py"
@@ -530,6 +537,51 @@ download "$REPO_RAW_BASE/runner/host/requirements.lock" "$INSTALL_DIR/runner/hos
 download "$REPO_RAW_BASE/runner/host/system-requirements.ubuntu.txt" "$INSTALL_DIR/runner/host/system-requirements.ubuntu.txt"
 download "$REPO_RAW_BASE/skills/README.md" "$INSTALL_DIR/skills/README.md"
 download "$REPO_RAW_BASE/skills/scanner-skill.md" "$INSTALL_DIR/skills/scanner-skill.md"
+for skill_file in \
+    01-scope-authorization-and-agent-safety.md \
+    02-attack-surface-and-asset-discovery.md \
+    03-stateful-crawling-content-and-parameter-discovery.md \
+    04-javascript-source-map-and-client-route-analysis.md \
+    05-http-baselining-replay-and-differential-analysis.md \
+    06-authentication-and-identity-enumeration-testing.md \
+    07-session-cookie-token-and-jwt-testing.md \
+    08-account-recovery-mfa-and-lifecycle-testing.md \
+    09-authorization-idor-bola-bfla-and-property-level-testing.md \
+    10-business-logic-and-insecure-design-testing.md \
+    11-api-inventory-openapi-and-contract-testing.md \
+    12-graphql-security-testing.md \
+    13-websocket-sse-and-realtime-security-testing.md \
+    14-sql-nosql-orm-and-ldap-injection-testing.md \
+    15-command-ssti-expression-and-deserialization-testing.md \
+    16-xss-dom-and-client-side-injection-testing.md \
+    17-csrf-cors-clickjacking-and-cross-origin-testing.md \
+    18-ssrf-url-fetch-and-cloud-metadata-testing.md \
+    19-path-traversal-file-inclusion-and-xxe-testing.md \
+    20-file-upload-and-file-processing-testing.md \
+    21-oauth-oidc-saml-and-sso-testing.md \
+    22-http-request-smuggling-and-desync-testing.md \
+    23-cache-poisoning-deception-and-host-routing-testing.md \
+    24-race-condition-concurrency-and-idempotency-testing.md \
+    25-rate-limit-resource-consumption-and-automation-abuse-testing.md \
+    26-cryptography-tls-secrets-and-sensitive-data-testing.md \
+    27-software-supply-chain-and-integrity-testing.md \
+    28-security-misconfiguration-error-handling-and-logging-testing.md \
+    29-web-llm-and-ai-feature-security-testing.md \
+    30-scanner-orchestration-evidence-chaining-and-regression.md \
+    31-edge-waf-and-origin-exposure-validation.md \
+    README.md; do
+    download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
+done
+for core_file in \
+    00-engagement-scope-policy.md \
+    01-agent-trust-boundary.md \
+    02-tool-execution-safety.md \
+    03-approval-and-risk-gates.md \
+    04-evidence-validation-and-finding-promotion.md \
+    05-engagement-state-contract.md \
+    06-skill-routing-and-composition.md; do
+    download "$REPO_RAW_BASE/skills/web/core/$core_file" "$INSTALL_DIR/skills/web/core/$core_file"
+done
 download "$REPO_RAW_BASE/skills/ai-security-session/SKILL.md" "$INSTALL_DIR/skills/ai-security-session/SKILL.md"
 download "$REPO_RAW_BASE/skills/ai-security-session/agents/openai.yaml" "$INSTALL_DIR/skills/ai-security-session/agents/openai.yaml"
 download "$REPO_RAW_BASE/skills/ai-security-session/references/api.md" "$INSTALL_DIR/skills/ai-security-session/references/api.md"

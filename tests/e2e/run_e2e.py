@@ -361,12 +361,19 @@ def run_model_intake() -> H.Scorecard:
 # validation). Override SHAKERSCAN_E2E_HONEY_HOST on Linux CI (e.g. the compose
 # service name / bridge IP).
 HONEY_HOST = os.environ.get("SHAKERSCAN_E2E_HONEY_HOST", "host.docker.internal")
+# Keep the host-served fixture on its own DNS identity. Web targets intentionally
+# deduplicate by hostname, so sharing HONEY_HOST with a benchmark on another port
+# makes a long-lived acceptance stack bind the fixture Hunt to the benchmark's
+# stored origin. Compose maps this name to the host gateway for every executor.
+FIXTURES_HOST = os.environ.get(
+    "SHAKERSCAN_E2E_FIXTURES_HOST", "shakerscan-fixtures.internal",
+)
 # The local fixtures server (started in main) — worker-reachable, deterministic,
 # and deliberately leaky, so the AI detection/redaction and Model-Intake artifact
 # assertions run without external honey apps. Override SHAKERSCAN_E2E_AI_ENDPOINT
 # to point at a real honey AI app instead.
 FIXTURES_PORT = int(os.environ.get("SHAKERSCAN_E2E_FIXTURES_PORT", "18099"))
-FIXTURES_BASE = f"http://{HONEY_HOST}:{FIXTURES_PORT}"
+FIXTURES_BASE = f"http://{FIXTURES_HOST}:{FIXTURES_PORT}"
 AI_ENDPOINT = os.environ.get("SHAKERSCAN_E2E_AI_ENDPOINT", f"{FIXTURES_BASE}/ai/chat")
 
 
@@ -526,9 +533,29 @@ def run_platform() -> H.Scorecard:
             ),
         )
 
+        # Enabling continuous ASM schedules active recon, so the server requires a
+        # target-bound, active-tier, expiring approval receipt (asm.continuous). Mint
+        # one the way the Hunt lane does and pass it in the policy config. The target
+        # is non-public (.invalid), so no recon this enables can reach a real host.
+        asm_host = urllib.parse.urlsplit(target_url).hostname or ""
+        _, asm_scope = H.post("/arsenal/scope/preview", {
+            "url": target_url, "target_id": target_id,
+            "allowed_hosts": [asm_host], "environment": "lab",
+        })
+        asm_scope_id = str((asm_scope.get("scope_receipt") or {}).get("receipt_id") or "")
+        _, asm_approval = H.post("/arsenal/approvals", {
+            "scope_receipt_id": asm_scope_id,
+            "risk_tier": "active",
+            "confirmations": ["confirm_authorized", "confirm_scope_reviewed"],
+            "approved_by": "platform-e2e",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        })
+        asm_approval_id = str((asm_approval.get("approval_receipt") or {}).get("id") or "")
         enable_status, enabled_policy = H.put(
             f"/targets/{target_id}/asm/policy",
-            {"enabled": True, "config": {"recon_interval_hours": 24}},
+            {"enabled": True, "config": {
+                "recon_interval_hours": 24, "approval_receipt_id": asm_approval_id,
+            }},
         )
         disable_status, disabled_policy = H.put(
             f"/targets/{target_id}/asm/policy",
@@ -546,6 +573,13 @@ def run_platform() -> H.Scorecard:
             ),
         )
 
+        # A recurring scan schedule resolves its target at create time and refuses any
+        # destination that is not globally routable -- the SSRF-class protection this
+        # E2E should prove against the real deployed guard. The disposable target is
+        # deliberately non-public (.invalid), so it must be refused. (The create /
+        # disable / read lifecycle is covered by the schedules unit suite with an
+        # injected resolver; a resolvable target here cannot be used because the 60s
+        # ASM dispatcher would recon it.)
         future = datetime.now(timezone.utc) + timedelta(hours=6)
         schedule_status, schedule = H.post("/schedules", {
             "target_id": target_id,
@@ -558,18 +592,13 @@ def run_platform() -> H.Scorecard:
             "jitter_minutes": 0,
         })
         schedule_id = str(schedule.get("id") or "")
-        if schedule_status not in {200, 201} or not schedule_id:
-            raise RuntimeError(f"schedule creation failed: status={schedule_status} body={schedule}")
-        update_status, updated = H.patch(
-            f"/schedules/{schedule_id}", {"is_active": False},
-        )
-        stored_schedule = H.get(f"/schedules/{schedule_id}")
+        schedule_detail = str(schedule.get("detail") or "").lower()
         sc.check(
-            "P-7 schedule create, disable, and read lifecycle works",
-            update_status == 200
-            and updated.get("status") == "updated"
-            and stored_schedule.get("is_active") is False,
-            f"update_status={update_status} active={stored_schedule.get('is_active')}",
+            "P-7 recurring-scan scheduling refuses a non-public destination",
+            schedule_status == 422
+            and not schedule_id
+            and "resol" in schedule_detail,
+            f"schedule_status={schedule_status} detail={schedule.get('detail')}",
         )
 
         finding_status, finding = H.post("/findings/manual", {
@@ -849,7 +878,7 @@ HUNT_WEB_TARGET = os.environ.get(
 def _dast_fixture_authority(
     fixture_target: str = FIXTURES_BASE,
     *,
-    allowed_host: str = HONEY_HOST,
+    allowed_host: str = FIXTURES_HOST,
 ) -> tuple[str, str, dict[str, dict[str, str]]]:
     """Create target-bound approval plus exact saved-request selections."""
     _, target = H.post("/targets", {
@@ -992,7 +1021,7 @@ def _dast_fixture_authority(
 def _hunt_fixture_authority(
     fixture_target: str = FIXTURES_BASE,
     *,
-    allowed_host: str = HONEY_HOST,
+    allowed_host: str = FIXTURES_HOST,
     risk_tier: str = "active",
 ) -> tuple[str, str, str]:
     """Create one reusable, target-bound, bounded Hunt approval."""
@@ -1043,6 +1072,7 @@ def _hunt_start_payload(
     credential_refs: dict[str, str] | None = None,
     request_collection_ids: list[str] | None = None,
     capabilities: list[str] | None = None,
+    budget_profile: str = "fast",
 ) -> dict:
     credentials_requested = bool(credential_refs)
     privileged = active or network_discovery or credentials_requested
@@ -1051,11 +1081,14 @@ def _hunt_start_payload(
         "target_id": target_id,
         "target_kind": target_kind,
         "goal": goal,
-        "budget_profile": "fast",
+        "budget_profile": budget_profile,
         "budgets": {
             "max_active_actions": 4 if privileged else 0,
             "max_state_changing_requests": 0,
-            "max_hosts": 1 if network_discovery else 0,
+            # One host is exactly the first action's charge, so a single call exhausted
+        # the hunt and cancellation could never be the stopping reason. Address
+        # binding is still asserted from the receipt, not from this ceiling.
+        "max_hosts": 2 if network_discovery else 0,
             "max_tcp_ports": 100 if network_discovery else 0,
             "max_udp_ports": 0,
             "max_oob_interactions": 0,
@@ -1078,7 +1111,7 @@ def _hunt_start_payload(
 
 def _hunt_api_collection_fixture(
     target_id: str,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Create two exact principals and one API-bound safe request collection."""
     profile_ids: list[str] = []
     for slot, token in (("primary", "parity-owner"), ("secondary", "parity-attacker")):
@@ -1090,7 +1123,7 @@ def _hunt_api_collection_fixture(
             "principal_slot": slot,
             "principal_label": f"e2e-{slot}",
             "secret": f"Bearer {token}",
-            "allowed_capabilities": ["http.request", "request.replay"],
+            "allowed_capabilities": ["http.request", "collections.replay_safe"],
             "created_by": "hunt-e2e",
         })
         profile_id = str((created.get("profile") or {}).get("id") or "")
@@ -1127,9 +1160,25 @@ def _hunt_api_collection_fixture(
         "target_id": target_id,
         "allowed_origins": [FIXTURES_BASE],
     })
-    if not (bound.get("binding") or {}).get("id"):
+    binding_id = str((bound.get("binding") or {}).get("id") or "")
+    if not binding_id:
         raise RuntimeError(f"Hunt API collection binding rejected: {bound}")
-    return collection_id, profile_ids[0], profile_ids[1]
+    # Safe replay resolves a saved selection, not a bare collection: the server
+    # refuses to replay requests an operator never explicitly selected.
+    status, selected = H.post(
+        f"/request-collections/{collection_id}/selections",
+        {
+            "name": f"Hunt API replay selection {_RUN_NONCE}",
+            "binding_id": binding_id,
+            "replay_policy": "safe_reads",
+            "methods": ["GET"],
+            "safe_methods_only": True,
+        },
+    )
+    selection_id = str((selected.get("selection") or selected).get("id") or "")
+    if status != 200 or not selection_id:
+        raise RuntimeError(f"Hunt API collection selection rejected: {selected}")
+    return collection_id, selection_id, profile_ids[0], profile_ids[1]
 
 
 def _load_real_mcp_adapter():
@@ -1152,6 +1201,21 @@ def run_hunt() -> H.Scorecard:
     """Exercise canonical Hunt authority through REST, CLI, and MCP clients."""
     sc = H.Scorecard("hunt")
     print("\n== Hunt V2 e2e ==", flush=True)
+
+    def action_result(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        value = payload.get("action_result")
+        return value if isinstance(value, dict) else {}
+
+    def canonical_action_status(payload: object) -> str:
+        return str(action_result(payload).get("status") or "")
+
+    def action_receipt_id(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        result = payload.get("result")
+        return str(result.get("receipt_id") or "") if isinstance(result, dict) else ""
     target_id = scope_id = approval_id = ""
     try:
         hunt_host = urllib.parse.urlsplit(HUNT_WEB_TARGET).hostname or HONEY_HOST
@@ -1200,7 +1264,8 @@ def run_hunt() -> H.Scorecard:
             "H-2 passive action persists receipt and duplicate delivery is idempotent",
             call_status == replay_status == 200
             and bool(first.get("action_id"))
-            and bool(first.get("receipt_id"))
+            and canonical_action_status(first) == "success"
+            and bool(action_receipt_id(first))
             and replay.get("action_id") == first.get("action_id")
             and replay.get("idempotent_replay") is True,
             f"first={first} replay={replay}",
@@ -1274,8 +1339,8 @@ def run_hunt() -> H.Scorecard:
             "H-7 privileged verifier settles a durable action and receipt",
             call_status == 200
             and bool(action.get("action_id"))
-            and bool(action.get("receipt_id"))
-            and action.get("status") in {"completed", "partial"},
+            and bool(action_receipt_id(action))
+            and canonical_action_status(action) in {"success", "partial"},
             f"status={call_status} action={action}",
         )
         revoke_status, revoked = H.post(
@@ -1381,7 +1446,8 @@ def run_hunt() -> H.Scorecard:
             "H-11 installed CLI start and call produce valid V2 authority",
             valid_cli_start.returncode == cli_call.returncode == 0
             and bool(cli_hunt_id)
-            and cli_action.get("response", {}).get("status") == "completed",
+            and canonical_action_status(cli_action.get("response")) == "success"
+            and bool(action_receipt_id(cli_action.get("response"))),
             f"start_exit={valid_cli_start.returncode} call_exit={cli_call.returncode}",
         )
         H.post(f"/hunts/{cli_hunt_id}/finish", {
@@ -1426,10 +1492,11 @@ def run_hunt() -> H.Scorecard:
         sc.check(
             "H-12 MCP start, query, capability, and finish use the real V2 API",
             bool(mcp_hunt_id)
-            and action.get("status") == "completed"
+            and canonical_action_status(action) == "success"
+            and bool(action_receipt_id(action))
             and int(queried.get("count") or 0) >= 1
             and finished.get("status") == "completed",
-            f"hunt={mcp_hunt_id} action={action.get('status')}",
+            f"hunt={mcp_hunt_id} action={canonical_action_status(action)}",
         )
     except Exception as exc:
         sc.error("H-12 MCP real-stack acceptance", exc)
@@ -1441,7 +1508,7 @@ def run_hunt() -> H.Scorecard:
         api_target_id, api_scope_id, api_approval_id = _hunt_fixture_authority(
             risk_tier="credential",
         )
-        collection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
+        collection_id, selection_id, primary_id, secondary_id = _hunt_api_collection_fixture(
             api_target_id,
         )
         FX.reset_parity_traffic()
@@ -1455,7 +1522,7 @@ def run_hunt() -> H.Scorecard:
                 "primary_credential_profile_id": primary_id,
                 "secondary_credential_profile_id": secondary_id,
             },
-            request_collection_ids=[collection_id],
+            request_collection_ids=[selection_id],
             capabilities=["collections.inspect", "collections.replay_safe"],
         ))
         api_hunt_id = str(api_hunt.get("hunt_id") or "")
@@ -1487,8 +1554,8 @@ def run_hunt() -> H.Scorecard:
             and bool(api_hunt_id)
             and all(
                 item.get("http_status") == 200
-                and item.get("status") in {"completed", "partial"}
-                and item.get("receipt_id")
+                and canonical_action_status(item) in {"success", "partial"}
+                and action_receipt_id(item)
                 for item in actions
             )
             and {item.get("principal") for item in relevant} >= {"owner", "attacker"}
@@ -1517,6 +1584,9 @@ def run_hunt() -> H.Scorecard:
             network_target_id,
             goal="Registered-address network service acceptance.",
             target_kind="network",
+            # Cancellation is the subject; the hunt must survive long enough to be
+            # cancelled rather than stopping at budget_exhausted first.
+            budget_profile="balanced",
             network_discovery=True,
             approval_id=network_approval_id,
             scope_id=network_scope_id,
@@ -1543,12 +1613,12 @@ def run_hunt() -> H.Scorecard:
             "H-14 network Hunt binds registered addresses and cancellation stops new work",
             status == 200
             and action_status == 200
-            and action.get("status") in {"completed", "partial"}
-            and bool(action.get("receipt_id"))
+            and canonical_action_status(action) in {"success", "partial"}
+            and bool(action_receipt_id(action))
             and cancelled.get("status") == "cancelled"
             and after_status == 409,
             (
-                f"start={status} action={action_status}/{action.get('status')} "
+                f"start={status} action={action_status}/{canonical_action_status(action)} "
                 f"cancel={cancelled.get('status')} after={after_status}"
             ),
         )
@@ -1596,8 +1666,8 @@ def run_hunt() -> H.Scorecard:
             device_status == 200
             and status == 200
             and action_status == 200
-            and action.get("status") == "completed"
-            and bool(action.get("receipt_id"))
+            and canonical_action_status(action) == "success"
+            and bool(action_receipt_id(action))
             and isinstance(context.get("device_policy_state"), dict)
             and context.get("device_policy_state", {}).get("schema_version")
                 == "hunt-device-policy/v2"
@@ -1626,18 +1696,38 @@ def run_hunt() -> H.Scorecard:
         # reason: nothing was promoted because nothing was found. The pair tests the
         # candidate-to-finding bridge, so it is bound to the fixture that actually serves
         # the evidence, exactly as the API and network Hunt areas already are.
-        verify_target_id, verify_scope_id, verify_approval_id = _hunt_fixture_authority()
+        # Candidate verification re-executes through the family-proof workflow, which the
+        # server gates at the "credential" risk tier (it may replay with principal
+        # credentials). A default "active" approval does not cover that action, so the
+        # verify returns 400 "risk tier does not cover the requested action"; mint the
+        # tier the bridge actually requires, as the collection-replay acceptance does.
+        verify_target_id, verify_scope_id, verify_approval_id = _hunt_fixture_authority(
+            risk_tier="credential",
+        )
         status, run = H.post("/hunts", _hunt_start_payload(
             verify_target_id,
             goal="Verify an anonymous credential exposure end to end.",
             active=True,
             scope_id=verify_scope_id,
             approval_id=verify_approval_id,
+            # Each candidate verification charges 12 browser actions and this check
+            # runs the positive and negative case, so the fast profile's 20 cannot
+            # fund both. The subject here is the candidate-to-finding bridge, not
+            # budget enforcement, which H-1 and H-6 already cover.
+            budget_profile="balanced",
         ))
         verify_hunt_id = str(run.get("hunt_id") or "")
 
-        def _candidate_verdict(route: str, title: str, claim: str) -> dict:
+        def _candidate_verdict(base_route: str, title: str, claim: str) -> dict:
             """Probe one route, raise a candidate from that observation, and verify it."""
+            # A candidate fingerprint is (plane, target, family, locus). Verified rows
+            # are immutable by design, so a fixed route collides with an earlier run's
+            # verified candidate against the same durable DB and verify returns 409 --
+            # the acceptance would then fail on its own prior success. The fixture
+            # serves this content under any /<base>/<suffix>, so a per-run route
+            # segment makes the locus unique while the probe and the re-executed
+            # verification still reach the same evidence.
+            route = f"{base_route}/{_RUN_NONCE}"
             probe_status, probe = H.post(
                 f"/hunts/{verify_hunt_id}/capabilities/http.request",
                 {
@@ -1673,11 +1763,15 @@ def run_hunt() -> H.Scorecard:
         )
         proof = exposed["verification"]
         finding_id = str(proof.get("verified_finding_id") or "")
-        finding_status, finding = (H.get(f"/findings/{finding_id}") if finding_id else (0, {}))
+        finding_status, finding = (
+            H._req("GET", f"/findings/{finding_id}")
+            if finding_id else (0, {})
+        )
         finding_row = finding.get("finding") if isinstance(finding.get("finding"), dict) else finding
         sc.check(
             "H-16 a Hunt candidate is verified into a materialized finding",
             exposed["probe_status"] == exposed["candidate_status"] == 200
+            and exposed["verify_status"] == 200
             and bool(exposed["candidate_id"])
             and proof.get("proof_state") == "verified"
             and (proof.get("family_proof") or {}).get("promotable") is True
@@ -1685,7 +1779,11 @@ def run_hunt() -> H.Scorecard:
             and finding_status == 200
             and str(finding_row.get("last_verification_verdict")) == "exploited"
             and str(finding_row.get("severity")) in {"critical", "high"},
-            f"verification={proof} finding_status={finding_status} finding={finding_row}",
+            (
+                f"probe={exposed['probe_status']} candidate={exposed['candidate_status']} "
+                f"verify={exposed['verify_status']} action_id={exposed['action_id']} "
+                f"verification={proof} finding_status={finding_status} finding={finding_row}"
+            ),
         )
 
         control = _candidate_verdict(
@@ -1697,16 +1795,165 @@ def run_hunt() -> H.Scorecard:
         sc.check(
             "H-17 a candidate with no sensitive evidence is not promoted",
             control["candidate_status"] == 200
+            # The verifier must actually have run and returned a verdict: a 409
+            # replay or a suspended turn yields an empty verification, which would
+            # satisfy "not verified" for the wrong reason and hide a broken bridge.
+            and control["verify_status"] == 200
+            and bool(control_proof)
             and control_proof.get("proof_state") != "verified"
             and (control_proof.get("family_proof") or {}).get("promotable") is not True
             and not control_proof.get("verified_finding_id"),
-            f"verification={control_proof}",
+            f"verify_status={control['verify_status']} verification={control_proof}",
         )
         H.post(f"/hunts/{verify_hunt_id}/finish", {
             "summary": "Candidate verification acceptance completed.", "next_actions": [],
         })
     except Exception as exc:
         sc.error("H-16 through H-17 candidate verification acceptance", exc)
+
+    # Exact-manifest release acceptance must also prove the planner-facing loop
+    # against the real benchmark application: evidence -> compact suggestion ->
+    # one methodology read/bind -> canonical verifier -> persisted finding.
+    if HUNT_WEB_TARGET == FIXTURES_BASE:
+        sc.skip(
+            "H-18 adaptive real-target methodology produces a verified finding",
+            "SHAKERSCAN_E2E_HUNT_TARGET does not name the real benchmark target",
+        )
+    else:
+        adaptive_hunt_id = ""
+        try:
+            adaptive_target_id, adaptive_scope_id, adaptive_approval_id = (
+                _hunt_fixture_authority(
+                    HUNT_WEB_TARGET,
+                    allowed_host=(
+                        urllib.parse.urlsplit(HUNT_WEB_TARGET).hostname
+                        or HONEY_HOST
+                    ),
+                )
+            )
+            status, adaptive = H.post("/hunts", _hunt_start_payload(
+                adaptive_target_id,
+                goal=(
+                    "Investigate an Angular client template with a reflected DOM "
+                    "source/sink path and obtain deterministic XSS execution proof."
+                ),
+                active=True,
+                scope_id=adaptive_scope_id,
+                approval_id=adaptive_approval_id,
+            ))
+            adaptive_hunt_id = str(adaptive.get("hunt_id") or "")
+            baseline_status, baseline = H.post(
+                f"/hunts/{adaptive_hunt_id}/capabilities/http.request",
+                {
+                    "idempotency_key": f"e2e-adaptive-baseline-{_RUN_NONCE}",
+                    "input": {"method": "GET", "path": "/"},
+                },
+                timeout=120,
+            )
+            suggestion_status, suggested = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/suggestions",
+                {
+                    "signals": [
+                        "Angular client_template",
+                        "DOM_source_sink_path",
+                        "URL_or_postMessage_input",
+                    ],
+                },
+            )
+            xss_skill_id = "skill.web.xss-dom-and-client-side-injection-testing"
+            suggestions = suggested.get("suggestions") or []
+            chosen = next((
+                item for item in suggestions
+                if item.get("skill_id") == xss_skill_id
+            ), None)
+            read_status, methodology = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/{xss_skill_id}/read", {},
+            )
+            bind_status, bound = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/{xss_skill_id}/bind",
+                {
+                    "reason": "Angular DOM source/sink evidence matched the XSS router",
+                    "evidence_refs": [str(baseline.get("action_id") or "")],
+                },
+            )
+            proof_path = os.environ.get(
+                "SHAKERSCAN_E2E_HUNT_PROOF_PATH",
+                "/#/search?q=shakerscan",
+            )
+            proof_status, proof_action = H.post(
+                f"/hunts/{adaptive_hunt_id}/capabilities/xss.verify",
+                {
+                    "idempotency_key": f"e2e-adaptive-xss-{_RUN_NONCE}",
+                    "input": {
+                        "path": proof_path,
+                        "severity": "high",
+                        "deep_domxss": True,
+                    },
+                },
+                timeout=240,
+            )
+            proof_result = (
+                proof_action.get("result")
+                if isinstance(proof_action.get("result"), dict) else {}
+            )
+            verified_ids = [
+                str(value) for value in proof_result.get("verified_finding_ids") or []
+                if str(value)
+            ]
+            finding_status, finding = (
+                H._req("GET", f"/findings/{verified_ids[0]}")
+                if verified_ids else (0, {})
+            )
+            finding_row = (
+                finding.get("finding")
+                if isinstance(finding.get("finding"), dict) else finding
+            )
+            usage_status, usage = H.post(
+                f"/hunts/{adaptive_hunt_id}/skills/{xss_skill_id}/usage",
+                {
+                    "state": "completed",
+                    "action_id": str(proof_action.get("action_id") or ""),
+                    "reason": "Canonical verifier produced deterministic execution proof",
+                },
+            )
+            skill_events = usage.get("skill_activity") or []
+            sc.check(
+                "H-18 adaptive real-target methodology produces a verified finding",
+                status == baseline_status == suggestion_status == 200
+                and read_status == bind_status == proof_status == usage_status == 200
+                and bool(adaptive_hunt_id)
+                and len(suggestions) <= 3
+                and chosen is not None
+                and methodology.get("methodology")
+                and any(
+                    item.get("skill_id") == xss_skill_id
+                    for item in (bound.get("skills") or [])
+                )
+                and bool(verified_ids)
+                and finding_status == 200
+                and finding_row.get("last_verification_verdict") == "exploited"
+                and any(
+                    event.get("skill_id") == xss_skill_id
+                    and event.get("event_type") == "completed"
+                    for event in skill_events
+                ),
+                (
+                    f"suggestions={[item.get('skill_id') for item in suggestions]} "
+                    f"proof={proof_result.get('status')} findings={verified_ids} "
+                    f"finding_status={finding_status}"
+                ),
+            )
+        except Exception as exc:
+            sc.error(
+                "H-18 adaptive real-target methodology produces a verified finding",
+                exc,
+            )
+        finally:
+            if adaptive_hunt_id:
+                H.post(f"/hunts/{adaptive_hunt_id}/finish", {
+                    "summary": "Adaptive real-target acceptance completed.",
+                    "next_actions": [],
+                })
 
     return sc
 

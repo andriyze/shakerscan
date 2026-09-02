@@ -47,11 +47,41 @@ test('device summaries preserve the latest scan provisional state', () => {
     last_score: 100,
     last_posture_complete: false,
     last_posture_decision: 'needs_review',
-  })
+    last_reachability: { status: 'online', checked_at: '2026-08-28T00:00:00Z' },
+  }, { nowMs: Date.parse('2026-08-29T00:00:00Z') })
   assert.equal(presentation.status, 'provisional')
   assert.equal(presentation.grade, 'A')
   assert.equal(presentation.score, 100)
   assert.match(presentation.note, /not a pass verdict/)
+})
+
+
+test('device summaries withhold a retained A when latest reachability is inconclusive', () => {
+  const presentation = deviceTargetScorePresentation({
+    last_grade: 'A',
+    last_score: 100,
+    last_posture_complete: true,
+    last_posture_decision: 'allow',
+    last_reachability: { status: 'inconclusive', checked_at: '2026-08-29T00:00:00Z' },
+  }, { nowMs: Date.parse('2026-08-29T01:00:00Z') })
+  assert.equal(presentation.status, 'unavailable')
+  assert.equal(presentation.grade, null)
+  assert.equal(presentation.score, null)
+  assert.match(presentation.note, /not current proof/)
+})
+
+
+test('device summaries qualify stale positive evidence', () => {
+  const presentation = deviceTargetScorePresentation({
+    last_grade: 'A',
+    last_score: 100,
+    last_posture_complete: true,
+    last_posture_decision: 'allow',
+    last_reachability: { status: 'online', checked_at: '2026-08-15T00:00:00Z' },
+  }, { nowMs: Date.parse('2026-08-29T00:00:00Z') })
+  assert.equal(presentation.status, 'provisional')
+  assert.equal(presentation.grade, 'A')
+  assert.match(presentation.note, /older than 7 days/)
 })
 
 
@@ -75,6 +105,28 @@ test('non-device score presentation is unchanged', () => {
 })
 
 
+test('non-device detail prefers current-policy result projection over legacy row score', () => {
+  assert.deepEqual(deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A',
+    score: 100,
+    result: {
+      result: {
+        risk_grade: 'B',
+        risk_score: 86,
+        score_policy: 'risk_and_assurance/v5',
+      },
+    },
+  }), {
+    isDevice: false,
+    status: 'final',
+    grade: 'B',
+    score: 86,
+    note: null,
+  })
+})
+
+
 test('unreliable DAST grade is explicitly provisional and never displayed as A star', () => {
   const presentation = deviceScorePresentation({
     run_kind: 'web_dast',
@@ -90,6 +142,37 @@ test('unreliable DAST grade is explicitly provisional and never displayed as A s
   assert.equal(presentation.grade, 'A')
   assert.equal(presentation.score, 100)
   assert.match(presentation.note, /not a pass verdict/)
+})
+
+
+test('a DAST run that only reached an auth challenge withholds the clean grade', () => {
+  const presentation = deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A*',
+    score: 100,
+    result: {
+      result: {
+        grade: 'A*',
+        score: 100,
+        risk_grade: 'A',
+        risk_score: 100,
+        grade_reliable: false,
+        risk_assessment_state: 'not_examined',
+      },
+      coverage: {
+        status: 'complete',
+        grade_reliability: {
+          reliable: false,
+          reasons: ['application_not_observed'],
+        },
+      },
+    },
+  })
+
+  assert.equal(presentation.status, 'not_examined')
+  assert.equal(presentation.grade, null)
+  assert.equal(presentation.score, null)
+  assert.match(presentation.note, /authentication challenge/)
 })
 
 

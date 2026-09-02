@@ -10,6 +10,10 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The repo root lets `scanner.redaction` (the source-layout fallback inside
+# api/runtime/receipts.py) resolve; api/ lets `hunt.start_contract` resolve.
+# Without the root, a bare CI runner fails with "No module named 'scanner'".
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "api"))
 
 from hunt.start_contract import hunt_start_public_contract  # noqa: E402

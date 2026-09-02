@@ -14,13 +14,6 @@
     "name": "get_agent_context_pack"
   },
   {
-    "path": "/agent/findings/{finding_id}/verify",
-    "methods": [
-      "POST"
-    ],
-    "name": "verify_suspected_agent_finding"
-  },
-  {
     "path": "/agent/findings/{target_id}",
     "methods": [
       "GET"
@@ -54,13 +47,6 @@
       "GET"
     ],
     "name": "get_agent_tool_readiness"
-  },
-  {
-    "path": "/agent/tools/{target_id}/execute",
-    "methods": [
-      "POST"
-    ],
-    "name": "execute_agent_tool_endpoint"
   },
   {
     "path": "/agents/local",
@@ -649,6 +635,13 @@
       "POST"
     ],
     "name": "create_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/capabilities",
+    "methods": [
+      "GET"
+    ],
+    "name": "credential_capability_catalog"
   },
   {
     "path": "/credential-profiles/{profile_id}",
@@ -1346,6 +1339,20 @@
     "name": "health"
   },
   {
+    "path": "/hunt/skills",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_hunt_skills"
+  },
+  {
+    "path": "/hunt/skills/{skill_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_skill"
+  },
+  {
     "path": "/hunts",
     "methods": [
       "GET"
@@ -1395,6 +1402,20 @@
     "name": "create_hunt_candidate"
   },
   {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_hunt_candidate"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
+    "methods": [
+      "PATCH"
+    ],
+    "name": "update_hunt_candidate"
+  },
+  {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
     "methods": [
       "POST"
@@ -1416,11 +1437,32 @@
     "name": "finish_hunt"
   },
   {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "purge_hunt_transactions"
+  },
+  {
+    "path": "/hunts/{hunt_id}/http-transactions",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_hunt_transactions"
+  },
+  {
     "path": "/hunts/{hunt_id}/query",
     "methods": [
       "POST"
     ],
     "name": "query_hunt"
+  },
+  {
+    "path": "/hunts/{hunt_id}/record",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_hunt_record"
   },
   {
     "path": "/hunts/{hunt_id}/resume",
@@ -1435,6 +1477,41 @@
       "POST"
     ],
     "name": "confirm_hunt_shell_plan"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/suggestions",
+    "methods": [
+      "POST"
+    ],
+    "name": "suggest_hunt_skills"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "unbind_hunt_skill"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/bind",
+    "methods": [
+      "POST"
+    ],
+    "name": "bind_hunt_skill"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/read",
+    "methods": [
+      "POST"
+    ],
+    "name": "read_hunt_skill"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/{skill_id}/usage",
+    "methods": [
+      "POST"
+    ],
+    "name": "record_hunt_skill_usage"
   },
   {
     "path": "/investigation/candidates",
@@ -2055,25 +2132,11 @@
     "name": "refresh_research_observation"
   },
   {
-    "path": "/research/episodes/{episode_id}/plan-step",
-    "methods": [
-      "POST"
-    ],
-    "name": "plan_research_episode_step"
-  },
-  {
     "path": "/research/episodes/{episode_id}/settle",
     "methods": [
       "POST"
     ],
     "name": "settle_research_episode"
-  },
-  {
-    "path": "/research/launch",
-    "methods": [
-      "POST"
-    ],
-    "name": "launch_research_episode"
   },
   {
     "path": "/research/readiness",
@@ -2214,6 +2277,20 @@
       "GET"
     ],
     "name": "get_scan_device_activity"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "purge_scan_transactions"
+  },
+  {
+    "path": "/scans/{scan_id}/http-transactions",
+    "methods": [
+      "GET"
+    ],
+    "name": "export_scan_transactions"
   },
   {
     "path": "/scans/{scan_id}/logs",

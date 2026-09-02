@@ -1194,6 +1194,18 @@ def test_trivy_bundle_build_retries_transient_registry_failures():
     assert "Trivy data download failed" in dockerfile
 
 
+def test_api_overlay_retries_partial_docker_cli_download_and_verifies_checksum():
+    dockerfile = (ROOT / "scanner" / "Dockerfile.api").read_text()
+    download = dockerfile.index("https://download.docker.com/linux/static/stable/")
+    checksum = dockerfile.index('echo "${expected}  /tmp/docker.tgz" | sha256sum -c -')
+    extraction = dockerfile.index("tar -xzf /tmp/docker.tgz")
+
+    assert "curl --retry 4 --retry-all-errors --retry-delay 3" in dockerfile
+    assert "--connect-timeout 20" in dockerfile
+    assert "--max-time 300" in dockerfile
+    assert download < checksum < extraction
+
+
 def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     requirements = (ROOT / "scanner" / "requirements.txt").read_text()
@@ -1422,6 +1434,31 @@ def test_full_rebuild_verifies_the_recreated_running_stack_before_success():
         "verify_running_build_identity"
     )
     assert rebuild.index("verify_running_build_identity") < rebuild.index("Rebuild complete")
+
+
+def test_ui_only_rebuild_recreates_and_verifies_only_the_ui_artifact():
+    script = (ROOT / "scanner.sh").read_text()
+    rebuild = script.split("rebuild_images() {", 1)[1].split(
+        "\n}\n\nrefresh_workers_after_rebuild", 1,
+    )[0]
+    verifier = script.split("verify_running_ui_identity() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'if [ "$SERVICES" = "ui" ]' in rebuild
+    assert 'refresh_running_service_after_rebuild ui "$existing_ui"' in rebuild
+    assert 'verify_running_ui_identity' in rebuild
+    assert rebuild.index('refresh_running_service_after_rebuild ui "$existing_ui"') < rebuild.index(
+        "verify_running_ui_identity"
+    )
+    assert "API and workers were not rebuilt or restarted" in rebuild
+    assert "verify_running_build_identity" not in rebuild.split(
+        'if [ "$SERVICES" = "ui" ] &&', 1,
+    )[1].split("fi", 1)[0]
+    assert "/api/build-identity" in verifier
+    assert ".source_revision // empty" in verifier
+    assert ".expected_api_build_fingerprint // empty" in verifier
+    assert 'build_versions_match "$expected_revision" "$ui_revision"' in verifier
+    assert 'SHAKERSCAN_EXPECTED_API_FINGERPRINT' in script
+    assert 'source_file_map(sys.argv[1])' in script
 
 
 def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networks():

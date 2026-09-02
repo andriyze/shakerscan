@@ -10,7 +10,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "profile_ceilings": {
         "balanced": 1200,
         "fast": 300,
-        "thorough": 3600
+        "thorough": 5400
       }
     },
     {
@@ -60,7 +60,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "profile_ceilings": {
         "balanced": 900,
         "fast": 180,
-        "thorough": 3600
+        "thorough": 7200
       }
     },
     {
@@ -119,13 +119,13 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     },
     "thorough": {
       "max_browser_actions": 1000,
-      "max_duration_seconds": 3600,
+      "max_duration_seconds": 5400,
       "max_endpoints": 10000,
       "max_hosts": 500,
       "max_http_requests": 20000,
       "max_state_changing_requests": 2000,
       "max_tcp_ports": 20000,
-      "max_tool_wall_seconds": 3600,
+      "max_tool_wall_seconds": 7200,
       "max_workers": 8
     }
   },
@@ -312,6 +312,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "baseline_capabilities": [
       "http.request",
       "dns.inspect",
+      "infrastructure.inspect",
       "tls.inspect"
     ],
     "default_families": [

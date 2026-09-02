@@ -507,6 +507,12 @@ export interface TimelineEvent {
   blocked_by?: string[]
   next_action?: string | null
   next_eligible_at?: string | null
+  dispatch_at?: string | null
+  frequency?: string | null
+  day_of_week?: number | null
+  time_of_day?: string | null
+  timezone?: string | null
+  jitter_minutes?: number | null
   scan_type?: string | null
   name?: string | null
   schedule_id?: string | null
@@ -1185,6 +1191,8 @@ export interface Scan {
   current_phase?: string
   score?: number
   grade?: string
+  // How much of the application the scan examined, scored independently of the findings.
+  assurance_score?: number | null
   findings_count: number
   created_at: string
   started_at?: string | null
@@ -1625,6 +1633,10 @@ export interface ModelIntakeAutomaticReview {
   progress: number
   effective_current_step?: string
   effective_progress?: number
+  progress_semantics?: 'workflow_lifecycle_percentage'
+  workflow_terminal?: boolean
+  required_technical_controls_complete?: boolean
+  required_technical_controls_status?: 'pending' | 'complete' | 'incomplete'
   active_runner_job_state?: string | null
   static_scan_status?: string | null
   static_scan_progress?: number | null
@@ -1956,6 +1968,37 @@ export interface AsmCoverageRollup {
   coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
   coverage_reconciles?: boolean
   attempted?: number
+  metric_contract?: AsmCoverageMetricContract
+}
+
+export interface AsmCoverageMetricContract {
+  schema_version: 'asm_coverage_metrics/v2' | string
+  snapshot_at?: string | null
+  inventory: {
+    canonical_routes: number
+    route_variants: number
+    retired_variants: number
+  }
+  examination: {
+    canonical_routes_ever_completed: number
+    variants_ever_completed: number
+    current_fresh_variants: number
+    stale_variants: number
+    never_attempted_variants: number
+  }
+  execution: {
+    attempts: number
+    latest_attempted_variants: number
+    latest_completed_variants: number
+    latest_partial_variants: number
+    latest_auth_blocked_variants: number
+    latest_rate_limited_variants: number
+    latest_error_variants: number
+  }
+  proof: {
+    proof_bearing_variants: number
+  }
+  definitions?: Record<string, string>
 }
 
 export interface Target {
@@ -1976,7 +2019,11 @@ export interface Target {
   created_at: string
   asm_coverage?: AsmCoverageRollup | null
   origins?: string[]
+  cohort?: TargetCohort
+  metadata_json?: Record<string, unknown>
 }
+
+export type TargetCohort = 'production' | 'staging' | 'lab' | 'demo' | 'calibration' | 'internal' | 'unclassified'
 
 export interface GroupedDomain {
   root_domain: string
@@ -2007,6 +2054,7 @@ export interface AsmCoverage {
   coverage: number
   coverage_basis?: 'attempt_ledger' | 'endpoint_status' | string
   coverage_reconciles?: boolean
+  metric_contract?: AsmCoverageMetricContract
   status_coverage?: Record<string, number | string>
   attempt_coverage?: Record<string, number | string>
   detail?: {
@@ -2029,9 +2077,27 @@ export interface AsmEndpoint {
   test_status: 'untested' | 'in_progress' | 'tested' | 'stale' | 'gone'
   last_attempt_status?: string | null
   last_verdict?: string | null
+  last_http_status?: number | null
+  unreachable_streak?: number
+  last_reachability_at?: string | null
+  provenance_kind?: 'response_observed' | 'declared_or_imported' | 'scanner_discovered' | 'unknown' | string
+  provenance_label?: string
+  provenance_explanation?: string
+  reachability_state?: 'reachable_observed' | 'unreachable_observed' | 'retired_unreachable' | 'not_checked' | 'inconclusive' | string
+  reachability_label?: string
+  reachability_explanation?: string
   first_seen_at?: string
   last_seen_at?: string
   last_tested_at?: string | null
+}
+
+export interface AsmInventorySemantics {
+  schema_version: string
+  informational_only: boolean
+  affects_score_or_grade: boolean
+  route_claim: string
+  provenance_counts_on_page?: Record<string, number>
+  reachability_counts_on_page?: Record<string, number>
 }
 
 export interface AsmRecommendation {
@@ -2234,6 +2300,8 @@ export interface Finding {
   target_url?: string
   target_name?: string
   scan_id?: string
+  first_seen_scan_id?: string | null
+  last_seen_scan_id?: string | null
   target_id?: string
   ai_target_id?: string | null
   device_target_id?: string | null
@@ -2261,6 +2329,12 @@ export interface Finding {
   last_verification_confidence?: number
   last_verified_at?: string
   verification_count?: number
+  latest_retest_status?: string | null
+  latest_retest_result_status?: string | null
+  latest_retest_verdict?: string | null
+  latest_retest_confidence?: number | null
+  latest_retest_completed_at?: string | null
+  latest_retest_mode?: 'deterministic' | 'ai_driven' | string | null
   // Single proof-state (docs §7): derived server-side so list and detail agree.
   is_verified?: boolean
   is_suspected?: boolean
@@ -2327,6 +2401,11 @@ export interface RetestRecord {
   auth_context?: Record<string, unknown> | null
   ai_plan?: Record<string, unknown> | null
   ai_reasoning?: string | null
+  deterministic_proof_state?: 'proven' | 'not_proven'
+  verdict_basis?: 'deterministic_proof' | 'ai_assessment' | 'execution_result'
+  primary_tested_endpoint?: string | null
+  tested_endpoints?: string[]
+  tested_scope?: 'single_endpoint' | 'multiple_endpoints'
   confidence?: number | null
   retry_class?: string | null
   retryable?: boolean
@@ -2352,6 +2431,7 @@ export interface WorkerInfo {
   status: string
   health?: string
   build_current?: boolean | null
+  build_fingerprint?: string | null
   scanner_version?: string | null
 }
 
@@ -2373,6 +2453,8 @@ export interface WorkerStats {
   fleet_uniform?: boolean
   stale_count?: number
   pending_count?: number
+  distinct_fingerprints?: string[]
+  expected_build_fingerprint?: string | null
   expected_scanner_version?: string
   execution_capacity?: {
     local_running: number
@@ -2861,6 +2943,7 @@ export interface ExposureAsset {
   root_domain?: string | null
   origin?: string | null
   exposure_class?: 'public' | 'internal' | 'supply_chain' | 'unknown' | string | null
+  cohort?: TargetCohort
   owner?: string | null
   environment?: string | null
   target_type?: string | null
@@ -2940,6 +3023,9 @@ export interface ExposureAssetsResponse {
   offset?: number
   new_count: number
   metrics: ExposureAssetMetrics
+  cohort?: string
+  cohort_counts?: Record<string, number>
+  truncated?: boolean
 }
 
 export interface ExposureAttackStep {
@@ -3824,46 +3910,9 @@ export interface AgentTwoTierFindings {
   suspected: AgentSuspectedFinding[]
 }
 
-export interface AgentVerifyResult {
-  finding_id: string
-  candidate_id?: string
-  verified: boolean
-  verified_finding_id: string | null
-  upgraded_in_place?: boolean
-  hypothesis_id?: string
-  superseded_suspected?: boolean
-  family_proof?: { verdict: string | null; promotable: boolean | null; novelty_gate: unknown }
-  error?: string
-}
-
 export async function getAgentTwoTierFindings(targetId: string): Promise<AgentTwoTierFindings> {
   const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(targetId)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load agent findings'))
-  return res.json()
-}
-
-export async function verifySuspectedAgentFinding(findingId: string, approvalReceiptId: string): Promise<AgentVerifyResult> {
-  const res = await fetch(`${API_URL}/agent/findings/${encodeURIComponent(findingId)}/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approval_receipt_id: approvalReceiptId }),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to verify finding'))
-  return res.json()
-}
-
-export async function planResearchEpisodeStep(episodeId: string, payload: {
-  execute?: boolean
-  timeout_seconds?: number
-  max_tokens?: number
-  created_by?: string
-} = {}): Promise<ResearchEpisodeDetail> {
-  const res = await fetch(`${API_URL}/research/episodes/${encodeURIComponent(episodeId)}/plan-step`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to run research planner step'))
   return res.json()
 }
 
@@ -3977,12 +4026,14 @@ export async function getExposureNodes(params?: {
 export async function getExposureAssets(params?: {
   root_domain?: string
   kind?: ExposureAssetKind
+  cohort?: 'operational' | 'non_operational' | TargetCohort | 'all'
   limit?: number
   offset?: number
 }): Promise<ExposureAssetsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.kind) searchParams.set('kind', params.kind)
+  if (params?.cohort) searchParams.set('cohort', params.cohort)
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.offset) searchParams.set('offset', String(params.offset))
   const query = searchParams.toString()
@@ -4035,10 +4086,11 @@ export async function updateTargetMetadata(
   targetId: string,
   metadata: Record<string, string>
 ): Promise<{ id: string; status: string }> {
+  const { cohort, ...metadataJson } = metadata
   const res = await fetch(`${API_URL}/targets/${targetId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ metadata_json: metadata }),
+    body: JSON.stringify({ metadata_json: metadataJson, ...(cohort ? { cohort } : {}) }),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update target metadata'))
   return res.json()
@@ -5452,7 +5504,11 @@ export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
 export async function getAsmEndpoints(
   targetId: string,
   params?: { status?: string; limit?: number; offset?: number }
-): Promise<{ endpoints: AsmEndpoint[]; coverage: AsmCoverage }> {
+): Promise<{
+  endpoints: AsmEndpoint[]
+  coverage: AsmCoverage
+  inventory_semantics?: AsmInventorySemantics
+}> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
   if (params?.limit) searchParams.set('limit', params.limit.toString())
@@ -5540,6 +5596,7 @@ export interface AsmConfig {
   window_end_hour: number | null
   window_days: number[] | null
   max_requests_per_hour_per_domain: number
+  approval_receipt_id: string | null
 }
 
 export interface AsmPolicy {
@@ -5601,11 +5658,11 @@ export async function getAsmActivity(
   return res.json()
 }
 
-export async function createTarget(url: string, name?: string) {
+export async function createTarget(url: string, name?: string, cohort?: Exclude<TargetCohort, 'unclassified'>) {
   const res = await fetch(`${API_URL}/targets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, name })
+    body: JSON.stringify({ url, name, cohort })
   })
   if (!res.ok) throw new Error('Failed to create target')
   return res.json()
@@ -5648,7 +5705,17 @@ export async function getFindings(params?: {
   sort_by?: 'severity' | 'first_seen' | 'last_seen' | 'cvss'
   sort_order?: 'asc' | 'desc'
   include_candidates?: boolean
-}): Promise<{ findings: Finding[]; total: number; limit: number; offset: number; candidates_total?: number; included_candidates?: number }> {
+  include_details?: boolean
+}): Promise<{
+  findings: Finding[]
+  total: number
+  limit: number
+  offset: number
+  details_included: boolean
+  omitted_detail_fields: string[]
+  candidates_total?: number
+  included_candidates?: number
+}> {
   const searchParams = new URLSearchParams()
   if (params?.severity) searchParams.set('severity', params.severity)
   if (params?.status) searchParams.set('status', params.status)
@@ -5672,6 +5739,7 @@ export async function getFindings(params?: {
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
   if (params?.include_candidates === true) searchParams.set('include_candidates', 'true')
+  if (params?.include_details === true) searchParams.set('include_details', 'true')
 
   const res = await fetch(`${API_URL}/findings?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch findings')
@@ -5714,7 +5782,12 @@ export interface EvidenceObject {
 // storage URI) for a finding — distinct from the embedded `finding.evidence` blob.
 export async function getFindingEvidence(
   id: string
-): Promise<{ finding_id: string; evidence_objects: EvidenceObject[] }> {
+): Promise<{
+  finding_id: string
+  original_finding_scan_id?: string | null
+  latest_observation_scan_id?: string | null
+  evidence_objects: EvidenceObject[]
+}> {
   const res = await fetch(`${API_URL}/findings/${id}/evidence`)
   if (!res.ok) throw new Error('Failed to fetch finding evidence objects')
   return res.json()
@@ -6597,7 +6670,10 @@ export interface AIInventoryCandidate {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | string
   confidence: number
   evidence: string[]
-  suggested_target: AITargetPayload
+  qualification: 'corroborated_candidate' | 'speculative_lead'
+  corroboration: string[]
+  contract_observed: boolean
+  suggested_target: AITargetPayload | null
 }
 
 export interface AIInventoryAsset {
@@ -6627,11 +6703,18 @@ export interface AIInventory {
   generated_at: string
   assets: AIInventoryAsset[]
   candidates: AIInventoryCandidate[]
+  leads: AIInventoryCandidate[]
   summary: {
     asset_count: number
     saved_ai_targets: number
     model_artifacts: number
     candidate_count: number
+    total_candidates?: number
+    candidates_truncated?: boolean
+    lead_count: number
+    total_leads?: number
+    leads_truncated?: boolean
+    quarantined_scan_count?: number
     by_type: Record<string, number>
     highest_blast_radius_score: number
     coverage_gaps: string[]

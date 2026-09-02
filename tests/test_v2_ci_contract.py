@@ -85,6 +85,25 @@ def test_v2_workflow_executes_new_runtime_contracts_and_release_gates():
     assert (ROOT / "api" / "hunt" / "capability_executor.py").is_file()
 
 
+def test_v2_workflow_executes_foundation_regressions_on_every_backend_change():
+    text = _workflow_text()
+
+    for test_file in (
+        "tests/test_http_archive.py",
+        "tests/test_hunt_authority_integrity.py",
+        "tests/test_hunt_direct_origin.py",
+        "tests/test_hunt_http_capability.py",
+        "tests/test_hunt_run_router.py",
+        "tests/test_hunt_skills.py",
+        "tests/test_runtime_credentials.py",
+        "tests/test_runtime_hardening.py",
+        "tests/test_scan_credentials.py",
+        "tests/test_scan_finalizer.py",
+        "tests/test_scan_risk_and_assurance.py",
+    ):
+        assert test_file in text, test_file
+
+
 def test_v2_workflow_is_valid_yaml_with_focused_contract_and_manual_stack_jobs():
     workflow = yaml.safe_load(_workflow_text())
 
@@ -166,7 +185,7 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
         encoding="utf-8",
     )
     assert 'SHAKERSCAN_E2E_SCAN_TARGET="http://juice-shop:3000"' in installed_smoke
-    assert "SHAKERSCAN_E2E_HUNT_TARGET" not in installed_smoke
+    assert 'SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000"' in installed_smoke
 
 
 def test_full_release_e2e_accepts_only_exact_v2_candidates():
