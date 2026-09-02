@@ -318,6 +318,7 @@ run_operational_candidate() {
     docker run --detach --name "$CANDIDATE_UI_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
+        -e HOSTNAME=0.0.0.0 \
         "$CANDIDATE_UI_IMAGE" >/dev/null
     local healthy=0
     # The candidate API runs the full schema migration on startup before it serves
@@ -406,6 +407,7 @@ run_operational_rollback() {
         --network "container:$SMOKE_CONTAINER" \
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
         -e NEXT_PUBLIC_APP_VERSION="$STABLE_VERSION" \
+        -e HOSTNAME=0.0.0.0 \
         "$BASELINE_UI_IMAGE" >/dev/null
     local healthy=0
     # Same cold-CI reasoning as the candidate readiness wait above: a fresh probe
