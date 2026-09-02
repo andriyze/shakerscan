@@ -17,7 +17,7 @@ schema_version: v2-surface-disposition/v1
 # Audited convergence baseline. The checker requires this exact commit to exist
 # and remain an ancestor of the current checkout; later work may only shrink the
 # pending-write backlog unless this baseline is deliberately advanced.
-source_head: 11ecfdd7b29e5259ea07b10649a2c4f5872198ce
+source_head: 9965afc0f73229e3a02a3deb689b593ea03c1c8b
 release_boundary: canonical_scan_hunt_with_transitional_compatibility_writes
 
 surfaces:
