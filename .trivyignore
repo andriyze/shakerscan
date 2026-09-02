@@ -1,0 +1,19 @@
+# Trivy ignore list for the release runtime images.
+#
+# Deliberate, reviewed HIGH/CRITICAL waivers only. Every entry names a concrete,
+# justified reason; anything without one must be fixed, not ignored. The
+# release-candidate workflow scans os,library vulns at HIGH,CRITICAL with
+# --ignore-unfixed, so only fixable findings ever reach this list.
+#
+# Review by: 2026-12-01
+#
+# --- Build-tool package metadata, not a runtime code path -------------------
+# The scanner/api images uninstall setuptools and msgpack as non-runtime build
+# tools (see scanner/Dockerfile: `pip uninstall -y --break-system-packages
+# msgpack setuptools` and the pip removal that follows), but Trivy still detects
+# leftover dist-info metadata for them. No shipped runtime module imports either
+# package, so these HIGH findings describe metadata, not exploitable code. The
+# genuinely runtime-vendored grpc finding (CVE-2026-84304) is FIXED in the image
+# instead, by building the Go tools against grpc >= 1.83.1.
+CVE-2025-47273
+GHSA-6v7p-g79w-8964
