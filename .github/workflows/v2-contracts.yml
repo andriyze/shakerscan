@@ -97,6 +97,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          # check_surface_dispositions.py verifies the manifest source_head is an
+          # ancestor of HEAD; the default shallow clone omits it and the ancestry
+          # check fails with "source_head is not an ancestor of the current checkout".
+          fetch-depth: 0
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
