@@ -320,14 +320,18 @@ run_operational_candidate() {
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
         "$CANDIDATE_UI_IMAGE" >/dev/null
     local healthy=0
-    for _attempt in $(seq 1 120); do
+    # The candidate API runs the full schema migration on startup before it serves
+    # /health, and each probe here spins a fresh (large) scanner container, so on a
+    # cold CI runner the real wall time per attempt is several seconds. 120 attempts
+    # timed out just before a stack that then came up cleanly; widen the window.
+    for _attempt in $(seq 1 300); do
         if docker run --rm --network "container:$SMOKE_CONTAINER" \
             --entrypoint sh "$SCANNER_IMAGE" -c \
             "curl -sf http://127.0.0.1:8080/health >/dev/null && curl -sf http://127.0.0.1:3000/ >/dev/null"; then
             healthy=1
             break
         fi
-        sleep 1
+        sleep 2
     done
     if [ "$healthy" -ne 1 ]; then
         echo "candidate API/UI did not become healthy on the upgraded database" >&2
@@ -404,14 +408,16 @@ run_operational_rollback() {
         -e NEXT_PUBLIC_APP_VERSION="$STABLE_VERSION" \
         "$BASELINE_UI_IMAGE" >/dev/null
     local healthy=0
-    for _attempt in $(seq 1 90); do
+    # Same cold-CI reasoning as the candidate readiness wait above: a fresh probe
+    # container per attempt makes each iteration several seconds, so widen the window.
+    for _attempt in $(seq 1 200); do
         if docker run --rm --network "container:$SMOKE_CONTAINER" \
             --entrypoint sh "$SCANNER_IMAGE" -c \
             "curl -sf http://127.0.0.1:8080/health >/dev/null && curl -sf http://127.0.0.1:3000/ >/dev/null"; then
             healthy=1
             break
         fi
-        sleep 1
+        sleep 2
     done
     if [ "$healthy" -ne 1 ]; then
         echo "previous-stable API/UI did not become healthy after rollback" >&2
