@@ -672,11 +672,21 @@ def _jwt_principal_identity(token):
         return None
     if not isinstance(claims, dict):
         return None
+    # Identity may sit at the top level or inside one nesting container -- Juice
+    # Shop issues ``{"data": {"email": ...}, "bid": ...}`` -- so search the top
+    # level first and then one level of nested objects, preserving key priority
+    # so a stable e-mail still outranks a numeric id in either location.
+    scopes = [claims]
+    scopes.extend(value for value in claims.values() if isinstance(value, dict))
     for key in ("email", "user_id", "userId", "username", "sub", "id"):
-        value = claims.get(key)
-        if isinstance(value, (str, int)) and str(value).strip():
-            normalized = str(value).strip().lower() if key in {"email", "username"} else str(value).strip()
-            return f"{key}:{normalized}"
+        for scope in scopes:
+            value = scope.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                normalized = (
+                    str(value).strip().lower()
+                    if key in {"email", "username"} else str(value).strip()
+                )
+                return f"{key}:{normalized}"
     return None
 
 

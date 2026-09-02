@@ -495,6 +495,18 @@ def test_jwt_principal_identity_requires_stable_account_claim():
     assert b._jwt_principal_identity("opaque-token") is None
 
 
+def test_jwt_principal_identity_reads_a_nested_identity_container():
+    # Juice Shop nests the account under ``data``; a top-level-only reader fails
+    # to prove two distinct principals and aborts the whole authenticated run.
+    u1 = _jwt(data={"id": 41, "email": "One@Example.Test", "role": "customer"}, bid=7)
+    u2 = _jwt(data={"id": 42, "email": "Two@Example.Test", "role": "customer"}, bid=8)
+    assert b._jwt_principal_identity(u1) == "email:one@example.test"
+    assert b._jwt_principal_identity(u2) == "email:two@example.test"
+    assert b._jwt_principal_identity(u1) != b._jwt_principal_identity(u2)
+    # A nested numeric id still resolves when no e-mail/username claim exists.
+    assert b._jwt_principal_identity(_jwt(data={"id": 42})) == "id:42"
+
+
 def test_principal_identity_fingerprint_is_bounded_and_non_claim():
     identity = "email:user@example.test"
     fingerprint = b._principal_identity_fingerprint(identity)
