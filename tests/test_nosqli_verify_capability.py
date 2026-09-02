@@ -124,7 +124,7 @@ def test_operator_set_differential_promotes_repeatably():
     proof = result.observations[0]
     assert proof["proof_state"] == "verified"
     assert proof["proof_contract"] == "nosqli_operator_differential/v1"
-    assert proof["technique"] == "operator_set_differential_repeated"
+    assert proof["technique"] == "operator_equality_complement_differential"
     assert proof["repetitions"] == 2
     assert len(proof["response_pairs"]) == 2
 
@@ -287,3 +287,107 @@ def test_a_server_error_on_the_operator_payload_is_never_proof():
     proof = result.observations[0]
     assert proof["proof_state"] == "not_proven"
     assert proof["finding_verdict"] == "not_proven"
+
+
+class QueryEchoTransport:
+    """A 200 endpoint that reflects the parsed query value back in its body.
+
+    Express parses ``q[$ne]=x`` into ``{"$ne": "x"}``; echoing that back makes
+    the operator response differ from the literal response for every request,
+    which a bare literal-vs-operator differential mistakes for interpretation.
+    """
+
+    async def send(self, request, **_kwargs):
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(request.url).query, keep_blank_values=True,
+        )
+        return _result(200, json.dumps({"searched": query}).encode("utf-8"))
+
+
+class RawQueryStringEchoTransport:
+    """A 200 permalink page that renders the raw query string verbatim."""
+
+    async def send(self, request, **_kwargs):
+        raw = urllib.parse.urlsplit(request.url).query
+        return _result(200, f"<p>You searched for: {raw}</p>".encode("utf-8"))
+
+
+class ConstantOperatorRejectionTransport:
+    """A 200 endpoint that answers any operator object with one constant page.
+
+    A type guard that rejects every ``field[<op>]`` shape with the same body
+    makes the ``$ne`` response differ from the literal yet be sentinel-stable,
+    which a differential-only oracle mistakes for an interpreted operator.
+    """
+
+    async def send(self, request, **_kwargs):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.url).query)
+        if any("[$" in key for key in query):
+            return _result(200, b'{"error":"operator objects are not allowed"}')
+        return _result(200, b'{"results":[]}')
+
+
+def test_reflected_query_value_is_never_mistaken_for_an_operator():
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "e" * 64, "method": "GET",
+            "parameter_name": "q", "request_class": "safe_read",
+        },
+        QueryEchoTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+    assert proof["finding_verdict"] == "not_proven"
+
+
+def test_raw_query_string_reflection_is_never_proof():
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "f" * 64, "method": "GET",
+            "parameter_name": "q", "request_class": "safe_read",
+        },
+        RawQueryStringEchoTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+
+
+def test_constant_operator_rejection_page_is_never_proof():
+    result = _run(
+        _request(url="https://app.example.test/rest/products/search?q=apple"),
+        {
+            "candidate_id": "0" * 64, "method": "GET",
+            "parameter_name": "q", "request_class": "safe_read",
+        },
+        ConstantOperatorRejectionTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"
+
+
+class BodyMessageEchoTransport:
+    """A 200 login-shaped endpoint that reflects the submitted value, no session."""
+
+    async def send(self, request, **_kwargs):
+        document = json.loads(request.body.decode("utf-8"))
+        return _result(200, json.dumps({"message": f"no user {document.get('email')!s}"}).encode("utf-8"))
+
+
+def test_body_reflection_without_a_session_is_never_auth_bypass():
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body=json.dumps({"email": "a@b.test", "password": "guess"}),
+            content_type="application/json",
+        ),
+        {
+            "candidate_id": "1" * 64, "method": "POST",
+            "field_path": "email", "request_class": "safe_authentication",
+            "request_ref_id": "exact-request",
+        },
+        BodyMessageEchoTransport(),
+    )
+    proof = result.observations[0]
+    assert proof["proof_state"] == "not_proven"

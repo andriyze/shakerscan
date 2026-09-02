@@ -255,43 +255,53 @@ class NoSQLiVerifyAdapter:
                 attempted_fields.append(field)
                 field_digest = hashlib.sha256(field.encode("utf-8")).hexdigest()[:8]
                 sentinel = f"shakerscan_nosqli_{candidate_id[:8]}_{field_digest}"
-                literal_request = self._literal(field, sentinel)
-                ne_request = self._operator(field, "$ne", sentinel)
-                pairs = [
-                    (await send(literal_request), await send(ne_request))
-                    for _ in range(2)
-                ]
                 technique = None
                 if request_class == "safe_authentication":
                     # Auth bypass: the sentinel password never matches; ``$ne``
-                    # matches every stored password, so a resulting session is proof.
+                    # matches every stored password, so a resulting authenticated
+                    # session is proof -- but only when the operator response itself
+                    # succeeded, so a stray cookie on an error page cannot forge one.
+                    pairs = [
+                        (
+                            await send(self._literal(field, sentinel)),
+                            await send(self._operator(field, "$ne", sentinel)),
+                        )
+                        for _ in range(2)
+                    ]
                     if all(
                         not literal.error_code and not payload.error_code
+                        and _succeeded(payload)
                         and not _identity_signal(literal) and _identity_signal(payload)
                         for literal, payload in pairs
                     ):
                         verified = True
                         technique = "operator_auth_bypass_repeated"
                 else:
-                    literal_prints = [_fingerprint(literal) for literal, _ in pairs]
-                    ne_prints = [_fingerprint(payload) for _, payload in pairs]
+                    # Semantic oracle. In a document store ``{field: {$eq: X}}`` is
+                    # identical to ``{field: X}`` while ``{field: {$ne: X}}`` is its
+                    # complement. An endpoint that merely echoes the value, stringifies
+                    # the operator object, or rejects every operator shape with one
+                    # constant response cannot satisfy BOTH "eq collapses onto the
+                    # literal" AND "ne diverges from it", so reflection can no longer
+                    # masquerade as an interpreted operator.
+                    r_literal = await send(self._literal(field, sentinel))
+                    r_ne = await send(self._operator(field, "$ne", sentinel))
+                    r_eq = await send(self._operator(field, "$eq", sentinel))
+                    r_ne_again = await send(self._operator(field, "$ne", sentinel))
+                    samples = (r_literal, r_ne, r_eq, r_ne_again)
+                    fp_literal = _fingerprint(r_literal)
+                    fp_ne = _fingerprint(r_ne)
+                    fp_eq = _fingerprint(r_eq)
+                    fp_ne_again = _fingerprint(r_ne_again)
+                    pairs = [(r_literal, r_ne), (r_literal, r_ne_again)]
                     if (
-                        all(
-                            not literal.error_code and not payload.error_code
-                            for literal, payload in pairs
-                        )
-                        # A differential is proof only when the operator was
-                        # interpreted and both requests still succeeded.
-                        and all(
-                            _succeeded(literal) and _succeeded(payload)
-                            for literal, payload in pairs
-                        )
-                        and literal_prints[0] == literal_prints[1]
-                        and ne_prints[0] == ne_prints[1]
-                        and ne_prints[0] != literal_prints[0]
+                        all(not item.error_code and _succeeded(item) for item in samples)
+                        and fp_ne == fp_ne_again      # the operator answer is stable
+                        and fp_eq == fp_literal        # {$eq:X} collapses onto literal X
+                        and fp_ne != fp_literal        # {$ne:X} is the complement, not X
                     ):
                         verified = True
-                        technique = "operator_set_differential_repeated"
+                        technique = "operator_equality_complement_differential"
 
                 observations.append({
                     "kind": "nosqli_proof",
