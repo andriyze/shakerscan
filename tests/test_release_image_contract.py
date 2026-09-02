@@ -128,7 +128,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
 
     assert "node:24-alpine@sha256:" in ui
     assert ui.count("apk add --no-cache --upgrade") == 2
-    assert ui.count("APK_TOOLS_VERSION=3.0.7-r0") == 2
+    assert ui.count("APK_TOOLS_VERSION=3.0.8-r0") == 2
     assert ui.count("OPENSSL_VERSION=3.5.8-r0") == 2
     assert ui.count("Pinned Alpine security update failed after 4 attempts") == 2
     assert "rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx" in ui
