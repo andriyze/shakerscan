@@ -83,3 +83,31 @@ def test_the_worker_uses_the_shared_rule():
     assert "_RECEIPT_SENSITIVE_KEYS" not in source, (
         "worker.py still carries its own exact-match key set"
     )
+
+
+def test_coverage_auth_state_labels_are_not_secrets_but_unknown_values_still_are():
+    # The public scan result carries which principal contexts ran; the release benchmark reads
+    # them back. Masking them to "***" made two minted principals look missing.
+    assert not key_is_sensitive("auth_states_tested", item=["user1", "user2"])
+    assert not key_is_sensitive("auth_states_tested", item=["anonymous"])
+    assert not key_is_sensitive("auth_states_tested", item=[])
+    assert not key_is_sensitive("auth_state", item="user2")
+    # Anything that is not a known label under these keys is still masked, and the key
+    # without a value is masked because the value cannot be inspected.
+    assert key_is_sensitive("auth_states_tested", item=["Bearer eyJhbGci"])
+    assert key_is_sensitive("auth_states_tested", item=["user1", "x-secret"])
+    assert key_is_sensitive("auth_states_tested")
+    assert key_is_sensitive("auth_header", item="Bearer abc")
+    assert key_is_sensitive("auth_headers_json", item='{"x": "y"}')
+
+
+def test_runtime_hardening_redactor_preserves_auth_state_labels():
+    from runtime import v2_runtime_hardening as hardening
+
+    redacted = hardening._redact_receipt_value({
+        "smart_coverage": {"auth_states_tested": ["user1", "user2"]},
+        "options": {"auth_header": "Bearer abc", "auth_states_tested": ["user1", "Bearer abc"]},
+    })
+    assert redacted["smart_coverage"]["auth_states_tested"] == ["user1", "user2"]
+    assert redacted["options"]["auth_header"] == "***"
+    assert redacted["options"]["auth_states_tested"] == "***"
