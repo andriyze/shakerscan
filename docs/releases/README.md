@@ -7,7 +7,7 @@ use `../release-readiness.md` plus `RELEASES.md` at the repository root.
 
 ## Published 2.0 line
 
-- [`2.0.1.md`](2.0.1.md) — candidate; not yet published or promoted.
+- [`2.0.1.md`](2.0.1.md) — published 2026-09-03 and promoted to the stable installer channel.
 - [`2.0.0.md`](2.0.0.md) — published 2026-09-03 and promoted to the stable installer channel.
 
 ## Published 0.8 line
