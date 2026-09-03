@@ -188,6 +188,8 @@ jobs:
           EOF
           # The certified receipt is attached so the evidence hashes outlive the 30-day
           # workflow-artifact retention that used to be their only home.
-          gh release create "v${VERSION}" --verify-tag \
+          # --verify-tag attaches to the annotated tag created above; --target keeps the exact
+          # candidate SHA as the release's target commit (promote-stable reads it back).
+          gh release create "v${VERSION}" --verify-tag --target "$CANDIDATE_SHA" \
             --title "ShakerScan v${VERSION}" --notes-file release-notes.md \
             release-image-lock.env release-candidate-receipt.json

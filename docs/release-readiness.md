@@ -1,11 +1,11 @@
 # ShakerScan 2.0.0 Release Readiness
 
-**Status (reconciled 2026-08-29): candidate preparation; not approved for publication.** Earlier V2
-source/manual passes predate subsequent behavior changes and are regression evidence only; fresh
-current-head checks and frozen-candidate qualification remain separate gates. `VERSION` and release
-notes are prepared for 2.0.0, but no release tag, candidate image publication, GitHub Release, `latest` alias, hosted
-installer change, or stable-channel promotion is authorized by this document. The stable installer
-must remain on 0.8.18 until every frozen-candidate gate below has a successful exact-SHA receipt.
+**Status (2026-09-03): 2.0.0 published and promoted.** Candidate run 33714172205 on `9d207661`
+passed exact-manifest certification with the authorized declared-debt waivers, promotion run
+33717500565 published the digests and the GitHub Release, the public install smoke passed, and
+`install/STABLE_VERSION` moved to 2.0.0. The checklist below is retained as the template for the
+next release; its unchecked items describe work that was deliberately declared as debt, not gates
+that were skipped.
 
 This is the live release checklist. Source, migrations, generated inventories, immutable runtime
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
