@@ -479,13 +479,51 @@ def amended_scan_plan_revision(
     )
 
 
+def reconciled_continuation_ceiling(
+    allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference] | None,
+) -> dict[str, int]:
+    """The frozen continuation ceiling plus what the settled parent actions gave back.
+
+    Root actions are admitted on worst-case reservations, and the ceiling frozen at
+    submission is the residual after those holds. Discovery routinely settles far
+    below its hold -- a balanced crawl of a single-page application reserved 345 wall
+    seconds and used 74 -- and keeping the ceiling static starved the stage the Scan
+    exists to reach: the SQL injection verifier was scaled to its 30-second floor
+    tier, ``prove.xss`` was skipped for wall budget, and the run finished with two
+    thirds of its wall and all of its state-changing allowance unspent and nothing
+    proven. Reserve before execution, reconcile after: this is the reconciliation.
+
+    Each settled parent result returns ``reserved - consumed`` per dimension (a
+    result cannot consume more than it reserved; the result model rejects that), so
+    the sum never exceeds the profile ceiling minus what the parent actually spent.
+    Only dimensions the frozen ceiling declares can grow; a dimension the root plan
+    never held stays as the submission froze it.
+    """
+    ceiling = {name: int(amount) for name, amount in allocation.budget_ceiling.items()}
+    for action_id in allocation.parent_action_ids:
+        result = (parent_results or {}).get(action_id)
+        if result is None:
+            continue
+        reserved = dict(result.budget_reserved or {})
+        consumed = dict(result.budget_consumed or {})
+        for name in ceiling:
+            ceiling[name] += int(reserved.get(name, 0)) - int(consumed.get(name, 0))
+    return {name: max(0, amount) for name, amount in ceiling.items()}
+
+
 def merge_scan_action_continuation(
     *,
     parent_plan: ScanActionPlan,
     continuation_plan: ScanActionPlan,
     allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference] | None = None,
 ) -> ScanActionPlan:
-    """Append a digest-bound continuation without changing executed actions."""
+    """Append a digest-bound continuation without changing executed actions.
+
+    With ``parent_results`` the continuation is bounded by the reconciled ceiling
+    (see ``reconciled_continuation_ceiling``); without them, by the frozen one.
+    """
     if (
         parent_plan.scan_id != allocation.scan_id
         or parent_plan.plan_digest != allocation.parent_plan_digest
@@ -552,7 +590,8 @@ def merge_scan_action_continuation(
             )
         appended.append(action)
 
-    consumed = {name: 0 for name in allocation.budget_ceiling}
+    ceiling = reconciled_continuation_ceiling(allocation, parent_results)
+    consumed = {name: 0 for name in ceiling}
     for action in (*appended, finalizers[0]):
         for name, amount in action.requested_budget.items():
             if name not in consumed:
@@ -561,9 +600,9 @@ def merge_scan_action_continuation(
                 )
             consumed[name] += amount
     shortages = {
-        name: consumed[name] - allocation.budget_ceiling[name]
+        name: consumed[name] - ceiling[name]
         for name in consumed
-        if consumed[name] > allocation.budget_ceiling[name]
+        if consumed[name] > ceiling[name]
     }
     if shortages:
         raise ScanContinuationError(
