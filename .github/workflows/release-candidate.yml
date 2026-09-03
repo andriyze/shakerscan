@@ -1027,10 +1027,15 @@ jobs:
       - name: Build exact-digest preservation receipt
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+          WAIVE_E2E_DEBT: ${{ inputs.waive_e2e_debt }}
         shell: bash
         run: |
           receipt=artifacts/uncertified/release-candidate-receipt.json
-          python3 scripts/release_preservation.py \
+          preservation_args=()
+          if [[ "$WAIVE_E2E_DEBT" == "true" ]]; then
+            preservation_args+=(--declared-debt)
+          fi
+          python3 scripts/release_preservation.py "${preservation_args[@]}" \
             --matrix tests/release_preservation_matrix.json \
             --junit artifacts/certification/v2-full-python.xml \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \

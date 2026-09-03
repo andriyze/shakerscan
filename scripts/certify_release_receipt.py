@@ -25,8 +25,10 @@ CERTIFICATION_CHECK_ACCEPTED_STATES: dict[str, frozenset[str]] = {
     "model_intake_acceptance": frozenset({"pass"}),
     "source_and_image_identity": frozenset({"pass"}),
     "e2e_subject_binding": frozenset({"pass"}),
-    "complete_dast_quality_bar": frozenset({"pass"}),
-    "dast_release_quality_contract": frozenset({"pass"}),
+    # An authorized declared-debt release records the measured shortfall, never a pass; the
+    # promotion validator additionally requires the matching scope-exclusion record.
+    "complete_dast_quality_bar": frozenset({"pass", "waived_declared_debt"}),
+    "dast_release_quality_contract": frozenset({"pass", "waived_declared_debt"}),
     "fault_cancellation": frozenset({"pass"}),
     "fault_reservation_identity": frozenset({"pass"}),
     "fault_action_resume": frozenset({"pass"}),
@@ -123,6 +125,14 @@ def certify_receipt(
         raise CertificationError("preservation receipt does not bind the final image digests")
     if preservation.get("scope_exclusions") != []:
         raise CertificationError("preservation receipt must include deterministic Model Intake")
+    preservation_debt = preservation.get("declared_debt_controls") or []
+    if not isinstance(preservation_debt, list):
+        raise CertificationError("preservation declared-debt controls must be a list")
+    if preservation_debt and not waive_e2e_declared_debt:
+        raise CertificationError(
+            "preservation receipt records declared-debt controls, but this release did not "
+            "authorize installed-stack E2E debt"
+        )
 
     if e2e.get("schema_version") != "shakerscan-e2e-scorecard/v1" or e2e.get("gate") != "pass":
         raise CertificationError("exact-manifest installed-stack E2E did not pass")
@@ -319,6 +329,15 @@ def certify_receipt(
                     "checks": declared_debt_rows,
                 }
             ] if declared_debt_rows else []),
+            # Preservation controls whose only evidence is a declared-debt check, recorded by
+            # control so the matrix never silently loses coverage.
+            *([
+                {
+                    "boundary": "mature_subsystem_preservation_declared_debt",
+                    "state": "waived_declared_debt",
+                    "controls": preservation_debt,
+                }
+            ] if preservation_debt else []),
         ],
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),
