@@ -35,7 +35,7 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
 
   const [response] = await Promise.all([
     page.waitForResponse((candidate) => isApiResponse(candidate, API_URL, '/hunts')),
-    page.getByRole('button', { name: 'Start Hunt' }).click(),
+    page.getByRole('button', { name: 'Open agent session' }).click(),
   ])
   expect(response.ok()).toBeTruthy()
   expect(response.headers()['x-shakerscan-hunt-contract']).toBe('v2')
