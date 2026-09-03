@@ -90,6 +90,11 @@ def certify_receipt(
     provenance = candidate.get("provenance")
     if not isinstance(provenance, Mapping) or provenance.get("verified") is not True:
         raise CertificationError("candidate provenance was not verified")
+    # The installer verifies every host-side runtime file against install/MANIFEST.sha256 and the
+    # manifest against the published image lock; the lock is written from this field at promotion.
+    runtime_manifest = candidate.get("runtime_manifest_sha256")
+    if not isinstance(runtime_manifest, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_manifest):
+        raise CertificationError("candidate receipt does not bind the runtime manifest digest")
 
     if upgrade.get("schema_version") != "stateful-upgrade-acceptance/v2":
         raise CertificationError("unsupported upgrade receipt schema")
@@ -251,6 +256,7 @@ def certify_receipt(
         "checks_schema_version": CERTIFICATION_CHECKS_SCHEMA_VERSION,
         "source_sha": source_sha,
         "images": dict(sorted(images.items())),
+        "runtime_manifest_sha256": runtime_manifest,
         "checks": {
             "exact_manifest_installed_stack_e2e": "pass",
             "stateful_previous_stable_upgrade": "pass",

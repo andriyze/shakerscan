@@ -1504,7 +1504,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 18 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 364 | Python sources + Compose manifests |
+| Runtime environment keys | 367 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 119 | `scanner/scanner_tools/` |
 | UI pages | 37 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2320,6 +2320,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DEVICE_SCAN_WORKER_ENABLED` | `api/worker.py` |
 | `DEVICE_SSH_AUTH_COOLDOWN_SECONDS` | `api/worker.py` |
 | `DEVICE_SSH_AUTH_DAILY_FAILURE_CAP` | `api/worker.py` |
+| `DOCKERHUB_TOKEN` | `scripts/cleanup_candidate_tags.py` |
+| `DOCKERHUB_USERNAME` | `scripts/cleanup_candidate_tags.py` |
 | `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
 | `ENV` | `scanner/scanner_tools/remediation_kb.py` |
 | `EVIDENCE_INLINE_MAX_BYTES` | `api/evidence_storage.py` |
@@ -2368,6 +2370,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_WORKER_IMAGE_DIGEST` | `api/api.py`, `api/fleet_routes/router.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_WORKER_MEMORY_LIMIT` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FULL_COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
+| `GITHUB_REPOSITORY` | `scripts/apply_main_ruleset.py` |
 | `GITHUB_TOKEN` | `scanner/scanner.py` |
 | `GIT_COMMIT` | `api/api.py`, `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/release_identity.py` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `api/worker.py` |

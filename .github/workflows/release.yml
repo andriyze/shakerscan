@@ -77,8 +77,11 @@ jobs:
           [[ -n "$receipt" ]]
           python3 scripts/validate_promotion_receipt.py --receipt "$receipt"
           jq -e --arg version "$VERSION" --arg sha "$CANDIDATE_SHA" \
-            '.schema_version == "shakerscan-release-candidate/v2" and .version == $version and .candidate_sha == $sha and (.candidate_tag | test("^candidate-[0-9a-f]{40}-[0-9]+$")) and ([.images[] | test("^sha256:[0-9a-f]{64}$")] | all) and .provenance.verified == true and .provenance.issuer == "github-actions-sigstore" and .provenance.repository == env.GITHUB_REPOSITORY and .certification.status == "pass" and .certification.source_sha == $sha and .certification.images == .images and ([.certification.evidence_sha256[] | test("^[0-9a-f]{64}$")] | all)' \
+            '.schema_version == "shakerscan-release-candidate/v2" and .version == $version and .candidate_sha == $sha and (.candidate_tag | test("^candidate-[0-9a-f]{40}-[0-9]+$")) and ([.images[] | test("^sha256:[0-9a-f]{64}$")] | all) and .provenance.verified == true and .provenance.issuer == "github-actions-sigstore" and .provenance.repository == env.GITHUB_REPOSITORY and .certification.status == "pass" and .certification.source_sha == $sha and .certification.images == .images and ([.certification.evidence_sha256[] | test("^[0-9a-f]{64}$")] | all) and (.runtime_manifest_sha256 | test("^[0-9a-f]{64}$"))' \
             "$receipt"
+          # The host-side runtime the installer will download must be the tree that was certified.
+          python3 scripts/generate_install_manifest.py --check
+          [[ "$(sha256sum install/MANIFEST.sha256 | awk '{print $1}')" == "$(jq -r '.runtime_manifest_sha256' "$receipt")" ]]
           cp "$receipt" release-candidate-receipt.json
 
       - name: Reverify signed candidate provenance
@@ -132,6 +135,30 @@ jobs:
           promote "$UI_IMAGE" ui
           promote "$SIGNER_IMAGE" signer
 
+      - name: Create the annotated release tag
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        shell: bash
+        run: |
+          # `gh release create` makes a lightweight tag. An annotated tag carries the candidate
+          # binding in the tag object itself and is what the installer and ledger point at, so it
+          # is created first and the release attaches to it. An existing tag must already name
+          # this candidate; a tag is never moved.
+          git fetch --no-tags origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/v${VERSION}^{commit}" >/dev/null; then
+            [[ "$(git rev-parse "refs/tags/v${VERSION}^{commit}")" == "$CANDIDATE_SHA" ]]
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v${VERSION}" "$CANDIDATE_SHA" \
+              -m "ShakerScan v${VERSION}" \
+              -m "candidate_sha=${CANDIDATE_SHA}" \
+              -m "candidate_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}"
+            git push origin "refs/tags/v${VERSION}"
+          fi
+
       - name: Create provenance-rich GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -144,9 +171,10 @@ jobs:
             "SCANNER_IMAGE=shakerscan/shakerscan-scanner@" + .images.scanner,
             "API_IMAGE=shakerscan/shakerscan-api@" + .images.api,
             "UI_IMAGE=shakerscan/shakerscan-ui@" + .images.ui,
-            "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@" + .images.signer
+            "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@" + .images.signer,
+            "RUNTIME_MANIFEST_SHA256=" + .runtime_manifest_sha256
           ' release-candidate-receipt.json > release-image-lock.env
-          test "$(wc -l < release-image-lock.env | tr -d ' ')" = 4
+          test "$(wc -l < release-image-lock.env | tr -d ' ')" = 5
           cp "docs/releases/${VERSION}.md" release-notes.md
           cat >> release-notes.md <<EOF
 
@@ -154,8 +182,12 @@ jobs:
 
           - Candidate commit: \`${CANDIDATE_SHA}\`
           - Candidate workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}
+          - Runtime manifest: \`$(jq -r '.runtime_manifest_sha256' release-candidate-receipt.json)\`
+          - Certified receipt: attached as \`release-candidate-receipt.json\`
           - Stable installer and \`latest\` are promoted separately after public smoke.
           EOF
-          gh release create "v${VERSION}" --target "$CANDIDATE_SHA" \
+          # The certified receipt is attached so the evidence hashes outlive the 30-day
+          # workflow-artifact retention that used to be their only home.
+          gh release create "v${VERSION}" --verify-tag \
             --title "ShakerScan v${VERSION}" --notes-file release-notes.md \
-            release-image-lock.env
+            release-image-lock.env release-candidate-receipt.json

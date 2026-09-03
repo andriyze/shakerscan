@@ -2,6 +2,8 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -217,7 +219,15 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert 'STABLE_VERSION="$(tr -d' in script
     assert 'BASELINE_REF:-v${STABLE_VERSION}' in script
     assert "previous-stable API/UI did not become healthy" in script
-    assert "shakerscan/shakerscan-scanner@sha256:1bfdd22e87bf90cead6a2c38cd98abd94c5a8eadeea9cee351ea9a484bd1d1fd" in script
+    # The previous-stable images are read from the RELEASES.md ledger row for the stable channel,
+    # never hardcoded, so advancing install/STABLE_VERSION cannot leave the smoke on stale digests.
+    assert 'BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image scanner)}"' in script
+    ledger = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "release_ledger.py"), "--version",
+         (ROOT / "install" / "STABLE_VERSION").read_text(encoding="utf-8").strip(), "--image", "scanner"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert ledger.startswith("shakerscan/shakerscan-scanner@sha256:")
     assert "run_baseline_migrations scanner_dirty" in script
     assert 'docker restart "$SMOKE_CONTAINER"' in script
     assert "run_scenario scanner_dirty verify_dirty" in script

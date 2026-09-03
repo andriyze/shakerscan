@@ -165,11 +165,17 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
     )
 
     assert 'echo "ui=true" >> "$GITHUB_OUTPUT"' in smoke
-    assert "steps.changes.outputs.ui == 'true'" in smoke
+    assert 'echo "backend=true" >> "$GITHUB_OUTPUT"' in smoke
+    # Browser acceptance runs whenever the stack is up; the deterministic E2E areas run only for
+    # backend changes, so a UI-only PR never pays for the backend suite.
+    assert "steps.changes.outputs.stack == 'true'" in smoke
+    assert "steps.changes.outputs.backend == 'true'" in smoke
     assert "npm --prefix ui run test:unit" in smoke
     assert "npm --prefix ui run test:browser" in smoke
-    assert "python3 tests/e2e/run_e2e.py --area hunt" in smoke
-    assert "--area model_intake" not in smoke
+    areas_step = smoke[smoke.index("Run every deterministic E2E area"):]
+    assert "if: steps.changes.outputs.backend == 'true'" in areas_step[:200]
+    assert "python3 tests/e2e/run_e2e.py --area all" in smoke
+    assert "docker compose --profile e2e up -d" in smoke
     assert "test_model_intake_signature_crypto.py" not in smoke
     assert "scripts/run_complete_python_suite.py" not in smoke
     assert "node-version: 24" in smoke
@@ -188,15 +194,17 @@ def test_ui_only_prs_run_portable_ui_and_browser_gates_without_backend_suite():
     assert 'SHAKERSCAN_E2E_HUNT_TARGET="http://juice-shop:3000"' in installed_smoke
 
 
-def test_full_release_e2e_accepts_only_exact_v2_candidates():
+def test_full_release_e2e_accepts_only_exact_main_candidates():
     text = (ROOT / ".github" / "workflows" / "e2e.yml").read_text(
         encoding="utf-8",
     )
 
-    assert 'description: "Exact approved commit SHA on v2"' in text
-    assert "refs/heads/v2:refs/remotes/origin/v2" in text
-    assert 'git merge-base --is-ancestor "$candidate_sha" origin/v2' in text
-    assert "origin/main" not in text
+    # The candidate must be reachable from the protected default branch; the historical `v2`
+    # integration branch is stale and would reject every current candidate.
+    assert 'description: "Exact approved commit SHA on main"' in text
+    assert "refs/heads/main:refs/remotes/origin/main" in text
+    assert 'git merge-base --is-ancestor "$candidate_sha" origin/main' in text
+    assert "origin/v2" not in text
 
 
 def test_release_candidate_requires_candidate_image_external_wire_acceptance():

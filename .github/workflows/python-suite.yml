@@ -1,0 +1,93 @@
+name: Python suite
+
+# The complete Python suite used to run only inside the release candidate, after every image had
+# been built: a red unit test cost an hour of pipeline before anyone saw it, and `main` could be
+# red for days. This job runs the same partitioned suite the candidate runs, from the same locked
+# dependency set, on every pull request and on every push to main. It is a required check.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-suite-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  python-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether any Python-visible file changed
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A required check must always report. Metadata-only changes (docs, release notes, the
+          # stable-channel pointer, the ruleset) report success without running the suite; anything
+          # that cannot be classified fails closed into running everything.
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          run=false
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            case "$path" in
+              docs/*|*.md|install/STABLE_VERSION|.github/rulesets/*|LICENSE|.gitignore) ;;
+              *) run=true ;;
+            esac
+          done <<< "$changed"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Skip for metadata-only changes
+        if: steps.changes.outputs.run != 'true'
+        run: echo "No Python-visible change; the complete suite is not required."
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        if: steps.changes.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+
+      - name: Install the locked candidate dependency set
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes \
+            -r scanner/requirements.lock
+
+      - name: Run the complete partitioned Python suite
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          mkdir -p artifacts
+          python scripts/run_complete_python_suite.py --artifacts-dir artifacts
+
+      - name: Verify generated inventories and the installer manifest
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          python scripts/generate_capability_inventory.py --check
+          python scripts/generate_install_manifest.py --check
+          python scripts/check_installed_import_closure.py
+          python scripts/check_module_size.py
+
+      - name: Upload JUnit report
+        if: always() && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: python-suite-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/v2-full-python.xml
+          if-no-files-found: error
+          retention-days: 14

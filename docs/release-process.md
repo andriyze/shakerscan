@@ -1,41 +1,58 @@
 # Release process
 
-**Status:** current immutable-candidate publication process; reconciled 2026-08-29.
+**Status:** current immutable-candidate publication process; revised 2026-09-03.
 
-ShakerScan releases use one immutable source commit and one set of image digests. Building,
-accepting, publishing, and moving the stable channel are separate gates.
+ShakerScan releases use one immutable source commit and one set of image digests. Protecting
+`main`, building, accepting, publishing, and moving the stable channel are separate gates, and each
+gate runs *before* the change it guards becomes visible to anyone.
 
-## Repository controls
+## 0. Repository controls
 
-Import `.github/rulesets/main.json` as the active `main` ruleset. Confirm the required check names in
-the repository UI after their first run, because GitHub check contexts are repository-specific.
-Store Docker Hub credentials as repository secrets.
+`.github/rulesets/main.json` is the source of truth for how `main` is protected. It requires a pull
+request, resolved review threads, linear history, no bypass actors, and three required checks that
+report on every pull request:
 
-The committed ruleset requires a PR, resolved conversations, linear history, current required checks,
-and no bypass actors. It does not require an approving or independent reviewer. The **Commit policy** check rejects `release:` commits that
-also change product, runtime, migration, test, or operational code. Use `fix(scope):`,
-`feat(scope):`, `refactor(scope):`, or `test(scope):` for behavioral work; reserve `release:` for
-version, notes, and provenance metadata.
+| Check | Workflow | What it proves |
+| --- | --- | --- |
+| `commit-policy` | `commit-policy.yml` | A `release:` commit carries only metadata (`VERSION`, notes, ledger, `install/STABLE_VERSION`). |
+| `python-suite` | `python-suite.yml` | The complete partitioned Python suite, generated inventories, the installer manifest, the import closure, and the module-size ratchet pass from the locked dependency set. |
+| `smoke` | `e2e-pr.yml` | Every deterministic E2E area and the real-stack browser acceptance pass on the built stack with the pinned Juice Shop. |
+
+A committed ruleset is a promise until it is imported. Apply and verify it with:
+
+```bash
+python3 scripts/apply_main_ruleset.py --apply    # create or update the live ruleset from the file
+python3 scripts/apply_main_ruleset.py --check    # exit 1 when main is under-protected
+```
+
+The **Release candidate** workflow runs the same `--check` and refuses to build from an
+unprotected `main`. The ruleset does not require an approving reviewer; CODEOWNERS routes review
+requests only. Store Docker Hub credentials as repository secrets.
 
 ## 1. Freeze and build a candidate
 
 Merge the intended commit through protected `main`, obtain successful exact-SHA CodeQL, then run
 **Release candidate** with `version`, the exact 40-character SHA, and the CodeQL run ID. Optional
 real-fleet Scan parity, Model Intake physical acceptance, and Connected Device physical acceptance
-run IDs may be supplied when those support boundaries are being qualified. The workflow verifies
-every supplied workflow identity, conclusion, and head SHA, runs the frozen-source gates and native builds,
-bakes version plus source revision into `/opt/shakerscan/release-manifest.json`, pushes only
-`candidate-<sha>-<run-id>` multi-architecture manifests, and uploads
-`release-candidate-receipt.json`. Each platform build publishes BuildKit provenance and an SBOM;
-the final multi-architecture scanner, API, UI, and signer digests receive GitHub/Sigstore build
-attestations that are verified immediately and recorded in the receipt. The final four manifest
-digests are scanned for unwaived high/critical vulnerabilities before certification. The
-exact-manifest installed-stack run includes deterministic Model Intake fixture acceptance, and the
-preservation receipt must cover the Model Intake program; only physical KVM qualification remains
-optional.
+run IDs may be supplied when those support boundaries are being qualified.
+
+The workflow verifies every supplied workflow identity, conclusion, and head SHA; checks that
+`install/MANIFEST.sha256` is current and that `main` is protected; runs the frozen-source gates and
+native builds; bakes version plus source revision into `/opt/shakerscan/release-manifest.json`;
+pushes only `candidate-<sha>-<run-id>` multi-architecture manifests; and uploads
+`release-candidate-receipt.json`. The receipt binds the four final image digests, the signed
+provenance verification, and the digest of the installer manifest. Each platform build publishes
+BuildKit provenance and an SBOM; the final multi-architecture digests receive GitHub/Sigstore build
+attestations that are verified immediately. Vulnerability scans of the four final manifests run in
+parallel with certification; both must succeed for the run to be promotable.
+
+Certification runs the exact-manifest installed-stack E2E, the stateful previous-stable upgrade and
+rollback (baseline digests read from `RELEASES.md`), the preservation matrix, the DAST recall
+benchmark, and the fault receipts, then seals the promotion-ready receipt.
 
 Never deploy by a mutable version or `latest` during acceptance. Use the candidate tag or, for the
-strongest binding, the digests in the receipt.
+strongest binding, the digests in the receipt. Any application-code change creates a new candidate
+SHA and requires a new candidate build.
 
 ## 2. Optional physical support-boundary acceptance
 
@@ -44,38 +61,47 @@ hosted-installer control plane with multiple broker VPS nodes on the exact candi
 receipts exercise host-specific support boundaries; they are optional operational evidence, not a
 release-promotion requirement. An omitted receipt is recorded as not run, never passed.
 
-Any application-code change creates a new candidate SHA and requires a new candidate build. Do not
-patch a live candidate and keep the old build receipt.
-
 ## 3. Publish the immutable version
 
 Run **Promote release** with the version, candidate SHA, and candidate workflow run ID. The workflow
-verifies that the candidate succeeded for the exact SHA, downloads its receipt, compares every
-registry digest, re-verifies every signed provenance attestation, and creates version tags from
-those digests. It performs no build. The GitHub
-Release records build provenance. `latest` and the installer remain unchanged.
+verifies that the candidate run succeeded for the exact SHA, downloads its receipt, checks the
+installer manifest digest against the checked-out tree, compares every registry digest, re-verifies
+every signed provenance attestation, creates version tags from those digests, and creates an
+**annotated** `v<version>` git tag on the candidate commit. It performs no build. The GitHub Release
+attaches `release-image-lock.env` (four image digests plus `RUNTIME_MANIFEST_SHA256`) and the
+certified `release-candidate-receipt.json`, so the evidence outlives workflow-artifact retention.
+`latest` and the installer remain unchanged.
+
+Promotion must happen within the candidate artifact's 30-day retention; afterwards, cut a new
+candidate. Expired `candidate-*` tags are removed by the **Candidate tag cleanup** workflow, which
+is a dry run unless dispatched with `delete: true`.
 
 ## 4. Public smoke and stable promotion
 
 Test the published version as a new user would. At minimum run
 `scripts/public_install_smoke.sh <version>`, which uses the public curl installer in an empty
-temporary home and verifies the installed version plus UI, API, and worker identity. Model Intake is
-explicitly excluded from this release's public smoke receipt. The smoke passes
-`SHAKERSCAN_INSTALL_VERSION` to the public installer so it tests the
-published immutable version before the stable channel moves; ordinary installs leave that variable
-unset and continue to resolve `install/STABLE_VERSION`. Continue with the stateful upgrade, rollback,
-doctor/status, agent/MCP launch, and a bounded scan. Optional Model Intake or remote Fleet checks
-belong in their separate support-boundary receipts.
-Preserve the generated content-free receipt and hash.
+temporary home and verifies the installed version plus UI, API, and worker identity. The installer
+verifies every downloaded runtime file against `install/MANIFEST.sha256` and the manifest against
+the published lock, so a moved tag or a mismatched tree fails the install instead of activating.
+Model Intake is explicitly excluded from this release's public smoke receipt. Continue with the
+stateful upgrade, rollback, doctor/status, agent/MCP launch, and a bounded scan. Preserve the
+generated content-free receipt and hash.
 
-Only then merge a small PR changing `install/STABLE_VERSION`. Run **Promote stable channel** with the
-version and smoke receipt. The workflow validates the receipt schema and every required clean-install
-check, confirms the public non-draft release and stable-version file, then moves each `latest` alias
-to the already-published version digest. It does not rebuild.
+Then run **Promote stable channel** with the version and smoke receipt. In this order, the workflow:
+
+1. validates the receipt schema, hash, source SHA, and image digests against the release lock;
+2. moves each `latest` alias to the already-published version digest without rebuilding;
+3. pushes a `release/stable-<version>` branch that bumps `install/STABLE_VERSION` and prints the
+   `gh pr create` command in the run summary.
+
+Open and merge that pull request last. The hosted installer resolves `install/STABLE_VERSION`
+from `main` at request time, so the merge is the public promotion; every gate above has already
+run by then. The Cloudflare worker serves the bootstrap script from the resolved release tag, so
+`main` no longer carries live installer code.
 
 ## Stop conditions
 
 Stop and cut a new candidate for any identity mismatch, stale fleet, failed or missing coverage,
-heartbeat authority loss, migration failure, digest drift, build-receipt mismatch, unaccepted
-high/critical dependency finding, or public smoke regression. Roll back by
+heartbeat authority loss, migration failure, digest drift, build-receipt mismatch, manifest
+mismatch, unaccepted high/critical dependency finding, or public smoke regression. Roll back by
 pinning the previous immutable version/digest; do not overwrite an existing version tag.

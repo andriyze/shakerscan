@@ -14,23 +14,29 @@ FUNCTIONAL_ROOTS = {
     "docker-compose.broker-worker.yml", "scanner.sh",
 }
 
+# Release metadata that lives under a functional root. The stable-channel pointer is moved by a
+# `release:` commit after public smoke; treating it as product code would reject the one commit the
+# release process requires to carry that label.
+RELEASE_METADATA_PATHS = {
+    "install/STABLE_VERSION",
+}
+
 
 def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
 def is_functional(path: str) -> bool:
+    if path in RELEASE_METADATA_PATHS:
+        return False
     first = PurePosixPath(path).parts[0] if PurePosixPath(path).parts else path
     return first in FUNCTIONAL_ROOTS
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base", required=True)
-    parser.add_argument("--head", required=True)
-    args = parser.parse_args()
+def check_range(base: str, head: str) -> tuple[list[str], int]:
+    """Return (failures, commit_count) for every `release:` commit in base..head."""
     failures: list[str] = []
-    commits = git("rev-list", "--reverse", f"{args.base}..{args.head}").splitlines()
+    commits = [line for line in git("rev-list", "--reverse", f"{base}..{head}").splitlines() if line]
     for commit in commits:
         subject = git("show", "-s", "--format=%s", commit)
         if not subject.lower().startswith("release:"):
@@ -42,11 +48,20 @@ def main() -> int:
                 f"{commit[:12]} {subject!r} hides functional files under release:: "
                 + ", ".join(hidden[:8])
             )
+    return failures, len(commits)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    args = parser.parse_args()
+    failures, count = check_range(args.base, args.head)
     if failures:
         print("\n".join(failures))
         print("Use fix(...):, feat(...):, refactor(...):, test(...):, or split the release metadata commit.")
         return 1
-    print(f"Commit policy passed for {len(commits)} commit(s)")
+    print(f"Commit policy passed for {count} commit(s)")
     return 0
 
 

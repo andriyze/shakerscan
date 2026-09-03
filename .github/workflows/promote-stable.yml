@@ -1,5 +1,10 @@
 name: Promote stable channel
 
+# Order matters here. The hosted installer resolves `install/STABLE_VERSION` from `main` at
+# request time, so merging that change IS the public promotion. This workflow therefore validates
+# the public smoke receipt and moves `latest` FIRST, and only then prepares the channel bump as a
+# branch for a pull request. Nothing user-facing moves before the receipt has been checked.
+
 on:
   workflow_dispatch:
     inputs:
@@ -22,14 +27,17 @@ permissions:
 
 jobs:
   stable:
-    name: Move stable aliases last
+    name: Validate smoke, move latest, prepare the channel bump
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: main
+          fetch-depth: 0
 
-      - name: Verify release, installer PR, and public smoke
+      - name: Verify release and public smoke receipt
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
@@ -40,7 +48,6 @@ jobs:
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SMOKE_URL" =~ ^https:// ]]
           [[ "$SMOKE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$(tr -d '[:space:]' < install/STABLE_VERSION)" == "$VERSION" ]]
           gh release view "v${VERSION}" --json isPrerelease,isDraft --jq '(.isPrerelease == false) and (.isDraft == false)' | grep -qx true
           release_sha="$(gh release view "v${VERSION}" --json targetCommitish --jq .targetCommitish)"
           [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
@@ -64,6 +71,16 @@ jobs:
             [[ "$expected" =~ @sha256:[0-9a-f]{64}$ ]]
             test "$(jq -r ".images.${key}" public-smoke-receipt.json)" = "$expected"
           done
+          python3 - "$VERSION" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          current = Path("install/STABLE_VERSION").read_text().strip()
+          nxt = tuple(map(int, sys.argv[1].split(".")))
+          cur = tuple(map(int, current.split("."))) if re.fullmatch(r"\d+\.\d+\.\d+", current) else (0, 0, 0)
+          if nxt < cur:
+              raise SystemExit(f"refusing to move the stable channel backwards from {current} to {sys.argv[1]}")
+          PY
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 
@@ -88,3 +105,37 @@ jobs:
             latest="$(docker buildx imagetools inspect "${image}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ "$latest" == "$digest" ]]
           done
+
+      - name: Prepare the stable-channel pull request branch
+        env:
+          VERSION: ${{ inputs.version }}
+          SMOKE_URL: ${{ inputs.smoke_receipt_url }}
+          SMOKE_SHA256: ${{ inputs.smoke_receipt_sha256 }}
+        shell: bash
+        run: |
+          if [[ "$(tr -d '[:space:]' < install/STABLE_VERSION)" == "$VERSION" ]]; then
+            echo "install/STABLE_VERSION already resolves ${VERSION}; nothing to bump."
+            exit 0
+          fi
+          branch="release/stable-${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch" main
+          printf '%s\n' "$VERSION" > install/STABLE_VERSION
+          git add install/STABLE_VERSION
+          git commit -m "release: promote ${VERSION} stable channel" \
+            -m "Public smoke receipt: ${SMOKE_URL}" \
+            -m "Receipt sha256: ${SMOKE_SHA256}" \
+            -m "Promotion run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          git push --force-with-lease origin "$branch"
+          # Pull requests opened with the workflow token do not trigger the required checks, so the
+          # operator opens it; merging that pull request moves the hosted installer.
+          {
+            echo "## Stable channel bump prepared"
+            echo
+            echo "\`latest\` now points at v${VERSION}. Open and merge the channel pull request:"
+            echo
+            echo '```bash'
+            echo "gh pr create --base main --head ${branch} --title 'release: promote ${VERSION} stable channel' --body 'Public smoke receipt: ${SMOKE_URL} (sha256 ${SMOKE_SHA256})'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
