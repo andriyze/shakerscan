@@ -377,3 +377,39 @@ def test_scan_http_principal_rejects_case_insensitive_duplicate_headers():
                 "authorization": "Bearer second",
             }),
         })
+
+
+def test_scan_principal_authenticates_the_headless_browser_crawl():
+    """The credential drives the highest-fidelity recon producer, not only the static crawl.
+
+    A single-page application builds its API calls in JavaScript and sends the credential on
+    those XHR requests, so an anonymous headless crawl observes only the public boot. web.crawl
+    was already an allowed semantic capability; the omission of web.browser_crawl meant every
+    authenticated scan crawled anonymously and reached an authenticated app with almost nothing
+    to test.
+    """
+    options = {
+        "auth_header": "Bearer primary-secret",
+        "resolved_credential_profiles": [{
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "auth_kind": "bearer_token",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "allowed_capabilities": ["web.crawl", "web.browser_crawl"],
+        }],
+    }
+
+    for capability in ("web.crawl", "web.browser_crawl"):
+        principal = resolve_scan_http_principal(options, capability_name=capability)
+        assert principal.authenticated is True, capability
+        assert principal.headers() == {"Authorization": "Bearer primary-secret"}, capability
+
+
+def test_browser_crawl_is_a_selectable_scan_credential_capability():
+    from api.runtime.scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+
+    assert "web.browser_crawl" in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+    # Its static sibling has always been here; both are read-only recon crawlers over the same
+    # bound target and either may carry the credential.
+    assert "web.crawl" in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES

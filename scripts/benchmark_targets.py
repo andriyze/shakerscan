@@ -102,7 +102,7 @@ PUBLIC_SCAN_OPTION_FIELDS = frozenset({
     "auth_state_shards",
 })
 BENCHMARK_CREDENTIAL_CAPABILITIES = [
-    "http.request", "web.probe", "web.crawl", "web.content_discover",
+    "http.request", "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
     "templates.passive_scan", "templates.scan", "collections.replay_safe",
     "collections.replay_active", "xss.verify", "sqli.verify",
     "xss.request_verify", "sqli.request_verify", "authz.verify",
