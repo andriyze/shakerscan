@@ -25,6 +25,12 @@ SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
     "http.request",
     "web.probe",
     "web.crawl",
+    # The headless crawl observes the application's own authenticated XHR requests, so it is the
+    # producer that most needs the credential: without it the crawl sees only the anonymous SPA
+    # boot and the active families reach an authenticated app with almost nothing to test. Its
+    # static sibling web.crawl was already here; the omission of this one made every authenticated
+    # scan crawl anonymously.
+    "web.browser_crawl",
     "web.content_discover",
     "templates.passive_scan",
     "templates.scan",
