@@ -234,6 +234,53 @@ def test_candidate_ranking_is_semantic_recorded_and_observation_order_independen
     )
 
 
+
+def test_candidate_ranking_puts_transport_plumbing_and_cache_busters_last():
+    """A websocket handshake's timestamp nonce is not application input.
+
+    A thorough scan spent its SQL injection verifier on ``/socket.io/?t=1`` ahead of the
+    search query because both were observed GET parameters. Plumbing stays in the manifest
+    (nothing is silently excluded) but ranks below every real parameter.
+    """
+    surface = _surface(query_keys=("q",))
+    handshake = dict(surface["endpoints"][0])
+    handshake.update({
+        "normalized_path": "/socket.io/",
+        "concrete_path": "/socket.io/",
+        "query_keys": ["t", "EIO", "transport"],
+    })
+    busted = dict(surface["endpoints"][0])
+    busted.update({
+        "normalized_path": "/api/products",
+        "concrete_path": "/api/products",
+        "query_keys": ["ts", "category"],
+    })
+    surface["endpoints"].extend([handshake, busted])
+    endpoints = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface,
+        source_action_ids=("discover.web_crawl",),
+    )
+
+    ranked = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.candidates",), maximum=20,
+    )
+
+    order = [(entry["canonical_path"], entry["parameter_name"]) for entry in ranked.entries]
+    assert len(order) == 6, "plumbing candidates remain in the manifest"
+    real = {(surface["endpoints"][0]["normalized_path"], "q"), ("/api/products", "category")}
+    assert set(order[:2]) == real, order
+    plumbing = [entry for entry in ranked.entries if entry["canonical_path"] == "/socket.io/"]
+    assert plumbing and all(
+        "transport_plumbing_route" in entry["ranking_rationale"] for entry in plumbing
+    )
+    nonce = next(entry for entry in ranked.entries if entry["parameter_name"] == "ts")
+    assert "cache_buster_parameter" in nonce["ranking_rationale"]
+    assert nonce["score"] < min(
+        entry["score"] for entry in ranked.entries if (entry["canonical_path"], entry["parameter_name"]) in real
+    )
+
 def test_manifest_execution_selects_exact_endpoint_and_candidate_index():
     endpoint = _endpoint_manifest(query_keys=("a", "b"))
     candidates = build_candidate_manifest(
