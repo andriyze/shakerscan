@@ -108,7 +108,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     scanner = (ROOT / "scanner" / "Dockerfile").read_text()
     ui = (ROOT / "ui" / "Dockerfile").read_text()
 
-    assert "golang:1.26.7-bookworm@sha256:" in scanner
+    assert "golang:1.27.0-bookworm@sha256:" in scanner
     assert "github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1" in scanner
     for dependency in (
         "github.com/getkin/kin-openapi@v0.144.0",
@@ -131,7 +131,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     assert "rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth" in scanner
     assert "test -z \"$(python -c 'pass' 2>&1)\"" in scanner
 
-    assert "node:24-alpine@sha256:" in ui
+    assert "node:26-alpine@sha256:" in ui
     assert ui.count("apk add --no-cache --upgrade") == 2
     assert ui.count("APK_TOOLS_VERSION=3.0.8-r0") == 2
     assert ui.count("OPENSSL_VERSION=3.5.8-r0") == 2

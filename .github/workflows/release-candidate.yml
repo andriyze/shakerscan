@@ -211,7 +211,7 @@ jobs:
       - name: Pre-pull checksum-pinned scanner bases
         run: |
           scripts/retry-command.sh timeout 300 docker pull \
-            golang:1.26.7-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514
+            golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
           scripts/retry-command.sh timeout 300 docker pull \
             mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
@@ -1000,7 +1000,7 @@ jobs:
       - name: Set up supported Node browser runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
           cache-dependency-path: ui/package-lock.json
 

@@ -91,7 +91,7 @@ def test_pr_smoke_runs_fast_areas_and_browser_once_and_skips_unrelated_changes()
     assert "npm --prefix ui run build" in smoke
     assert "npm --prefix ui run test:browser" in smoke
     assert "scripts/run_complete_python_suite.py" not in smoke
-    assert "node-version: 24" in smoke
+    assert "node-version: 26" in smoke
 
 
 def test_candidate_validate_reuses_the_main_suite_report_instead_of_rerunning():
