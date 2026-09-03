@@ -133,6 +133,13 @@ function structuredLogWarning(raw, source) {
   return /\b(warn(?:ing)?|timed?\s*out|partial|degraded|budget reached|skipping)\b/i.test(raw)
 }
 
+const COVERAGE_REASON_LABELS = {
+  timed_out: 'The run timed out before all planned work finished',
+  cancelled: 'The run was cancelled before all planned work finished',
+  budget_exhausted: 'The run exhausted its budget before all planned work finished',
+  worker_lost: 'A worker was lost before all planned work finished',
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -183,20 +190,42 @@ export function scanResultPresentation(scan, assurance) {
   const scorePolicy = String(result.score_policy || '')
   const posturePenalty = finiteNumber(result.posture_penalty, null)
   const policyVersion = Number(scorePolicy.match(/^risk_and_assurance\/v(\d+)$/)?.[1] || 0)
-  const coverageReasons = Array.isArray(record(report.coverage).reasons)
-    ? record(report.coverage).reasons
-    : []
+  const coverage = record(report.coverage)
+  const coverageReasons = Array.isArray(coverage.reasons) ? coverage.reasons : []
   const coverageWarnings = coverageReasons.map((reason) => (
     String(reason || '').replaceAll('_', ' ')
   )).filter(Boolean)
+  // Families the operator selected that never reached a complete state. Naming them is what
+  // turns "a selected check family is incomplete" into something a reader can act on.
+  const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
+    ? coverage.selected_family_gaps.map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
+    : []
+  const assuranceGaps = Array.isArray(assurance?.gaps) ? assurance.gaps : []
+  // A strong examination score describes the work that ran. When the run stopped before its
+  // plan completed, or the scorer itself marked the grade unreliable, the conclusion is only as
+  // wide as the completed work, and the supporting sentence must say so instead of endorsing it.
+  const coverageIncomplete = coverageWarnings.length > 0
+    || incompleteFamilies.length > 0
+    || assuranceGaps.length > 0
+    || result.grade_reliable === false
+  const confidenceTone = weakExamination ? 'weak' : coverageIncomplete ? 'qualified' : 'supporting'
+  const confidence = weakExamination
+    ? `${assuranceLabel} — this is not a clean bill of health.`
+    : coverageIncomplete
+      ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
+      : `${assuranceLabel} supports this run-level conclusion.`
+  const coverageGapReasons = coverageReasons.map((reason) => COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')).filter(Boolean)
 
   return {
     headline,
     explanation,
     tone,
-    confidence: weakExamination
-      ? `${assuranceLabel} — this is not a clean bill of health.`
-      : `${assuranceLabel} supports this run-level conclusion.`,
+    confidence,
+    confidenceTone,
+    coverageIncomplete,
+    coverageGapReasons,
+    incompleteFamilies,
+    observedCount: findings.length,
     observedRiskScore: finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
     observedRiskGrade: String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
     budgetProfile,

@@ -193,6 +193,7 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:$UI_PORT" \
             CI=1 \
             PLAYWRIGHT_REAL_STACK=1 \
+            PLAYWRIGHT_DYNAMIC_RECORDS_REQUIRED=1 \
             SHAKERSCAN_API_URL="http://127.0.0.1:$API_PORT" \
             SHAKERSCAN_E2E_SCAN_TARGET="http://juice-shop:3000" \
             npm --prefix "$ROOT_DIR/ui" run test:browser
