@@ -9,7 +9,7 @@
 # results into one multi-arch manifest, so there is no QEMU emulation (which is
 # what blew past GitHub's 6h job limit on the v0.5.4 build) and katana's CGO
 # dependency (go-tree-sitter) compiles cleanly.
-FROM golang:1.26.7-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS go-builder
+FROM golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS go-builder
 
 # Naabu supports both SYN and CONNECT discovery, and its Go packet-capture
 # dependency is compiled even though ShakerScan deliberately invokes CONNECT
