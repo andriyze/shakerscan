@@ -188,6 +188,7 @@ def _findings_for_action(
     unobserved_response_urls: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    header_origin_findings: dict[tuple[str, str], dict[str, Any]] = {}
     receipt = _receipt(result)
     allowed_kinds = {
         "http.request": {"http_observation"},
@@ -794,21 +795,43 @@ def _findings_for_action(
             if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
             title, header_name = _header_template_title(item)
+            # A response header policy is a property of the origin, not of the path that
+            # happened to be requested. Emitting the match per URL turned one missing header
+            # into one finding per crawled page -- a thorough scan reported 1,032 "missing
+            # header" findings for 8 headers across 129 URLs -- and buried the single proven
+            # finding under them. Collapse to one finding per (header, origin) and keep the
+            # matched URLs as evidence, so the count is still visible and nothing is lost.
+            header_origin = _http_origin(matched_url) if header_name else None
+            if header_name and header_origin:
+                existing = header_origin_findings.get((header_name, header_origin))
+                if existing is not None:
+                    evidence = existing["evidence"]
+                    evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0) + 1
+                    samples = evidence.setdefault("matched_urls", [])
+                    if len(samples) < 5 and matched_url not in samples:
+                        samples.append(matched_url)
+                    continue
             finding = _base_finding(
                 tool="nuclei",
                 title=title,
                 severity=severity,
                 cwe=str(item.get("cwe") or "") or None,
-                url=matched_url,
+                url=header_origin or matched_url,
                 evidence={
                     "template_id": item.get("template_id"),
                     "matcher_name": item.get("matcher_name"),
                     **({"header_name": header_name} if header_name else {}),
-                    "matched_at": matched_url,
+                    "matched_at": header_origin or matched_url,
+                    **(
+                        {"matched_urls": [matched_url], "matched_url_count": 1}
+                        if header_origin else {}
+                    ),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
             )
+            if header_name and header_origin:
+                header_origin_findings[(header_name, header_origin)] = finding
             finding.update({
                 "verified": False,
                 "suspected": True,
@@ -1331,7 +1354,23 @@ def finalize_scan_report(
             rows,
             unobserved_response_urls=frozenset(unobserved_response_urls),
         ):
-            findings_by_id.setdefault(_finding_identity(finding), finding)
+            identity = _finding_identity(finding)
+            existing = findings_by_id.get(identity)
+            if existing is None:
+                findings_by_id[identity] = finding
+                continue
+            # The same origin-level header finding from a later batch of the same sweep:
+            # keep the first, fold the later batch's URL evidence into it.
+            merged = existing.get("evidence") if isinstance(existing.get("evidence"), dict) else None
+            later = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+            if merged is not None and "matched_url_count" in merged and "matched_url_count" in later:
+                merged["matched_url_count"] = int(merged["matched_url_count"]) + int(later["matched_url_count"])
+                samples = merged.setdefault("matched_urls", [])
+                for url in later.get("matched_urls") or ():
+                    if len(samples) >= 5:
+                        break
+                    if url not in samples:
+                        samples.append(url)
         runtime_destinations.extend(_runtime_destinations(
             action_id=action.action_id,
             capability_name=action.capability_name,

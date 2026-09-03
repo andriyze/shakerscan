@@ -363,6 +363,73 @@ def test_finalizer_names_the_specific_header_reported_by_nuclei():
     )
 
 
+
+def test_finalizer_reports_a_missing_header_once_per_origin_with_the_urls_as_evidence():
+    """A response header policy belongs to the origin, not to each crawled path.
+
+    Per-URL emission turned one missing header into one finding per page (1,032 findings for
+    8 headers over 129 URLs on a thorough scan) and buried the single proven finding.
+    """
+    templates = _action(
+        "passive.templates", 0, capability_name="templates.passive_batch",
+    )
+    more = _action(
+        "passive.templates.001", 1, capability_name="templates.passive_batch",
+    )
+    final = _action(
+        "finalize.report", 2, dependencies=(templates.action_id, more.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(templates, more, final),
+    )
+    results = {
+        templates.action_id: _result_with_observation_count(templates, 3),
+        more.action_id: _result_with_observation_count(more, 1),
+    }
+    def match(url, matcher="referrer-policy"):
+        return {
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": url,
+            "matcher_name": matcher,
+        }
+    observations = {
+        templates.action_id: (
+            match("https://app.example.test/"),
+            match("https://app.example.test/about"),
+            match("https://app.example.test/about", matcher="content-security-policy"),
+        ),
+        # A later batch of the same sweep matches the same header again on another page.
+        more.action_id: (match("https://app.example.test/contact"),),
+    }
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    by_title = {item["title"]: item for item in report["findings"]}
+    assert set(by_title) == {
+        "Missing HTTP response header: Referrer-Policy",
+        "Missing HTTP response header: Content-Security-Policy",
+    }, "one finding per header per origin, not per URL"
+    referrer = by_title["Missing HTTP response header: Referrer-Policy"]
+    assert referrer["url"] == "https://app.example.test"
+    assert referrer["evidence"]["matched_url_count"] == 3, "later batches fold into the first"
+    assert referrer["evidence"]["matched_urls"] == [
+        "https://app.example.test/", "https://app.example.test/about",
+        "https://app.example.test/contact",
+    ]
+    csp = by_title["Missing HTTP response header: Content-Security-Policy"]
+    assert csp["evidence"]["matched_url_count"] == 1
+
 def test_finalizer_promotes_only_deterministic_proof_contracts():
     xss = _action("verify.xss", 0, capability_name="xss.verify")
     sqli = _action(
