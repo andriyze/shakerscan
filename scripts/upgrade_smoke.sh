@@ -213,6 +213,11 @@ INSERT INTO node_join_tokens (
     'upgrade-consumed-token', 'worker', 'broker', NOW() + INTERVAL '1 hour',
     1, 1, NOW(), NOW()
 );
+-- The legacy credential above predates the one-time V2 mirror migration. The previous stable
+-- is itself a V2 runtime that already applied that migration on startup (the first V2->V2
+-- upgrade), so its marker would make the candidate skip the row. Clear it: the candidate must
+-- re-run the mirror against this credential, which is exactly what the upgrade proves.
+DELETE FROM app_schema_migrations WHERE name = 'v2_target_credentials_to_generic_v1';
 SQL
 docker exec -i "$SMOKE_CONTAINER" psql -v ON_ERROR_STOP=1 -U scanner -d scanner_dirty \
     < "$SMOKE_TMP/dirty.sql" >/dev/null
