@@ -233,7 +233,11 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert "run_scenario scanner_dirty verify_dirty" in script
     assert "upgrade_acceptance_receipt.py" in script
     assert "_assert_rollback" in verifier
-    assert 'choices=("clean", "dirty", "verify_dirty", "rollback")' in verifier
+    assert 'choices=("clean", "dirty", "verify_dirty", "inventory", "rollback")' in verifier
+    # The rollback expectations come from an inventory of what the previous-stable runtime
+    # created, never a hardcoded table list that only matched one historical baseline.
+    assert "def rollback_expectations(baseline: dict, upgraded: dict)" in verifier
+    assert "--baseline-inventory /inventory/baseline.json" in script
     assert '"active_findings_count": 1 if upgraded else 3' in verifier
 
 

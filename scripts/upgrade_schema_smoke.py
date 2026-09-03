@@ -8,9 +8,6 @@ import asyncio
 import json
 import os
 
-import asyncpg
-
-from retest_contract import run_schema_migrations
 
 
 TARGET_ID = "11111111-1111-4111-8111-111111111111"
@@ -292,29 +289,118 @@ async def _assert_stable_fixture(conn, *, upgraded: bool) -> None:
             raise RuntimeError(f"legacy credential was not mirrored into V2: {generic!r}")
 
 
-async def _assert_rollback(conn) -> None:
-    for candidate_only_table in (
-        "budget_reservations",
-        "credential_profiles",
-        "request_collections",
-        "hunt_runs",
-    ):
-        if await _table_exists(conn, candidate_only_table):
-            raise RuntimeError(f"rollback retained candidate-only table {candidate_only_table}")
-    if await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations "
-        "WHERE name='v2_budget_reservations_v2')"
-    ):
-        raise RuntimeError("rollback retained a candidate V2 migration marker")
+def rollback_expectations(baseline: dict, upgraded: dict) -> dict:
+    """What a restored pre-upgrade backup must and must not carry, per schema object kind.
+
+    The previous-stable inventory is whatever the baseline runtime actually created, so the
+    candidate-only set is derived for each release instead of being hardcoded against one
+    historical baseline: the pre-V2 list (budget_reservations, credential_profiles, ...) was
+    right against 0.8.18 and wrong against every V2 baseline, which already owns those objects.
+    """
+    expectations: dict = {}
+    for kind in ("tables", "migrations"):
+        base = set(baseline.get(kind, []))
+        upg = set(upgraded.get(kind, []))
+        expectations[kind] = {
+            "absent": sorted(upg - base),
+            "present": sorted(base),
+            "dropped_by_candidate": sorted(base - upg),
+        }
+    return expectations
+
+
+async def schema_inventory(conn) -> dict:
+    tables = [
+        row["tablename"]
+        for row in await conn.fetch(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
+        )
+    ]
+    migrations: list[str] = []
+    if await _table_exists(conn, "app_schema_migrations"):
+        migrations = [
+            row["name"]
+            for row in await conn.fetch("SELECT name FROM app_schema_migrations ORDER BY name")
+        ]
+    return {"tables": tables, "migrations": migrations}
+
+
+async def _migration_applied(conn, name: str) -> bool:
+    if not await _table_exists(conn, "app_schema_migrations"):
+        return False
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name=$1)", name
+        )
+    )
+
+
+async def _assert_rollback(conn, expectations: dict) -> None:
+    probes = {"tables": _table_exists, "migrations": _migration_applied}
+    for kind, exists in probes.items():
+        label = kind[:-1]
+        for name in expectations[kind]["absent"]:
+            if await exists(conn, name):
+                raise RuntimeError(f"rollback retained candidate-only {label} {name}")
+        for name in expectations[kind]["present"]:
+            if not await exists(conn, name):
+                raise RuntimeError(f"rollback lost previous-stable {label} {name}")
     await _assert_stable_fixture(conn, upgraded=False)
 
 
-async def _run(database_url: str, scenario: str) -> None:
+def _load_inventory(path: str) -> dict:
+    with open(path, encoding="utf-8") as handle:
+        inventory = json.load(handle)
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("tables"), list):
+        raise RuntimeError(f"{path} is not a schema inventory")
+    return inventory
+
+
+async def _write_inventory(conn, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(await schema_inventory(conn), handle, indent=2, sort_keys=True)
+
+
+async def _run(
+    database_url: str,
+    scenario: str,
+    *,
+    inventory_out: str | None = None,
+    baseline_inventory: str | None = None,
+    upgraded_inventory: str | None = None,
+) -> None:
+    import asyncpg
+
+    from retest_contract import run_schema_migrations
+
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
     try:
-        if scenario == "rollback":
+        if scenario == "inventory":
+            # Read-only: the pre-upgrade baseline schema, taken before any candidate migration.
             async with pool.acquire() as conn:
-                await _assert_rollback(conn)
+                await _write_inventory(conn, inventory_out)
+            return
+        if scenario == "rollback":
+            expectations = rollback_expectations(
+                _load_inventory(baseline_inventory), _load_inventory(upgraded_inventory)
+            )
+            print(
+                json.dumps(
+                    {
+                        "scenario": "rollback",
+                        "candidate_only": {
+                            kind: expectations[kind]["absent"] for kind in expectations
+                        },
+                        "dropped_by_candidate": {
+                            kind: expectations[kind]["dropped_by_candidate"]
+                            for kind in expectations
+                        },
+                    },
+                    sort_keys=True,
+                )
+            )
+            async with pool.acquire() as conn:
+                await _assert_rollback(conn, expectations)
             return
         if scenario != "verify_dirty":
             await run_schema_migrations(pool)
@@ -324,6 +410,8 @@ async def _run(database_url: str, scenario: str) -> None:
             await _assert_common(conn)
             if scenario in {"dirty", "verify_dirty"}:
                 await _assert_stable_fixture(conn, upgraded=True)
+            if inventory_out:
+                await _write_inventory(conn, inventory_out)
     finally:
         await pool.close()
 
@@ -332,13 +420,30 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
-        "--scenario", choices=("clean", "dirty", "verify_dirty", "rollback"), required=True,
+        "--scenario",
+        choices=("clean", "dirty", "verify_dirty", "inventory", "rollback"),
+        required=True,
     )
+    parser.add_argument("--inventory-out", help="write the schema inventory JSON here")
+    parser.add_argument("--baseline-inventory", help="pre-upgrade inventory (rollback)")
+    parser.add_argument("--upgraded-inventory", help="post-candidate inventory (rollback)")
     args = parser.parse_args()
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL is required")
+    if args.scenario == "inventory" and not args.inventory_out:
+        parser.error("--scenario inventory requires --inventory-out")
+    if args.scenario == "rollback" and not (args.baseline_inventory and args.upgraded_inventory):
+        parser.error("--scenario rollback requires --baseline-inventory and --upgraded-inventory")
 
-    asyncio.run(_run(args.database_url, args.scenario))
+    asyncio.run(
+        _run(
+            args.database_url,
+            args.scenario,
+            inventory_out=args.inventory_out,
+            baseline_inventory=args.baseline_inventory,
+            upgraded_inventory=args.upgraded_inventory,
+        )
+    )
     print(json.dumps({"status": "passed", "scenario": args.scenario}, sort_keys=True))
     return 0
 

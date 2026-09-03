@@ -119,3 +119,20 @@ def test_every_candidate_container_is_cleaned_up():
     for name in ("$CANDIDATE_WORKER_CONTAINER", "$CANDIDATE_UI_CONTAINER",
                  "$CANDIDATE_API_CONTAINER", "$CANDIDATE_REDIS_CONTAINER"):
         assert name in cleanup, name
+
+
+def test_the_baseline_schema_is_inventoried_before_any_candidate_migration():
+    source = SMOKE.read_text()
+    baseline = source.index("run_scenario scanner_dirty inventory --inventory-out /inventory/baseline.json")
+    # After the dirty seed and the pre-upgrade dump, before the candidate migrates the database.
+    assert source.index("scanner_dirty.before-upgrade.dump\"\n") < baseline
+    assert baseline < source.index("run_scenario scanner_dirty dirty --inventory-out /inventory/upgraded.json")
+
+
+def test_the_rollback_leg_derives_its_expectations_from_both_inventories():
+    source = SMOKE.read_text()
+    rollback = source.index("run_scenario scanner_dirty rollback")
+    tail = source[rollback : rollback + 200]
+    assert "--baseline-inventory /inventory/baseline.json" in tail
+    assert "--upgraded-inventory /inventory/upgraded.json" in tail
+    assert '-v "$SMOKE_TMP/inventory:/inventory"' in source
