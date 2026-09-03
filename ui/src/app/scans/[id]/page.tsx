@@ -298,9 +298,13 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
                   <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
                 </li>
               )}
-              {(assurance?.gaps || [])
-                .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
-                .map((gap: string) => <li key={gap}>• What was not established: {gap}.</li>)}
+              {(() => {
+                const gaps = (assurance?.gaps || [])
+                  .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
+                return gaps.length > 0
+                  ? <li>• What was not established: {gaps.join('; ')}.</li>
+                  : null
+              })()}
             </ul>
             <p className="mt-2 text-xs text-amber-100/60">
               Findings above are real; absence of a finding in an unfinished family is not evidence of safety.
@@ -543,6 +547,19 @@ function findingLocation(finding: any): string | null {
   }
 }
 
+const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+
+function findingPriority(finding: any): number {
+  const proofState = String(finding.proof_state || '')
+  const proofRank = finding.verified === true && proofState === 'verified'
+    ? 0
+    : proofState === 'likely_vulnerable' || finding.suspected === true
+      ? 1
+      : 2
+  const severityRank = SEVERITY_ORDER[String(finding.severity || 'info').toLowerCase()] ?? 4
+  return proofRank * 10 + severityRank
+}
+
 function findingProofLabel(finding: any): { label: string; className: string } {
   const state = String(finding?.proof_state || '')
   if (state === 'verified' || (finding?.verified === true && !state)) {
@@ -631,6 +648,10 @@ function ScanFindingContextCard({
       _persisted: true,
     })),
   ]
+  // The list is what an operator reads first, so the proven critical must not sit under a
+  // thousand informational candidates: order by proof, then severity, keeping the server's
+  // order within a tier.
+  current.sort((a: any, b: any) => findingPriority(a) - findingPriority(b))
   const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrent.length)
   const provenCount = current.filter((finding: any) => (
     finding.verified === true && String(finding.proof_state || '') === 'verified'

@@ -133,10 +133,17 @@ function structuredLogWarning(raw, source) {
   return /\b(warn(?:ing)?|timed?\s*out|partial|degraded|budget reached|skipping)\b/i.test(raw)
 }
 
+// Coverage reasons arrive as the finalizer's stable codes. Each label says what happened to the
+// planned work in the operator's terms; the raw code (underscores and all) is the fallback only
+// for a code this table does not know.
 const COVERAGE_REASON_LABELS = {
-  timed_out: 'The run timed out before all planned work finished',
+  timed_out: 'A planned step ran out of its time allowance before it finished',
   cancelled: 'The run was cancelled before all planned work finished',
   budget_exhausted: 'The run exhausted its budget before all planned work finished',
+  insufficient_plan_budget: 'Planned steps were skipped because the admitted budget did not reach them',
+  not_applicable: 'A planned proof step had no candidate left to prove',
+  dependency_failed: 'A planned step was skipped because the step it depended on did not complete',
+  policy_disabled: 'A planned step was disabled by the scan policy',
   worker_lost: 'A worker was lost before all planned work finished',
 }
 
