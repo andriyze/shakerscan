@@ -13,6 +13,7 @@ from api.scan.manifest_store import (
     ScanManifestStoreError,
 )
 from api.scan.work_manifests import (
+    execution_request_for_manifest_candidate,
     CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
     CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
@@ -177,13 +178,17 @@ def test_candidate_manifest_covers_every_parameter_and_marks_bounded_truncation(
         maximum=2,
     )
 
-    assert {item["parameter_name"] for item in complete.entries} == {"a", "b", "c"}
+    # Three query parameters plus one path-segment candidate from the fixture's /api/orders/{int}.
+    assert {item["parameter_name"] for item in complete.entries} == {"a", "b", "c", "path_3"}
     assert list(complete.entries) == sorted(
         complete.entries,
         key=lambda item: (-item["score"], item["candidate_id"]),
     )
-    assert len({item["candidate_id"] for item in complete.entries}) == 3
-    assert all(item["family_hints"] == ("xss", "sqli") for item in complete.entries)
+    assert len({item["candidate_id"] for item in complete.entries}) == 4
+    query_entries = [e for e in complete.entries if e.get("parameter_location") != "path"]
+    path_entries = [e for e in complete.entries if e.get("parameter_location") == "path"]
+    assert all(item["family_hints"] == ("xss", "sqli") for item in query_entries)
+    assert path_entries and all(item["family_hints"] == ("sqli",) for item in path_entries)
     assert all(item["ranking_rationale"] for item in complete.entries)
     assert partial.status == "partial"
     assert partial.reason_code == "candidate_limit_reached"
@@ -268,9 +273,11 @@ def test_candidate_ranking_puts_transport_plumbing_and_cache_busters_last():
     )
 
     order = [(entry["canonical_path"], entry["parameter_name"]) for entry in ranked.entries]
-    assert len(order) == 6, "plumbing candidates remain in the manifest"
-    real = {(surface["endpoints"][0]["normalized_path"], "q"), ("/api/products", "category")}
-    assert set(order[:2]) == real, order
+    # /api/orders/{int} now also yields a path-segment candidate, so seven candidates remain.
+    assert len(order) == 7, "plumbing candidates remain in the manifest"
+    orders_path = surface["endpoints"][0]["normalized_path"]
+    real = {(orders_path, "q"), ("/api/products", "category"), (orders_path, "path_3")}
+    assert set(order[:3]) == real, order
     plumbing = [entry for entry in ranked.entries if entry["canonical_path"] == "/socket.io/"]
     assert plumbing and all(
         "transport_plumbing_route" in entry["ranking_rationale"] for entry in plumbing
@@ -292,12 +299,24 @@ def test_manifest_execution_selects_exact_endpoint_and_candidate_index():
     assert execution_url_for_manifest_endpoint(endpoint, 0) == (
         "https://app.example.test/api/orders/1?a=1&b=1"
     )
-    selected_parameter = candidates.entries[1]["parameter_name"]
-    assert execution_url_for_manifest_candidate(endpoint, candidates, 1) == (
+    query_index = next(
+        i for i, c in enumerate(candidates.entries)
+        if c.get("parameter_location") != "path"
+    )
+    selected_parameter = candidates.entries[query_index]["parameter_name"]
+    assert execution_url_for_manifest_candidate(endpoint, candidates, query_index) == (
         f"https://app.example.test/api/orders/1?{selected_parameter}=1"
     )
+    # The path-segment candidate resolves to the sqlmap marker at its segment.
+    path_index = next(
+        i for i, c in enumerate(candidates.entries)
+        if c.get("parameter_location") == "path"
+    )
+    assert execution_url_for_manifest_candidate(endpoint, candidates, path_index) == (
+        "https://app.example.test/api/orders/1*"
+    )
     with pytest.raises(ScanWorkManifestError, match="outside immutable content"):
-        execution_url_for_manifest_candidate(endpoint, candidates, 2)
+        execution_url_for_manifest_candidate(endpoint, candidates, len(candidates.entries))
 
 
 def test_request_and_template_manifests_are_complete_bounded_and_deterministic():
@@ -626,3 +645,76 @@ def test_request_manifest_entries_never_carry_safe_method():
         assert "safe_method" not in entry
         assert entry["request_class"] in wm.REQUEST_CLASSES
     assert sum(wm.entry_is_mutating(entry) for entry in manifest.entries) == 1
+
+
+def test_templated_path_segments_become_sqli_only_candidates():
+    """A path parameter is a value the query never names; it is a first-class SQLi site.
+
+    Path-templated endpoints (/api/orders/{int}) declare no query or body input, so before this
+    they produced no candidate at all. They are read with a GET, so a path candidate needs no
+    state-changing authority and never reflects into HTML — SQLi only.
+    """
+    surface = {
+        "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+        "endpoints": [{
+            "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+            "normalized_path": "/api/orders/{int}", "concrete_path": "/api/orders/1",
+            "query_keys": [], "source": "web.spec_ingest",
+        }, {
+            "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+            "normalized_path": "/rest/products/{int}/reviews",
+            "concrete_path": "/rest/products/1/reviews", "query_keys": [], "source": "web.crawl",
+        }],
+    }
+    endpoints = build_endpoint_manifest(
+        scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface, source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.candidates",), maximum=20,
+    )
+    path_candidates = [c for c in candidates.entries if c.get("parameter_location") == "path"]
+    assert {c["canonical_path"] for c in path_candidates} == {
+        "/api/orders/{int}", "/rest/products/{int}/reviews",
+    }
+    for candidate in path_candidates:
+        assert candidate["family_hints"] == ("sqli",)
+        assert "path_id_injection_point" in candidate["ranking_rationale"]
+        index = candidates.entries.index(candidate)
+        resolved = execution_request_for_manifest_candidate(endpoints, candidates, index)
+        assert resolved["path_injection"] is True
+        assert resolved["method"] == "GET"
+        assert "1*" in resolved["url"]
+    # The marker sits on the exact templated segment, not the tail.
+    reviews = next(c for c in path_candidates if "reviews" in c["canonical_path"])
+    reviews_url = execution_request_for_manifest_candidate(
+        endpoints, candidates, candidates.entries.index(reviews),
+    )["url"]
+    assert reviews_url == "https://app.example.test/rest/products/1*/reviews"
+
+
+def test_path_candidate_identity_and_field_tampering_are_rejected():
+    surface = {
+        "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+        "endpoints": [{
+            "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+            "normalized_path": "/api/orders/{int}", "concrete_path": "/api/orders/1",
+            "query_keys": [], "source": "web.crawl",
+        }],
+    }
+    endpoints = build_endpoint_manifest(
+        scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface, source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.candidates",), maximum=20,
+    )
+    path = next(c for c in candidates.entries if c.get("parameter_location") == "path")
+    # Pointing the candidate at a literal (non-templated) segment is rejected.
+    tampered = {**path, "path_segment_index": 1}
+    with pytest.raises(ScanWorkManifestError):
+        ScanWorkManifest(
+            scan_id=SCAN_ID, kind=ScanWorkManifestKind.CANDIDATE,
+            target_binding_digest=TARGET_DIGEST, source_action_ids=("x",),
+            entries=(tampered,), status="complete", reason_code=None,
+        )

@@ -1897,3 +1897,73 @@ def test_spec_ingest_skips_cleanly_when_no_spec_is_published(monkeypatch):
     receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
     assert receipt.status == "success"
     assert not [o for o in receipt.observations if o.get("kind") == "discovered_route"]
+
+
+def test_path_candidate_goes_to_sqlmap_with_a_marker_and_is_skipped_by_dalfox(monkeypatch):
+    """A path-segment candidate is a SQLi-only site carrying the sqlmap ``*`` marker.
+
+    The SQLi verifier tests the marked URL; the XSS verifier would feed the literal ``*`` to
+    dalfox as a value, so it skips path candidates.
+    """
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id, target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                "normalized_path": "/api/orders/{int}", "concrete_path": "/api/orders/1",
+                "query_keys": [], "source": "web.spec_ingest",
+            }],
+        },
+        source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.spec",), maximum=10,
+    )
+    assert any(c.get("parameter_location") == "path" for c in candidates.entries)
+
+    def _batch_action(capability):
+        return _action(
+            f"verify.{capability.split('.')[0]}.batch.00000", capability, 0,
+            capability_args={
+                "candidate_manifest_ref": candidates.reference().canonical_dict(),
+                "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+                "slice": {"start": 0, "count": 5},
+                "profile": "balanced", "proof_policy": "deterministic",
+            },
+        )
+
+    def run(capability, parser_version):
+        action = _batch_action(capability)
+        plan = ScanActionPlan(
+            scan_id=scan_id, execution_plan_digest="a" * 64,
+            target_binding_digest=TARGET.digest, actions=(action,),
+        )
+        calls = []
+
+        async def execute(_self, context, adapter, **_kwargs):
+            calls.append(adapter._process_payload["execution_target"])
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={name: 1 for name in context.requested_budget},
+                observations=(), execution_started=True, parser_version=parser_version,
+            )
+
+        monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+        backend = Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        })
+        dispatcher = _dispatcher(
+            plan, backend,
+            policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+        )
+        asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+        return calls
+
+    sqli_calls = run("sqli.verify_batch", "sqlmap-jsonl/v1")
+    assert sqli_calls == ["https://app.example.test/api/orders/1*"], sqli_calls
+
+    xss_calls = run("xss.verify_batch", "dalfox-jsonl/v1")
+    assert xss_calls == [], "dalfox never receives a path candidate"
