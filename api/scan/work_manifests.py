@@ -390,7 +390,10 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         "family_hints", "source_tool", "source_observation_ref", "auth_lane",
         "selected_shard", "request_ref_id", "score", "ranking_rationale",
     }
-    optional = {"browser_fragment_path", "browser_fragment_query_parameter_names"}
+    optional = {
+        "browser_fragment_path", "browser_fragment_query_parameter_names",
+        "parameter_location", "path_segment_index",
+    }
     if not expected <= set(value) or not set(value) <= (expected | optional):
         raise ScanWorkManifestError("candidate manifest entry fields are invalid")
     method = str(value["method"] or "").strip().upper()
@@ -418,13 +421,29 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
     # body_field_names being non-empty is what marks the candidate as testing a request body.
     in_body = bool(body_names)
     in_fragment = bool(fragment_names)
+    in_path = value.get("parameter_location") == "path"
     if fragment_path is not None and not in_fragment:
         raise ScanWorkManifestError(
             "fragment candidate requires browser fragment parameters"
         )
-    if sum((in_body, in_fragment)) > 1:
+    if sum((in_body, in_fragment, in_path)) > 1:
         raise ScanWorkManifestError("candidate has multiple injection locations")
-    if in_body:
+    path_segment_index = None
+    if in_path:
+        raw_index = value.get("path_segment_index")
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
+            raise ScanWorkManifestError("path candidate segment index is invalid")
+        path_segment_index = raw_index
+        segments = str(value["canonical_path"]).split("/")
+        if raw_index >= len(segments) or segments[raw_index] not in {"{int}", "{uuid}"}:
+            raise ScanWorkManifestError(
+                "path candidate segment is not a templated path segment"
+            )
+        if parameter != f"path_{raw_index}":
+            raise ScanWorkManifestError(
+                "path candidate parameter name must anchor its segment index"
+            )
+    elif in_body:
         if parameter not in body_names:
             raise ScanWorkManifestError(
                 "candidate parameter is absent from body_field_names"
@@ -453,6 +472,9 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         identity["location"] = "body"
     elif in_fragment:
         identity["location"] = "fragment"
+    elif in_path:
+        identity["location"] = "path"
+        identity["path_segment_index"] = int(path_segment_index or 0)
     expected_id = _digest(identity)
     if _hex(value["candidate_id"], name="candidate_id") != expected_id:
         raise ScanWorkManifestError("candidate_id does not match candidate identity")
@@ -492,6 +514,9 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
             "browser_fragment_path": fragment_path,
             "browser_fragment_query_parameter_names": list(fragment_names),
         })
+    if in_path:
+        result["parameter_location"] = "path"
+        result["path_segment_index"] = int(path_segment_index or 0)
     return result
 
 
@@ -1064,9 +1089,11 @@ def build_candidate_manifest(
 
     def ranked_candidate(
         endpoint: Mapping[str, Any], parameter: str, *, location: str = "query",
+        path_segment_index: int | None = None,
     ) -> dict[str, Any]:
         in_body = location == "body"
         in_fragment = location == "fragment"
+        in_path = location == "path"
         normalized_name = parameter.lower().replace("-", "_")
         score = 30
         rationale = [f"parameterized_{location}"]
@@ -1084,6 +1111,12 @@ def build_candidate_manifest(
             # query parameter rather than above it.
             score += 4
             rationale.append("state_changing_request_required")
+        elif in_path:
+            # A templated path segment is a value the application substitutes into a query and is
+            # read with a GET, so it needs no state-changing authority; it ranks with a query
+            # parameter as a first-class SQL injection site.
+            score += 8
+            rationale.append("path_parameter")
         if endpoint["request_ref_ids"]:
             score += 18
             rationale.append("exact_request_reference")
@@ -1096,6 +1129,9 @@ def build_candidate_manifest(
         if normalized_name in sqli_names or normalized_name.endswith("_id"):
             score += 10
             rationale.append("sqli_semantic_parameter")
+        if in_path:
+            score += 10
+            rationale.append("path_id_injection_point")
         # Library transport plumbing and cache-busters are parameters the application never
         # reads as input. A thorough scan spent its SQL injection verifier on
         # ``/socket.io/?t=1`` -- the websocket long-poll handshake with its timestamp
@@ -1119,6 +1155,9 @@ def build_candidate_manifest(
             identity["location"] = "body"
         elif in_fragment:
             identity["location"] = "fragment"
+        elif in_path:
+            identity["location"] = "path"
+            identity["path_segment_index"] = int(path_segment_index or 0)
         candidate_id = _digest(identity)
         candidate = {
             "candidate_id": candidate_id,
@@ -1134,8 +1173,12 @@ def build_candidate_manifest(
                 (str(endpoint.get("content_type")) if endpoint.get("content_type") else None)
                 if in_body else None
             ),
-            # URL fragments never reach the server, so SQL injection is not a meaningful family.
-            "family_hints": ["xss"] if in_fragment else ["xss", "sqli"],
+            # URL fragments never reach the server, so SQL injection is not a meaningful family;
+            # a path segment reaches the query engine but never reflects into HTML, so it is a
+            # SQL-injection site only.
+            "family_hints": (
+                ["sqli"] if in_path else ["xss"] if in_fragment else ["xss", "sqli"]
+            ),
             "source_tool": endpoint["source_tool"],
             "source_observation_ref": None,
             "auth_lane": endpoint["auth_lane"],
@@ -1147,6 +1190,9 @@ def build_candidate_manifest(
             "score": min(100, score),
             "ranking_rationale": rationale,
         }
+        if in_path:
+            candidate["parameter_location"] = "path"
+            candidate["path_segment_index"] = int(path_segment_index or 0)
         if in_fragment:
             candidate.update({
                 "browser_fragment_path": endpoint["browser_fragment_path"],
@@ -1173,6 +1219,10 @@ def build_candidate_manifest(
                 (str(name), "fragment")
                 for name in endpoint.get("browser_fragment_query_parameter_names") or ()
             )
+        # A templated path segment (/api/orders/{int}) is an injectable value the query never names.
+        # It is read with a GET regardless of the endpoint's own method, so it needs no
+        # state-changing authority; the anchor name records the segment position.
+        path_segments = _templated_path_segments(str(endpoint["canonical_path"]))
         if endpoint["method"] != "GET":
             # ONE candidate for the whole declared body, not one per field. The verifier tests
             # every field in a single run and stops at the first vulnerable one, so per-field
@@ -1185,6 +1235,24 @@ def build_candidate_manifest(
                 [(max(body_fields, key=lambda name: (_body_field_rank(name), name)), "body")]
                 if allow_state_changing_http and body_fields else []
             )
+        path_candidates = [
+            ranked_candidate(
+                endpoint, f"path_{segment_index}", location="path",
+                path_segment_index=segment_index,
+            )
+            for segment_index in path_segments
+        ]
+        for candidate in path_candidates:
+            candidate_count += 1
+            heap_key = (
+                int(candidate["score"]),
+                -int(str(candidate["candidate_id"]), 16),
+            )
+            row = (heap_key, candidate)
+            if len(selected) < limit:
+                heapq.heappush(selected, row)
+            elif heap_key > selected[0][0]:
+                heapq.heapreplace(selected, row)
         for parameter, location in locations:
             candidate = ranked_candidate(endpoint, parameter, location=location)
             candidate_count += 1
@@ -1603,11 +1671,29 @@ def canonical_nuclei_options_for_manifest(
     }
 
 
+def _templated_path_segments(canonical_path: str) -> list[int]:
+    """Indices of the ``{int}``/``{uuid}`` segments in a normalized path.
+
+    Only a templated segment carries a value the application substitutes into a query, so only
+    those are injectable; a literal segment is part of the route, not an input.
+    """
+    return [
+        index for index, segment in enumerate(str(canonical_path or "").split("/"))
+        if segment in {"{int}", "{uuid}"}
+    ]
+
+
 def execution_url_for_endpoint(
     entry: Mapping[str, Any], *, parameter_name: str | None = None,
     parameter_location: str = "query",
+    path_injection_segment: int | None = None,
 ) -> str:
-    """Materialize a value-free execution URL from canonical manifest fields."""
+    """Materialize a value-free execution URL from canonical manifest fields.
+
+    With ``path_injection_segment`` the value at that path segment carries a trailing ``*``, the
+    sqlmap custom-injection marker, so a path parameter can be tested where the endpoint declares
+    no query or body input.
+    """
     scheme = str(entry["scheme"])
     host = str(entry["host"])
     port = int(entry["port"])
@@ -1618,15 +1704,33 @@ def execution_url_for_endpoint(
     fragment_names = list(
         entry.get("browser_fragment_query_parameter_names") or ()
     )
-    if parameter_name is not None:
+    if path_injection_segment is not None:
+        # The injection point is the path segment; the query is not part of this candidate, and
+        # sqlmap's ``*`` marker overrides auto-detection, so a bare marked path is the exact test.
+        names = []
+        fragment_names = []
+    elif parameter_name is not None:
         if parameter_location not in {"query", "fragment"}:
             raise ScanWorkManifestError("candidate parameter location is invalid")
         names = [parameter_name] if parameter_location == "query" else []
         fragment_names = [parameter_name] if parameter_location == "fragment" else []
-    path = str(entry["canonical_path"])
-    path = path.replace("{int}", "1").replace(
-        "{uuid}", "00000000-0000-4000-8000-000000000000",
-    )
+    canonical = str(entry["canonical_path"])
+    if path_injection_segment is None:
+        path = canonical.replace("{int}", "1").replace(
+            "{uuid}", "00000000-0000-4000-8000-000000000000",
+        )
+    else:
+        rendered_segments: list[str] = []
+        for index, segment in enumerate(canonical.split("/")):
+            value = (
+                "1" if segment == "{int}"
+                else "00000000-0000-4000-8000-000000000000" if segment == "{uuid}"
+                else segment
+            )
+            if index == path_injection_segment and segment in {"{int}", "{uuid}"}:
+                value = f"{value}*"
+            rendered_segments.append(value)
+        path = "/".join(rendered_segments) or "/"
     query = urllib.parse.urlencode([(name, "1") for name in names])
     fragment_path = str(entry.get("browser_fragment_path") or "")
     fragment_query = urllib.parse.urlencode([
@@ -1718,6 +1822,21 @@ def execution_url_for_manifest_candidate(
         raise ScanWorkManifestError(
             "candidate route is absent from its endpoint manifest"
         )
+    if candidate.get("parameter_location") == "path":
+        segment_index = int(candidate.get("path_segment_index") or 0)
+        if (
+            endpoint["method"] != candidate["method"]
+            or endpoint["canonical_path"] != candidate["canonical_path"]
+            or segment_index not in _templated_path_segments(
+                str(endpoint["canonical_path"])
+            )
+        ):
+            raise ScanWorkManifestError(
+                "candidate identity conflicts with its endpoint manifest"
+            )
+        return execution_url_for_endpoint(
+            endpoint, path_injection_segment=segment_index,
+        )
     fragment_names = list(
         candidate.get("browser_fragment_query_parameter_names") or ()
     )
@@ -1784,6 +1903,19 @@ def execution_request_for_manifest_candidate(
         raise ScanWorkManifestError(
             "candidate manifest index is outside immutable content"
         ) from exc
+    if candidate.get("parameter_location") == "path":
+        # A path candidate is a GET whose URL carries the sqlmap ``*`` marker at the segment; it
+        # has no body and needs no state-changing authority.
+        return {
+            "method": "GET",
+            "url": execution_url_for_manifest_candidate(
+                endpoint_manifest, candidate_manifest, index,
+            ),
+            "content_type": None,
+            "field_name": str(candidate["parameter_name"]),
+            "body_field_names": [],
+            "path_injection": True,
+        }
     body_fields = list(candidate.get("body_field_names") or ())
     if not body_fields:
         return {

@@ -1658,6 +1658,11 @@ class DatabaseNeutralScanActionDispatcher:
             # the browser XSS proof; skip it here.
             if candidate.get("browser_fragment_path"):
                 continue
+            # A path-segment candidate has no request field to mutate; the repeated differential
+            # proof operates on a body or query parameter, so a path SQLi is left at the sqlmap
+            # verification tier rather than proven here.
+            if candidate.get("parameter_location") == "path":
+                continue
             if candidate_id not in candidate_signals:
                 continue
             attempt_id = hashlib.sha256(
@@ -2132,6 +2137,10 @@ class DatabaseNeutralScanActionDispatcher:
             # NoSQL differential would search for a parameter that does not exist and
             # block. It belongs to the browser XSS proof; skip it here.
             if candidate.get("browser_fragment_path"):
+                continue
+            # A path segment is not a NoSQL operator-injection site (no field to replace with an
+            # operator object); skip it here, it belongs to the SQLi verifier.
+            if candidate.get("parameter_location") == "path":
                 continue
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:nosqli:{candidate_id}".encode()
@@ -2655,6 +2664,11 @@ class DatabaseNeutralScanActionDispatcher:
             self.options, lane="primary", capability_name=legacy_capability,
         )
         for offset, (manifest_index, row) in enumerate(rows):
+            # A path-segment candidate (family_hints: ["sqli"]) carries the sqlmap ``*`` marker in
+            # its URL; only the SQLi verifier understands it. Dalfox and the template sweeps would
+            # test the literal ``*`` as a value, so they skip it.
+            if row.get("parameter_location") == "path" and family != "sqli":
+                continue
             candidate_id = str(
                 row.get("candidate_id") or row.get("route_id")
                 or hashlib.sha256(str(manifest_index).encode()).hexdigest()
