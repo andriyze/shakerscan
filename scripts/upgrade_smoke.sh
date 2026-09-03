@@ -235,15 +235,25 @@ run_scenario() {
         -e PYTHONPATH=/app \
         -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
         -v "$REPO_ROOT/scripts:/upgrade-smoke:ro" \
+        -v "$SMOKE_TMP/inventory:/inventory" \
         --entrypoint python \
         "$SCANNER_IMAGE" \
         /upgrade-smoke/upgrade_schema_smoke.py \
         --database-url "postgresql://scanner:${POSTGRES_PASSWORD:-scanner}@127.0.0.1:5432/$database" \
-        --scenario "$scenario"
+        --scenario "$scenario" \
+        "${@:3}"
 }
 
+# The rollback leg must demand exactly the previous-stable schema back, so record what the
+# baseline runtime created (tables and migration markers) before any candidate migration
+# touches the dirty database, and again once the candidate has migrated it. The rollback
+# assertions derive the candidate-only set from that difference instead of a fixed list.
+mkdir -p "$SMOKE_TMP/inventory"
+chmod 0777 "$SMOKE_TMP/inventory"
+run_scenario scanner_dirty inventory --inventory-out /inventory/baseline.json
+
 run_scenario scanner clean
-run_scenario scanner_dirty dirty
+run_scenario scanner_dirty dirty --inventory-out /inventory/upgraded.json
 
 # A real database restart must not depend on an in-memory migration or lease
 # side effect. Verify the complete state again without rerunning migrations.
@@ -387,7 +397,9 @@ docker exec -i "$SMOKE_CONTAINER" pg_restore \
     -U scanner -d scanner_dirty --exit-on-error \
     < "$SMOKE_TMP/scanner_dirty.before-upgrade.dump" >/dev/null
 
-run_scenario scanner_dirty rollback
+run_scenario scanner_dirty rollback \
+    --baseline-inventory /inventory/baseline.json \
+    --upgraded-inventory /inventory/upgraded.json
 
 run_operational_rollback() {
     # The baseline API image carries no default command: v0.8.18's compose file supplies
