@@ -38,8 +38,8 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 
 | Document | Purpose |
 |---|---|
-| [`../results/benchmark-runs/INTEGRITY_LEDGER.md`](../results/benchmark-runs/INTEGRITY_LEDGER.md) | Benchmark contamination, stale-fleet, scoring, and interpretation corrections |
-| [`../results/planner-evals/INTEGRITY_LEDGER.md`](../results/planner-evals/INTEGRITY_LEDGER.md) | Planner-evaluation limitations, invalidations, and rerun requirements |
+| [`ledgers/benchmark-integrity-ledger.md`](ledgers/benchmark-integrity-ledger.md) | Benchmark contamination, stale-fleet, scoring, and interpretation corrections |
+| [`ledgers/planner-evals-integrity-ledger.md`](ledgers/planner-evals-integrity-ledger.md) | Planner-evaluation limitations, invalidations, and rerun requirements |
 
 ## AI Security
 

@@ -1,13 +1,10 @@
 # Generated benchmark/test scratch output
 tests/benchmark/results/
 
-# Results (scan outputs, checkpoints) are local-only...
-results/*
-# ...except benchmark scorecards: §13 requires benchmark outcomes to be visible in git history.
-# (ignore contents with results/* — not the dir — so a subdir can be re-included.)
-!results/benchmark-runs/
-results/benchmark-runs/*
-!results/benchmark-runs/*.json
+# Results (scan outputs, checkpoints, benchmark and planner-eval cards) are local-only. Release
+# benchmark cards are uploaded as certification artifacts and their digests are sealed into the
+# certified receipt attached to each GitHub Release; nothing under results/ belongs in git.
+results/
 
 # Environment
 .venv/
