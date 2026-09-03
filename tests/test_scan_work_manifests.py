@@ -269,7 +269,7 @@ def test_candidate_ranking_puts_transport_plumbing_and_cache_busters_last():
 
     order = [(entry["canonical_path"], entry["parameter_name"]) for entry in ranked.entries]
     assert len(order) == 6, "plumbing candidates remain in the manifest"
-    real = {("/search", "q"), ("/api/products", "category")}
+    real = {(surface["endpoints"][0]["normalized_path"], "q"), ("/api/products", "category")}
     assert set(order[:2]) == real, order
     plumbing = [entry for entry in ranked.entries if entry["canonical_path"] == "/socket.io/"]
     assert plumbing and all(
