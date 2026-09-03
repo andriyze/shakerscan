@@ -879,3 +879,84 @@ def test_anonymous_equals_authenticated_is_not_a_verified_authorization_break():
     assert '"suspected": True' in block
     assert '"needs_verification": True' in block
     assert '"severity="high"' not in block
+
+
+def test_finalizer_verified_findings_carry_the_universal_proof_envelope():
+    """Every finding the finalizer marks verified must satisfy the scorer's proof predicate.
+
+    The risk scorer trusts only the ``proof_contract_v2`` envelope. A verified finding without
+    it is scored as suspected (half weight, softer ceiling), so a proven critical SQL injection
+    graded C instead of capping the run at the proven-critical ceiling.
+    """
+    try:
+        from ai_verdict_policy import has_deterministic_exploit_proof
+    except ModuleNotFoundError:  # package import layout
+        from scanner.ai_verdict_policy import has_deterministic_exploit_proof
+
+    prove = _action("prove.sqli.0", 0, capability_name="sqli.prove_batch")
+    baseline = _action("baseline.http", 1, capability_name="http.request")
+    final = _action(
+        "finalize.report", 2, dependencies=(prove.action_id, baseline.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(prove, baseline, final),
+    )
+    results = {
+        prove.action_id: _result_with_observation_count(prove, 1),
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+    }
+    observations = {
+        prove.action_id: ({
+            "kind": "sqli_proof",
+            "candidate_id": "candidate-sqli",
+            "request_ref_id": "request-sqli",
+            "method": "POST",
+            "field_path": "email",
+            "canonical_path": "/rest/user/login",
+            "request_class": "safe_authentication",
+            "proof_state": "verified",
+            "finding_verdict": "verified",
+            "proof_contract": "sqli_authentication_bypass/v1",
+            "technique": "authentication_bypass_repeated",
+            "repetitions": 2,
+            "response_pairs": [{
+                "control_response_sha256": "c" * 64,
+                "payload_response_sha256": "d" * 64,
+            }],
+            "session_state_discarded": True,
+        },),
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"origin": "https://app.example.test", "pinned_address": "203.0.113.10"},
+            "response": {
+                "status": 200,
+                "selected_headers": {
+                    "content-security-policy": "",
+                    "referrer-policy": "strict-origin-when-cross-origin",
+                    "permissions-policy": "camera=()",
+                    "strict-transport-security": "max-age=63072000",
+                },
+            },
+        },),
+    }
+
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    verified = [item for item in report["findings"] if item["verified"] is True]
+    assert {item["tool"] for item in verified} >= {"shakerscan_sqli_proof", "http_baseline"}
+    for finding in verified:
+        assert has_deterministic_exploit_proof(finding), finding["tool"]
+        envelope = finding["proof_contract_v2"]
+        assert envelope["schema_version"] == "proof-contract/v2"
+        assert envelope["contract_id"] == f"scan.{finding['evidence']['canonical_capability']}.{envelope['family']}"
+        assert envelope["reexecution"]["verifier_build"] == finding["evidence"]["canonical_capability"]
+        assert envelope["capability_receipt"] == finding["evidence"]["capability_receipt"]
+    reasons = report["result"]["score_reasons"]
+    assert "proven_critical:1" in reasons, reasons
+    assert not any(reason.startswith("suspected_critical") for reason in reasons), reasons
