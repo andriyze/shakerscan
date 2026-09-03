@@ -131,7 +131,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
     assert "rm -f /usr/lib/python3/dist-packages/distutils-precedence.pth" in scanner
     assert "test -z \"$(python -c 'pass' 2>&1)\"" in scanner
 
-    assert "node:24-alpine@sha256:" in ui
+    assert "node:26-alpine@sha256:" in ui
     assert ui.count("apk add --no-cache --upgrade") == 2
     assert ui.count("APK_TOOLS_VERSION=3.0.8-r0") == 2
     assert ui.count("OPENSSL_VERSION=3.5.8-r0") == 2
