@@ -58,7 +58,7 @@ def test_registry_filters_target_kind_and_active_permission():
         "web.probe", "http.request", "artifact.inspect", "javascript.analyze",
         "dns.inspect", "infrastructure.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
         "browser.interact", "web.crawl", "web.browser_crawl",
-        "web.content_discover",
+        "web.content_discover", "web.spec_ingest",
         "templates.passive_scan", "templates.passive_batch",
         "collections.inspect", "collections.select", "collections.replay_safe",
     }

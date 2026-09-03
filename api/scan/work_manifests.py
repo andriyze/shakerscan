@@ -940,6 +940,9 @@ def build_endpoint_manifest(
         "web.probe": 0,
         "web.crawl": 1,
         "web.content_discover": 1,
+        # A published API description is a first-party declaration of the surface, not a route
+        # inferred from a fetched page, so it is depth 0 like a seeded endpoint.
+        "web.spec_ingest": 0,
         "subdomains.discover": 1,
     }
     entries: list[dict[str, Any]] = []
@@ -1052,6 +1055,9 @@ def build_candidate_manifest(
         "web.browser_crawl": (16, "browser_observed_source"),
         "web.crawl": (12, "crawler_observed_source"),
         "web.content_discover": (8, "content_discovery_source"),
+        # The application's own spec is authoritative about what a route accepts, on a par with an
+        # operator-declared known endpoint.
+        "web.spec_ingest": (14, "api_specification_source"),
         "web.probe": (6, "probe_observed_source"),
         "seed": (4, "seed_source"),
     }

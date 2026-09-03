@@ -31,6 +31,7 @@ SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES = frozenset({
     # static sibling web.crawl was already here; the omission of this one made every authenticated
     # scan crawl anonymously.
     "web.browser_crawl",
+    "web.spec_ingest",
     "web.content_discover",
     "templates.passive_scan",
     "templates.scan",

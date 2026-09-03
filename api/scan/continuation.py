@@ -639,6 +639,7 @@ DISCOVERY_CONTINUATION_ACTION_IDS: tuple[str, ...] = (
     "discover.web_crawl",
     "discover.browser_crawl",
     "discover.web_content",
+    "discover.spec",
     "discover.subdomains",
 )
 
@@ -877,6 +878,7 @@ def discovery_shard_endpoint_worklist(
         crawl=summary("discover.web_crawl"),
         browser=summary("discover.browser_crawl"),
         content=summary("discover.web_content"),
+        spec=summary("discover.spec"),
         max_endpoints=max(1, int(max_endpoints)),
     )
     manifest = build_endpoint_manifest(
@@ -975,6 +977,7 @@ def build_discovery_continuation_manifests(
         crawl=summary(("discover.web_crawl",)),
         browser=summary(("discover.browser_crawl",)),
         content=summary(("discover.web_content",)),
+        spec=summary(("discover.spec",)),
         max_endpoints=allocation.max_endpoint_entries,
     )
     request_refs_by_route: dict[str, list[str]] = {}

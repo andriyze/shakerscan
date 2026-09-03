@@ -953,6 +953,7 @@ class ParallelActionPlanCompiler:
         """
         names = [
             "web.probe", "web.crawl", "web.browser_crawl", "web.content_discover",
+            "web.spec_ingest",
         ]
         if include_subdomains:
             names.append("subdomains.discover")

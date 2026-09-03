@@ -161,6 +161,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "web.content_discover",
       "web.crawl",
       "web.probe",
+      "web.spec_ingest",
       "xss.request_verify",
       "xss.request_verify_batch",
       "xss.verify",
@@ -186,7 +187,8 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
         "web.probe",
         "web.crawl",
         "web.browser_crawl",
-        "web.content_discover"
+        "web.content_discover",
+        "web.spec_ingest"
       ],
       "default_enabled": true,
       "description": "Crawl, API/HAR/OpenAPI discovery, and passive surface refresh.",

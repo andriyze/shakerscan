@@ -1047,6 +1047,20 @@ class ScanActionPlanCompiler:
                     {"target_manifest_ref": endpoint_ref or None},
                     dependencies=("discover.web_probe",),
                 )
+            # The application's own API description declares routes a black-box crawl never
+            # exercises -- body-bearing endpoints above all -- so it is planned alongside the
+            # crawlers whenever candidates are wanted or recon breadth is selected. Supporting,
+            # never required: a target with no published spec still completes its scan.
+            # Ranked with its sibling content-discovery producer, not above the primary crawl:
+            # a plain optional action, so under a scarce budget the crawl is funded first and
+            # spec ingestion degrades to a coverage gap rather than starving it.
+            add(
+                "discover.spec",
+                "discover_surface",
+                "web.spec_ingest",
+                {},
+                dependencies=primary_dependency,
+            )
         if scope in {"full", "discovery"} and policy.subdomain_discovery:
             add(
                 "discover.subdomains",
