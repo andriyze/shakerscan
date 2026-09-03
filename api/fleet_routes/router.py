@@ -65,7 +65,7 @@ try:
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
-    from scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
+    from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from scan.contracts import SCAN_AUTHENTICATION_KEYS
     from scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from scan.executor import build_native_scan_execution
@@ -3144,12 +3144,17 @@ async def _materialize_broker_scan_continuation(
         )
         continuation_plan = allocate_scan_action_plan(
             continuation_raw,
-            ContinuationBudgetCeiling(allocation.budget_ceiling),
+            # Admit against what the settled root actions actually left, not the
+            # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
+            ContinuationBudgetCeiling(
+                reconciled_continuation_ceiling(allocation, results),
+            ),
         ).plan
         amended = merge_scan_action_continuation(
             parent_plan=parent_plan,
             continuation_plan=continuation_plan,
             allocation=allocation,
+            parent_results=results,
         )
         revision = amended_scan_plan_revision(
             parent_plan=parent_plan,

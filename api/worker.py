@@ -216,6 +216,7 @@ from scan.budget_allocator import (
 )
 from scan.continuation import (
     ContinuationBudgetCeiling,
+    reconciled_continuation_ceiling,
     ScanContinuationAllocation,
     ScanContinuationError,
     ScanPlanRevision,
@@ -11687,12 +11688,17 @@ async def _materialize_local_scan_continuation(
     )
     continuation_plan = allocate_scan_action_plan(
         continuation_raw,
-        ContinuationBudgetCeiling(allocation.budget_ceiling),
+        # Admit against what the settled root actions actually left, not the
+        # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
+        ContinuationBudgetCeiling(
+            reconciled_continuation_ceiling(allocation, parent_results),
+        ),
     ).plan
     amended = merge_scan_action_continuation(
         parent_plan=parent_plan,
         continuation_plan=continuation_plan,
         allocation=allocation,
+        parent_results=parent_results,
     )
     revision = amended_scan_plan_revision(
         parent_plan=parent_plan,

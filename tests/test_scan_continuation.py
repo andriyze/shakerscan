@@ -9,6 +9,7 @@ from api.runtime.models import TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
+    reconciled_continuation_ceiling,
     ContinuationBudgetCeiling,
     SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
     ScanContinuationAllocation,
@@ -889,3 +890,76 @@ def test_absent_receipt_from_an_enabled_producer_is_failed_not_skipped():
     }
     assert network["schema_version"] == "canonical-scan-network-discovery/v1"
     assert network["network_binding"] == "exact_address_subset"
+
+
+def test_continuation_ceiling_reclaims_what_settled_root_actions_did_not_spend():
+    """Reserve before execution, reconcile after: the continuation is bounded by what the
+    root actions actually left, not by the worst-case residual frozen at submission.
+
+    A balanced discovery reserved 345 wall seconds and used 74; holding the frozen ceiling
+    scaled the SQL injection verifier to its floor tier and skipped browser proof while two
+    thirds of the wall allowance went unspent.
+    """
+    parent, continuation, allocation = _plans()
+    untouched = {
+        action.action_id: _result(action, status=CapabilityResultStatus.SUCCESS)
+        for action in parent.actions
+    }
+    fully_charged = {
+        action.action_id: _result(
+            action, status=CapabilityResultStatus.SUCCESS, charge_full=True,
+        )
+        for action in parent.actions
+    }
+    returned = {name: 0 for name in allocation.budget_ceiling}
+    for action in parent.actions:
+        for name, amount in action.requested_budget.items():
+            if name in returned:
+                returned[name] += amount
+    assert returned["tool_wall_seconds"] > 0, "the root plan must hold wall budget"
+
+    assert reconciled_continuation_ceiling(allocation, fully_charged) == dict(
+        allocation.budget_ceiling,
+    ), "a root action that spent its whole hold gives nothing back"
+    assert reconciled_continuation_ceiling(allocation, None) == dict(allocation.budget_ceiling)
+    reclaimed = reconciled_continuation_ceiling(allocation, untouched)
+    assert reclaimed == {
+        name: amount + returned[name] for name, amount in allocation.budget_ceiling.items()
+    }, "an unspent hold returns in full, dimension by dimension"
+
+    # The merge bound moves with the reconciliation: a ceiling the continuation cannot fit
+    # statically is accepted once the settled surplus covers the gap, and by no more.
+    needed = {name: 0 for name in allocation.budget_ceiling}
+    for action in continuation.actions:
+        for name, amount in action.requested_budget.items():
+            needed[name] += amount
+    exact_fit = ScanContinuationAllocation(**{
+        **allocation.digest_material(),
+        "budget_ceiling": {
+            name: max(0, needed[name] - returned[name]) for name in needed
+        },
+    })
+    with pytest.raises(ScanContinuationError, match="upfront allocation"):
+        merge_scan_action_continuation(
+            parent_plan=parent, continuation_plan=continuation, allocation=exact_fit,
+        )
+    merged = merge_scan_action_continuation(
+        parent_plan=parent, continuation_plan=continuation, allocation=exact_fit,
+        parent_results=untouched,
+    )
+    assert len(merged.actions) == len(parent.actions) + len(continuation.actions)
+    one_short = ScanContinuationAllocation(**{
+        **exact_fit.digest_material(),
+        "budget_ceiling": {
+            **exact_fit.budget_ceiling,
+            "tool_wall_seconds": max(0, exact_fit.budget_ceiling["tool_wall_seconds"] - 1),
+        },
+    })
+    if needed["tool_wall_seconds"] > returned["tool_wall_seconds"]:
+        with pytest.raises(ScanContinuationError, match="upfront allocation"):
+            merge_scan_action_continuation(
+                parent_plan=parent, continuation_plan=continuation, allocation=one_short,
+                parent_results=untouched,
+            )
+    # A result cannot consume more than it reserved (the result model rejects it), so the
+    # reconciliation only ever returns budget; it never has to charge an overrun.
