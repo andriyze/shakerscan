@@ -37,6 +37,14 @@ _UNSET = object()
 # header name.
 _NON_SECRET_HEADER_VALUES = {
     "access_control_allow_credentials": frozenset({"true"}),
+    # Coverage records WHICH principal contexts a scan exercised, as fixed labels. The bare
+    # word `auth` in the key masked the whole list to "***" on the public scan result, and the
+    # release benchmark then read the mask character by character as a wildcard state and
+    # reported the two principals it had minted as missing. Labels are not secrets; anything
+    # else under these keys still is.
+    "auth_states_tested": frozenset({"anonymous", "user1", "user2"}),
+    "auth_state": frozenset({"anonymous", "user1", "user2"}),
+    "auth_states": frozenset({"anonymous", "user1", "user2"}),
 }
 _EXACT_SENSITIVE_KEYS = frozenset({
     "access_key", "access_key_id", "access_token", "api_key", "apikey",
@@ -115,8 +123,16 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     joined = "_".join(parts)
     allowed_header_values = _NON_SECRET_HEADER_VALUES.get(joined)
     if allowed_header_values is not None:
-        normalized_item = str(item).strip().lower() if item is not _UNSET else ""
-        return normalized_item not in allowed_header_values
+        if item is _UNSET:
+            return True
+        # A list under such a key is safe only when every element is a known label.
+        candidates = list(item) if isinstance(item, (list, tuple, set, frozenset)) else [item]
+        if not candidates:
+            return False
+        return any(
+            str(candidate).strip().lower() not in allowed_header_values
+            for candidate in candidates
+        )
     describes = _describes_a_value(parts)
     # Only a bool. A descriptor name over a boolean is a statement about a secret --
     # `secret_values_visible: False` -- and a secret is never True or False. Numbers are

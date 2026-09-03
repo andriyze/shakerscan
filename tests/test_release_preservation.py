@@ -8,6 +8,8 @@ import pytest
 
 from scripts.release_preservation import PreservationError, build_receipt
 
+SOURCE = "a" * 40
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX = json.loads(
@@ -229,3 +231,70 @@ def test_release_workflows_require_and_publish_preservation_evidence():
         "preservation-receipt.json",
     ):
         assert required in candidate
+
+
+def _scorecard_with_debt(tmp_path: Path, row: str, area: str):
+    """Replace one required row by its declared-debt xfail row, as a debt release records it."""
+    junit, scorecard, playwright = _write_evidence(tmp_path)
+    card = json.loads(scorecard.read_text())
+    check_id = row.split(" ", 1)[0].rstrip("ABCDEFGH")
+    for block in card["areas"]:
+        if block["area"] != area:
+            continue
+        block["rows"] = [item for item in block["rows"] if item["name"] != row]
+        block["rows"].append({
+            "name": f"{check_id} declared-debt lifecycle", "passed": True, "skipped": False,
+            "xfail": True, "reason": "preview surface outside the shipping scope",
+        })
+    scorecard.write_text(json.dumps(card))
+    return junit, scorecard, playwright
+
+
+def test_a_declared_debt_row_is_recorded_as_waived_only_in_an_authorized_debt_release(tmp_path):
+    control = next(
+        (program_id, control) for program_id, program in MATRIX["programs"].items()
+        for control in program["controls"]
+        if control.get("e2e") and not control.get("pytest_selector") and not control.get("playwright")
+    )
+    program_id, spec = control
+    junit, scorecard, playwright = _scorecard_with_debt(tmp_path, spec["e2e"]["row"], spec["e2e"]["area"])
+
+    strict = build_receipt(
+        matrix=MATRIX, junit_path=junit, scorecard_path=scorecard, playwright_path=playwright,
+        source_sha=SOURCE, images=_images(),
+    )
+    assert strict["status"] == "fail"
+    assert f"{program_id}.{spec['id']}" in strict["failed_controls"]
+    assert strict["declared_debt_controls"] == []
+
+    debt = build_receipt(
+        matrix=MATRIX, junit_path=junit, scorecard_path=scorecard, playwright_path=playwright,
+        source_sha=SOURCE, images=_images(), declared_debt=True,
+    )
+    assert debt["status"] == "pass"
+    assert debt["failed_controls"] == []
+    assert [item["control"] for item in debt["declared_debt_controls"]] == [f"{program_id}.{spec['id']}"]
+    assert debt["declared_debt_controls"][0]["reason"] == "preview surface outside the shipping scope"
+    status = {
+        c["id"]: c["status"] for p in debt["programs"] if p["id"] == program_id for c in p["controls"]
+    }
+    assert status[spec["id"]] == "waived_declared_debt"
+
+
+def test_a_missing_row_without_a_matching_debt_row_still_fails_in_a_debt_release(tmp_path):
+    spec = next(
+        control for program in MATRIX["programs"].values() for control in program["controls"]
+        if control.get("e2e")
+    )
+    junit, scorecard, playwright = _write_evidence(tmp_path)
+    # The row is simply absent: the area gate still passes, but nothing records the check as debt.
+    card = json.loads(scorecard.read_text())
+    for block in card["areas"]:
+        block["rows"] = [item for item in block["rows"] if item["name"] != spec["e2e"]["row"]]
+    scorecard.write_text(json.dumps(card))
+    receipt = build_receipt(
+        matrix=MATRIX, junit_path=junit, scorecard_path=scorecard, playwright_path=playwright,
+        source_sha=SOURCE, images=_images(), declared_debt=True,
+    )
+    assert receipt["status"] == "fail"
+    assert receipt["declared_debt_controls"] == []

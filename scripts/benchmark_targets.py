@@ -747,6 +747,10 @@ def collect_scorecard(report, fixture):
     })
 
     auth_states = ((report.get("smart_coverage") or {}).get("auth_states_tested") or [])
+    # A masked or otherwise scalar value is "no auth state evidence", never a set of
+    # one-character states: iterating the string "***" once produced a phantom "*" state.
+    if not isinstance(auth_states, (list, tuple, set, frozenset)):
+        auth_states = []
     auth_cfg = fixture.get("auth") or {}
     required_auth_states = []
     if auth_cfg.get("user1_login"):

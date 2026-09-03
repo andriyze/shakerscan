@@ -453,3 +453,65 @@ def test_the_certification_records_the_runtime_manifest_digest(tmp_path):
     )
     assert receipt["runtime_manifest_sha256"] == "5" * 64
     assert receipt["certification"]["runtime_manifest_sha256"] == "5" * 64
+
+
+def _debt_preservation(preservation: dict) -> dict:
+    return {
+        **preservation,
+        "declared_debt_controls": [{
+            "control": "model_intake.trust_expiry", "checks": ["MI-6 durable trust-anchor lifecycle"],
+            "reason": "preview surface outside the shipping scope",
+        }],
+    }
+
+
+def test_preservation_declared_debt_requires_the_e2e_debt_waiver(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    with pytest.raises(CertificationError, match="preservation receipt records declared-debt"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=_debt_preservation(preservation),
+            e2e=e2e, source_sha=SOURCE, **paths,
+        )
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=_debt_preservation(preservation),
+        e2e=e2e, source_sha=SOURCE, waive_e2e_declared_debt=True, **paths,
+    )
+    record = next(
+        item for item in receipt["certification"]["scope_exclusions"]
+        if isinstance(item, dict) and item["boundary"] == "mature_subsystem_preservation_declared_debt"
+    )
+    assert record["controls"][0]["control"] == "model_intake.trust_expiry"
+    validate_certification_checks(receipt)
+
+
+def test_promotion_accepts_waived_dast_quality_only_with_its_scope_record(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    dast_path = paths["external_evidence"]["dast_quality"][1]
+    shortfall = {**paths["external_evidence"]["dast_quality"][0], "passed": False,
+                 "quality_bar_passed": False, "release_quality_contract_passed": False}
+    dast_path.write_text(json.dumps(shortfall), encoding="utf-8")
+    paths["external_evidence"]["dast_quality"] = (shortfall, dast_path)
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+        source_sha=SOURCE, waive_dast_quality=True, **paths,
+    )
+    assert receipt["certification"]["checks"]["complete_dast_quality_bar"] == "waived_declared_debt"
+    validate_certification_checks(receipt)
+
+    stripped = json.loads(json.dumps(receipt))
+    stripped["certification"]["scope_exclusions"] = [
+        item for item in stripped["certification"]["scope_exclusions"]
+        if not (isinstance(item, dict) and item.get("boundary") == "complete_dast_quality_bar")
+    ]
+    with pytest.raises(PromotionReceiptError, match="no scope-exclusion record"):
+        validate_certification_checks(stripped)
+
+    half = json.loads(json.dumps(receipt))
+    half["certification"]["checks"]["dast_release_quality_contract"] = "pass"
+    with pytest.raises(PromotionReceiptError, match="waived together"):
+        validate_certification_checks(half)
+
+    unknown = json.loads(json.dumps(receipt))
+    unknown["certification"]["scope_exclusions"].append({"boundary": "made_up", "state": "waived_declared_debt"})
+    with pytest.raises(PromotionReceiptError, match="unknown or unwaived"):
+        validate_certification_checks(unknown)

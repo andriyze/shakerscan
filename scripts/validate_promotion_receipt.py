@@ -30,6 +30,12 @@ OPTIONAL_CHECK_TO_EXCLUSION = {
     "model_intake_physical": "model_intake_physical",
     "device_physical": "device_physical",
 }
+# Boundaries an authorized declared-debt release may record as waived, by name.
+WAIVER_BOUNDARIES = frozenset({
+    "complete_dast_quality_bar",
+    "installed_stack_e2e_declared_debt",
+    "mature_subsystem_preservation_declared_debt",
+})
 
 
 def validate_certification_checks(receipt: Mapping[str, Any]) -> None:
@@ -57,17 +63,41 @@ def validate_certification_checks(receipt: Mapping[str, Any]) -> None:
             )
 
     exclusions = certification.get("scope_exclusions")
-    if not isinstance(exclusions, list) or any(not isinstance(item, str) for item in exclusions):
-        raise PromotionReceiptError("certification scope exclusions must be a string list")
+    if not isinstance(exclusions, list):
+        raise PromotionReceiptError("certification scope exclusions must be a list")
+    optional_exclusions = sorted(item for item in exclusions if isinstance(item, str))
+    waiver_records = [item for item in exclusions if isinstance(item, Mapping)]
+    if len(optional_exclusions) + len(waiver_records) != len(exclusions):
+        raise PromotionReceiptError("certification scope exclusions must be names or waiver records")
     expected_exclusions = sorted(
         exclusion
         for check, exclusion in OPTIONAL_CHECK_TO_EXCLUSION.items()
         if checks.get(check) == "not_run_optional_boundary"
     )
-    if sorted(exclusions) != expected_exclusions:
+    if optional_exclusions != expected_exclusions:
         raise PromotionReceiptError(
             "scope exclusions do not match optional checks recorded as not run"
         )
+    # Every waiver record must name a known boundary in the waived state, and every waived
+    # check must be backed by its record, so a receipt can never carry a silent waiver.
+    boundaries: list[str] = []
+    for record in waiver_records:
+        boundary = str(record.get("boundary") or "")
+        if boundary not in WAIVER_BOUNDARIES or record.get("state") != "waived_declared_debt":
+            raise PromotionReceiptError(f"unknown or unwaived scope-exclusion record: {boundary!r}")
+        boundaries.append(boundary)
+    if len(set(boundaries)) != len(boundaries):
+        raise PromotionReceiptError("duplicate scope-exclusion records")
+    dast_waived = {
+        checks.get("complete_dast_quality_bar"), checks.get("dast_release_quality_contract"),
+    }
+    if dast_waived == {"waived_declared_debt"}:
+        if "complete_dast_quality_bar" not in boundaries:
+            raise PromotionReceiptError("waived DAST quality bar has no scope-exclusion record")
+    elif dast_waived != {"pass"}:
+        raise PromotionReceiptError("DAST quality checks must be waived together or pass together")
+    elif "complete_dast_quality_bar" in boundaries:
+        raise PromotionReceiptError("DAST quality scope-exclusion record without a waived check")
 
 
 def _read(path: Path) -> Mapping[str, Any]:

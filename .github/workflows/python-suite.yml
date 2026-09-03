@@ -79,13 +79,18 @@ jobs:
           mkdir -p artifacts
           python scripts/run_complete_python_suite.py --artifacts-dir artifacts
 
-      - name: Verify generated inventories and the installer manifest
+      - name: Verify generated inventories, contracts, and static release gates
         if: steps.changes.outputs.run == 'true'
         run: |
           python scripts/generate_capability_inventory.py --check
           python scripts/generate_install_manifest.py --check
+          python scripts/generate_scan_contract.py --check
+          python scripts/generate_hunt_contract.py --check
           python scripts/check_installed_import_closure.py
           python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
+          python scripts/check_surface_dispositions.py
+          python scripts/check_scan_target_transport.py
 
       - name: Upload JUnit report
         if: always() && steps.changes.outputs.run == 'true'

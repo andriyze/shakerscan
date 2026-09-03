@@ -880,3 +880,28 @@ def test_zero_attempt_selected_family_hard_fails_the_gate():
     clean = b.apply_gates({"family_attempt_failures": []}, {"gates": {}})
     ok = next(g for g in clean if g["gate"] == "selected_families_attempted")
     assert ok["pass"] is True
+
+
+def test_auth_workflow_reads_principal_labels_and_never_a_masked_string():
+    """A redacted "***" under auth_states_tested must read as no evidence, not as state "*"."""
+    fixture = {
+        "name": "unit",
+        "expected": [],
+        "auth": {"user1_login": {"url": "/rest/user/login"}, "requires_two_users": True},
+        "gates": {"require_auth_workflow_ready": True},
+    }
+    masked = b.collect_scorecard(
+        {"findings": [], "smart_coverage": {"auth_states_tested": "***"}}, fixture,
+    )
+    assert masked["auth_workflow"]["observed_auth_states"] == []
+    assert masked["auth_workflow"]["status"] == "blocked"
+    assert "*" not in masked["auth_workflow"]["principal_contexts_scheduled"]
+
+    labelled = b.collect_scorecard(
+        {"findings": [], "smart_coverage": {"auth_states_tested": ["user1", "user2"]}}, fixture,
+    )
+    assert labelled["auth_workflow"]["observed_auth_states"] == ["user1", "user2"]
+    assert labelled["auth_workflow"]["status"] == "ready"
+    assert labelled["auth_workflow"]["two_principal_contexts_scheduled"] is True
+    gate = next(g for g in b.apply_gates(labelled, fixture) if g["gate"] == "auth_workflow_ready")
+    assert gate["pass"] is True

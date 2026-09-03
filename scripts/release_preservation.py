@@ -84,7 +84,30 @@ def _selector_result(selector: str, cases: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _e2e_result(spec: Mapping[str, Any], scorecard: Mapping[str, Any]) -> dict[str, Any]:
+_CHECK_ID = re.compile(r"^([A-Z]+-\d+)")
+
+
+def _declared_debt_for(row_name: str, rows: Any) -> Mapping[str, Any] | None:
+    """The declared-debt (xfail) row covering a check, if the release recorded one.
+
+    A debt check is recorded as one xfail row named by its check id ("MI-6 ..."); the
+    sub-rows the matrix names ("MI-6A ...", "MI-6B ...") never run, so they are absent.
+    """
+    wanted = _CHECK_ID.match(row_name)
+    if wanted is None:
+        return None
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("xfail") is not True:
+            continue
+        found = _CHECK_ID.match(str(row.get("name") or ""))
+        if found is not None and found.group(1) == wanted.group(1):
+            return row
+    return None
+
+
+def _e2e_result(
+    spec: Mapping[str, Any], scorecard: Mapping[str, Any], *, declared_debt: bool = False,
+) -> dict[str, Any]:
     area_name = str(spec.get("area") or "")
     row_name = str(spec.get("row") or "")
     areas = scorecard.get("areas") or ()
@@ -97,15 +120,28 @@ def _e2e_result(spec: Mapping[str, Any], scorecard: Mapping[str, Any]) -> dict[s
         row for row in rows
         if isinstance(row, Mapping) and str(row.get("name") or "") == row_name
     ]
-    return {
+    genuine = bool(matches) and all(
+        row.get("passed") is True and row.get("skipped") is not True and not row.get("xfail")
+        for row in matches
+    )
+    result: dict[str, Any] = {
         "area": area_name,
         "row": row_name,
         "matched": len(matches),
-        "passed": bool(matches) and all(
-            row.get("passed") is True and row.get("skipped") is not True
-            for row in matches
-        ),
+        "passed": genuine,
     }
+    if not genuine and declared_debt:
+        # Only an explicitly authorized declared-debt release may record a control as debt,
+        # and only when the scorecard itself carries the xfail row for that check.
+        debt = _declared_debt_for(row_name, rows) or next(
+            (row for row in matches if isinstance(row, Mapping) and row.get("xfail") is True), None,
+        )
+        if debt is not None:
+            result["declared_debt"] = {
+                "check": str(debt.get("name") or ""),
+                "reason": str(debt.get("reason") or ""),
+            }
+    return result
 
 
 def _playwright_result(spec: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str, Any]:
@@ -153,6 +189,7 @@ def build_receipt(
     source_sha: str,
     images: Mapping[str, str],
     excluded_programs: set[str] | None = None,
+    declared_debt: bool = False,
 ) -> dict[str, Any]:
     if matrix.get("schema_version") != "release-preservation-matrix/v1":
         raise PreservationError("unsupported preservation matrix schema")
@@ -182,6 +219,7 @@ def build_receipt(
         )
     programs: list[dict[str, Any]] = []
     failed: list[str] = []
+    debt_controls: list[dict[str, Any]] = []
     for program_id, program in (matrix.get("programs") or {}).items():
         if str(program_id) in excluded:
             continue
@@ -197,7 +235,7 @@ def build_receipt(
             if control.get("e2e"):
                 if not isinstance(control["e2e"], Mapping):
                     raise PreservationError(f"invalid E2E evidence in {control['id']}")
-                evidence.append(_e2e_result(control["e2e"], scorecard))
+                evidence.append(_e2e_result(control["e2e"], scorecard, declared_debt=declared_debt))
             if control.get("playwright"):
                 if not isinstance(control["playwright"], Mapping):
                     raise PreservationError(
@@ -209,12 +247,24 @@ def build_receipt(
                     )
                 evidence.append(_playwright_result(control["playwright"], playwright))
             passed = bool(evidence) and all(item["passed"] for item in evidence)
-            if not passed:
+            # Every failed leg must be covered by a declared-debt row for the control to be
+            # recorded as debt instead of a failure; a partially covered control still fails.
+            debt_legs = [item for item in evidence if not item["passed"] and item.get("declared_debt")]
+            waived = bool(evidence) and not passed and all(
+                item["passed"] or item.get("declared_debt") for item in evidence
+            )
+            if waived:
+                debt_controls.append({
+                    "control": f"{program_id}.{control['id']}",
+                    "checks": sorted({leg["declared_debt"]["check"] for leg in debt_legs}),
+                    "reason": "; ".join(sorted({leg["declared_debt"]["reason"] for leg in debt_legs})),
+                })
+            elif not passed:
                 failed.append(f"{program_id}.{control['id']}")
             controls.append({
                 "id": str(control["id"]),
                 "label": str(control.get("label") or control["id"]),
-                "status": "pass" if passed else "fail",
+                "status": "pass" if passed else ("waived_declared_debt" if waived else "fail"),
                 "evidence": evidence,
             })
         if not controls:
@@ -222,7 +272,11 @@ def build_receipt(
         programs.append({
             "id": str(program_id),
             "label": str(program.get("label") or program_id),
-            "status": "pass" if all(c["status"] == "pass" for c in controls) else "fail",
+            "status": (
+                "pass" if all(c["status"] == "pass" for c in controls)
+                else "fail" if any(c["status"] == "fail" for c in controls)
+                else "waived_declared_debt"
+            ),
             "controls": controls,
         })
 
@@ -243,6 +297,7 @@ def build_receipt(
         },
         "status": "pass" if not failed else "fail",
         "failed_controls": failed,
+        "declared_debt_controls": debt_controls,
         "scope_exclusions": sorted(excluded),
         "programs": programs,
     }
@@ -271,6 +326,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--image", action="append", default=[])
     parser.add_argument("--exclude-program", action="append", default=[])
+    parser.add_argument(
+        "--declared-debt", action="store_true",
+        help="Authorized declared-debt release: a control whose E2E row is an xfail (or whose "
+             "sub-rows never ran because the check is xfail) is recorded as waived debt, not a failure.",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -282,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
             source_sha=args.source_sha,
             images=_images(args.image),
             excluded_programs=set(args.exclude_program),
+            declared_debt=args.declared_debt,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
