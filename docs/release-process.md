@@ -15,8 +15,14 @@ report on every pull request:
 | Check | Workflow | What it proves |
 | --- | --- | --- |
 | `commit-policy` | `commit-policy.yml` | A `release:` commit carries only metadata (`VERSION`, notes, ledger, `install/STABLE_VERSION`). |
-| `python-suite` | `python-suite.yml` | The complete partitioned Python suite, generated inventories, the installer manifest, the import closure, and the module-size ratchet pass from the locked dependency set. |
-| `smoke` | `e2e-pr.yml` | Every deterministic E2E area and the real-stack browser acceptance pass on the built stack with the pinned Juice Shop. |
+| `python-suite` | `python-suite.yml` | The complete partitioned Python suite plus every static gate (generated inventories and contracts, installer manifest, import closure, module size, documentation policy, surface dispositions, target transport) from the locked dependency set. |
+| `smoke` | `e2e-pr.yml` | The fast deterministic E2E areas (platform, AI Gate, Hunt) and the real-stack browser acceptance on the built stack. |
+
+Each check runs once per change. The candidate reuses the `python-suite` report for its exact SHA
+instead of rerunning the suite inside the image, and the slow E2E areas (DAST against Juice Shop,
+Model Intake), the recall benchmark, the fault receipts, and the upgrade rehearsal run only in
+candidate certification, on the final images. `v2-contracts.yml` is a manual stack acceptance and
+runs nothing on pull requests.
 
 A committed ruleset is a promise until it is imported. Apply and verify it with:
 
@@ -37,8 +43,9 @@ real-fleet Scan parity, Model Intake physical acceptance, and Connected Device p
 run IDs may be supplied when those support boundaries are being qualified.
 
 The workflow verifies every supplied workflow identity, conclusion, and head SHA; checks that
-`install/MANIFEST.sha256` is current and that `main` is protected; runs the frozen-source gates and
-native builds; bakes version plus source revision into `/opt/shakerscan/release-manifest.json`;
+`install/MANIFEST.sha256` is current and that `main` is protected; reuses the `python-suite` report
+for the exact SHA (running the suite in the image only when a metadata-only merge skipped it); runs
+the installer smoke, the external wire ceilings, and the native builds; bakes version plus source revision into `/opt/shakerscan/release-manifest.json`;
 pushes only `candidate-<sha>-<run-id>` multi-architecture manifests; and uploads
 `release-candidate-receipt.json`. The receipt binds the four final image digests, the signed
 provenance verification, and the digest of the installer manifest. Each platform build publishes

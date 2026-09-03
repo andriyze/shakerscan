@@ -32,7 +32,15 @@ cleanup() {
             --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
             down --volumes --remove-orphans >/dev/null 2>&1 || true
     fi
-    rm -rf "$SMOKE_ROOT"
+    # Containers write scan artifacts into the bind-mounted results tree as root. A cleanup that
+    # cannot remove them must not turn a passed smoke into a failure: the runner is ephemeral, so
+    # leftovers are reported and ignored.
+    if ! rm -rf "$SMOKE_ROOT" 2>/dev/null; then
+        docker run --rm -v "$SMOKE_ROOT:/smoke" --entrypoint sh "shakerscan/shakerscan-scanner:$VERSION" \
+            -c 'rm -rf /smoke/home/.shakerscan/results' >/dev/null 2>&1 || true
+        rm -rf "$SMOKE_ROOT" 2>/dev/null || \
+            echo "smoke cleanup: leftover root-owned files under $SMOKE_ROOT (ignored)" >&2
+    fi
 }
 trap cleanup EXIT
 

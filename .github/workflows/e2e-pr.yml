@@ -1,10 +1,11 @@
 name: E2E smoke
 
-# Pre-merge integration coverage. This runs the same deterministic E2E areas and the same
-# production-stack browser acceptance that the release candidate certifies on its final
-# manifests, so a regression is caught on the pull request instead of an hour into a
-# candidate build. Only the DAST recall benchmark and the installed-stack fault receipts
-# remain candidate-only. It is a required check and always reports.
+# Pre-merge integration coverage, run ONCE per change: the fast deterministic E2E areas
+# (platform, AI Gate on the fixture endpoint, keyless Hunt) and the production-stack browser
+# acceptance, so a broken page or contract fails on the pull request instead of an hour into
+# a candidate build. The complete E2E (DAST against Juice Shop, Model Intake), the recall
+# benchmark, and the fault receipts run once, on the final images, in release-candidate
+# certification. It is a required check and always reports.
 
 on:
   pull_request:
@@ -21,17 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      # Juice Shop shares the Compose network with the scanner worker. Do not
-      # route active scans through the runner host gateway.
-      SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
-      SHAKERSCAN_E2E_SCAN_TARGET: http://juice-shop:3000
-      SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
-      MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
-      MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
-      MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
-      SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -77,26 +69,20 @@ jobs:
         if: steps.changes.outputs.stack != 'true'
         run: echo "No E2E-relevant backend or UI changes; smoke test is not required."
 
-      - name: Start ShakerScan stack and pinned Juice Shop
+      - name: Start ShakerScan stack
         if: steps.changes.outputs.stack == 'true'
         run: |
           # The API image builds FROM shakerscan-worker:local, which compose will not
           # build for it -- see tests/test_ci_builds_before_composing.py.
           ./scanner.sh build
-          docker compose --profile e2e up -d
+          docker compose up -d
           for i in $(seq 1 90); do
             curl -sf http://localhost:8080/health && break
             sleep 5
           done
           curl -sf http://localhost:8080/health
-          for i in $(seq 1 40); do
-            curl -sf http://localhost:3001/ >/dev/null && break
-            sleep 5
-          done
-          curl -sf http://localhost:3001/ >/dev/null
-          docker compose exec -T worker python3 -c 'import urllib.request; response = urllib.request.urlopen("http://juice-shop:3000/rest/products/search?q=apple", timeout=10); assert response.status == 200'
 
-      - name: Run every deterministic E2E area
+      - name: Run the fast deterministic E2E areas
         if: steps.changes.outputs.backend == 'true'
         env:
           # The PR gate mirrors the candidate certification, which is an authorized declared-debt
@@ -105,7 +91,9 @@ jobs:
           SHAKERSCAN_RELEASE_DECLARED_DEBT: "1"
         run: |
           mkdir -p artifacts
-          python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json
+          python3 tests/e2e/run_e2e.py --area platform --scorecard artifacts/e2e-scorecard.json
+          python3 tests/e2e/run_e2e.py --area ai_gate
+          python3 tests/e2e/run_e2e.py --area hunt
           python3 - <<'PY'
           import json
           card = json.load(open("artifacts/e2e-scorecard.json"))
@@ -152,8 +140,8 @@ jobs:
 
       - name: Dump stack logs on failure
         if: failure() && steps.changes.outputs.stack == 'true'
-        run: docker compose --profile e2e logs --tail=300 api worker ui juice-shop || true
+        run: docker compose logs --tail=300 api worker ui || true
 
       - name: Stop E2E stack
         if: always() && steps.changes.outputs.stack == 'true'
-        run: docker compose --profile e2e down -v
+        run: docker compose down -v
