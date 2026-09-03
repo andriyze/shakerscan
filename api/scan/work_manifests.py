@@ -998,6 +998,20 @@ def _body_field_rank(name: str) -> int:
     return 0
 
 
+# Client-library transport endpoints: socket.io / engine.io long-poll handshakes, SockJS,
+# and dev-server hot-reload channels. Their query strings are protocol state, not inputs.
+_TRANSPORT_PLUMBING_ROUTE_RE = re.compile(
+    r"(?:^|/)(?:socket\.io|engine\.io|sockjs(?:-node)?|__webpack_hmr|webpack-hmr|hot-update)(?:/|$)",
+    re.IGNORECASE,
+)
+# Parameters that carry a nonce, a timestamp, or transport negotiation rather than a value the
+# application interprets. ``t`` and ``_`` are the jQuery/socket.io cache-busters.
+_CACHE_BUSTER_PARAMETERS = frozenset({
+    "t", "_", "ts", "timestamp", "cb", "cachebust", "cache_bust", "nocache", "no_cache",
+    "rand", "random", "nonce", "eio", "transport", "sid",
+})
+
+
 def build_candidate_manifest(
     endpoint_manifest: ScanWorkManifest,
     *,
@@ -1076,6 +1090,18 @@ def build_candidate_manifest(
         if normalized_name in sqli_names or normalized_name.endswith("_id"):
             score += 10
             rationale.append("sqli_semantic_parameter")
+        # Library transport plumbing and cache-busters are parameters the application never
+        # reads as input. A thorough scan spent its SQL injection verifier on
+        # ``/socket.io/?t=1`` -- the websocket long-poll handshake with its timestamp
+        # nonce -- ahead of the login body, because both scored as an observed GET query. Rank
+        # them below every real parameter instead of dropping them: they stay in the manifest
+        # and still run when the budget reaches them, so nothing is silently excluded.
+        if _TRANSPORT_PLUMBING_ROUTE_RE.search(str(endpoint["canonical_path"] or "")):
+            score -= 20
+            rationale.append("transport_plumbing_route")
+        if normalized_name in _CACHE_BUSTER_PARAMETERS:
+            score -= 12
+            rationale.append("cache_buster_parameter")
         identity: dict[str, Any] = {
             "route_id": endpoint["route_id"],
             "method": endpoint["method"],
