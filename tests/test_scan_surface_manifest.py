@@ -173,7 +173,6 @@ def test_surface_manifest_ingests_declared_spec_routes_including_body_endpoints(
         max_endpoints=20,
     )
     assert "web.spec_ingest" in manifest["producers"]
-    from scan.work_manifests import build_endpoint_manifest
     endpoint_manifest = build_endpoint_manifest(
         scan_id="10000000-0000-0000-0000-000000000009",
         target_binding_digest=TARGET.digest,

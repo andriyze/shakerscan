@@ -2,22 +2,13 @@ from __future__ import annotations
 
 import json
 
-try:
-    from capabilities.spec_ingest import (
-        discovered_route_records,
-        ingest_spec_bodies,
-        is_openapi_document,
-        parse_spec_document,
-        spec_endpoints,
-    )
-except ModuleNotFoundError:  # package import layout
-    from api.capabilities.spec_ingest import (
-        discovered_route_records,
-        ingest_spec_bodies,
-        is_openapi_document,
-        parse_spec_document,
-        spec_endpoints,
-    )
+from capabilities.spec_ingest import (
+    discovered_route_records,
+    ingest_spec_bodies,
+    is_openapi_document,
+    parse_spec_document,
+    spec_endpoints,
+)
 
 
 def test_openapi_3_query_and_json_body_fields_are_extracted():
