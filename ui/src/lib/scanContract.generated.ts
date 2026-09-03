@@ -157,6 +157,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "templates.passive_batch",
       "templates.passive_scan",
       "templates.scan",
+      "web.browser_crawl",
       "web.content_discover",
       "web.crawl",
       "web.probe",

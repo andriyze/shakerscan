@@ -407,7 +407,7 @@ def test_scan_principal_authenticates_the_headless_browser_crawl():
 
 
 def test_browser_crawl_is_a_selectable_scan_credential_capability():
-    from runtime.scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+    from api.runtime.scan_credentials import SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
 
     assert "web.browser_crawl" in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
     # Its static sibling has always been here; both are read-only recon crawlers over the same
