@@ -1,4 +1,6 @@
-# Release and supply-chain controls require explicit maintainer review.
+# Release and supply-chain controls. CODEOWNERS routes review requests; the main ruleset
+# (.github/rulesets/main.json) does not require an approving review, so the required
+# checks (commit-policy, python-suite, smoke) are the enforced gate.
 /.github/workflows/ @andriyze
 /.github/rulesets/ @andriyze
 /.github/dependabot.yml @andriyze

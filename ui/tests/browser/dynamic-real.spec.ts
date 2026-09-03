@@ -15,14 +15,13 @@ async function readJson(request: APIRequestContext, path: string) {
 test('real dynamic detail routes remain usable and accessible', async ({ page, request }) => {
   test.skip(!REAL_STACK, 'release-only non-mutating dynamic UI acceptance')
 
-  const [scanData, findingData, deviceData, huntData, campaignData, targetData, episodeData] = await Promise.all([
+  const [scanData, findingData, deviceData, huntData, campaignData, targetData] = await Promise.all([
     readJson(request, '/scans?limit=20'),
     readJson(request, '/findings?limit=50'),
     readJson(request, '/devices?limit=20'),
     readJson(request, '/hunts?limit=20'),
     readJson(request, '/arsenal/campaigns?limit=20'),
     readJson(request, '/targets?limit=20'),
-    readJson(request, '/research/episodes?limit=20'),
   ])
 
   const scan = (scanData.scans || []).find((item: any) => item.scan_role !== 'shard' && item.run_kind === 'web_dast')
@@ -33,20 +32,27 @@ test('real dynamic detail routes remain usable and accessible', async ({ page, r
   const hunt = (huntData.hunts || []).find((item: any) => item.target_id)
   const campaign = (campaignData.campaigns || []).find((item: any) => item.campaign_type !== 'autonomous_research')
   const target = (targetData.targets || []).find((item: any) => item.is_active) || (targetData.targets || [])[0]
-  const episode = (episodeData.episodes || [])[0]
 
-  const routes = [
-    scan?.id && `/scans/${scan.id}`,
-    finding?.id && `/findings/${finding.id}`,
+  // The deterministic E2E areas always leave a scan, a finding, a Hunt, and a target behind on a
+  // clean installed stack; those detail routes are required by name. Devices, campaigns, and legacy
+  // research episodes exist only when their optional areas or an operator created them, so they are
+  // audited when present rather than demanded by a record count that encoded a developer database.
+  // Legacy research episodes are a compatibility surface and are not part of release acceptance.
+  const required: Record<string, string | undefined> = {
+    scan: scan?.id && `/scans/${scan.id}`,
+    finding: finding?.id && `/findings/${finding.id}`,
+    hunt: hunt?.hunt_id && hunt?.target_id
+      && `/hunt?target=${encodeURIComponent(hunt.target_id)}&run=${encodeURIComponent(hunt.hunt_id)}`,
+    target: target?.id && `/targets/${target.id}/graph`,
+  }
+  const missing = Object.entries(required).filter(([, route]) => !route).map(([name]) => name)
+  expect(missing, `required dynamic records for UI acceptance are missing: ${missing.join(', ')}`).toEqual([])
+  const optional = [
     device?.id && `/devices/${device.id}`,
     device?.id && `/devices/${device.id}/agent`,
-    hunt?.hunt_id && hunt?.target_id && `/hunt?target=${encodeURIComponent(hunt.target_id)}&run=${encodeURIComponent(hunt.hunt_id)}`,
     campaign?.id && `/campaigns/${campaign.id}`,
-    target?.id && `/targets/${target.id}/graph`,
-    episode?.id && `/deep-hunt/runs/${episode.id}`,
-  ].filter((route): route is string => Boolean(route))
-
-  expect(routes.length, 'dynamic records available for UI acceptance').toBeGreaterThanOrEqual(6)
+  ]
+  const routes = [...Object.values(required), ...optional].filter((route): route is string => Boolean(route))
   for (const route of routes) await visitAndAuditPage(page, route, 700)
 })
 

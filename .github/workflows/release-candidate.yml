@@ -142,8 +142,15 @@ jobs:
           # cannot provide that baseline tree.
           fetch-depth: 0
 
-      - name: Verify generated documentation
-        run: python3 scripts/generate_capability_inventory.py --check
+      - name: Verify generated documentation and the installer manifest
+        run: |
+          python3 scripts/generate_capability_inventory.py --check
+          python3 scripts/generate_install_manifest.py --check
+
+      - name: Refuse to build a release from an unprotected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/apply_main_ruleset.py --check
 
       - name: Verify exact-SHA external release gates
         env:
@@ -632,6 +639,11 @@ jobs:
       ui_digest: ${{ steps.receipt.outputs.ui_digest }}
       signer_digest: ${{ steps.receipt.outputs.signer_digest }}
     steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -706,6 +718,10 @@ jobs:
           echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
           echo "ui_digest=$ui_digest" >> "$GITHUB_OUTPUT"
           echo "signer_digest=$signer_digest" >> "$GITHUB_OUTPUT"
+          # The host-side runtime is verified file by file against install/MANIFEST.sha256;
+          # its digest is bound into the receipt so promotion can publish it in the image lock.
+          python3 scripts/generate_install_manifest.py --check
+          runtime_manifest="$(sha256sum install/MANIFEST.sha256 | awk '{print $1}')"
           jq -n \
             --arg version "$VERSION" \
             --arg candidate_sha "$CANDIDATE_SHA" \
@@ -715,7 +731,8 @@ jobs:
             --arg api "$api_digest" \
             --arg ui "$ui_digest" \
             --arg signer "$signer_digest" \
-            '{schema_version:"shakerscan-release-candidate/v1",version:$version,candidate_sha:$candidate_sha,candidate_tag:$candidate_tag,workflow_run:$workflow_run,images:{scanner:$scanner,api:$api,ui:$ui,signer:$signer}}' \
+            --arg runtime_manifest "$runtime_manifest" \
+            '{schema_version:"shakerscan-release-candidate/v1",version:$version,candidate_sha:$candidate_sha,candidate_tag:$candidate_tag,workflow_run:$workflow_run,images:{scanner:$scanner,api:$api,ui:$ui,signer:$signer},runtime_manifest_sha256:$runtime_manifest}' \
             > release-candidate-receipt.json
 
       - name: Attest final scanner manifest provenance
@@ -860,10 +877,13 @@ jobs:
 
   # Certification deliberately happens after the multi-architecture manifests
   # exist. These are the exact immutable digests the promotion workflow re-tags;
-  # pre-manifest build images cannot stand in for them.
+  # pre-manifest build images cannot stand in for them. It runs in parallel with
+  # the vulnerability scans: promotion requires the whole run to succeed, so a
+  # failed scan still blocks, and the slowest gate no longer waits for eight
+  # image scans that do not feed it.
   certify:
     name: Certify final manifest digests
-    needs: [meta, merge, vulnerability-scan]
+    needs: [meta, merge]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:

@@ -81,7 +81,12 @@ def test_release_images_publish_sboms_and_verified_final_digest_provenance():
 
 def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
     workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
-    assert "needs: [meta, merge, vulnerability-scan]" in workflow
+    promotion = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    # The scans run in parallel with certification; they still gate publication because
+    # promotion accepts only a candidate run whose overall conclusion is success.
+    assert "needs: [meta, merge]\n" in workflow[workflow.index("  certify:"):]
+    assert "  vulnerability-scan:\n" in workflow
+    assert '== "success $CANDIDATE_SHA"' in promotion
     for image in ("scanner", "api", "ui", "signer"):
         assert f"- name: {image}" in workflow
     assert "severity: HIGH,CRITICAL" in workflow

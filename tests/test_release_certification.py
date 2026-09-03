@@ -28,6 +28,7 @@ def _write(tmp_path: Path, name: str, value: dict) -> Path:
 def _evidence(tmp_path: Path):
     candidate = {
         "schema_version": "shakerscan-release-candidate/v1",
+        "runtime_manifest_sha256": "5" * 64,
         "version": "9.9.9",
         "candidate_sha": SOURCE,
         "candidate_tag": f"candidate-{SOURCE}-123",
@@ -427,3 +428,28 @@ def test_waived_h18_debt_certifies_and_is_recorded(tmp_path):
         and item.get("boundary") == "installed_stack_e2e_declared_debt"
     )
     assert any("H-18" in row["check"] for row in debt["checks"])
+
+
+@pytest.mark.parametrize("manifest", [None, "", "not-a-digest", "5" * 63])
+def test_a_candidate_without_a_runtime_manifest_digest_cannot_certify(tmp_path, manifest):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    candidate = dict(candidate)
+    if manifest is None:
+        candidate.pop("runtime_manifest_sha256")
+    else:
+        candidate["runtime_manifest_sha256"] = manifest
+    with pytest.raises(CertificationError, match="runtime manifest"):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+            source_sha=SOURCE, **paths,
+        )
+
+
+def test_the_certification_records_the_runtime_manifest_digest(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    receipt = certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+        source_sha=SOURCE, **paths,
+    )
+    assert receipt["runtime_manifest_sha256"] == "5" * 64
+    assert receipt["certification"]["runtime_manifest_sha256"] == "5" * 64

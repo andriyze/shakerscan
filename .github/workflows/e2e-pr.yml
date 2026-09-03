@@ -1,7 +1,10 @@
 name: E2E smoke
 
-# Deterministic integration coverage for backend changes. Active DAST tests are
-# kept in the manually triggered full release gate (e2e.yml).
+# Pre-merge integration coverage. This runs the same deterministic E2E areas and the same
+# production-stack browser acceptance that the release candidate certifies on its final
+# manifests, so a regression is caught on the pull request instead of an hour into a
+# candidate build. Only the DAST recall benchmark and the installed-stack fault receipts
+# remain candidate-only. It is a required check and always reports.
 
 on:
   pull_request:
@@ -16,10 +19,19 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
+      # Juice Shop shares the Compose network with the scanner worker. Do not
+      # route active scans through the runner host gateway.
+      SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
+      SHAKERSCAN_E2E_SCAN_TARGET: http://juice-shop:3000
+      SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
+      MODEL_INTAKE_SIGNER_DATABASE_PASSWORD: ci-model-intake-signer-db-password-00000001
+      MODEL_INTAKE_SIGNER_INTERNAL_TOKEN: ci-model-intake-signer-token-000000000000001
+      MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
+      SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ci-model-intake-operator-token-00000000000001
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -32,7 +44,7 @@ jobs:
           if git diff --quiet \
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}" \
-            -- api scanner db tests/e2e docker-compose.yml Makefile \
+            -- api scanner db tests/e2e docker-compose.yml Makefile scanner.sh \
                scripts/generate_public_api_contract.py \
                docs/generated/public-openapi-manifest.json \
                ui/src/lib/publicApi.generated.ts \
@@ -55,41 +67,71 @@ jobs:
           else
             echo "ui=true" >> "$GITHUB_OUTPUT"
           fi
+          if [[ "$(cat "$GITHUB_OUTPUT" | grep -c '=true')" -gt 0 ]]; then
+            echo "stack=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stack=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Skip smoke tests for unrelated changes
-        if: steps.changes.outputs.backend != 'true' && steps.changes.outputs.ui != 'true'
+        if: steps.changes.outputs.stack != 'true'
         run: echo "No E2E-relevant backend or UI changes; smoke test is not required."
 
-      - name: Start ShakerScan stack
-        if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true'
+      - name: Start ShakerScan stack and pinned Juice Shop
+        if: steps.changes.outputs.stack == 'true'
         run: |
           # The API image builds FROM shakerscan-worker:local, which compose will not
           # build for it -- see tests/test_ci_builds_before_composing.py.
           ./scanner.sh build
-          docker compose up -d
+          docker compose --profile e2e up -d
           for i in $(seq 1 90); do
             curl -sf http://localhost:8080/health && break
             sleep 5
           done
           curl -sf http://localhost:8080/health
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:3001/ >/dev/null && break
+            sleep 5
+          done
+          curl -sf http://localhost:3001/ >/dev/null
+          docker compose exec -T worker python3 -c 'import urllib.request; response = urllib.request.urlopen("http://juice-shop:3000/rest/products/search?q=apple", timeout=10); assert response.status == 200'
 
-      - name: Run deterministic platform, AI Gate, and Hunt smoke tests
+      - name: Run every deterministic E2E area
         if: steps.changes.outputs.backend == 'true'
+        env:
+          # The PR gate mirrors the candidate certification, which is an authorized declared-debt
+          # release: checks the release owner has recorded as debt run as loud, counted XFAIL rows
+          # (an XPASS is printed when one unexpectedly passes). Every undeclared check stays hard.
+          SHAKERSCAN_RELEASE_DECLARED_DEBT: "1"
         run: |
-          python3 tests/e2e/run_e2e.py --area platform
-          python3 tests/e2e/run_e2e.py --area ai_gate
-          python3 tests/e2e/run_e2e.py --area hunt
+          mkdir -p artifacts
+          python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json
+          python3 - <<'PY'
+          import json
+          card = json.load(open("artifacts/e2e-scorecard.json"))
+          debt = [
+              (area.get("area"), row.get("name"), row.get("reason"))
+              for area in card.get("areas", []) for row in area.get("rows", [])
+              if row.get("xfail")
+          ]
+          for area, name, reason in debt:
+              print(f"::warning title=declared E2E debt::{area}: {name} -- {reason}")
+          print(f"declared-debt rows: {len(debt)}; gate: {card.get('gate')}")
+          PY
 
       - name: Set up supported Node runtime
-        if: steps.changes.outputs.ui == 'true'
+        if: steps.changes.outputs.stack == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - name: Run UI contracts and browser acceptance
-        if: steps.changes.outputs.ui == 'true'
+      - name: Run UI contracts, production build, and real-stack browser acceptance
+        if: steps.changes.outputs.stack == 'true'
+        env:
+          PLAYWRIGHT_REAL_STACK: "1"
+          SHAKERSCAN_API_URL: http://localhost:8080
         run: |
           npm --prefix ui ci
           npm --prefix ui run test:unit
@@ -97,10 +139,21 @@ jobs:
           npx --prefix ui playwright install --with-deps chromium
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
 
+      - name: Upload E2E scorecard and browser results
+        if: always() && steps.changes.outputs.stack == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: e2e-smoke-${{ github.event.pull_request.head.sha }}
+          path: |
+            artifacts/e2e-scorecard.json
+            ui/test-results/browser-results.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Dump stack logs on failure
-        if: failure() && (steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true')
-        run: docker compose logs --tail=300 api worker ui || true
+        if: failure() && steps.changes.outputs.stack == 'true'
+        run: docker compose --profile e2e logs --tail=300 api worker ui juice-shop || true
 
       - name: Stop E2E stack
-        if: always() && (steps.changes.outputs.backend == 'true' || steps.changes.outputs.ui == 'true')
-        run: docker compose down -v
+        if: always() && steps.changes.outputs.stack == 'true'
+        run: docker compose --profile e2e down -v

@@ -78,6 +78,7 @@ after the candidate is frozen:
 - [x] Production npm and locked Python dependency audits report no known vulnerabilities.
 - [x] Generated capability inventory is current.
 - [x] Frozen-source installer smoke passes without retired V1 command files.
+- [x] `install/MANIFEST.sha256` is current and the installer refuses tampered runtime files.
 - [x] Clean, duplicate-dirty, verification, and rollback migration scenarios pass from v0.8.17.
 - [x] Manual MCP initialize/tool-list/read-only Arsenal execution was exercised; target inventory is bounded.
 - [x] The latest exact V2 migration workflow completes successfully without cancellation by a later push:
@@ -204,16 +205,19 @@ receipts.
 
 ## Publication sequence (not authorized by preparation)
 
-1. Freeze one exact candidate SHA after all implementation and manual fixes.
-2. Obtain successful exact-SHA source contracts and CodeQL. Attach optional physical-boundary
-   receipts only for support tiers being qualified.
-3. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
-4. Complete candidate-image, upgrade, UI/API/CLI/MCP, and public-install acceptance.
-5. Run **Promote release** to map version tags to accepted digests without rebuilding.
-6. Record the published SHA/digests in `RELEASES.md` and verify the GitHub Release.
-7. Only in a separate stable-channel change, update `install/STABLE_VERSION` and run **Promote stable
-   channel** with the public smoke receipt.
+1. Confirm `main` is protected: `python3 scripts/apply_main_ruleset.py --check` passes and the
+   `commit-policy`, `python-suite`, and `smoke` checks are green on the candidate's pull request.
+2. Freeze one exact candidate SHA after all implementation and manual fixes.
+3. Obtain successful exact-SHA CodeQL. Attach optional physical-boundary receipts only for support
+   tiers being qualified.
+4. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
+5. Complete candidate-image, upgrade, UI/API/CLI/MCP, and public-install acceptance.
+6. Run **Promote release** to map version tags to accepted digests, create the annotated tag, and
+   attach the lock and certified receipt to the GitHub Release without rebuilding.
+7. Record the published SHA/digests in `RELEASES.md` and verify the GitHub Release.
+8. Run **Promote stable channel** with the public smoke receipt; it moves `latest` and prepares the
+   `install/STABLE_VERSION` branch. Merge that pull request last.
 
-Stop before step 3 unless the user explicitly authorizes release publication. This preparation task
+Stop before step 4 unless the user explicitly authorizes release publication. This preparation task
 does not authorize tagging, candidate publication, GitHub Release creation, `latest`, hosted
 installer deployment, or stable-channel promotion.

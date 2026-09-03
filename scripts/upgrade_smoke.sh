@@ -4,9 +4,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STABLE_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/install/STABLE_VERSION")"
 BASELINE_REF="${BASELINE_REF:-v${STABLE_VERSION}}"
-BASELINE_IMAGE="${BASELINE_IMAGE:-shakerscan/shakerscan-scanner@sha256:1bfdd22e87bf90cead6a2c38cd98abd94c5a8eadeea9cee351ea9a484bd1d1fd}"
-BASELINE_API_IMAGE="${BASELINE_API_IMAGE:-shakerscan/shakerscan-api@sha256:9349c5c0b4dc59c4c43de0583770ed03a996df6601adf49b175d40747a7f4a0a}"
-BASELINE_UI_IMAGE="${BASELINE_UI_IMAGE:-shakerscan/shakerscan-ui@sha256:7811dd9ff647c546fe695cc139171694e90b2bc26a725ec6b0534fe94c8ce7bb}"
+# The previous-stable images come from the published ledger row for install/STABLE_VERSION, so
+# advancing the channel cannot leave this smoke qualifying an upgrade from stale digests.
+BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image scanner)}"
+BASELINE_API_IMAGE="${BASELINE_API_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image api)}"
+BASELINE_UI_IMAGE="${BASELINE_UI_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image ui)}"
 SCANNER_IMAGE="${SCANNER_IMAGE:-shakerscan-scanner:upgrade-smoke}"
 # Untagged defaults resolve to `:latest`, which is whatever happens to be on the host
 # -- so the smoke could pass while qualifying an upgrade the release does not ship, or

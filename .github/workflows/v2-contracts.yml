@@ -123,9 +123,10 @@ jobs:
             tests/test_api_characterization.py \
             tests/test_documentation_policy.py
 
-      - name: Verify the public installer ships its whole import closure
+      - name: Verify the public installer ships its whole import closure and a current manifest
         run: |
           python scripts/check_installed_import_closure.py
+          python scripts/generate_install_manifest.py --check
 
       - name: Enforce V2 surface dispositions
         run: |

@@ -62,9 +62,25 @@ curl -fsSL https://install.shakerscan.com | SHAKERSCAN_REMOTE=1 sh
 curl -fsSL https://install.shakerscan.com | SHAKERSCAN_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main" sh
 ```
 
+## Integrity of the downloaded runtime
+
+`install/MANIFEST.sha256` lists the SHA-256 of every file the installer downloads. The installer
+fetches it first, verifies each file against it before activation, and checks the manifest's own
+digest against `RUNTIME_MANIFEST_SHA256` in the published `release-image-lock.env`. A file the
+manifest does not list, a digest mismatch, or a lock without the manifest digest aborts the install
+without touching the existing tree. Regenerate the manifest whenever an installed file changes:
+
+```bash
+python3 scripts/generate_install_manifest.py          # rewrite
+python3 scripts/generate_install_manifest.py --check  # CI gate
+```
+
 Hosting options:
 
-- Cloudflare Worker: deploy `cloudflare-worker.js` on `install.shakerscan.com`.
+- Cloudflare Worker: deploy `cloudflare-worker.js` on `install.shakerscan.com`. It resolves
+  `install/STABLE_VERSION` from `main` and serves that release tag's `bootstrap.sh`, falling back
+  to the `main` copy only for releases that predate the dispatcher. Redeploy the worker when this
+  file changes; the release pipeline does not deploy it.
 - Static host: configure the site root to return `index.sh` at `/`; `_headers` contains the intended content type.
 
 Keep the response body unchanged; `curl | sh` must receive shell, not HTML.

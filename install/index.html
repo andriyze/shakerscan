@@ -17,6 +17,9 @@ START_AFTER_INSTALL="${SHAKERSCAN_START:-1}"
 REMOTE_ACCESS="${SHAKERSCAN_REMOTE:-0}"
 INSTALL_STAGE=""
 INSTALL_BACKUP=""
+# Release manifest the staged downloads are verified against (empty until fetched).
+INSTALL_MANIFEST_FILE=""
+RUNTIME_MANIFEST_NAME=".shakerscan-runtime-manifest.sha256"
 
 say() {
     printf '%s\n' "$*"
@@ -29,6 +32,31 @@ fail() {
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+sha256_of() {
+    if have sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif have shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif have openssl; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        fail "no SHA-256 tool found (need sha256sum, shasum, or openssl)"
+    fi
+}
+
+# Every runtime file must match the digest the release candidate was certified with. A file the
+# manifest does not list is refused outright: a moved tag or a CDN serving another revision must
+# never produce a mixed install.
+verify_manifest_entry() {
+    entry_path="$1"
+    entry_file="$2"
+    expected="$(awk -v p="$entry_path" '$2 == p {print $1; exit}' "$INSTALL_MANIFEST_FILE")"
+    [ -n "$expected" ] || fail "release manifest does not list $entry_path; refusing an unverified file"
+    actual="$(sha256_of "$entry_file")"
+    [ "$actual" = "$expected" ] || \
+        fail "$entry_path does not match the release manifest (expected $expected, got $actual)"
 }
 
 run_sudo() {
@@ -116,6 +144,11 @@ download() {
     if ! curl -fsSL "$src" -o "$tmp"; then
         rm -f "$tmp"
         fail "failed to download $src"
+    fi
+    if [ -n "${INSTALL_MANIFEST_FILE:-}" ]; then
+        case "$src" in
+            "$REPO_RAW_BASE"/*) verify_manifest_entry "${src#"$REPO_RAW_BASE"/}" "$tmp" ;;
+        esac
     fi
     mv "$tmp" "$staged_dst"
     # Record what this version owns. Committing with an overlaying copy left files behind that a
@@ -274,7 +307,7 @@ if [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/relea
                     *) printf 'Invalid release image lock for %s\n' "\$key" >&2; exit 1 ;;
                 esac
                 ;;
-            ''|'#'*) ;;
+            RUNTIME_MANIFEST_SHA256|''|'#'*) ;;
             *) printf 'Unsupported release image lock key: %s\n' "\$key" >&2; exit 1 ;;
         esac
     done < "$INSTALL_DIR/release-image-lock.env"
@@ -425,6 +458,11 @@ if [ -d "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh" ]; then
 fi
 
 say "Downloading ShakerScan runtime files..."
+# The manifest is fetched first and every later download is verified against it. Its own digest is
+# checked against the published image lock below, so the whole tree is bound to the certified release.
+download "$REPO_RAW_BASE/install/MANIFEST.sha256" "$INSTALL_DIR/$RUNTIME_MANIFEST_NAME"
+INSTALL_MANIFEST_FILE="$INSTALL_STAGE/$RUNTIME_MANIFEST_NAME"
+[ "$(grep -c . "$INSTALL_MANIFEST_FILE")" -gt 0 ] || fail "release manifest is empty"
 download "$REPO_RAW_BASE/scanner.sh" "$INSTALL_DIR/scanner.sh"
 download "$REPO_RAW_BASE/docker-compose.release.yml" "$INSTALL_DIR/docker-compose.release.yml"
 download "$REPO_RAW_BASE/docker-compose.worker.yml" "$INSTALL_DIR/docker-compose.worker.yml"
@@ -433,26 +471,33 @@ download "$REPO_RAW_BASE/db/init.sql" "$INSTALL_DIR/db/init.sql"
 download "$REPO_RAW_BASE/db/configure-model-intake-signer-role.sh" "$INSTALL_DIR/db/configure-model-intake-signer-role.sh"
 download "$REPO_RAW_BASE/VERSION" "$INSTALL_DIR/VERSION"
 release_version="$(tr -d '[:space:]' < "$INSTALL_STAGE/VERSION")"
-case "$release_version" in
-    2.*)
-        download "$RELEASE_ASSET_ROOT/v${release_version}/release-image-lock.env" \
-            "$INSTALL_DIR/release-image-lock.env"
-        for binding in \
-            "SCANNER_IMAGE=shakerscan/shakerscan-scanner" \
-            "API_IMAGE=shakerscan/shakerscan-api" \
-            "UI_IMAGE=shakerscan/shakerscan-ui" \
-            "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer"; do
-            key="${binding%%=*}"
-            repository="${binding#*=}"
-            value="$(sed -n "s/^${key}=//p" "$INSTALL_STAGE/release-image-lock.env")"
-            if ! printf '%s' "$value" | grep -Eq "^${repository}@sha256:[0-9a-f]{64}$"; then
-                fail "release image lock is missing an exact ${key} digest"
-            fi
-        done
-        [ "$(wc -l < "$INSTALL_STAGE/release-image-lock.env" | tr -d ' ')" -eq 4 ] || \
-            fail "release image lock must contain exactly four images"
-        ;;
-esac
+download "$RELEASE_ASSET_ROOT/v${release_version}/release-image-lock.env" \
+    "$INSTALL_DIR/release-image-lock.env"
+for binding in \
+    "SCANNER_IMAGE=shakerscan/shakerscan-scanner" \
+    "API_IMAGE=shakerscan/shakerscan-api" \
+    "UI_IMAGE=shakerscan/shakerscan-ui" \
+    "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer"; do
+    key="${binding%%=*}"
+    repository="${binding#*=}"
+    value="$(sed -n "s/^${key}=//p" "$INSTALL_STAGE/release-image-lock.env")"
+    if ! printf '%s' "$value" | grep -Eq "^${repository}@sha256:[0-9a-f]{64}$"; then
+        fail "release image lock is missing an exact ${key} digest"
+    fi
+done
+while IFS='=' read -r lock_key lock_value; do
+    case "$lock_key" in
+        SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|RUNTIME_MANIFEST_SHA256|''|'#'*) ;;
+        *) fail "release image lock contains an unsupported key: $lock_key" ;;
+    esac
+done < "$INSTALL_STAGE/release-image-lock.env"
+# The lock is published by the promotion workflow from the certified receipt. Binding the manifest to
+# it means the runtime files, the images, and the certification all describe one release.
+locked_manifest="$(sed -n 's/^RUNTIME_MANIFEST_SHA256=//p' "$INSTALL_STAGE/release-image-lock.env")"
+printf '%s' "$locked_manifest" | grep -Eq '^[0-9a-f]{64}$' || \
+    fail "release image lock does not record the runtime manifest digest"
+[ "$(sha256_of "$INSTALL_MANIFEST_FILE")" = "$locked_manifest" ] || \
+    fail "release manifest does not match the digest published for v${release_version}"
 download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
 download "$REPO_RAW_BASE/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
