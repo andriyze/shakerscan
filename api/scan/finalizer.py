@@ -85,6 +85,52 @@ def _receipt(result: CapabilityResultReference) -> dict[str, Any]:
     return result.receipt_ref.canonical_dict()
 
 
+
+def _canonical_proof_contract_v2(
+    *, capability_name: str, kind: str, receipt: Any,
+) -> dict[str, Any]:
+    """The universal proof envelope for a finding a canonical capability proved live.
+
+    The risk scorer trusts only this envelope (a bare verified flag can come from coarse
+    heuristics), and every branch below that stamps ``proof_state: verified`` does so from a
+    receipt-backed deterministic capability execution. Without the envelope those findings were
+    scored as suspected: half the severity weight and the softer grade ceiling, so a verified
+    critical graded C. The execution itself is the proof run, so no separate re-execution is
+    required; the receipt binds the verifier. Shape mirrors the legacy adapter in
+    ``scanner/ai_verdict_policy.py`` so one reader validates both producers.
+    """
+    return {
+        "schema_version": "proof-contract/v2",
+        "contract_id": f"scan.{capability_name}.{kind}"[:160],
+        "contract_version": "1.0.0",
+        "family": str(kind)[:80],
+        "reexecution": {
+            "required": False,
+            "performed": True,
+            "verifier_build": str(capability_name)[:160],
+        },
+        "controls": [{
+            "canonical_capability": capability_name,
+            "normalization_boundary": "scan_finalizer",
+        }],
+        "observations": [{"proof_basis": "canonical_capability_execution"}],
+        "proof_basis": "canonical_capability_execution",
+        "capability_receipt": receipt,
+        "predicate": {
+            "satisfied": True,
+            "reason": "receipt-backed canonical capability proved the finding live",
+            "requirements": ["deterministic_proof"],
+            "met": ["deterministic_proof"],
+            "missing": [],
+            "refuted_by": [],
+        },
+        "verdict": "verified",
+        "promotable": True,
+        "traffic_receipt_id": None,
+        "tool_receipt_ids": [],
+    }
+
+
 def _base_finding(
     *,
     tool: str,
@@ -227,6 +273,9 @@ def _findings_for_action(
                         "suspected": False,
                         "needs_verification": False,
                         "proof_state": "verified",
+                        "proof_contract_v2": _canonical_proof_contract_v2(
+                            capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                        ),
                         "verification_reason": (
                             "Pinned deterministic HTTP response omitted the header"
                         ),
@@ -332,6 +381,9 @@ def _findings_for_action(
             finding.update({
                 "verified": True, "suspected": False,
                 "needs_verification": False, "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
                 "verification_reason": "Canonical headless browser execution proof satisfied",
             })
             findings.append(finding)
@@ -475,6 +527,9 @@ def _findings_for_action(
                 "suspected": False,
                 "needs_verification": False,
                 "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
                 "verification_reason": (
                     "Repeated deterministic SQL injection differential satisfied"
                 ),
@@ -522,6 +577,9 @@ def _findings_for_action(
                 "suspected": False,
                 "needs_verification": False,
                 "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
                 "verification_reason": (
                     "Deterministic sensitive-exposure response signature satisfied"
                 ),
@@ -568,6 +626,9 @@ def _findings_for_action(
                 "suspected": False,
                 "needs_verification": False,
                 "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
                 "verification_reason": (
                     "Repeated deterministic NoSQL operator differential satisfied"
                 ),
@@ -658,6 +719,9 @@ def _findings_for_action(
                 "suspected": False,
                 "needs_verification": False,
                 "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
                 "verification_reason": "Cross-principal owner-object replay proof satisfied",
             })
             findings.append(finding)
@@ -707,6 +771,9 @@ def _findings_for_action(
                     "suspected": False,
                     "needs_verification": False,
                     "proof_state": "verified",
+                    "proof_contract_v2": _canonical_proof_contract_v2(
+                        capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                    ),
                     "verification_reason": (
                         "Pinned deterministic TLS posture proof satisfied"
                     ),
