@@ -1905,6 +1905,11 @@
     "operation_id": "generate_endpoint_inventory_hypotheses_targets__target_id__inventory_hypotheses_post"
   },
   {
+    "path": "/targets/{target_id}/posture",
+    "method": "get",
+    "operation_id": "get_target_posture_targets__target_id__posture_get"
+  },
+  {
     "path": "/targets/{target_id}/principal-matrix",
     "method": "get",
     "operation_id": "list_target_principal_matrix_targets__target_id__principal_matrix_get"

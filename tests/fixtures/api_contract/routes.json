@@ -2706,6 +2706,13 @@
     "name": "generate_endpoint_inventory_hypotheses"
   },
   {
+    "path": "/targets/{target_id}/posture",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_posture"
+  },
+  {
     "path": "/targets/{target_id}/principal-matrix",
     "methods": [
       "GET"

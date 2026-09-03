@@ -174,9 +174,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "657abf9790c8c62edbbb9e7520ee3ce60813cbd1257a9e6eeb268abbb9b9e3e1",
+  "contract_sha256": "f367702d496072090b97b4c3c59123ad31209867f9a7b184a428a371c2f351aa",
   "openapi": "3.1.0",
-  "operation_count": 393,
+  "operation_count": 394,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2733,6 +2733,19 @@
       "deprecated": false,
       "operation_id": "get_target_invariant_verification_plan_targets__target_id__invariants__contract_id__verification_plan_get",
       "parameters_sha256": "1d92a571366a2b14e346e94bc5317649a390f92fd5201a0c674d8bf0c232620f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
+    "GET /targets/{target_id}/posture": {
+      "deprecated": false,
+      "operation_id": "get_target_posture_targets__target_id__posture_get",
+      "parameters_sha256": "24e3b4b1639d47a64af5a1a362c735009622245596129f3326c1d842aff7bdbd",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
