@@ -66,7 +66,7 @@ def test_surface_manifest_unifies_producers_and_redacts_values():
     assert manifest["endpoint_count"] == 7
     assert set(manifest["producers"]) == {
         "seed", "known_endpoints", "collections.replay", "web.probe",
-        "web.crawl", "web.browser_crawl", "web.content_discover",
+        "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
         "subdomains.discover",
     }
     assert secret not in encoded
@@ -130,7 +130,7 @@ def test_browser_observed_post_body_shape_survives_without_values():
         if item["method"] == "POST" and item["concrete_path"] == "/rest/user/login"
     )
     assert login["content_type"] == "application/json"
-    assert login["body_field_names"] == ["email", "password"]
+    assert list(login["body_field_names"]) == ["email", "password"]
     assert secret not in json.dumps(manifest, sort_keys=True)
 
     endpoints = build_endpoint_manifest(
@@ -149,3 +149,44 @@ def test_browser_observed_post_body_shape_survives_without_values():
     assert candidates.entries[0]["method"] == "POST"
     assert candidates.entries[0]["content_type"] == "application/json"
     assert list(candidates.entries[0]["body_field_names"]) == ["email", "password"]
+
+
+def test_surface_manifest_ingests_declared_spec_routes_including_body_endpoints():
+    """A spec declares routes a black-box crawl never exercises, body endpoints above all."""
+    manifest = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("skipped"),
+        crawl=_summary("skipped"),
+        content=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        spec=_summary("success", [
+            {"kind": "discovered_route", "method": "GET",
+             "url": "https://app.example.test/rest/products/1/reviews"},
+            {"kind": "discovered_route", "method": "POST",
+             "url": "https://app.example.test/rest/user/login",
+             "content_type": "application/json",
+             "body_field_names": ["email", "password"]},
+        ]),
+        max_endpoints=20,
+    )
+    assert "web.spec_ingest" in manifest["producers"]
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id="10000000-0000-0000-0000-000000000009",
+        target_binding_digest=TARGET.digest,
+        surface_manifest=manifest,
+        source_action_ids=("discover.spec",),
+    )
+    endpoints = {
+        (item["method"], item["canonical_path"]): item
+        for item in endpoint_manifest.entries
+    }
+    # A path-templated route becomes an addressable {int} endpoint, deduped like a crawl route.
+    assert ("GET", "/rest/products/{int}/reviews") in endpoints
+    login = endpoints[("POST", "/rest/user/login")]
+    assert list(login["body_field_names"]) == ["email", "password"]
+    assert login["content_type"] == "application/json"
+    # The spec is a first-party declaration, ranked at depth 0 like a seeded endpoint.
+    assert login["discovery_depth"] == 0

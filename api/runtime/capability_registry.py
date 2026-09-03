@@ -564,6 +564,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
         ),
         CapabilitySpec(
+            "web.spec_ingest",
+            "Fetch the target's own OpenAPI/Swagger description and declare its routes.",
+            "internal", "read_only", _HTTP_TARGETS, "agent.spec_ingest", "1",
+            None, {"http_requests": 12, "tool_wall_seconds": 30},
+            {"network_reachability": True, "runtime_target_binding": True},
+            _http_principal_schema(),
+            "spec-ingest/v1", ("discovered_route",),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "web.content_discover", "Bounded content discovery using a bundled wordlist.",
             "external_tool", "read_only", _HTTP_TARGETS, "ffuf", "1",
             None, {"http_requests": 220, "tool_wall_seconds": 75},

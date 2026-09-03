@@ -146,6 +146,7 @@ def build_scan_surface_manifest(
     content: Mapping[str, Any],
     max_endpoints: int,
     browser: Mapping[str, Any] | None = None,
+    spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize every fixed-stage surface producer without retaining URL values.
 
@@ -154,6 +155,7 @@ def build_scan_surface_manifest(
     is recorded as skipped rather than treated as a failure.
     """
     browser = browser if isinstance(browser, Mapping) else {"status": "skipped"}
+    spec = spec if isinstance(spec, Mapping) else {"status": "skipped"}
     limit = max(1, min(100_000, int(max_endpoints)))
     manifest = EndpointManifest(auto_persist=False)
     allowed_origins = {
@@ -293,6 +295,18 @@ def build_scan_surface_manifest(
             if isinstance(item, Mapping) and item.get("kind") == "content_discovery"
         ),
         summary=content,
+    )
+    collect(
+        "web.spec_ingest",
+        (
+            (
+                item.get("method") or "GET", item.get("url"),
+                item.get("content_type"), item.get("body_field_names"),
+            )
+            for item in spec.get("observations") or ()
+            if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
+        ),
+        summary=spec,
     )
     collect(
         "subdomains.discover",

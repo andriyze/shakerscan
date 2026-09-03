@@ -1807,3 +1807,93 @@ def test_directory_listing_entries_resolve_for_both_href_conventions():
     }
     for (directory, link), expected in cases.items():
         assert resolve(directory, link) == expected, (directory, link)
+
+
+def test_spec_ingest_declares_body_endpoints_from_the_fetched_spec(monkeypatch):
+    import json as _json
+    scan_id = str(uuid.uuid4())
+    spec_body = _json.dumps({
+        "openapi": "3.0.0",
+        "paths": {
+            "/rest/products/search": {"get": {"parameters": [{"name": "q", "in": "query"}]}},
+            "/rest/user/login": {"post": {"requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"email": {}, "password": {}}}}}}}},
+        },
+    }).encode()
+
+    class FakeTransport:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            assert follow_redirects is False
+            self.sent.append(request.url)
+            # The application publishes its spec at exactly one conventional path.
+            if request.url.endswith("/openapi.json"):
+                return ReplayTransportResult(
+                    status_code=200, connected_address="192.0.2.10",
+                    final_url=request.url,
+                    response_headers={"Content-Type": "application/json"},
+                    response_body=spec_body, elapsed_ms=5,
+                )
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "text/html"},
+                response_body=b"not found", elapsed_ms=5,
+            )
+
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: transport,
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    routes = {
+        (item["method"], item["url"]): item
+        for item in receipt.observations
+        if item.get("kind") == "discovered_route"
+    }
+    login = next(
+        item for (method, url), item in routes.items()
+        if method == "POST" and url.endswith("/rest/user/login")
+    )
+    assert login["body_field_names"] == ["email", "password"]
+    assert login["content_type"] == "application/json"
+    # Query values never persist in an observation; the parameter key survives for candidates.
+    assert any(
+        method == "GET" and "/rest/products/search?q=" in url
+        for method, url in routes
+    )
+    # Fetched once per conventional path, bounded, and never off the pinned target.
+    assert all(url.startswith("https://app.example.test/") for url in transport.sent)
+    assert receipt.status == "success"
+
+
+def test_spec_ingest_skips_cleanly_when_no_spec_is_published(monkeypatch):
+    scan_id = str(uuid.uuid4())
+
+    class NotFoundTransport:
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={}, response_body=b"", elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: NotFoundTransport(),
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    assert not [o for o in receipt.observations if o.get("kind") == "discovered_route"]

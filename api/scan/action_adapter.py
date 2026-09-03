@@ -43,6 +43,7 @@ try:
         bfla_finding,
         boundary_established,
     )
+    from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -102,6 +103,7 @@ except (ImportError, ModuleNotFoundError):
         bfla_finding,
         boundary_established,
     )
+    from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from ..capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -206,6 +208,7 @@ _PRIMARY_PRINCIPAL_CAPABILITIES = frozenset({
     "sqli.verify", "sqli.verify_batch", "sqli.request_verify",
     "sqli.request_verify_batch", "sqli.prove_batch", "exposure.verify_batch",
     "nosqli.verify_batch", "authz_surface.verify_batch", "authz.verify",
+    "web.spec_ingest",
 })
 
 
@@ -1803,6 +1806,87 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    async def _spec_ingest(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        """Fetch the target's own OpenAPI/Swagger description and declare its routes.
+
+        A crawl only observes the endpoints an application happens to call; the spec declares the
+        whole surface, including body-bearing routes a black-box crawl never exercises. Each
+        conventional spec location is fetched once over the pinned transport, under the primary
+        principal so an authenticated spec is reachable, and parsed into value-free
+        ``discovered_route`` observations that flow into the same endpoint manifest as the crawl.
+        """
+        origin = self._exposure_origin()
+        if origin is None:
+            return self._skip(action, "no_canonical_origin")
+        base_origin, _scheme = origin
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name="web.spec_ingest",
+        )
+        header_items = tuple(
+            (str(name), str(value)) for name, value in primary.headers().items()
+        )
+        http_ceiling = int(action.requested_budget.get("http_requests") or 0)
+        wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
+        transport = PinnedAiohttpReplayTransport()
+        started_at = datetime.now(timezone.utc).isoformat()
+        documents: list[tuple[str, bytes, str | None]] = []
+        errors: list[str] = []
+        attempted = 0
+        for path in SPEC_DISCOVERY_PATHS:
+            if self.cancelled() or attempted >= http_ceiling:
+                break
+            spec_url = f"{base_origin}{path}"
+            request = ReplayRequest(
+                request_id=f"spec:{attempted}", ordinal=attempted,
+                name="spec probe", folder="", method="GET", url=spec_url,
+                headers=header_items, body=b"", body_mode="none",
+                auth_type="bearer" if header_items else "none",
+                has_sensitive_material=bool(header_items),
+            )
+            remaining = max(1, http_ceiling - attempted)
+            result = await transport.send(
+                request, target=self.target,
+                timeout_seconds=max(0.5, min(15.0, wall_ceiling / remaining)),
+                follow_redirects=False,
+            )
+            attempted += 1
+            await heartbeat()
+            if result.error_code:
+                errors.append(str(result.error_code))
+                continue
+            if (result.status_code or 0) == 200 and result.response_body:
+                content_type = str(
+                    result.response_headers.get("content-type")
+                    or result.response_headers.get("Content-Type") or ""
+                ) or None
+                documents.append((spec_url, result.response_body, content_type))
+        routes = ingest_spec_bodies(documents, origin=base_origin)
+        # Value-free: the observation carries the route shape and field names, never a spec value.
+        observations = tuple(dict(route) for route in routes)
+        consumed = {
+            name: 0 for name in action.requested_budget
+        }
+        if "http_requests" in consumed:
+            consumed["http_requests"] = min(http_ceiling, attempted)
+        if "tool_wall_seconds" in consumed:
+            consumed["tool_wall_seconds"] = min(wall_ceiling, max(1, attempted))
+        return self._receipt(
+            action,
+            status="success",
+            parser_version="spec-ingest/v1",
+            started_at=started_at,
+            observations=observations,
+            errors=tuple(errors[:20]),
+            consumed=consumed,
+            redacted_execution={
+                "action_id": action.action_id,
+                "specs_probed": attempted,
+                "specs_parsed": len(documents),
+                "routes_declared": len(routes),
+                "authenticated": bool(header_items),
+            },
+        )
+
     def _exposure_origin(self) -> tuple[str, str] | None:
         """Return the (origin, scheme) for canonical-host seed probing."""
         for origin in self.target.allowed_origins:
@@ -2927,6 +3011,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._infrastructure(action, heartbeat)
         if action.capability_name == "tls.inspect":
             return await self._tls(action, heartbeat)
+        if action.capability_name == "web.spec_ingest":
+            return await self._spec_ingest(action, heartbeat)
         if action.capability_name in {
             "ports.discover", "service.fingerprint", "subdomains.discover",
         }:
