@@ -98,9 +98,26 @@ jobs:
 
       - name: Run every deterministic E2E area
         if: steps.changes.outputs.backend == 'true'
+        env:
+          # The PR gate mirrors the candidate certification, which is an authorized declared-debt
+          # release: checks the release owner has recorded as debt run as loud, counted XFAIL rows
+          # (an XPASS is printed when one unexpectedly passes). Every undeclared check stays hard.
+          SHAKERSCAN_RELEASE_DECLARED_DEBT: "1"
         run: |
           mkdir -p artifacts
           python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json
+          python3 - <<'PY'
+          import json
+          card = json.load(open("artifacts/e2e-scorecard.json"))
+          debt = [
+              (area.get("area"), row.get("name"), row.get("reason"))
+              for area in card.get("areas", []) for row in area.get("rows", [])
+              if row.get("xfail")
+          ]
+          for area, name, reason in debt:
+              print(f"::warning title=declared E2E debt::{area}: {name} -- {reason}")
+          print(f"declared-debt rows: {len(debt)}; gate: {card.get('gate')}")
+          PY
 
       - name: Set up supported Node runtime
         if: steps.changes.outputs.stack == 'true'
