@@ -163,7 +163,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
               {resultPresentation.headline}
             </h2>
             <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
-            <p className={`mt-3 text-sm font-medium ${assuranceClass(assurance?.band)}`}>
+            <p className={`mt-3 text-sm font-medium ${resultPresentation.confidenceTone === 'qualified' ? 'text-amber-200' : assuranceClass(assurance?.band)}`}>
               {resultPresentation.confidence}
             </p>
           </div>
@@ -222,6 +222,13 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
               <p className="mt-2 text-xs leading-5 text-gray-500">
                 How much planned work, candidate testing, identity coverage, and verification actually ran.
               </p>
+              {resultPresentation.coverageIncomplete && (
+                <p className="mt-2 text-xs text-amber-200/90">
+                  Scores the work that ran; {resultPresentation.incompleteFamilies.length > 0
+                    ? `${resultPresentation.incompleteFamilies.length} selected check ${resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} did not finish.`
+                    : 'the run did not finish everything it planned.'}
+                </p>
+              )}
             </>
           ) : (
             <p className="mt-3 text-sm text-gray-500">Coverage score unavailable</p>
@@ -277,20 +284,27 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
             </p>
           </div>
         )}
-        {resultPresentation.coverageWarnings.length > 0 && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+        {resultPresentation.coverageIncomplete && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3" data-testid="coverage-gaps">
             <p className="text-sm font-medium text-amber-200">Requested coverage did not complete</p>
-            <p className="mt-1 text-xs leading-5 text-amber-100/75">
-              {resultPresentation.coverageWarnings.join(' · ')}. Review the execution details before relying on this run.
-            </p>
-          </div>
-        )}
-        {assurance && assurance.gaps.length > 0 && (
-          <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-            <p className="text-xs font-medium text-gray-300">What was not established</p>
-            <ul className="mt-2 grid gap-1 text-xs text-gray-500 sm:grid-cols-2">
-              {assurance.gaps.map((gap: string) => <li key={gap}>• {gap}</li>)}
+            <ul className="mt-2 space-y-1 text-xs leading-5 text-amber-100/80">
+              {resultPresentation.coverageGapReasons.map((reason: string) => (
+                <li key={reason}>• {reason}.</li>
+              ))}
+              {resultPresentation.incompleteFamilies.length > 0 && (
+                <li>
+                  • Check {resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} that did not finish:{' '}
+                  <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
+                </li>
+              )}
+              {(assurance?.gaps || [])
+                .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
+                .map((gap: string) => <li key={gap}>• What was not established: {gap}.</li>)}
             </ul>
+            <p className="mt-2 text-xs text-amber-100/60">
+              Findings above are real; absence of a finding in an unfinished family is not evidence of safety.
+              Coverage details are in the execution section below.
+            </p>
           </div>
         )}
       </div>
@@ -363,10 +377,14 @@ function DeploymentDecisionCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-gray-300">Overall release decision</h2>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className={`rounded px-2 py-1 text-xs font-medium ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
-            {decision?.policy_profile && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{String(decision.policy_profile)}</span>}
-            {decision?.policy_name && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{String(decision.policy_name)}</span>}
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className={`rounded px-2 py-1 font-medium uppercase ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
+            {decision?.policy_profile && (
+              <span className="rounded bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">profile</span> {String(decision.policy_profile)}</span>
+            )}
+            {decision?.policy_name && (
+              <span className="rounded bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">policy</span> {String(decision.policy_name)}</span>
+            )}
           </div>
         </div>
         <button
@@ -443,15 +461,21 @@ function DeploymentDecisionCard({
         </div>
       )}
       {blockingCount > 0 && (
-        <div className="mt-3 border-t border-gray-800 pt-3">
+        <details className="mt-3 border-t border-gray-800 pt-3">
+          <summary className="cursor-pointer text-xs text-gray-300 hover:text-white">
+            {blockingCount} blocking finding{blockingCount === 1 ? '' : 's'}
+            {targetActiveCount > 0 && (
+              <span className="text-gray-500">
+                {' '}· {blockingCount - targetActiveCount} from this scan · {targetActiveCount} unresolved on this target from earlier scans
+              </span>
+            )}
+          </summary>
           {targetActiveCount > 0 && (
-            <p className="mb-2 text-xs text-amber-300/90">
-              {targetActiveCount} of these {targetActiveCount === 1 ? 'is an' : 'are'} unresolved
-              critical/high finding{targetActiveCount === 1 ? '' : 's'} already open on this target
-              (not necessarily detected by this scan). Resolve them or add a policy exception to unblock deploy.
+            <p className="mt-2 text-xs text-amber-300/90">
+              Findings marked "on target" were not necessarily detected by this scan. Resolve them or add a policy exception to unblock deploy.
             </p>
           )}
-          <ul className="space-y-1">
+          <ul className="mt-2 space-y-1">
             {blockingFindings.slice(0, 8).map((f, i) => {
               const persistedFinding = linkedPersistedFinding(f as Record<string, unknown>, persistedFindingIndex)
               const persistedFindingId = typeof persistedFinding?.id === 'string' ? persistedFinding.id : null
@@ -482,7 +506,7 @@ function DeploymentDecisionCard({
           {blockingCount > 8 && (
             <p className="mt-1 text-xs text-gray-500">+{blockingCount - 8} more</p>
           )}
-        </div>
+        </details>
       )}
     </Card>
   )
@@ -501,6 +525,61 @@ function deploySeverityClass(severity?: string): string {
     default:
       return 'bg-gray-700 text-gray-300'
   }
+}
+
+// Where the finding was observed, without leaking values: the path plus the names of any
+// query parameters. Titles repeat across a scan ("directory listing" x3); the route is what
+// tells the rows apart.
+function findingLocation(finding: any): string | null {
+  const raw = String(finding?.url || finding?.location || '')
+  if (!raw) return null
+  try {
+    const parsed = new URL(raw)
+    const names = Array.from(new Set(Array.from(parsed.searchParams.keys()))).slice(0, 4)
+    return `${parsed.pathname || '/'}${names.length ? `?${names.join('&')}` : ''}`
+  } catch {
+    return raw.length > 80 ? `${raw.slice(0, 77)}…` : raw
+  }
+}
+
+function findingProofLabel(finding: any): { label: string; className: string } {
+  const state = String(finding?.proof_state || '')
+  if (state === 'verified' || (finding?.verified === true && !state)) {
+    return { label: 'proven', className: 'text-emerald-300' }
+  }
+  if (state === 'likely_vulnerable') return { label: 'likely vulnerable', className: 'text-amber-200' }
+  if (state === 'refuted' || state === 'false_positive') return { label: state.replaceAll('_', ' '), className: 'text-gray-500' }
+  if (state) return { label: state.replaceAll('_', ' '), className: 'text-gray-400' }
+  if (finding?.suspected || finding?.needs_verification) return { label: 'needs verification', className: 'text-gray-400' }
+  return { label: String(finding?.status || 'unverified').replaceAll('_', ' '), className: 'text-gray-500' }
+}
+
+function ScanFindingRow({ finding }: { finding: any }) {
+  const location = findingLocation(finding)
+  const proof = findingProofLabel(finding)
+  const title = finding.title || 'Untitled finding'
+  return (
+    <li className="grid gap-x-3 gap-y-1 px-3 py-2 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center">
+      <div className="flex items-center justify-between gap-2 sm:contents">
+        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
+          {String(finding.severity || 'info')}
+        </span>
+        <span className={`text-xs sm:order-last ${proof.className}`}>{proof.label}</span>
+      </div>
+      <div className="min-w-0">
+        {finding.id && finding._persisted ? (
+          <Link href={`/findings/${finding.id}`} className="block truncate text-gray-200 hover:text-white" title={title}>
+            {title}
+          </Link>
+        ) : (
+          <span className="block truncate text-gray-200" title={title}>{title}</span>
+        )}
+        {location && (
+          <span className="block truncate font-mono text-xs text-gray-500" title={location}>{location}</span>
+        )}
+      </div>
+    </li>
+  )
 }
 
 function ScanFindingContextCard({
@@ -552,6 +631,9 @@ function ScanFindingContextCard({
     })),
   ]
   const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrent.length)
+  const provenCount = current.filter((finding: any) => (
+    finding.verified === true && String(finding.proof_state || '') === 'verified'
+  )).length
 
   return (
     <Card className="mb-6 p-4">
@@ -566,9 +648,14 @@ function ScanFindingContextCard({
           Open all target findings
         </Link>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2 text-xs">
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
         <span className="rounded bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} observed in this scan</span>
         <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} not observed in this scan</span>
+        {current.length > 0 && (
+          <span className="text-gray-500">
+            {provenCount} proven · {current.length - provenCount} {current.length - provenCount === 1 ? 'needs' : 'need'} verification
+          </span>
+        )}
       </div>
       {loading ? (
         <p className="mt-3 text-sm text-gray-500">Loading target finding history…</p>
@@ -581,24 +668,7 @@ function ScanFindingContextCard({
       ) : (
         <ul className="mt-3 divide-y divide-gray-800 rounded-lg border border-gray-800">
           {current.slice(0, 6).map((finding: any) => (
-            <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
-              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
-                {String(finding.severity || 'info')}
-              </span>
-              <span className={`rounded px-1.5 py-0.5 text-xs ${finding._origin === 'observed in this scan' ? 'bg-blue-500/10 text-blue-200' : 'bg-gray-800 text-gray-300'}`}>
-                {finding._origin}
-              </span>
-              {finding.id && finding._persisted ? (
-                <Link href={`/findings/${finding.id}`} className="min-w-0 flex-1 break-words text-gray-200 hover:text-white">
-                  {finding.title || 'Untitled finding'}
-                </Link>
-              ) : (
-                <span className="min-w-0 flex-1 break-words text-gray-200">{finding.title || 'Untitled finding'}</span>
-              )}
-              <span className="text-xs text-gray-500">
-                {finding.proof_state?.replaceAll('_', ' ') || (finding.verified ? 'verified' : finding.suspected ? 'needs verification' : finding.status?.replaceAll('_', ' ') || 'unverified')}
-              </span>
-            </li>
+            <ScanFindingRow key={finding._rowKey} finding={finding} />
           ))}
         </ul>
       )}
@@ -609,21 +679,7 @@ function ScanFindingContextCard({
           </summary>
           <ul className="divide-y divide-gray-800 border-t border-gray-800">
             {current.slice(6).map((finding: any) => (
-              <li key={finding._rowKey} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
-                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
-                  {String(finding.severity || 'info')}
-                </span>
-                {finding.id && finding._persisted ? (
-                  <Link href={`/findings/${finding.id}`} className="min-w-0 flex-1 break-words text-gray-200 hover:text-white">
-                    {finding.title || 'Untitled finding'}
-                  </Link>
-                ) : (
-                  <span className="min-w-0 flex-1 break-words text-gray-200">{finding.title || 'Untitled finding'}</span>
-                )}
-                <span className="text-xs text-gray-500">
-                  {finding.proof_state?.replaceAll('_', ' ') || (finding.verified ? 'verified' : finding.suspected ? 'needs verification' : finding.status?.replaceAll('_', ' ') || 'unverified')}
-                </span>
-              </li>
+              <ScanFindingRow key={finding._rowKey} finding={finding} />
             ))}
           </ul>
         </details>
