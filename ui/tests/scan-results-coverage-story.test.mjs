@@ -48,7 +48,22 @@ test('a strong score over an unfinished run is qualified, never endorsed, and na
   assert.match(presentation.confidence, /did not finish everything it planned/)
   assert.doesNotMatch(presentation.confidence, /supports this run-level conclusion/)
   assert.deepEqual(presentation.incompleteFamilies, ['nuclei passive', 'xss'])
-  assert.deepEqual(presentation.coverageGapReasons, ['The run timed out before all planned work finished'])
+  assert.deepEqual(presentation.coverageGapReasons, ['A planned step ran out of its time allowance before it finished'])
+})
+
+test('coverage gap reasons read as what happened to the planned work, not as codes', () => {
+  const scan = scanWith({
+    reasons: ['insufficient_plan_budget', 'not_applicable', 'some_future_code'],
+    gaps: [],
+    families: ['sqli'],
+    gradeReliable: false,
+  })
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.deepEqual(presentation.coverageGapReasons, [
+    'Planned steps were skipped because the admitted budget did not reach them',
+    'A planned proof step had no candidate left to prove',
+    'some future code',
+  ])
 })
 
 test('an unreliable grade alone is enough to qualify the conclusion', () => {
