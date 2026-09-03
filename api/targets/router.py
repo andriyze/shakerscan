@@ -13,6 +13,11 @@ app -> router and existing test patches of those names keep working.
 
 from __future__ import annotations
 
+try:
+    from target_posture import load_target_posture as _load_target_posture
+except ModuleNotFoundError:  # package-native import layout
+    from api.target_posture import load_target_posture as _load_target_posture
+
 import asyncio
 from collections import Counter, defaultdict
 import secrets
@@ -250,6 +255,26 @@ def _model(name: str) -> Any:
 
 
 QUEUE_NAME = os.environ.get("SCAN_QUEUE_NAME", "scan_jobs")
+
+
+@router.get("/targets/{target_id}/posture")
+async def get_target_posture(target_id: str, scan_id: Optional[str] = None):
+    """Latest known headers, TLS, DNS, and network posture for a target, each naming its scan.
+
+    Derived on read from the newest completed scans that observed each section, so a fast
+    profile that skipped a check still shows what an earlier run established, with provenance.
+    """
+    try:
+        uuid.UUID(str(target_id))
+        if scan_id:
+            uuid.UUID(str(scan_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid target or scan id")
+    async with _pool().acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM targets WHERE id = $1", target_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="target not found")
+        return await _load_target_posture(conn, target_id, prefer_scan_id=scan_id or None)
 
 
 @router.get("/targets")

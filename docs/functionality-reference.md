@@ -1493,8 +1493,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 403 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 337 | `api/**/*.py` |
+| Public REST operations | 404 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 338 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1907,6 +1907,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `POST` | `/targets/{target_id}/invariants/{contract_id}/retire` | `retire_target_invariant_contract` |
 | `GET` | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | `get_target_invariant_verification_plan` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
+| `GET` | `/targets/{target_id}/posture` | `get_target_posture` |
 | `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
 | `POST` | `/targets/{target_id}/principal-matrix` | `upsert_target_principal_matrix` |
 | `DELETE` | `/targets/{target_id}/principal-matrix/{expectation_id}` | `delete_target_principal_expectation` |

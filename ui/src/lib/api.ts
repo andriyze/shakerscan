@@ -4156,6 +4156,31 @@ export async function getScan(id: string): Promise<Scan> {
   return res.json()
 }
 
+export interface TargetPostureSection {
+  scan_id: string
+  observed_at: string | null
+  payload: Record<string, any>
+}
+
+export interface TargetPosture {
+  schema_version: string
+  target_id: string
+  sections: {
+    http_headers: TargetPostureSection | null
+    tls: TargetPostureSection | null
+    dns: TargetPostureSection | null
+    network: TargetPostureSection | null
+  }
+}
+
+/** Latest known headers, TLS, DNS, and network posture for a target, each naming its scan. */
+export async function getTargetPosture(targetId: string, scanId?: string): Promise<TargetPosture> {
+  const query = scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ''
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/posture${query}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch target posture'))
+  return res.json()
+}
+
 export async function getScanLogs(id: string, limit: number = 200) {
   const res = await fetch(`${API_URL}/scans/${id}/logs?limit=${limit}`)
   if (!res.ok) throw new Error('Failed to fetch scan logs')

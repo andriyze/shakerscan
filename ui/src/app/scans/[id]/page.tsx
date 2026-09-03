@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
+import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView from '@/components/ReportView'
@@ -1749,6 +1750,9 @@ function ScanDetailContent() {
   const [targetFindingsTotal, setTargetFindingsTotal] = useState(0)
   const [targetFindingsLoading, setTargetFindingsLoading] = useState(false)
   const [targetFindingsError, setTargetFindingsError] = useState<string | null>(null)
+  const [targetPosture, setTargetPosture] = useState<TargetPosture | null>(null)
+  const [targetPostureLoading, setTargetPostureLoading] = useState(false)
+  const [targetPostureError, setTargetPostureError] = useState<string | null>(null)
   const logsRef = useRef<HTMLDivElement | null>(null)
   // Latest known scan status, read inside the polling interval so the "should we
   // keep polling?" decision always sees the current value (not a stale closure
@@ -1779,6 +1783,19 @@ function ScanDetailContent() {
       setDeploymentDecisionLoading(false)
     }
   }
+
+  const postureTargetId = scan?.target_id ? String(scan.target_id) : null
+  useEffect(() => {
+    if (!postureTargetId) return
+    let cancelled = false
+    setTargetPostureLoading(true)
+    setTargetPostureError(null)
+    getTargetPosture(postureTargetId, scan?.id ? String(scan.id) : undefined)
+      .then((posture) => { if (!cancelled) setTargetPosture(posture) })
+      .catch((cause) => { if (!cancelled) setTargetPostureError(cause instanceof Error ? cause.message : 'Failed to fetch target posture') })
+      .finally(() => { if (!cancelled) setTargetPostureLoading(false) })
+    return () => { cancelled = true }
+  }, [postureTargetId, scan?.id])
 
   useEffect(() => {
     async function fetchScanAndLogs() {
@@ -2211,6 +2228,9 @@ function ScanDetailContent() {
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       <ShardContextBanner scan={scan} />
       {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
+      {scan.status === 'completed' && scan.target_id && (
+        <TargetPostureCard posture={targetPosture} currentScanId={String(scan.id)} targetId={String(scan.target_id)} loading={targetPostureLoading} error={targetPostureError} />
+      )}
       <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
       <DeploymentDecisionCard
         decision={deploymentDecision}
