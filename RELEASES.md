@@ -58,9 +58,9 @@ checks, one immutable **Release candidate** build per exact SHA, **Promote relea
 public smoke, and a separate stable-channel bump. This file is only the provenance ledger.
 
 Version 2.0.0 was published on 2026-09-03 from candidate run 33714172205 (the first candidate
-to pass exact-manifest certification) and promoted by digest in run 33717500565; its stable-channel
-promotion follows the public install smoke. Version 0.8.18 remains the stable installer channel
-until that promotion merges. Version 0.8.9 was published but deliberately not
+to pass exact-manifest certification) and promoted by digest in run 33717500565; the public install smoke
+passed and the stable installer channel moved to 2.0.0 the same day. Version 0.8.18 is the previous
+stable release and the upgrade baseline. Version 0.8.9 was published but deliberately not
 promoted after the installed-runtime audit found a remote-mode agent/MCP routing defect; 0.8.10 was
 cancelled before publication when the same audit found remaining hard-coded loopback guidance;
 0.8.11 was cancelled before publication when the final audit found a host-world-writable Model
