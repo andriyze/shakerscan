@@ -521,7 +521,7 @@ services:
   model-intake-worker:
     init: true
     hostname: shakerscan-model-intake-worker
-    image: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}
+    image: ${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}
     pull_policy: never
     extra_hosts:
       - "host.docker.internal:host-gateway"

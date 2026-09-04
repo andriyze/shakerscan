@@ -456,7 +456,7 @@ services:
   model-intake-worker:
     init: true
     hostname: shakerscan-model-intake-worker
-    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    image: ${MODEL_INTAKE_IMAGE:-shakerscan/shakerscan-model-intake:latest}
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "shakerscan-fixtures.internal:host-gateway"
@@ -551,7 +551,7 @@ services:
 
   model-intake-sandbox:
     init: true
-    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    image: ${MODEL_INTAKE_IMAGE:-shakerscan/shakerscan-model-intake:latest}
     user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"
     network_mode: none
     read_only: true

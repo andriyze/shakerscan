@@ -2530,7 +2530,12 @@ build_local_scanner_family() {
         fail_build 1 "could not resolve the newly built worker image"
         return 1
     fi
-    run_build_step sandbox_alias docker image tag "$worker_image_id" "$sandbox_image"
+    # Build the Model Intake image as an overlay on the exact worker runtime (like the API image),
+    # then bind the sandbox tag to it. The Model Intake toolchain lives only in this image; the
+    # worker and sandbox services both run it. Even --no-cache must never rebuild the scanner base.
+    run_build_step model_intake_overlay docker build $no_cache \
+        --build-arg "SCANNER_RUNTIME_IMAGE=${worker_image}" \
+        -f scanner/Dockerfile.model-intake -t "$sandbox_image" .
     run_build_step api_overlay compose build $no_cache api
 }
 
