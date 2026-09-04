@@ -1507,6 +1507,7 @@ def run_worker_preflight() -> None:
     if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
         print("[preflight] worker preflight disabled", flush=True)
         return
+    worker_queue_policy_module.refresh_model_intake_scanner_data(MODEL_INTAKE_ONLY_WORKER)
 
     try:
         try:

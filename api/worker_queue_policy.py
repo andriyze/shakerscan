@@ -6,6 +6,17 @@ import asyncio
 from collections.abc import Callable
 
 
+def refresh_model_intake_scanner_data(model_intake_only: bool) -> None:
+    """Refresh optional network-backed scanner data only in the dedicated worker role."""
+    if not model_intake_only:
+        return
+    try:
+        from scanner_tools.model_intake_scanners import refresh_trivy_database_at_worker_start
+    except ModuleNotFoundError:
+        from scanner.scanner_tools.model_intake_scanners import refresh_trivy_database_at_worker_start
+    print(f"[preflight] Trivy database: {refresh_trivy_database_at_worker_start()}", flush=True)
+
+
 async def heartbeat_worker_build_report(
     reporter: Callable[[], None], *, interval_seconds: float,
 ) -> None:

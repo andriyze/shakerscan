@@ -58,6 +58,7 @@ ADAPTER_SELF_TEST_PATH = os.getenv(
 )
 DEFAULT_MAX_RULE_AGE_DAYS = 90
 DEFAULT_MAX_DATABASE_AGE_DAYS = 14
+TRIVY_CACHE_DIR = Path(os.getenv("SHAKERSCAN_TRIVY_CACHE_DIR", "/opt/trivy-cache"))
 DEFAULT_RUNTIME_PROFILE_LOCK = os.getenv(
     "SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK",
     "/opt/model-intake-locks/firecracker-runtime.lock",
@@ -1071,6 +1072,48 @@ def _scanner_material_state(spec: ScannerSpec, *, now: datetime | None = None) -
     }
 
 
+def refresh_trivy_database_at_worker_start() -> dict[str, Any]:
+    """Refresh Trivy opportunistically and retain the baked database on any failure."""
+    spec = next(item for item in EXTERNAL_SCANNERS if item.name == "trivy")
+    before = _scanner_material_state(spec).get("database") or {}
+    enabled = os.getenv("SHAKERSCAN_TRIVY_REFRESH_ON_START", "true").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    executable = shutil.which(spec.executable)
+    status = "baked_fallback"
+    error = None
+    if enabled and executable:
+        try:
+            completed = subprocess.run(
+                [
+                    executable, "image", "--download-db-only", "--cache-dir",
+                    str(TRIVY_CACHE_DIR), "--disable-telemetry", "--skip-version-check",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=max(5, int(os.getenv("SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS", "120"))),
+                check=False,
+            )
+            if completed.returncode == 0:
+                status = "refreshed"
+            else:
+                error = f"trivy_exit_{completed.returncode}"
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            error = type(exc).__name__
+    elif not enabled:
+        status = "disabled_baked_database"
+    else:
+        error = "trivy_unavailable"
+    after = _scanner_material_state(spec).get("database") or {}
+    return {
+        "status": status,
+        "error": error,
+        "previous_updated_at": before.get("updated_at"),
+        "trivy_db_updated_at": after.get("updated_at"),
+        "database_ready": bool(after.get("present") and after.get("fresh")),
+    }
+
+
 def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[str, Any]) -> dict[str, Any]:
     started_at = _utc_iso()
     materials = _scanner_material_state(spec)
@@ -1079,6 +1122,8 @@ def run_external_scanner(spec: ScannerSpec, subject_path: Path, subject: dict[st
     material_execution = {
         "rules_sha256": rules_material.get("sha256"),
         "database_sha256": database_material.get("sha256"),
+        "database_updated_at": database_material.get("updated_at"),
+        "database_age_days": database_material.get("age_days"),
     }
     if not materials["ready"]:
         return _scanner_result(
@@ -1334,6 +1379,8 @@ def combine_trivy_repository_and_runtime(
             "repository_result_sha256": repository_result.get("evidence_sha256"),
             "runtime_result_sha256": runtime_result.get("evidence_sha256"),
             "database_sha256": repository_result.get("execution", {}).get("database_sha256"),
+            "database_updated_at": repository_result.get("execution", {}).get("database_updated_at"),
+            "database_age_days": repository_result.get("execution", {}).get("database_age_days"),
         },
         summary=summary,
     )
@@ -2825,6 +2872,9 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             "satisfied": status in acceptable,
         })
     vulnerabilities = reconcile_vulnerability_evidence(results)
+    trivy_result = next((
+        item for item in results if item.get("scanner", {}).get("name") == "trivy"
+    ), {})
     runtime_result = next((
         item for item in results
         if item.get("scanner", {}).get("name") == "shakerscan-runtime-dependencies"
@@ -2855,6 +2905,7 @@ def generated_evidence_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "vulnerability_summary": vulnerabilities["summary"],
         "vulnerability_inventory": vulnerabilities["vulnerabilities"],
+        "trivy_db_updated_at": trivy_result.get("execution", {}).get("database_updated_at"),
         "evidence_sha256": _sha256_json(results),
     }
 

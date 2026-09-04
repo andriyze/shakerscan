@@ -813,6 +813,11 @@ Checks include:
   the safe, review, and malicious fixtures expected for the applicable adapters. `GET
   /model-intake/scanners/readiness` exposes versions, applicability, rules/database identity, and the last
   functional receipt.
+- **Advisory-data cadence** — the dedicated Model Intake worker attempts a bounded Trivy database
+  refresh at startup when registry egress is available and retains the image's baked database on
+  failure or in offline environments. Generated static evidence and every frozen evidence manifest
+  record `trivy_db_updated_at`, so operators can judge database age instead of inferring freshness
+  from the image build date.
 - **Typed non-scanner providers** — `GET /model-intake/providers/readiness` separately reports sandbox
   execution, embedding evaluation, embedded/OPA policy, and core report providers. OPA remains explicitly
   `NOT_IMPLEMENTED`; an installed or configured label does not imply an enforcing decision contract.
