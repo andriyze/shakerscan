@@ -424,6 +424,37 @@ say "Command path:      $BIN_DIR/shakerscan"
 say "Source:            $REPO_RAW_BASE"
 say ""
 
+# An install directory is where .env secrets, results/ evidence, and the Docker volumes' recorded
+# password live together. Installing into a NEW directory while another directory already owns
+# this Compose project's containers or data volume would adopt those volumes, rotate the database
+# password out from under the other install, and hide its results/ evidence. Refuse unless the
+# operator named the directory (SHAKERSCAN_HOME) or asked to adopt the data explicitly.
+refuse_foreign_install() {
+    [ -z "${SHAKERSCAN_HOME:-}" ] || return 0
+    [ "${SHAKERSCAN_ADOPT_EXISTING_DATA:-0}" != "1" ] || return 0
+    [ ! -f "$INSTALL_DIR/$OWNED_MANIFEST_NAME" ] || return 0
+    have docker || return 0
+    project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    other_dir="$(docker ps -a --filter "label=com.docker.compose.project=$project" \
+        --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null \
+        | grep -v '^$' | grep -vx "$INSTALL_DIR" | sort -u | head -n 1 || true)"
+    if [ -n "$other_dir" ]; then
+        say "Error: a ShakerScan install already exists in $other_dir (Compose project '$project')." >&2
+        say "Installing into $INSTALL_DIR as well would take over that install's Docker volumes and rotate its database password." >&2
+        say "Upgrade the existing install in place instead:" >&2
+        say "  SHAKERSCAN_HOME=$other_dir sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
+        say "To adopt the data volumes from $INSTALL_DIR anyway (that install's results/ evidence will not be visible here), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
+        exit 1
+    fi
+    if docker volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
+        say "Error: a PostgreSQL data volume for Compose project '$project' already exists, but $INSTALL_DIR is not the install that created it." >&2
+        say "If that install lives in another directory, upgrade it in place: SHAKERSCAN_HOME=<that directory> sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
+        say "To adopt the volume from $INSTALL_DIR (its database password will be rotated), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
+        exit 1
+    fi
+}
+refuse_foreign_install
+
 install_parent="$(dirname "$INSTALL_DIR")"
 install_name="$(basename "$INSTALL_DIR")"
 mkdir -p "$install_parent"
@@ -681,6 +712,12 @@ chmod +x "$INSTALL_STAGE/scripts/provision-model-intake-firecracker.sh"
 chmod +x "$INSTALL_STAGE/.claude/hooks/session-start.sh"
 commit_staged_downloads
 
+# This runtime is the certified release image set. Record that beside the launcher so a later
+# `shakerscan start` from this directory never builds the scanner from a source tree that happens
+# to share it (the installer run over a checkout used to keep local-build mode and rebuild the
+# 5.7 GB scanner image), and so `./scanner.sh` run directly here resolves the same mode.
+printf 'prebuilt\n' > "$INSTALL_DIR/.shakerscan-local-build"
+
 install_command
 
 say ""
@@ -702,9 +739,9 @@ say ""
 cd "$INSTALL_DIR"
 start_rc=0
 if [ "$REMOTE_ACCESS" = "1" ]; then
-    "$BIN_DIR/shakerscan" start -y --remote || start_rc=$?
+    "$BIN_DIR/shakerscan" start -y --prebuilt --remote || start_rc=$?
 else
-    "$BIN_DIR/shakerscan" start -y || start_rc=$?
+    "$BIN_DIR/shakerscan" start -y --prebuilt || start_rc=$?
 fi
 
 if [ "$start_rc" -ne 0 ]; then

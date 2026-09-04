@@ -200,6 +200,14 @@ ensure_runtime_datastore_credentials() {
         if postgres_data_volume_exists; then
             case "${COMMAND:-}" in
                 start|restart)
+                    # No recorded password at all means this directory never owned that volume:
+                    # it is another install directory's data, not a weak-default upgrade. Refuse
+                    # to rotate it away from that install unless the operator says so.
+                    if [ -z "$current_postgres" ] && [ "${SHAKERSCAN_ADOPT_EXISTING_DATA:-0}" != "1" ]; then
+                        echo -e "${RED}Error: a PostgreSQL data volume for project '${COMPOSE_PROJECT_NAME:-shakerscan}' already exists, but ${SCRIPT_DIR}/.env has no POSTGRES_PASSWORD.${NC}" >&2
+                        echo -e "${RED}That volume belongs to a ShakerScan install in another directory. To upgrade it in place, re-run the installer with SHAKERSCAN_HOME=<that directory>. To take the volume over from here (its password will be rotated and that install's results/ evidence will not be visible), set SHAKERSCAN_ADOPT_EXISTING_DATA=1.${NC}" >&2
+                        return 1
+                    fi
                     compose up -d postgres > /dev/null
                     ready_attempt=0
                     until compose exec -T postgres pg_isready -U scanner > /dev/null 2>&1; do
@@ -479,13 +487,14 @@ pull_prebuilt_images() {
     fi
 
     echo -e "${BLUE}Pulling prebuilt Docker images...${NC}"
-    if ! compose pull api worker ui model-intake-signer; then
+    if ! compose pull api worker ui model-intake-signer model-intake-worker model-intake-sandbox; then
         local image
         for image in \
             "${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
             "${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
             "${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
-            "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
+            "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+            "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
             if ! docker image inspect "$image" >/dev/null 2>&1; then
                 echo -e "${RED}Error: image pull failed and $image is not cached.${NC}" >&2
                 echo "Check Docker Hub/network access and run './scanner.sh start' again." >&2
@@ -493,7 +502,7 @@ pull_prebuilt_images() {
             fi
         done
         echo -e "${YELLOW}Image pull failed; using the complete cached ${SCANNER_IMAGE_TAG} image set.${NC}"
-        echo "Startup will still verify UI, API, and worker build identity before reporting ready."
+        echo "Startup will still verify UI, API, worker, and Model Intake worker build identity before reporting ready."
     fi
 }
 
@@ -1412,6 +1421,8 @@ configure_runtime_mode() {
     local command="$1"
     local persisted_mode=""
     local release_version
+    local image_lock="$SCRIPT_DIR/release-image-lock.env"
+    local lock_key lock_value
 
     release_version="$(get_release_version)"
 
@@ -1433,10 +1444,13 @@ configure_runtime_mode() {
         export SCANNER_IMAGE_TAG="$IMAGE_TAG_OVERRIDE"
     fi
 
+    # The five release images. Every lifecycle path (pull, cache fallback, status, identity
+    # checks) derives from this one list; keep it in step with install/release-images.json.
     export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
     export API_IMAGE_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
     export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
     export MODEL_INTAKE_SIGNER_IMAGE_REPO="${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}"
+    export MODEL_INTAKE_IMAGE_REPO="${MODEL_INTAKE_IMAGE_REPO:-shakerscan/shakerscan-model-intake}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
     # The source Compose file consumes this exact image identity. Keeping the
     # build and sandbox retag on one explicit contract avoids guessing a tag
@@ -1452,10 +1466,6 @@ configure_runtime_mode() {
     else
         export SCANNER_IMAGE_TAG
     fi
-    export SCANNER_IMAGE="${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
-    export API_IMAGE="${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
-    export UI_IMAGE="${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
-    export SIGNER_IMAGE="${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
 
     if [ -f "$LOCAL_BUILD_MARKER" ]; then
         persisted_mode="$(head -n 1 "$LOCAL_BUILD_MARKER" 2>/dev/null | tr -d '[:space:]')"
@@ -1483,11 +1493,54 @@ configure_runtime_mode() {
         esac
     fi
 
+    # A release image lock beside this script is the installer's contract: the runtime files,
+    # the five image digests, and the certification describe one release. It wins over a source
+    # tree that happens to share the directory (the installer run over a checkout used to keep
+    # local-build mode and rebuild the 5.7 GB scanner from source), unless the operator chose a
+    # mode explicitly or disabled the lock. --image-tag remains the deliberate way to run a
+    # different tag with the locked runtime files.
+    if [ -f "$image_lock" ] && ! is_truthy "${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}"; then
+        if [ "$RUNTIME_MODE_EXPLICIT" -eq 0 ] && [ "$USE_PREBUILT" -ne 1 ]; then
+            echo -e "${YELLOW:-}A release image lock is present: using the locked release images instead of building this source tree. Pass --local to build from source.${NC:-}" >&2
+            USE_PREBUILT=1
+        fi
+        if [ "$USE_PREBUILT" -eq 1 ] && [ -z "$IMAGE_TAG_OVERRIDE" ]; then
+            while IFS='=' read -r lock_key lock_value; do
+                case "$lock_key" in
+                    SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|MODEL_INTAKE_IMAGE)
+                        case "$lock_value" in
+                            *@sha256:????????????????????????????????????????????????????????????????)
+                                if [ -z "${!lock_key:-}" ]; then
+                                    export "$lock_key=$lock_value"
+                                fi
+                                ;;
+                            *)
+                                echo -e "${RED:-}Error: invalid release image lock entry for $lock_key in $image_lock${NC:-}" >&2
+                                return 1
+                                ;;
+                        esac
+                        ;;
+                    RUNTIME_MANIFEST_SHA256|''|'#'*) ;;
+                    *)
+                        echo -e "${RED:-}Error: unsupported release image lock key: $lock_key${NC:-}" >&2
+                        return 1
+                        ;;
+                esac
+            done < "$image_lock"
+        fi
+    fi
+
     case "$command" in
         build|rebuild)
             USE_PREBUILT=0
             ;;
     esac
+
+    export SCANNER_IMAGE="${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export API_IMAGE="${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export UI_IMAGE="${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export SIGNER_IMAGE="${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    export MODEL_INTAKE_IMAGE="${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
 
     if [ "$USE_PREBUILT" -eq 1 ] && [ ! -f "$SCRIPT_DIR/$PREBUILT_COMPOSE_FILE" ]; then
         echo -e "${YELLOW}Prebuilt override file missing ($PREBUILT_COMPOSE_FILE). Falling back to local build mode.${NC}"
@@ -1700,10 +1753,15 @@ prepare_runtime_files() {
     ensure_directory_mode .shakerscan-model-intake-runner-stage 700
     mkdir -p .shakerscan-fleet
     ensure_directory_mode .shakerscan-fleet 700
-    ensure_runtime_datastore_credentials
+    # Order matters: the datastore step may bring up PostgreSQL to rotate its password when a data
+    # volume already exists, and that `compose up` interpolates the WHOLE compose file, which fails
+    # closed on every required secret. Every other required secret must therefore exist before it.
+    # (A new install directory beside an older install's volumes hit exactly this: the signer
+    # password was never generated and startup died with a misleading "is required" error.)
     ensure_model_intake_operator_credential
     ensure_model_intake_local_session_secret
     ensure_model_intake_signer_credentials
+    ensure_runtime_datastore_credentials
 
     if [ "$USE_PREBUILT" -eq 1 ]; then
         mkdir -p db
@@ -1858,16 +1916,19 @@ verify_running_ui_identity() {
 verify_specialized_worker_identity() {
     local expect_agent="${1:-0}"
     local expect_device="${2:-0}"
-    local health agent_status device_status elapsed=0
+    local expect_model_intake="${3:-0}"
+    local health agent_status device_status model_intake_status elapsed=0
     local timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
 
-    [ "$expect_agent" -gt 0 ] || [ "$expect_device" -gt 0 ] || return 0
+    [ "$expect_agent" -gt 0 ] || [ "$expect_device" -gt 0 ] || [ "$expect_model_intake" -gt 0 ] || return 0
     while [ "$elapsed" -lt "$timeout" ]; do
         health="$(curl -fsS "$(api_probe_url)/health" 2>/dev/null || true)"
         agent_status="$(printf '%s' "$health" | jq -r '.agent_tool_worker.status // empty' 2>/dev/null || true)"
         device_status="$(printf '%s' "$health" | jq -r '.device_worker.status // empty' 2>/dev/null || true)"
+        model_intake_status="$(printf '%s' "$health" | jq -r '.model_intake_worker.status // empty' 2>/dev/null || true)"
         if { [ "$expect_agent" -lt 1 ] || [ "$agent_status" = "ready" ]; } \
-            && { [ "$expect_device" -lt 1 ] || [ "$device_status" = "ready" ]; }; then
+            && { [ "$expect_device" -lt 1 ] || [ "$device_status" = "ready" ]; } \
+            && { [ "$expect_model_intake" -lt 1 ] || [ "$model_intake_status" = "ready" ]; }; then
             echo -e "${GREEN}Specialized worker identity verified${NC}"
             return 0
         fi
@@ -1877,6 +1938,7 @@ verify_specialized_worker_identity() {
     echo -e "${RED}Error: specialized worker build identity did not converge.${NC}" >&2
     echo "  agent scanner: ${agent_status:-unavailable}" >&2
     echo "  device worker: ${device_status:-not requested}" >&2
+    echo "  model intake worker: ${model_intake_status:-not requested}" >&2
     return 1
 }
 
@@ -2017,6 +2079,8 @@ start_services() {
         echo "  api:     ${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
         echo "  scanner: ${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
         echo "  ui:      ${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+        echo "  signer:  ${SIGNER_IMAGE:-}"
+        echo "  model intake: ${MODEL_INTAKE_IMAGE:-}"
         pull_prebuilt_images
     else
         echo "Mode: local build"
@@ -2039,7 +2103,8 @@ start_services() {
     verify_running_build_identity
     verify_specialized_worker_identity \
         "$(running_compose_service_count agent-tool-worker)" \
-        "$(running_device_worker_count)"
+        "$(running_device_worker_count)" \
+        "$(running_compose_service_count model-intake-worker)"
     if [ "$USE_PREBUILT" -eq 1 ]; then
         record_runtime_mode prebuilt
     fi
@@ -2111,6 +2176,9 @@ reload_services() {
     if [ "$(running_compose_service_count agent-tool-worker)" -gt 0 ]; then
         compose restart agent-tool-worker || return 1
     fi
+    if [ "$(running_compose_service_count model-intake-worker)" -gt 0 ]; then
+        compose restart model-intake-worker || return 1
+    fi
 
     # Verify host<->container parity for the single-file-mounted modules.
     local host_sha cont_sha drift=0 worker
@@ -2167,6 +2235,7 @@ show_status() {
         echo -e "API Health: ${GREEN}$(echo $HEALTH | jq -r '.status')${NC}"
         echo "  Database: $(echo $HEALTH | jq -r '.database')"
         echo "  Redis: $(echo $HEALTH | jq -r '.redis')"
+        echo "  Model Intake worker: $(echo $HEALTH | jq -r '.model_intake_worker.status // "unknown"')$(echo $HEALTH | jq -r '.model_intake_worker.reason // empty | if . == "" then "" else " (" + . + ")" end')"
     else
         echo -e "API Health: ${RED}Not responding${NC}"
     fi
@@ -2574,6 +2643,7 @@ rebuild_images() {
     local existing_ui
     local existing_model_intake_signer
     local existing_model_intake_sandbox
+    local existing_model_intake_worker
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -2632,6 +2702,7 @@ rebuild_images() {
     existing_ui="$(running_compose_service_count ui)"
     existing_model_intake_signer="$(running_compose_service_count model-intake-signer)"
     existing_model_intake_sandbox="$(running_compose_service_count model-intake-sandbox)"
+    existing_model_intake_worker="$(running_compose_service_count model-intake-worker)"
 
     if [ "$SERVICES" = "ui" ]; then
         run_build_step ui compose build $NO_CACHE ui
@@ -2647,6 +2718,9 @@ rebuild_images() {
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
         refresh_workers_after_rebuild "$existing_workers" "$existing_model_intake_sandbox"
         refresh_running_service_after_rebuild agent-tool-worker "$existing_agent_tool_worker"
+        # The Model Intake worker runs the rebuilt overlay image; recreate it with the
+        # rest of the execution tier so it cannot keep the pre-rebuild image ID.
+        refresh_running_service_after_rebuild model-intake-worker "$existing_model_intake_worker"
         refresh_device_worker_after_rebuild "$existing_device_workers"
     fi
 
@@ -2674,7 +2748,7 @@ rebuild_images() {
         wait_for_url "API" "$(api_probe_url)/health" 120
         wait_for_url "UI" "$(ui_probe_url)" 120
         verify_running_build_identity
-        verify_specialized_worker_identity "$existing_agent_tool_worker" "$existing_device_workers"
+        verify_specialized_worker_identity "$existing_agent_tool_worker" "$existing_device_workers" "$existing_model_intake_worker"
     fi
 
     finish_build_receipt
