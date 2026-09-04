@@ -1,9 +1,36 @@
 # ShakerScan 2.2.0 plan: trustworthy upgrades, a complete fifth image, and DAST depth
 
-**Status (2026-09-04): plan.** Source audit of the two residual reports against `main` at `0723cbb5`
-plus the branch `fix/start-secrets-before-rotation`, one live thorough Scan on the local stack, and
-the 0.8.x history for the old smart-scan budgets. Nothing here is implemented except A1 and the A2
-guard, which live on that branch with a passing test.
+**Status (2026-09-04): planned source changes implemented except DAST-1; certification pending.**
+The base is published 2.1.0 (`0723cbb5` on `main`); implementation is on
+`fix/start-secrets-before-rotation`. No test, build, image scan, or target Scan was run while
+completing the branch because the operator explicitly prohibited them. Static syntax, generated
+contract, generated image-inventory, and generated installer-manifest checks are preparation only
+and are not release evidence.
+
+### Implementation ledger
+
+| Area | Source status | Certification still required |
+|---|---|---|
+| A1–A6 installer/upgrade | Implemented in `7957291e`, `230c1b4f`, `e4350771`, `9ec647ea`, and `1fecb57e`. | Installer and both supported-baseline upgrade smokes. |
+| IMG-1–IMG-3, B1, B2, D3, UPG-1 | Implemented in `7b54a800`, `3c476c19`, `9c1592bc`, `a949377d`, `9ec647ea`, `a867a069`, and `d2c59e33`. | Exact-SHA five-image startup, pool readiness, and both upgrade receipts. |
+| B3, B4, B6 | Complete-image scanning is enforced (`4e994037`), Trivy provenance/refresh is implemented (`88d93d6f`), and the stale build-tool waivers are removed (`a59cd213`). | A fresh candidate image scan must prove the now waiver-free image clean. |
+| API-1, API-2 | Execution inventory is frozen (`ba1ee634`); the API is slim and non-root (`c07abdb1`). | Image-content and installed Model Intake staging gates. API-3 remains a 2.3.0 design item. |
+| DAST-2–DAST-5 | Profile ladder (`6200743f`), proportional batches (`7ca5bad2`), bounded append-only continuation (`ab77a262`, `6185a4bb`), and authenticated browser state (`46de445b`) are implemented. | Current-fleet authenticated Juice Shop/crAPI measurements and the DAST-8 exit gate. |
+| DAST-6, DAST-7 | Body/spec and browser-XSS paths were already present in the 2.1.0 history, including PRs #59 and #60 and their later correctness fixes. | Re-measure the named fixture expectations; source presence is not proof of recall. |
+| H-10/H-11, MI-6 | Installed CLI targeting is fixed (`926c074d`); trust-anchor lifecycle is a hard gate (`708cbe03`). | Installed-stack execution of those named checks. |
+| D1, D2 | Exact-SHA image reuse and image-affecting path classification are implemented in `8dbfc6f3` and `fead8f7d`. | Candidate workflow execution and attestation lookup. |
+
+DAST-1 is not complete. Its proposed premise—“settle from the transaction ledger the worker
+already keeps”—is false for external child processes: their HTTPS is opaque behind the pinned
+SOCKS transport and never enters the in-process HTTP archive. HTTPX's one-request contract and
+Nuclei's explicit cumulative counter settle exactly. Katana, Dalfox, SQLMap, and FFUF retain the
+full HTTP hold when no authoritative counter exists. TCP connection counts are not HTTP request
+counts and must not be substituted. Completing DAST-1 therefore requires a separately reviewed
+per-tool counter or a target-bound TLS-aware metering design; until then continuation may reuse
+actual wall surplus but must not refund unknown request authority.
+
+DAST-0 and DAST-8 are measurements, not missing source implementation. D5 is a GitHub UI cleanup.
+The release metadata, candidate, publication, and stable promotion remain intentionally unstarted.
 
 2.2.0 has three themes, in priority order:
 
@@ -39,7 +66,7 @@ Every item was checked against source. "Agree" means the mechanism described is 
 | B1 fleet overlays run the sandbox on the worker image | Agree | `docker-compose.worker.yml:36-59` and `docker-compose.broker-worker.yml:32` define `model-intake-sandbox` on `FLEET_WORKER_IMAGE`; it runs `model_intake_sandbox.py --serve`, which needs `/opt/model-intake-tools`. Nothing dispatches Model Intake to fleet nodes, so the service is dead weight that fails on start, not a data-path bug. |
 | B2 Model Intake placement on fleet nodes is unguarded | Agree, mechanism differs | Both submit sites call the generic `enqueue_job`, which routes any payload carrying `placement` to `model_intake_jobs:route:<digest>`; the option sanitizer strips approval keys but not `placement`; the only consumer of the base queue is the control-plane worker. A placement-bearing submission queues forever. |
 | B3 Model Intake toolchain is not vulnerability-scanned | Agree | `release-candidate.yml:882-887` skips `/opt/model-intake-tools`, `/opt/tools/trivy`, `/opt/tools/osv-scanner`. |
-| B4 waivers expire 2026-12-01 | Agree | `security/image-vulnerability-waivers.json` (msgpack, setuptools; both scoped to `model-intake`). |
+| B4 waivers expire 2026-12-01 | Fixed in source, pending image gate | The pip-audit lock already carries patched `msgpack==1.2.1`; the image now removes unneeded venv-seeded setuptools and the waiver file is empty. A candidate scan must confirm the built image. |
 | B5 API image is the scanner image plus a Docker client | Agree | `scanner/Dockerfile.api:6` is `FROM ${SCANNER_RUNTIME_IMAGE}`; no `USER` in any of the three Dockerfiles; `docker-compose.release.yml:212` mounts `/var/run/docker.sock`. `/workers` also reads that socket, so the socket cannot simply be removed. |
 | B6 Trivy database baked at build time | Agree | `scanner/Dockerfile.model-intake:70-77`. |
 
@@ -159,7 +186,7 @@ Each item names the files, the test that must fail without the fix, and the gate
 | ID | Change | Files | Test / gate |
 |---|---|---|---|
 | B3 | Scan the Model Intake image completely: delete `skip_dirs`/`skip_files` for `model-intake`; run one candidate to characterize findings; add exact `vulnerability_id` waivers with reasons and expiry only for findings inside vendored tool environments that no runtime path executes. The `api` skip of `/usr/local/bin/docker` stays until 3.4 removes the binary. | `.github/workflows/release-candidate.yml:882-887`, `security/image-vulnerability-waivers.json` | The waiver validator refuses directory-wide exclusions (add a check that the workflow matrix has empty skip fields for every image except the documented `api` binary). |
-| B4 | Bump the pip-audit lock to a release whose vendored pip carries fixed msgpack; drop both waivers if the scan is clean, otherwise renew with a justification and a new expiry. | `scanner/model_intake_tools/pip-audit.lock` | Candidate vulnerability gate. |
+| B4 | Keep the pip-audit graph on patched `msgpack==1.2.1`, remove venv-seeded setuptools because it is not a runtime dependency, and carry no waiver for either package. | `scanner/Dockerfile.model-intake`, `scanner/model_intake_tools/pip-audit.lock`, `security/image-vulnerability-waivers.json` | Candidate vulnerability gate must prove the built image clean without these waivers. |
 | B6 | Decision proposed: the worker refreshes the Trivy database at start when it has egress, falls back to the baked copy, and records `trivy_db_updated_at` in every Model Intake evidence manifest so a report states the database age. Document the cadence. | `scanner/scanner_tools/model_intake_scanners.py`, `docs/functionality-reference.md` | Evidence manifest test asserts the field; E2E fixture path asserts the fallback. |
 
 ### 3.4 WS4 API image boundary (B5; audit 5, 6)
@@ -180,7 +207,7 @@ them, then fix the two recall gaps that need new mechanisms.
 | ID | Change | Files | Test / gate |
 |---|---|---|---|
 | DAST-0 | Baseline measurement before any change: one thorough authenticated Juice Shop Scan and one crAPI Scan on a current fleet, recording used-versus-ceiling per dimension, per-action reserved/consumed, and the scorecard. This is the number every later step is judged against. | `scripts/benchmark_targets.py --submit-only`, `--scan-id` | Stored under `tests/benchmark/results/`. |
-| DAST-1 | Settle actual usage. Confirm whether adapters report reservations as consumed HTTP requests (the live run settled exactly the reservation on four actions). If so, settle from the transaction ledger the worker already keeps, so `reconciled_continuation_ceiling` returns real surplus on every dimension. Invariant 6 in `AGENTS.md`. | `api/scan/action_adapter.py`, `api/scan/external_process.py` | Test: an attempt that exits in 2 s with 3 requests settles 3, not the floor. |
+| DAST-1 | Settle actual usage only where authoritative telemetry exists. The original proposal incorrectly assumed external TLS requests enter the worker HTTP ledger. Existing exact counters are refunded; unknown traffic retains the full hold. A future design must add per-tool counters or TLS-aware target-bound metering without deriving requests from connections. Invariant 6 in `AGENTS.md`. | `api/agent_tools.py`, `api/capabilities/scanner.py`, future metering design | Exact-counter paths settle actual values; adapters without proof remain conservative. This item is unresolved, not waived. |
 | DAST-2 | Restore the profile ladder. Proposal, matching what the 0.8.x smart scan actually delivered and what the user asks for: fast 30 min / balanced 60 min / thorough 180 min, plus a new opt-in `deep` profile at 360 min (the old smart ceiling). Requests and endpoints scale with wall (proposal: 5k / 20k / 60k / 150k requests). Tool wall never exceeds wall (fixes the thorough inconsistency). Advanced values still only lower. | `api/scan/contracts.py` `BUDGET_PROFILES`, `api/runtime/models.py`, `ui/src/lib/scanContract.generated.ts` (regenerate), UI labels in `scan/new` and `schedules`, `docs/functionality-reference.md`, `/scan/contracts` | Contract test pins wall ≥ tool wall for every profile; a `test_profile_funds_its_own_plan` per profile (the thorough one referenced in `contracts.py` does not exist in `tests/`; add it). |
 | DAST-3 | Reservations that scale with the profile. Express `_BATCH_PROFILES` slices as a share of the profile ceilings (wall and requests) with the measured per-attempt floors kept absolute, so a bigger profile funds more candidates and longer template sweeps rather than the same fixed 600 s. | `api/scan/action_plan.py` | Test: for each profile, planned reservations sum to at least 80% of the wall ceiling on a fixture with abundant candidates, and never exceed it. |
 | DAST-4 | Continue until the ceiling. Replace the single `.001` round with a bounded loop: re-plan while the reconciled ceiling funds at least one fast-tier batch and unattempted candidates or template targets remain; cap at 8 rounds; every round digest-bound as today. Timeout of a round still preserves partial output. | `api/scan/continuation.py`, `api/worker.py` continuation site | Test: a plan whose first template batch times out with wall remaining gets a second and third round; the loop stops at the cap and at exhaustion. |

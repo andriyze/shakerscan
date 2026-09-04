@@ -1,15 +1,15 @@
-# ShakerScan 2.0.0 Release Readiness
+# ShakerScan 2.2.0 Release Readiness
 
-**Status (2026-09-03): 2.0.0 published and promoted.** Candidate run 33714172205 on `9d207661`
-passed exact-manifest certification with the authorized declared-debt waivers, promotion run
-33717500565 published the digests and the GitHub Release, the public install smoke passed, and
-`install/STABLE_VERSION` moved to 2.0.0. The checklist below is retained as the template for the
-next release; its unchecked items describe work that was deliberately declared as debt, not gates
-that were skipped.
+**Status (2026-09-04): implementation branch, not release-ready.** 2.1.0 is already published and
+is the stable upgrade base. The 2.2.0 source work is collected on
+`fix/start-secrets-before-rotation`, but no test, build, image-vulnerability scan, target Scan, or
+candidate workflow was run during the final implementation pass because the operator explicitly
+prohibited tests and scans. Every frozen-candidate checkbox therefore remains open. Historical
+receipts below are context only and do not qualify 2.2.0.
 
 This is the live release checklist. Source, migrations, generated inventories, immutable runtime
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
-useful regression evidence, but do not qualify the frozen 2.0.0 candidate.
+useful regression evidence, but do not qualify the frozen 2.2.0 candidate.
 
 ## 2.2.0 decision record
 
@@ -19,7 +19,7 @@ useful regression evidence, but do not qualify the frozen 2.0.0 candidate.
 
 ## Supported product boundary
 
-ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
+ShakerScan 2.2.0 remains a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -40,8 +40,8 @@ ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
 - Model Intake is release-gated for deterministic static review, artifacts/reports, and the opt-in
   AMD64 Linux/KVM Firecracker tier. Incomplete evidence or unavailable required controls fail closed.
 - Fleet production support is the outbound-only HTTPS `broker` transport. WireGuard remains preview
-  code outside the 2.0.0 support boundary pending its own physical acceptance.
-- AI Gate remains preview in 2.0.0.
+  code outside the 2.2.0 support boundary pending its own physical acceptance.
+- AI Gate remains preview in 2.2.0.
 
 ## Stop-ship contract
 
@@ -73,8 +73,8 @@ backlog reaches zero.
 
 ## Preliminary preparation evidence
 
-These checks were run during the working audit and must be repeated if product/runtime code changes
-after the candidate is frozen:
+These checks are historical 2.0.0 preparation evidence. They must not be checked off for 2.2.0
+until repeated against the frozen 2.2.0 candidate:
 
 - [x] Complete candidate-runtime Python suite: 1,143 package-native and 3,686 compatibility tests
   (4,829 total).
@@ -144,7 +144,7 @@ exact candidate is intentional.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v2.0.0`. Any product, migration, runtime,
+Run every item against the exact commit intended for `v2.2.0`. Any product, migration, runtime,
 test, workflow, or operational change creates a new candidate and invalidates earlier candidate
 receipts.
 
@@ -216,7 +216,7 @@ receipts.
 2. Freeze one exact candidate SHA after all implementation and manual fixes.
 3. Obtain successful exact-SHA CodeQL. Attach optional physical-boundary receipts only for support
    tiers being qualified.
-4. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
+4. Run **Release candidate** for 2.2.0; publish only immutable candidate tags and preserve receipts.
 5. Complete candidate-image, upgrade, UI/API/CLI/MCP, and public-install acceptance.
 6. Run **Promote release** to map version tags to accepted digests, create the annotated tag, and
    attach the lock and certified receipt to the GitHub Release without rebuilding.
